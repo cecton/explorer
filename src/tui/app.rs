@@ -6,13 +6,13 @@ use crate::lsp::ColoredLine;
 use camino::Utf8PathBuf;
 use r3bl_tui::{
     App, BoxedSafeApp, CommonResult, ComponentRegistry, ComponentRegistryMap, ContainsResult,
-    EventPropagation, FlexBoxId, GlobalData, HasFocus, InputDevice, InputEvent,
-    LayoutDirection, LayoutManagement, LengthOps, OutputDevice,
-    PerformPositioningAndSizing, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
-    SPACER_GLYPH, Size, Surface, SurfaceProps, SurfaceRender, TerminalWindow,
-    TuiStylesheet, ZOrder, box_end, box_start, col, height, key_press, new_style, ok,
-    render_component_in_current_box, render_tui_styled_texts_into, req_size_pc, row, surface,
-    throws, throws_with_return, tui_color, tui_styled_text, tui_styled_texts, tui_stylesheet,
+    EventPropagation, FlexBoxId, GlobalData, HasFocus, InputDevice, InputEvent, LayoutDirection,
+    LayoutManagement, LengthOps, OutputDevice, PerformPositioningAndSizing, RenderOpCommon,
+    RenderOpIR, RenderOpIRVec, RenderPipeline, SPACER_GLYPH, Size, Surface, SurfaceProps,
+    SurfaceRender, TerminalWindow, TuiStylesheet, ZOrder, box_end, box_start, col, height,
+    key_press, new_style, ok, render_component_in_current_box, render_tui_styled_texts_into,
+    req_size_pc, row, surface, throws, throws_with_return, tui_color, tui_styled_text,
+    tui_styled_texts, tui_stylesheet,
 };
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};

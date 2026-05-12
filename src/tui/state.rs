@@ -1,5 +1,5 @@
-use crate::lsp::ColoredLine;
 use crate::LoadedFile;
+use crate::lsp::ColoredLine;
 use camino::Utf8PathBuf;
 use r3bl_tui::TerminalWindowMainThreadSignal;
 use std::collections::HashMap;

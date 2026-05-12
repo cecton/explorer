@@ -443,15 +443,18 @@ fn utf16_to_byte(s: &str, utf16_offset: usize) -> usize {
 
 fn token_color(token_type: &str) -> Option<[u8; 3]> {
     match token_type {
-        "keyword" | "modifier" => Some([204, 120, 50]),
-        "string" | "comment" => Some([106, 153, 85]),
-        "number" => Some([181, 206, 168]),
-        "type" | "class" | "struct" | "enum" | "interface" | "namespace" => Some([78, 201, 176]),
+        "keyword" | "modifier" | "selfKeyword" | "boolean" => Some([204, 120, 50]),
+        "string" | "comment" | "character" | "escapeSequence" => Some([106, 153, 85]),
+        "number" | "const" | "static" => Some([181, 206, 168]),
+        "type" | "class" | "struct" | "enum" | "interface" | "namespace" | "builtinType"
+        | "typeAlias" | "typeParameter" | "constParameter" | "generic" | "toolModule" => {
+            Some([78, 201, 176])
+        }
         "function" | "method" => Some([220, 220, 170]),
-        "macro" => Some([189, 99, 197]),
+        "macro" | "attributeBracket" | "builtinAttribute" | "decorator" => Some([189, 99, 197]),
         "variable" | "parameter" => Some([156, 220, 254]),
         "property" | "enumMember" => Some([206, 145, 120]),
-        "operator" => Some([212, 212, 212]),
+        "operator" | "lifetime" => Some([212, 212, 212]),
         _ => None,
     }
 }
