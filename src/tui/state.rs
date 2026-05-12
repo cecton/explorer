@@ -1,0 +1,109 @@
+use crate::lsp::ColoredLine;
+use crate::LoadedFile;
+use camino::Utf8PathBuf;
+use r3bl_tui::TerminalWindowMainThreadSignal;
+use std::collections::HashMap;
+use std::fmt::{Debug, Display, Formatter};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
+
+#[derive(Clone)]
+pub struct State {
+    pub files: Arc<Vec<LoadedFile>>,
+    pub root: Utf8PathBuf,
+    pub selected: usize,
+    pub open_file: Option<usize>,
+    pub preview_scroll: usize,
+    pub preview_page_size: usize,
+    pub lsp_colors: Arc<Mutex<HashMap<usize, Vec<ColoredLine>>>>,
+    pub lsp_tx: Option<mpsc::Sender<usize>>,
+    pub notify_tx: Arc<Mutex<Option<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>>,
+    /// None = warmup in progress, Some(ms) = completed in ms milliseconds
+    pub warmup_ms: Arc<Mutex<Option<u128>>>,
+}
+
+impl State {
+    pub fn new(
+        files: Arc<Vec<LoadedFile>>,
+        root: Utf8PathBuf,
+        lsp_tx: mpsc::Sender<usize>,
+        lsp_colors: Arc<Mutex<HashMap<usize, Vec<ColoredLine>>>>,
+        warmup_ms: Arc<Mutex<Option<u128>>>,
+    ) -> Self {
+        Self {
+            files,
+            root,
+            selected: 0,
+            open_file: None,
+            preview_scroll: 0,
+            preview_page_size: 0,
+            lsp_colors,
+            lsp_tx: Some(lsp_tx),
+            notify_tx: Arc::new(Mutex::new(None)),
+            warmup_ms,
+        }
+    }
+}
+
+impl Default for State {
+    fn default() -> Self {
+        Self {
+            files: Arc::new(Vec::new()),
+            root: Utf8PathBuf::new(),
+            selected: 0,
+            open_file: None,
+            preview_scroll: 0,
+            preview_page_size: 0,
+            lsp_colors: Arc::new(Mutex::new(HashMap::new())),
+            lsp_tx: None,
+            notify_tx: Arc::new(Mutex::new(None)),
+            warmup_ms: Arc::new(Mutex::new(None)),
+        }
+    }
+}
+
+impl PartialEq for State {
+    fn eq(&self, other: &Self) -> bool {
+        Arc::ptr_eq(&self.files, &other.files)
+            && self.selected == other.selected
+            && self.open_file == other.open_file
+            && self.preview_scroll == other.preview_scroll
+    }
+}
+
+impl Eq for State {}
+
+impl Debug for State {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "State {{ files: {}, selected: {}, open_file: {:?} }}",
+            self.files.len(),
+            self.selected,
+            self.open_file
+        )
+    }
+}
+
+impl Display for State {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "State[files={}, selected={}]",
+            self.files.len(),
+            self.selected
+        )
+    }
+}
+
+#[derive(Default, Clone, Debug)]
+#[non_exhaustive]
+pub enum AppSignal {
+    SelectNext,
+    SelectPrev,
+    OpenSelected,
+    ScrollPreviewDown(usize),
+    ScrollPreviewUp(usize),
+    #[default]
+    Noop,
+}

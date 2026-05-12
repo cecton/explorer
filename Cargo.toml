@@ -1,0 +1,12 @@
+[package]
+name = "explorer"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+camino = "1"
+jwalk = "0.8"
+nucleo = "0.5"
+r3bl_tui = "0.7"
+serde_json = "1"
+tokio = { version = "1", features = ["full"] }
