@@ -6,6 +6,8 @@ use r3bl_tui::{
     render_pipeline, row, send_signal, throws_with_return, tui_color,
 };
 
+const DEFAULT_FG: [u8; 3] = [212, 212, 212];
+
 pub struct FilePreviewComponent {
     id: FlexBoxId,
 }
@@ -115,6 +117,8 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                             );
                             render_ops += RenderOpCommon::ResetColor;
                         } else {
+                            let default_style = new_style!(color_fg: {tui_color!(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2])});
+                            render_ops += RenderOpCommon::ApplyColors(Some(default_style));
                             render_ops +=
                                 RenderOpIR::PaintTextWithAttributes(text.as_str().into(), None);
                         }
@@ -122,6 +126,9 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                     continue;
                 }
 
+                let default_style =
+                    new_style!(color_fg: {tui_color!(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2])});
+                render_ops += RenderOpCommon::ApplyColors(Some(default_style));
                 render_ops += RenderOpIR::PaintTextWithAttributes(
                     file_line(&file.content, &file.line_starts, line_idx).into(),
                     None,
