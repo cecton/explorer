@@ -1,9 +1,9 @@
 use super::state::{AppSignal, State};
 use r3bl_tui::{
-    col, new_style, render_pipeline, row, send_signal, throws_with_return, tui_color,
     BoxedSafeComponent, CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData,
     HasFocus, InputEvent, Key, KeyPress, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
-    SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal, ZOrder,
+    SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal, ZOrder, col, new_style,
+    render_pipeline, row, send_signal, throws_with_return, tui_color,
 };
 
 pub struct FilePreviewComponent {
@@ -101,6 +101,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                 }
                 render_ops +=
                     RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset));
+                render_ops += RenderOpCommon::ResetColor;
 
                 if let Some(spans) = colored.and_then(|lines| lines.get(line_idx)) {
                     for (text, color) in spans {
