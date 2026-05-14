@@ -7,10 +7,14 @@ use std::sync::Arc;
 pub struct State {
     pub files: Arc<Vec<LoadedFile>>,
     pub root: Utf8PathBuf,
-    pub selected: usize,
     pub open_file: Option<usize>,
     pub preview_scroll: usize,
     pub preview_page_size: usize,
+    pub file_name_picker_open: bool,
+    pub file_name_picker_query: String,
+    /// Each entry: (index into files, sorted+deduped matched char positions from nucleo).
+    pub file_name_picker_results: Vec<(usize, Vec<u32>)>,
+    pub file_name_picker_selected: usize,
 }
 
 impl State {
@@ -18,10 +22,13 @@ impl State {
         Self {
             files,
             root,
-            selected: 0,
             open_file: None,
             preview_scroll: 0,
             preview_page_size: 0,
+            file_name_picker_open: false,
+            file_name_picker_query: String::new(),
+            file_name_picker_results: Vec::new(),
+            file_name_picker_selected: 0,
         }
     }
 }
@@ -31,10 +38,13 @@ impl Default for State {
         Self {
             files: Arc::new(Vec::new()),
             root: Utf8PathBuf::new(),
-            selected: 0,
             open_file: None,
             preview_scroll: 0,
             preview_page_size: 0,
+            file_name_picker_open: false,
+            file_name_picker_query: String::new(),
+            file_name_picker_results: Vec::new(),
+            file_name_picker_selected: 0,
         }
     }
 }
@@ -42,9 +52,11 @@ impl Default for State {
 impl PartialEq for State {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.files, &other.files)
-            && self.selected == other.selected
             && self.open_file == other.open_file
             && self.preview_scroll == other.preview_scroll
+            && self.file_name_picker_open == other.file_name_picker_open
+            && self.file_name_picker_query == other.file_name_picker_query
+            && self.file_name_picker_selected == other.file_name_picker_selected
     }
 }
 
@@ -54,31 +66,30 @@ impl Debug for State {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "State {{ files: {}, selected: {}, open_file: {:?} }}",
+            "State {{ files: {}, open_file: {:?}, picker_open: {} }}",
             self.files.len(),
-            self.selected,
-            self.open_file
+            self.open_file,
+            self.file_name_picker_open
         )
     }
 }
 
 impl Display for State {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "State[files={}, selected={}]",
-            self.files.len(),
-            self.selected
-        )
+        write!(f, "State[files={}]", self.files.len())
     }
 }
 
 #[derive(Default, Clone, Debug)]
 #[non_exhaustive]
 pub enum AppSignal {
-    SelectNext,
-    SelectPrev,
-    OpenSelected,
+    OpenFileNamePicker,
+    CloseFileNamePicker,
+    FileNamePickerChar(char),
+    FileNamePickerBackspace,
+    FileNamePickerSelectNext,
+    FileNamePickerSelectPrev,
+    FileNamePickerConfirm,
     ScrollPreviewDown(usize),
     ScrollPreviewUp(usize),
     #[default]

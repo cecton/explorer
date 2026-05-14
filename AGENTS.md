@@ -18,11 +18,15 @@ Every change you make must be committed with a clear title and description. Run
 4. Displays files in an interactive TUI: left pane is the file list, right pane is a syntax-highlighted preview.
 
 Source is organized as:
-- `src/main.rs` — file loading, async entry point
+- `src/main.rs` — async entry point, wires CLI → loader → TUI
+- `src/cli.rs` — CLI argument parsing via `pico-args`
+- `src/loader.rs` — parallel file walking and `LoadedFile` construction
+- `src/lsp.rs` — LSP client (JSON-RPC over stdio)
 - `src/tui/mod.rs` — module declarations
 - `src/tui/state.rs` — `State` and `AppSignal` types
 - `src/tui/app.rs` — `App` trait impl, layout, `run()` entry point
 - `src/tui/file_list.rs` — `FileListComponent` (left pane)
+- `src/tui/file_name_picker.rs` — fuzzy file-name picker overlay
 - `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane)
 
 ---
@@ -80,9 +84,11 @@ cargo test <module>::<test_name>
 |---------------|---------|---------------------------------------------------|
 | `camino`      | 1.x     | UTF-8–typed path types (`Utf8PathBuf`, etc.)      |
 | `jwalk`       | 0.8.x   | Parallel directory traversal (uses rayon)         |
+| `lsp-types`   | 0.97.x  | Typed LSP protocol structs (with `proposed` feature) |
 | `nucleo`      | 0.5.x   | Fuzzy matching for paths and file content         |
 | `pico-args`   | 0.5.x   | Lightweight CLI argument parsing (no proc macros) |
 | `r3bl_tui`    | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
+| `serde`       | 1.x     | Derive macros for serialization (`derive` feature) |
 | `serde_json`  | 1.x     | JSON-RPC message serialization for LSP protocol   |
 | `tokio`       | 1.x     | Async runtime required by `r3bl_tui`              |
 | `tracing`     | 0.1.x   | Structured logging macros (`debug!`, `info!`, etc.) |

@@ -1,5 +1,5 @@
 mod app;
-mod file_list;
+mod file_name_picker;
 mod preview;
 pub mod state;
 
