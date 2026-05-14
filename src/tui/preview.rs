@@ -106,9 +106,9 @@ impl Component<State, AppSignal> for FilePreviewComponent {
 
                 if let Some(spans) = colored_guard.as_ref().and_then(|lines| lines.get(line_idx)) {
                     let line_content = file_line(&file.content, &file.line_starts, line_idx);
-                    for &(start, end, color) in spans {
+                    for &(start, end, token_type) in spans {
                         let text = &line_content[start..end];
-                        if let Some([r, g, b]) = color {
+                        if let Some([r, g, b]) = token_color(token_type) {
                             let fg = tui_color!(r, g, b);
                             let style = new_style!(color_fg: {fg});
                             render_ops += RenderOpCommon::ApplyColors(Some(style));
@@ -137,6 +137,24 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             pipeline.push(ZOrder::Normal, render_ops);
             pipeline
         });
+    }
+}
+
+fn token_color(token_type: &str) -> Option<[u8; 3]> {
+    match token_type {
+        "keyword" | "modifier" | "selfKeyword" | "boolean" => Some([204, 120, 50]),
+        "string" | "comment" | "character" | "escapeSequence" => Some([106, 153, 85]),
+        "number" | "const" | "static" => Some([181, 206, 168]),
+        "type" | "class" | "struct" | "enum" | "interface" | "namespace" | "builtinType"
+        | "typeAlias" | "typeParameter" | "constParameter" | "generic" | "toolModule" => {
+            Some([78, 201, 176])
+        }
+        "function" | "method" => Some([220, 220, 170]),
+        "macro" | "attributeBracket" | "builtinAttribute" | "decorator" => Some([189, 99, 197]),
+        "variable" | "parameter" => Some([156, 220, 254]),
+        "property" | "enumMember" => Some([206, 145, 120]),
+        "operator" | "lifetime" => Some([212, 212, 212]),
+        _ => None,
     }
 }
 

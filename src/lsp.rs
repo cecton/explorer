@@ -5,14 +5,16 @@ use r3bl_tui::TerminalWindowMainThreadSignal;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
 
-pub type ColoredSpan = (usize, usize, Option<[u8; 3]>);
+pub type ColoredSpan = (usize, usize, &'static str);
 pub type ColoredLine = Vec<ColoredSpan>;
+
+static TOKEN_TYPES: OnceLock<Vec<&'static str>> = OnceLock::new();
 
 const RANGE_LINES: usize = 200;
 const RANGE_THRESHOLD: usize = 100;
@@ -68,23 +70,26 @@ pub async fn run(
         return;
     }
 
-    let (token_types, supports_range) = loop {
+    let supports_range = loop {
         let Ok(msg) = recv_msg(&mut reader).await else {
             let _ = child.kill().await;
             return;
         };
         if msg.get("id") == Some(&json!(0)) {
             let provider = &msg["result"]["capabilities"]["semanticTokensProvider"];
-            let types = provider["legend"]["tokenTypes"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
+            TOKEN_TYPES.get_or_init(|| {
+                provider["legend"]["tokenTypes"]
+                    .as_array()
+                    .map(|a| {
+                        a.iter()
+                            .filter_map(|v| v.as_str())
+                            .map(|s| Box::leak(s.to_string().into_boxed_str()) as &'static str)
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            });
             let range = !provider["range"].is_null() && provider["range"] != json!(false);
-            break (types, range);
+            break range;
         }
     };
 
@@ -148,7 +153,7 @@ pub async fn run(
                             .iter()
                             .filter_map(|v| v.as_u64().map(|n| n as u32))
                             .collect();
-                        let lines = decode_tokens(&data, &token_types, &files[file_idx].content);
+                        let lines = decode_tokens(&data, &files[file_idx].content);
                         let mut guard = files[file_idx].colored_lines.lock().unwrap();
                         if !is_range || guard.is_none() {
                             *guard = Some(lines);
@@ -357,9 +362,12 @@ async fn recv_msg(reader: &mut BufReader<ChildStdout>) -> std::io::Result<Value>
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
-type LineTokens = Vec<(usize, usize, Option<[u8; 3]>)>;
+type LineTokens = Vec<(usize, usize, &'static str)>;
 
-fn decode_tokens(data: &[u32], token_types: &[String], content: &str) -> Vec<ColoredLine> {
+fn decode_tokens(data: &[u32], content: &str) -> Vec<ColoredLine> {
+    let token_types = TOKEN_TYPES.get().map(Vec::as_slice).unwrap_or(&[]);
+    let static_types = token_types;
+
     let lines: Vec<&str> = content.lines().collect();
     let mut line_tokens: Vec<LineTokens> = vec![Vec::new(); lines.len()];
 
@@ -383,13 +391,12 @@ fn decode_tokens(data: &[u32], token_types: &[String], content: &str) -> Vec<Col
             continue;
         }
 
-        let type_name = token_types.get(type_idx).map(String::as_str).unwrap_or("");
-        let color = token_color(type_name);
+        let type_name = static_types.get(type_idx).copied().unwrap_or("");
         let line = lines[abs_line];
         let start = utf16_to_byte(line, abs_char);
         let end = utf16_to_byte(line, abs_char + length).min(line.len());
         if start < end {
-            line_tokens[abs_line].push((start, end, color));
+            line_tokens[abs_line].push((start, end, type_name));
         }
     }
 
@@ -399,19 +406,19 @@ fn decode_tokens(data: &[u32], token_types: &[String], content: &str) -> Vec<Col
         .map(|(i, line)| {
             let tokens = &line_tokens[i];
             if tokens.is_empty() {
-                return vec![(0, line.len(), None)];
+                return vec![(0, line.len(), "")];
             }
             let mut spans: ColoredLine = Vec::new();
             let mut pos = 0usize;
-            for &(start, end, color) in tokens {
+            for &(start, end, type_name) in tokens {
                 if pos < start {
-                    spans.push((pos, start, None));
+                    spans.push((pos, start, ""));
                 }
-                spans.push((start, end, color));
+                spans.push((start, end, type_name));
                 pos = end;
             }
             if pos < line.len() {
-                spans.push((pos, line.len(), None));
+                spans.push((pos, line.len(), ""));
             }
             spans
         })
@@ -427,22 +434,4 @@ fn utf16_to_byte(s: &str, utf16_offset: usize) -> usize {
         u16_count += ch.len_utf16();
     }
     s.len()
-}
-
-fn token_color(token_type: &str) -> Option<[u8; 3]> {
-    match token_type {
-        "keyword" | "modifier" | "selfKeyword" | "boolean" => Some([204, 120, 50]),
-        "string" | "comment" | "character" | "escapeSequence" => Some([106, 153, 85]),
-        "number" | "const" | "static" => Some([181, 206, 168]),
-        "type" | "class" | "struct" | "enum" | "interface" | "namespace" | "builtinType"
-        | "typeAlias" | "typeParameter" | "constParameter" | "generic" | "toolModule" => {
-            Some([78, 201, 176])
-        }
-        "function" | "method" => Some([220, 220, 170]),
-        "macro" | "attributeBracket" | "builtinAttribute" | "decorator" => Some([189, 99, 197]),
-        "variable" | "parameter" => Some([156, 220, 254]),
-        "property" | "enumMember" => Some([206, 145, 120]),
-        "operator" | "lifetime" => Some([212, 212, 212]),
-        _ => None,
-    }
 }
