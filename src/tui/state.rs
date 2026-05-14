@@ -1,4 +1,4 @@
-use crate::LoadedFile;
+use crate::loader::LoadedFile;
 use camino::Utf8PathBuf;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;

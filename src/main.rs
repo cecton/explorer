@@ -1,88 +1,19 @@
 use camino::Utf8PathBuf;
 use jwalk::WalkDir;
 use r3bl_tui::log::{TracingConfig, WriterConfig, try_initialize_logging_global};
-use std::env;
 use std::ffi::OsString;
-use std::fs;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use tracing_core::LevelFilter;
+use std::sync::Arc;
 
+mod cli;
+mod loader;
 mod lsp;
 mod tui;
 
-pub struct LoadedFile {
-    pub path: Utf8PathBuf,
-    pub content: String,
-    pub line_starts: Vec<usize>,
-    pub colored_lines: Mutex<Vec<lsp::ColoredLine>>,
-}
-
-struct Args {
-    log_file: Option<String>,
-    log_level: LevelFilter,
-}
-
-fn parse_args() -> Args {
-    let mut args = pico_args::Arguments::from_env();
-    let log_file: Option<String> = args
-        .opt_value_from_str("--log-file")
-        .expect("invalid --log-file");
-    let log_level: Option<String> = args
-        .opt_value_from_str("--log-level")
-        .expect("invalid --log-level");
-    let log_level = match log_level.as_deref() {
-        Some("error") => LevelFilter::ERROR,
-        Some("warn") => LevelFilter::WARN,
-        Some("info") => LevelFilter::INFO,
-        Some("debug") | None => LevelFilter::DEBUG,
-        Some("trace") => LevelFilter::TRACE,
-        Some(other) => {
-            eprintln!("unknown log level '{other}', defaulting to debug");
-            LevelFilter::DEBUG
-        }
-    };
-    Args {
-        log_file,
-        log_level,
-    }
-}
-
-fn find_git_root() -> PathBuf {
-    let mut dir = env::current_dir().expect("cannot get current directory");
-    loop {
-        if dir.join(".git").is_dir() {
-            return dir;
-        }
-        if !dir.pop() {
-            panic!("no git repository found (no .git directory in any parent)");
-        }
-    }
-}
-
-fn load_file(path: PathBuf) -> Option<LoadedFile> {
-    let path = Utf8PathBuf::from_path_buf(path).ok()?;
-    let content = fs::read_to_string(&path).ok()?;
-    let capacity = content.len() / 100 + 1;
-    let mut line_starts = Vec::with_capacity(capacity);
-    line_starts.push(0usize);
-    for (i, &b) in content.as_bytes().iter().enumerate() {
-        if b == b'\n' && i + 1 < content.len() {
-            line_starts.push(i + 1);
-        }
-    }
-    line_starts.shrink_to_fit();
-    Some(LoadedFile {
-        path,
-        content,
-        line_starts,
-        colored_lines: Mutex::new(vec![]),
-    })
-}
+use loader::{LoadedFile, find_git_root};
 
 #[tokio::main]
 async fn main() {
-    let args = parse_args();
+    let args = cli::parse_args();
 
     if let Some(ref path) = args.log_file {
         let config = TracingConfig {
@@ -111,7 +42,7 @@ async fn main() {
             if !entry.file_type().is_file() {
                 return None;
             }
-            load_file(entry.path())
+            LoadedFile::load(entry.path())
         })
         .collect();
 

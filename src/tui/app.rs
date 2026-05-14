@@ -1,7 +1,7 @@
 use super::file_list::FileListComponent;
 use super::preview::FilePreviewComponent;
 use super::state::{AppSignal, State};
-use crate::LoadedFile;
+use crate::loader::LoadedFile;
 use crate::lsp;
 use camino::Utf8PathBuf;
 use r3bl_tui::{

@@ -1,4 +1,4 @@
-use crate::LoadedFile;
+use crate::loader::LoadedFile;
 use crate::tui::state::AppSignal;
 use camino::Utf8PathBuf;
 use lsp_types::notification::{DidOpenTextDocument, Initialized, Notification};
