@@ -417,7 +417,7 @@ fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, picker_open: boo
     let hint = if picker_open {
         " Esc:Close  ↑↓:Select  Enter:Open"
     } else {
-        " Ctrl+P:Open file  PgUp/PgDn:Scroll  q/Ctrl+C:Quit"
+        " Ctrl+P:Open file  ↑↓/PgUp/PgDn:Scroll  Ctrl+C:Quit"
     };
 
     let styled_texts = tui_styled_texts! {
@@ -451,13 +451,10 @@ pub async fn run(
     root: Utf8PathBuf,
 ) -> CommonResult<()> {
     let app = AppMain::new_boxed(files, root);
-    let exit_keys = &[
-        InputEvent::Keyboard(key_press! { @char 'q' }),
-        InputEvent::Keyboard(KeyPress::WithModifiers {
-            key: Key::Character('c'),
-            mask: ModifierKeysMask::new().with_ctrl(),
-        }),
-    ];
+    let exit_keys = &[InputEvent::Keyboard(KeyPress::WithModifiers {
+        key: Key::Character('c'),
+        mask: ModifierKeysMask::new().with_ctrl(),
+    })];
     let _unused: (GlobalData<_, _>, InputDevice, OutputDevice) =
         TerminalWindow::main_event_loop(app, exit_keys, initial_state)?.await?;
     ok!()

@@ -55,6 +55,24 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                             )
                         );
                     }
+                    Key::SpecialKey(SpecialKey::Up) => {
+                        consumed = true;
+                        send_signal!(
+                            global_data.main_thread_channel_sender,
+                            TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                AppSignal::ScrollPreviewUp(1),
+                            )
+                        );
+                    }
+                    Key::SpecialKey(SpecialKey::Down) => {
+                        consumed = true;
+                        send_signal!(
+                            global_data.main_thread_channel_sender,
+                            TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                AppSignal::ScrollPreviewDown(1),
+                            )
+                        );
+                    }
                     _ => {}
                 }
             }
