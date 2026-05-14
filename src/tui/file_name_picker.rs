@@ -1,9 +1,9 @@
 use super::state::{AppSignal, State};
 use r3bl_tui::{
     BoxedSafeComponent, CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData,
-    HasFocus, InputEvent, Key, KeyPress, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
-    SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal, ZOrder, col, new_style,
-    render_pipeline, row, send_signal, throws_with_return, tui_color,
+    HasFocus, InputEvent, Key, KeyPress, MouseInputKind, RenderOpCommon, RenderOpIR, RenderOpIRVec,
+    RenderPipeline, SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal, ZOrder, col,
+    new_style, render_pipeline, row, send_signal, throws_with_return, tui_color,
 };
 use std::collections::HashSet;
 
@@ -93,6 +93,31 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                         );
                     }
                     _ => {}
+                }
+            }
+            if !consumed {
+                if let InputEvent::Mouse(mouse_input) = input_event {
+                    match mouse_input.kind {
+                        MouseInputKind::ScrollUp => {
+                            consumed = true;
+                            send_signal!(
+                                global_data.main_thread_channel_sender,
+                                TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                    AppSignal::FileNamePickerSelectPrev,
+                                )
+                            );
+                        }
+                        MouseInputKind::ScrollDown => {
+                            consumed = true;
+                            send_signal!(
+                                global_data.main_thread_channel_sender,
+                                TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                    AppSignal::FileNamePickerSelectNext,
+                                )
+                            );
+                        }
+                        _ => {}
+                    }
                 }
             }
             if consumed {
