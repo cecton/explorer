@@ -2,6 +2,7 @@ use super::file_list::FileListComponent;
 use super::preview::FilePreviewComponent;
 use super::state::{AppSignal, State};
 use crate::LoadedFile;
+use crate::lsp;
 use camino::Utf8PathBuf;
 use r3bl_tui::{
     App, BoxedSafeApp, CommonResult, ComponentRegistry, ComponentRegistryMap, ContainsResult,
@@ -13,7 +14,7 @@ use r3bl_tui::{
     req_size_pc, row, surface, throws, throws_with_return, tui_color, tui_styled_text,
     tui_styled_texts, tui_stylesheet,
 };
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 #[repr(u8)]
@@ -36,12 +37,28 @@ impl From<Id> for FlexBoxId {
     }
 }
 
-#[derive(Default)]
-pub struct AppMain;
+pub struct AppMain {
+    lsp_tx: mpsc::Sender<usize>,
+    lsp_rx: Option<mpsc::Receiver<usize>>,
+    files: Arc<Vec<LoadedFile>>,
+    root: Utf8PathBuf,
+    warmup_ms: Arc<Mutex<Option<u128>>>,
+}
 
 impl AppMain {
-    fn new_boxed() -> BoxedSafeApp<State, AppSignal> {
-        Box::new(Self)
+    fn new_boxed(
+        files: Arc<Vec<LoadedFile>>,
+        root: Utf8PathBuf,
+        warmup_ms: Arc<Mutex<Option<u128>>>,
+    ) -> BoxedSafeApp<State, AppSignal> {
+        let (lsp_tx, lsp_rx) = mpsc::channel(32);
+        Box::new(Self {
+            lsp_tx,
+            lsp_rx: Some(lsp_rx),
+            files,
+            root,
+            warmup_ms,
+        })
     }
 }
 
@@ -119,9 +136,7 @@ impl App for AppMain {
                     if file_count > 0 {
                         state.open_file = Some(state.selected);
                         state.preview_scroll = 0;
-                        if let Some(tx) = &state.lsp_tx {
-                            let _ = tx.try_send(state.selected);
-                        }
+                        let _ = self.lsp_tx.try_send(state.selected);
                     }
                 }
                 AppSignal::ScrollPreviewDown(n) => {
@@ -144,9 +159,14 @@ impl App for AppMain {
     ) -> CommonResult<RenderPipeline> {
         throws_with_return!({
             {
-                let mut guard = global_data.state.notify_tx.lock().unwrap();
-                if guard.is_none() {
-                    *guard = Some(global_data.main_thread_channel_sender.clone());
+                if let Some(lsp_rx) = self.lsp_rx.take() {
+                    let notify_tx = global_data.main_thread_channel_sender.clone();
+                    let files = Arc::clone(&self.files);
+                    let root = self.root.clone();
+                    let warmup_ms = Arc::clone(&self.warmup_ms);
+                    tokio::spawn(async move {
+                        lsp::run(root, files, lsp_rx, notify_tx, warmup_ms).await;
+                    });
                 }
             }
             let window_size = global_data.window_size;
@@ -317,14 +337,18 @@ fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, warmup_ms: Optio
 pub fn build_state(
     files: Arc<Vec<LoadedFile>>,
     root: Utf8PathBuf,
-    lsp_tx: mpsc::Sender<usize>,
     warmup_ms: Arc<std::sync::Mutex<Option<u128>>>,
 ) -> State {
-    State::new(files, root, lsp_tx, warmup_ms)
+    State::new(files, root, warmup_ms)
 }
 
-pub async fn run(initial_state: State) -> CommonResult<()> {
-    let app = AppMain::new_boxed();
+pub async fn run(
+    initial_state: State,
+    files: Arc<Vec<LoadedFile>>,
+    root: Utf8PathBuf,
+    warmup_ms: Arc<std::sync::Mutex<Option<u128>>>,
+) -> CommonResult<()> {
+    let app = AppMain::new_boxed(files, root, warmup_ms);
     let exit_keys = &[InputEvent::Keyboard(key_press! { @char 'q' })];
     let _unused: (GlobalData<_, _>, InputDevice, OutputDevice) =
         TerminalWindow::main_event_loop(app, exit_keys, initial_state)?.await?;

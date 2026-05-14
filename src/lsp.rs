@@ -23,7 +23,7 @@ pub async fn run(
     root: Utf8PathBuf,
     files: Arc<Vec<LoadedFile>>,
     mut requests: mpsc::Receiver<usize>,
-    notify_tx: Arc<Mutex<Option<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>>,
+    notify_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
     warmup_ms: Arc<Mutex<Option<u128>>>,
 ) {
     let Ok(mut child) = Command::new("rust-analyzer")
@@ -192,10 +192,8 @@ pub async fn run(
                     }
                 }
 
-                if notify_pending
-                    && let Some(tx) = notify_tx.lock().unwrap().as_ref()
-                {
-                    let _ = tx.try_send(
+                if notify_pending {
+                    let _ = notify_tx.try_send(
                         TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::Noop),
                     );
                     notify_pending = false;

@@ -80,20 +80,10 @@ async fn main() {
 
     let files = Arc::new(files);
     let warmup_ms: Arc<Mutex<Option<u128>>> = Arc::new(Mutex::new(None));
-    let (lsp_tx, lsp_rx) = tokio::sync::mpsc::channel(32);
 
-    let initial_state = tui::build_state(
-        Arc::clone(&files),
-        root.clone(),
-        lsp_tx,
-        Arc::clone(&warmup_ms),
-    );
-    let notify_tx = Arc::clone(&initial_state.notify_tx);
+    let initial_state = tui::build_state(Arc::clone(&files), root.clone(), Arc::clone(&warmup_ms));
 
-    let lsp_files = Arc::clone(&files);
-    tokio::spawn(async move {
-        lsp::run(root.clone(), lsp_files, lsp_rx, notify_tx, warmup_ms).await;
-    });
-
-    tui::run(initial_state).await.expect("TUI error");
+    tui::run(initial_state, files, root, warmup_ms)
+        .await
+        .expect("TUI error");
 }

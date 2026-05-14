@@ -1,9 +1,7 @@
 use crate::LoadedFile;
 use camino::Utf8PathBuf;
-use r3bl_tui::TerminalWindowMainThreadSignal;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::{Arc, Mutex};
-use tokio::sync::mpsc;
 
 #[derive(Clone)]
 pub struct State {
@@ -13,8 +11,6 @@ pub struct State {
     pub open_file: Option<usize>,
     pub preview_scroll: usize,
     pub preview_page_size: usize,
-    pub lsp_tx: Option<mpsc::Sender<usize>>,
-    pub notify_tx: Arc<Mutex<Option<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>>,
     /// None = warmup in progress, Some(ms) = completed in ms milliseconds
     pub warmup_ms: Arc<Mutex<Option<u128>>>,
 }
@@ -23,7 +19,6 @@ impl State {
     pub fn new(
         files: Arc<Vec<LoadedFile>>,
         root: Utf8PathBuf,
-        lsp_tx: mpsc::Sender<usize>,
         warmup_ms: Arc<Mutex<Option<u128>>>,
     ) -> Self {
         Self {
@@ -33,8 +28,6 @@ impl State {
             open_file: None,
             preview_scroll: 0,
             preview_page_size: 0,
-            lsp_tx: Some(lsp_tx),
-            notify_tx: Arc::new(Mutex::new(None)),
             warmup_ms,
         }
     }
@@ -49,8 +42,6 @@ impl Default for State {
             open_file: None,
             preview_scroll: 0,
             preview_page_size: 0,
-            lsp_tx: None,
-            notify_tx: Arc::new(Mutex::new(None)),
             warmup_ms: Arc::new(Mutex::new(None)),
         }
     }
