@@ -2234,8 +2234,6 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 [[package]]
 name = "r3bl_tui"
 version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1de2489a5670ea3a3770169909588c066da2761171270d3034825403f761cf64"
 dependencies = [
  "async-stream",
  "chrono",
