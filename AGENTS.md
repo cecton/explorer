@@ -36,11 +36,8 @@ cargo build --release
 # Build (release)
 cargo build --release
 
-# Run without a search query (lists all loaded files)
-cargo run
-
-# Run with a fuzzy search query
-cargo run -- <query>
+# Run
+cargo run --release
 
 # Format (required before every commit)
 cargo fmt
@@ -79,14 +76,17 @@ cargo test <module>::<test_name>
 
 ## Dependencies
 
-| Crate      | Version | Purpose                                           |
-|------------|---------|---------------------------------------------------|
+| Crate         | Version | Purpose                                           |
+|---------------|---------|---------------------------------------------------|
 | `camino`      | 1.x     | UTF-8–typed path types (`Utf8PathBuf`, etc.)      |
 | `jwalk`       | 0.8.x   | Parallel directory traversal (uses rayon)         |
 | `nucleo`      | 0.5.x   | Fuzzy matching for paths and file content         |
-| `r3bl_tui`   | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
+| `pico-args`   | 0.5.x   | Lightweight CLI argument parsing (no proc macros) |
+| `r3bl_tui`    | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
 | `serde_json`  | 1.x     | JSON-RPC message serialization for LSP protocol   |
 | `tokio`       | 1.x     | Async runtime required by `r3bl_tui`              |
+| `tracing`     | 0.1.x   | Structured logging macros (`debug!`, `info!`, etc.) |
+| `tracing-core` | 0.1.x  | `LevelFilter` type used to configure `r3bl_tui` logger |
 
 Add a dependency when it provides substantial value that would take significant effort to replicate correctly — covering performance, correctness, or capability. Prefer `std` for trivial things. Each dep must have a concrete, stated purpose in this table.
 
@@ -142,7 +142,21 @@ Planned feature areas and their likely dependencies:
 
 ### CLI Arguments
 
-- Parse arguments with `std::env::args()` directly. Do not add a CLI-parsing crate (`clap`, `argh`, etc.) unless the argument surface grows substantially more complex.
+- Use `pico-args` for argument parsing. It has no proc macros and minimal overhead.
+- `LevelFilter` from `tracing-core` does not implement `FromStr`. Parse log level as
+  `Option<String>` via `pico-args`, then convert to `LevelFilter` with a `match`.
+
+### Logging
+
+- Logging uses `r3bl_tui::log` (`tracing`-based). Use `tracing::debug!`, `tracing::info!`,
+  etc. — never the `log` crate macros.
+- `r3bl_tui` provides `try_initialize_logging_global(config)` where config is a
+  `TracingConfig { level_filter, writer_config }`.
+- `WriterConfig::File(path)` logs to an exact file path (no rolling suffix).
+- `DisplayPreference::Stdout` / `Stderr` must not be used in a TUI — it corrupts the display.
+- Logging is **off by default**. It is enabled only when `--log-file <path>` is passed.
+  An optional `--log-level <level>` controls verbosity (error/warn/info/debug/trace);
+  default is `debug`.
 
 ### Comments
 

@@ -208,14 +208,14 @@ pub async fn run(
                 let Ok(msg) = result else { break };
                 let method = msg.method.as_deref().unwrap_or("");
                 let has_id = msg.id.is_some();
-                log::debug!("recv: method={:?} has_id={} warmup_remaining={} notify_pending={}",
+                tracing::debug!("recv: method={:?} has_id={} warmup_remaining={} notify_pending={}",
                     method, has_id, warmup_remaining, notify_pending);
 
                 // Reply to any server-initiated request (e.g. window/workDoneProgress/create).
                 if msg.method.is_some()
                     && let Some(ref id) = msg.id
                 {
-                    log::debug!("replying to server request: method={:?} id={}", method, id);
+                    tracing::debug!("replying to server request: method={:?} id={}", method, id);
                     let reply = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null});
                     if send_msg(&mut stdin, &reply).await.is_err() {
                         break;
@@ -229,7 +229,7 @@ pub async fn run(
                         .result
                         .and_then(|v| serde_json::from_value(v).ok());
                     let has_data = tokens.is_some();
-                    log::debug!("token response: id={} file_idx={} is_range={} is_warmup={} has_data={} warmup_remaining={}",
+                    tracing::debug!("token response: id={} file_idx={} is_range={} is_warmup={} has_data={} warmup_remaining={}",
                         id, file_idx, is_range, is_warmup, has_data, warmup_remaining);
 
                     if let Some(SemanticTokens { data, .. }) = tokens {
@@ -245,25 +245,25 @@ pub async fn run(
                             if warmup_remaining == 0 {
                                 let elapsed = warmup_start.elapsed().as_millis();
                                 notify_pending = true;
-                                log::info!("warmup complete: elapsed={}ms", elapsed);
+                                tracing::info!("warmup complete: elapsed={}ms", elapsed);
                             }
                         }
                     } else if is_warmup {
                         // Null response: rust-analyzer not ready yet. Retry up to 3 times.
                         let retries = warmup_retries.entry(file_idx).or_insert(0);
                         *retries += 1;
-                        log::debug!("warmup null: file_idx={} retry={}", file_idx, retries);
+                        tracing::debug!("warmup null: file_idx={} retry={}", file_idx, retries);
                         if *retries < 3 {
                             warmup_queue.push_back(file_idx);
                         } else {
                             // Give up on this file.
-                            log::debug!("warmup give up: file_idx={}", file_idx);
+                            tracing::debug!("warmup give up: file_idx={}", file_idx);
                             if warmup_remaining > 0 {
                                 warmup_remaining -= 1;
                                 if warmup_remaining == 0 {
                                     let elapsed = warmup_start.elapsed().as_millis();
                                     notify_pending = true;
-                                    log::info!("warmup complete (with gave-up files): elapsed={}ms", elapsed);
+                                    tracing::info!("warmup complete (with gave-up files): elapsed={}ms", elapsed);
                                 }
                             }
                         }
@@ -280,7 +280,7 @@ pub async fn run(
 
             file_idx = requests.recv() => {
                 let Some(file_idx) = file_idx else { break };
-                log::debug!("user request: file_idx={}", file_idx);
+                tracing::debug!("user request: file_idx={}", file_idx);
                 let file = &files[file_idx];
                 if file.path.extension() != Some("rs") {
                     continue;
@@ -305,7 +305,7 @@ pub async fn run(
                 if !warmup_queue.is_empty() =>
             {
                 let file = &files[file_idx];
-                log::debug!("warmup send: file_idx={} path={} queue_remaining={}", file_idx, file.path, warmup_queue.len());
+                tracing::debug!("warmup send: file_idx={} path={} queue_remaining={}", file_idx, file.path, warmup_queue.len());
                 if request_tokens(
                     &mut stdin,
                     file,

@@ -1,11 +1,12 @@
 use camino::Utf8PathBuf;
 use jwalk::WalkDir;
-use simplelog::{Config, LevelFilter, WriteLogger};
+use r3bl_tui::log::{TracingConfig, WriterConfig, try_initialize_logging_global};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
+use tracing_core::LevelFilter;
 
 mod lsp;
 mod tui;
@@ -15,6 +16,36 @@ pub struct LoadedFile {
     pub content: String,
     pub line_starts: Vec<usize>,
     pub colored_lines: Mutex<Vec<lsp::ColoredLine>>,
+}
+
+struct Args {
+    log_file: Option<String>,
+    log_level: LevelFilter,
+}
+
+fn parse_args() -> Args {
+    let mut args = pico_args::Arguments::from_env();
+    let log_file: Option<String> = args
+        .opt_value_from_str("--log-file")
+        .expect("invalid --log-file");
+    let log_level: Option<String> = args
+        .opt_value_from_str("--log-level")
+        .expect("invalid --log-level");
+    let log_level = match log_level.as_deref() {
+        Some("error") => LevelFilter::ERROR,
+        Some("warn") => LevelFilter::WARN,
+        Some("info") => LevelFilter::INFO,
+        Some("debug") | None => LevelFilter::DEBUG,
+        Some("trace") => LevelFilter::TRACE,
+        Some(other) => {
+            eprintln!("unknown log level '{other}', defaulting to debug");
+            LevelFilter::DEBUG
+        }
+    };
+    Args {
+        log_file,
+        log_level,
+    }
 }
 
 fn find_git_root() -> PathBuf {
@@ -51,9 +82,15 @@ fn load_file(path: PathBuf) -> Option<LoadedFile> {
 
 #[tokio::main]
 async fn main() {
-    let log_file = fs::File::create("/tmp/explorer.log").expect("cannot create log file");
-    WriteLogger::init(LevelFilter::Debug, Config::default(), log_file)
-        .expect("cannot initialize logger");
+    let args = parse_args();
+
+    if let Some(ref path) = args.log_file {
+        let config = TracingConfig {
+            level_filter: args.log_level,
+            writer_config: WriterConfig::File(path.clone()),
+        };
+        _ = try_initialize_logging_global(config);
+    }
 
     let root = Utf8PathBuf::from_path_buf(find_git_root())
         .expect("repository root path is not valid UTF-8");
