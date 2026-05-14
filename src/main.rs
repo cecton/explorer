@@ -1,5 +1,6 @@
 use camino::Utf8PathBuf;
 use jwalk::WalkDir;
+use simplelog::{Config, LevelFilter, WriteLogger};
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -50,6 +51,10 @@ fn load_file(path: PathBuf) -> Option<LoadedFile> {
 
 #[tokio::main]
 async fn main() {
+    let log_file = fs::File::create("/tmp/explorer.log").expect("cannot create log file");
+    WriteLogger::init(LevelFilter::Debug, Config::default(), log_file)
+        .expect("cannot initialize logger");
+
     let root = Utf8PathBuf::from_path_buf(find_git_root())
         .expect("repository root path is not valid UTF-8");
 

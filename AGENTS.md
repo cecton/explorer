@@ -5,7 +5,7 @@ The project is in very early development — don't hesitate to make breaking cha
 don't write migration or retro-compatibility code.
 
 Every change you make must be committed with a clear title and description. Run
-`cargo fmt` before every commit.
+`cargo fmt` before every commit. Always use the git skill before committing.
 
 ---
 

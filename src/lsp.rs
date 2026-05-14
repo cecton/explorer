@@ -4,23 +4,12 @@ use camino::Utf8PathBuf;
 use r3bl_tui::TerminalWindowMainThreadSignal;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
-use std::io::Write;
 use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
 use tokio::sync::mpsc;
-
-macro_rules! log {
-    ($($arg:tt)*) => {{
-        if let Ok(mut f) = std::fs::OpenOptions::new()
-            .create(true).append(true).open("/tmp/explorer.log")
-        {
-            let _ = writeln!(f, $($arg)*);
-        }
-    }};
-}
 
 pub type ColoredSpan = (usize, usize, Option<[u8; 3]>);
 pub type ColoredLine = Vec<ColoredSpan>;
@@ -133,14 +122,14 @@ pub async fn run(
                 let Ok(msg) = result else { break };
                 let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
                 let has_id = msg.get("id").is_some();
-                log!("recv: method={:?} has_id={} warmup_remaining={} notify_pending={}",
+                log::debug!("recv: method={:?} has_id={} warmup_remaining={} notify_pending={}",
                     method, has_id, warmup_remaining, notify_pending);
 
                 // Reply to any server-initiated request (e.g. window/workDoneProgress/create).
                 if msg.get("method").is_some()
                     && let Some(id) = msg.get("id")
                 {
-                    log!("replying to server request: method={:?} id={}", method, id);
+                    log::debug!("replying to server request: method={:?} id={}", method, id);
                     let reply = json!({"jsonrpc": "2.0", "id": id, "result": null});
                     if send_msg(&mut stdin, &reply).await.is_err() {
                         break;
@@ -151,7 +140,7 @@ pub async fn run(
                     && let Some((file_idx, is_range, is_warmup)) = pending.remove(&id)
                 {
                     let has_data = msg["result"]["data"].is_array();
-                    log!("token response: id={} file_idx={} is_range={} is_warmup={} has_data={} warmup_remaining={}",
+                    log::debug!("token response: id={} file_idx={} is_range={} is_warmup={} has_data={} warmup_remaining={}",
                         id, file_idx, is_range, is_warmup, has_data, warmup_remaining);
 
                     if let Some(arr) = msg["result"]["data"].as_array() {
@@ -172,26 +161,26 @@ pub async fn run(
                                 let elapsed = warmup_start.elapsed().as_millis();
                                 *warmup_ms.lock().unwrap() = Some(elapsed);
                                 notify_pending = true;
-                                log!("warmup complete: elapsed={}ms", elapsed);
+                                log::debug!("warmup complete: elapsed={}ms", elapsed);
                             }
                         }
                     } else if is_warmup {
                         // Null response: rust-analyzer not ready yet. Retry up to 3 times.
                         let retries = warmup_retries.entry(file_idx).or_insert(0);
                         *retries += 1;
-                        log!("warmup null: file_idx={} retry={}", file_idx, retries);
+                        log::debug!("warmup null: file_idx={} retry={}", file_idx, retries);
                         if *retries < 3 {
                             warmup_queue.push_back(file_idx);
                         } else {
                             // Give up on this file.
-                            log!("warmup give up: file_idx={}", file_idx);
+                            log::debug!("warmup give up: file_idx={}", file_idx);
                             if warmup_remaining > 0 {
                                 warmup_remaining -= 1;
                                 if warmup_remaining == 0 {
                                     let elapsed = warmup_start.elapsed().as_millis();
                                     *warmup_ms.lock().unwrap() = Some(elapsed);
                                     notify_pending = true;
-                                    log!("warmup complete (with gave-up files): elapsed={}ms", elapsed);
+                                    log::debug!("warmup complete (with gave-up files): elapsed={}ms", elapsed);
                                 }
                             }
                         }
@@ -210,7 +199,7 @@ pub async fn run(
 
             file_idx = requests.recv() => {
                 let Some(file_idx) = file_idx else { break };
-                log!("user request: file_idx={}", file_idx);
+                log::debug!("user request: file_idx={}", file_idx);
                 let file = &files[file_idx];
                 if file.path.extension() != Some("rs") {
                     continue;
@@ -279,7 +268,7 @@ pub async fn run(
             {
                 let file = &files[file_idx];
                 let uri = format!("file://{}", file.path);
-                log!("warmup send: file_idx={} path={} queue_remaining={}", file_idx, file.path, warmup_queue.len());
+                log::debug!("warmup send: file_idx={} path={} queue_remaining={}", file_idx, file.path, warmup_queue.len());
 
                 if !opened.contains(&file_idx) {
                     let did_open = json!({
