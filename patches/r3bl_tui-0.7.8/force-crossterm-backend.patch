@@ -1,0 +1,10 @@
+--- a/src/tui/terminal_lib_backends/backend_selection.rs
++++ b/src/tui/terminal_lib_backends/backend_selection.rs
+@@ -53,7 +53,7 @@ pub enum TerminalLibBackend {
+ /// [`DirectToAnsi`]: variant@TerminalLibBackend::DirectToAnsi
+ #[cfg(target_os = "linux")]
+-pub const TERMINAL_LIB_BACKEND: TerminalLibBackend = TerminalLibBackend::DirectToAnsi;
++pub const TERMINAL_LIB_BACKEND: TerminalLibBackend = TerminalLibBackend::Crossterm;
+ 
+ /// The default terminal library backend for this platform.
+ ///

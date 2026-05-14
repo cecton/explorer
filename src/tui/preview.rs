@@ -1,9 +1,9 @@
 use super::state::{AppSignal, State};
 use r3bl_tui::{
     BoxedSafeComponent, CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData,
-    HasFocus, InputEvent, Key, KeyPress, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
-    SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal, ZOrder, col, new_style,
-    render_pipeline, row, send_signal, throws_with_return, tui_color,
+    HasFocus, InputEvent, Key, KeyPress, MouseInputKind, RenderOpCommon, RenderOpIR, RenderOpIRVec,
+    RenderPipeline, SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal, ZOrder, col,
+    new_style, render_pipeline, row, send_signal, throws_with_return, tui_color,
 };
 
 const DEFAULT_FG: [u8; 3] = [212, 212, 212];
@@ -65,6 +65,29 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                         );
                     }
                     Key::SpecialKey(SpecialKey::Down) => {
+                        consumed = true;
+                        send_signal!(
+                            global_data.main_thread_channel_sender,
+                            TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                AppSignal::ScrollPreviewDown(1),
+                            )
+                        );
+                    }
+                    _ => {}
+                }
+            }
+            if let InputEvent::Mouse(mouse) = input_event {
+                match mouse.kind {
+                    MouseInputKind::ScrollUp => {
+                        consumed = true;
+                        send_signal!(
+                            global_data.main_thread_channel_sender,
+                            TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                AppSignal::ScrollPreviewUp(1),
+                            )
+                        );
+                    }
+                    MouseInputKind::ScrollDown => {
                         consumed = true;
                         send_signal!(
                             global_data.main_thread_channel_sender,
