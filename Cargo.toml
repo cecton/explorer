@@ -7,8 +7,10 @@ edition = "2024"
 camino = "1"
 jwalk = "0.8"
 log = "0.4"
+lsp-types = { version = "0.97", features = ["proposed"] }
 nucleo = "0.5"
 r3bl_tui = "0.7"
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 simplelog = "0.12"
 tokio = { version = "1", features = ["full"] }

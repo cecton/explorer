@@ -30,8 +30,8 @@ Source is organized as:
 ## Build & Run Commands
 
 ```bash
-# Build (dev)
-cargo build
+# Build (dev) -- always use release even for development
+cargo build --release
 
 # Build (release)
 cargo build --release

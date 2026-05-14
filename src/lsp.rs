@@ -1,8 +1,21 @@
 use crate::LoadedFile;
 use crate::tui::state::AppSignal;
 use camino::Utf8PathBuf;
+use lsp_types::notification::{DidOpenTextDocument, Initialized, Notification};
+use lsp_types::request::{
+    Initialize, Request, SemanticTokensFullRequest, SemanticTokensRangeRequest,
+};
+use lsp_types::{
+    ClientCapabilities, DidOpenTextDocumentParams, InitializeParams, InitializeResult,
+    InitializedParams, PartialResultParams, Position, Range, SemanticToken, SemanticTokens,
+    SemanticTokensClientCapabilities, SemanticTokensClientCapabilitiesRequests,
+    SemanticTokensFullOptions, SemanticTokensParams, SemanticTokensRangeParams,
+    TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem, TokenFormat, Uri,
+    WorkDoneProgressParams, WorkspaceFolder,
+};
 use r3bl_tui::TerminalWindowMainThreadSignal;
-use serde_json::{Value, json};
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Stdio;
 use std::sync::{Arc, OnceLock};
@@ -18,6 +31,28 @@ static TOKEN_TYPES: OnceLock<Vec<&'static str>> = OnceLock::new();
 
 const RANGE_LINES: usize = 200;
 const RANGE_THRESHOLD: usize = 100;
+
+#[derive(Serialize)]
+struct RpcRequest<P: Serialize> {
+    jsonrpc: &'static str,
+    id: u64,
+    method: &'static str,
+    params: P,
+}
+
+#[derive(Serialize)]
+struct RpcNotification<P: Serialize> {
+    jsonrpc: &'static str,
+    method: &'static str,
+    params: P,
+}
+
+#[derive(Deserialize)]
+struct RpcResponse {
+    id: Option<Value>,
+    method: Option<String>,
+    result: Option<Value>,
+}
 
 pub async fn run(
     root: Utf8PathBuf,
@@ -38,31 +73,40 @@ pub async fn run(
     let stdout = child.stdout.take().expect("stdout piped");
     let mut reader = BufReader::new(stdout);
 
-    let root_uri = format!("file://{root}");
+    let root_uri: Uri = format!("file://{root}").parse().expect("valid root URI");
     let pid = std::process::id();
 
-    let init_req = json!({
-        "jsonrpc": "2.0",
-        "id": 0,
-        "method": "initialize",
-        "params": {
-            "processId": pid,
-            "rootUri": root_uri,
-            "capabilities": {
-                "textDocument": {
-                    "semanticTokens": {
-                        "requests": { "full": true, "range": true },
-                        "tokenTypes": [],
-                        "tokenModifiers": [],
-                        "formats": ["relative"],
-                        "multilineTokenSupport": false,
-                        "overlappingTokenSupport": false
-                    }
-                }
+    let init_req = RpcRequest {
+        jsonrpc: "2.0",
+        id: 0,
+        method: Initialize::METHOD,
+        params: InitializeParams {
+            process_id: Some(pid),
+            capabilities: ClientCapabilities {
+                text_document: Some(TextDocumentClientCapabilities {
+                    semantic_tokens: Some(SemanticTokensClientCapabilities {
+                        requests: SemanticTokensClientCapabilitiesRequests {
+                            full: Some(SemanticTokensFullOptions::Bool(true)),
+                            range: Some(true),
+                        },
+                        token_types: vec![],
+                        token_modifiers: vec![],
+                        formats: vec![TokenFormat::RELATIVE],
+                        multiline_token_support: Some(false),
+                        overlapping_token_support: Some(false),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                }),
+                ..Default::default()
             },
-            "workspaceFolders": [{"uri": root_uri, "name": "root"}]
-        }
-    });
+            workspace_folders: Some(vec![WorkspaceFolder {
+                uri: root_uri.clone(),
+                name: "root".to_string(),
+            }]),
+            ..Default::default()
+        },
+    };
 
     if send_msg(&mut stdin, &init_req).await.is_err() {
         let _ = child.kill().await;
@@ -74,34 +118,72 @@ pub async fn run(
             let _ = child.kill().await;
             return;
         };
-        if msg.get("id") == Some(&json!(0)) {
-            let provider = &msg["result"]["capabilities"]["semanticTokensProvider"];
+        if msg.id.as_ref().and_then(|v| v.as_u64()) == Some(0) {
+            let result: InitializeResult =
+                match msg.result.and_then(|v| serde_json::from_value(v).ok()) {
+                    Some(r) => r,
+                    None => {
+                        let _ = child.kill().await;
+                        return;
+                    }
+                };
             TOKEN_TYPES.get_or_init(|| {
-                provider["legend"]["tokenTypes"]
-                    .as_array()
-                    .map(|a| {
-                        a.iter()
-                            .filter_map(|v| v.as_str())
-                            .map(|s| Box::leak(s.to_string().into_boxed_str()) as &'static str)
+                result
+                    .capabilities
+                    .semantic_tokens_provider
+                    .as_ref()
+                    .map(|p| match p {
+                        lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
+                            opts,
+                        ) => &opts.legend.token_types,
+                        lsp_types::SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(
+                            opts,
+                        ) => &opts.semantic_tokens_options.legend.token_types,
+                    })
+                    .map(|types| {
+                        types
+                            .iter()
+                            .map(|t| {
+                                Box::leak(t.as_str().to_string().into_boxed_str()) as &'static str
+                            })
                             .collect::<Vec<_>>()
                     })
                     .unwrap_or_default()
             });
-            let range = !provider["range"].is_null() && provider["range"] != json!(false);
+            let range = result
+                .capabilities
+                .semantic_tokens_provider
+                .as_ref()
+                .map(|p| {
+                    match p {
+                    lsp_types::SemanticTokensServerCapabilities::SemanticTokensOptions(
+                        opts,
+                    ) => opts.range.unwrap_or(false),
+                    lsp_types::SemanticTokensServerCapabilities::SemanticTokensRegistrationOptions(
+                        opts,
+                    ) => opts.semantic_tokens_options.range.unwrap_or(false),
+                }
+                })
+                .unwrap_or(false);
             break range;
         }
     };
 
-    let notify_init = json!({"jsonrpc": "2.0", "method": "initialized", "params": {}});
+    let notify_init = RpcNotification {
+        jsonrpc: "2.0",
+        method: Initialized::METHOD,
+        params: InitializedParams {},
+    };
     if send_msg(&mut stdin, &notify_init).await.is_err() {
         let _ = child.kill().await;
         return;
     }
 
-    let mut next_id = 1u64;
-    // (file_idx, is_range, is_warmup)
-    let mut pending: HashMap<u64, (usize, bool, bool)> = HashMap::new();
-    let mut opened: HashSet<usize> = HashSet::new();
+    let mut req_state = TokenRequestState {
+        next_id: 1,
+        pending: HashMap::new(),
+        opened: HashSet::new(),
+    };
 
     // Queue of file indices still needing warmup sends; drained inside the select loop.
     let mut warmup_queue: VecDeque<usize> = files
@@ -124,34 +206,33 @@ pub async fn run(
 
             result = recv_msg(&mut reader) => {
                 let Ok(msg) = result else { break };
-                let method = msg.get("method").and_then(|v| v.as_str()).unwrap_or("");
-                let has_id = msg.get("id").is_some();
+                let method = msg.method.as_deref().unwrap_or("");
+                let has_id = msg.id.is_some();
                 log::debug!("recv: method={:?} has_id={} warmup_remaining={} notify_pending={}",
                     method, has_id, warmup_remaining, notify_pending);
 
                 // Reply to any server-initiated request (e.g. window/workDoneProgress/create).
-                if msg.get("method").is_some()
-                    && let Some(id) = msg.get("id")
+                if msg.method.is_some()
+                    && let Some(ref id) = msg.id
                 {
                     log::debug!("replying to server request: method={:?} id={}", method, id);
-                    let reply = json!({"jsonrpc": "2.0", "id": id, "result": null});
+                    let reply = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null});
                     if send_msg(&mut stdin, &reply).await.is_err() {
                         break;
                     }
                 }
 
-                if let Some(id) = msg.get("id").and_then(|v| v.as_u64())
-                    && let Some((file_idx, is_range, is_warmup)) = pending.remove(&id)
+                if let Some(id) = msg.id.as_ref().and_then(|v| v.as_u64())
+                    && let Some((file_idx, is_range, is_warmup)) = req_state.pending.remove(&id)
                 {
-                    let has_data = msg["result"]["data"].is_array();
+                    let tokens: Option<SemanticTokens> = msg
+                        .result
+                        .and_then(|v| serde_json::from_value(v).ok());
+                    let has_data = tokens.is_some();
                     log::debug!("token response: id={} file_idx={} is_range={} is_warmup={} has_data={} warmup_remaining={}",
                         id, file_idx, is_range, is_warmup, has_data, warmup_remaining);
 
-                    if let Some(arr) = msg["result"]["data"].as_array() {
-                        let data: Vec<u32> = arr
-                            .iter()
-                            .filter_map(|v| v.as_u64().map(|n| n as u32))
-                            .collect();
+                    if let Some(SemanticTokens { data, .. }) = tokens {
                         let lines = decode_tokens(&data, &files[file_idx].content);
                         let mut guard = files[file_idx].colored_lines.lock().unwrap();
                         if !is_range || guard.is_empty() {
@@ -184,7 +265,8 @@ pub async fn run(
                                     notify_pending = true;
                                     log::info!("warmup complete (with gave-up files): elapsed={}ms", elapsed);
                                 }
-                            }                        }
+                            }
+                        }
                     }
                 }
 
@@ -203,62 +285,19 @@ pub async fn run(
                 if file.path.extension() != Some("rs") {
                     continue;
                 }
-                let uri = format!("file://{}", file.path);
-
-                if !opened.contains(&file_idx) {
-                    let did_open = json!({
-                        "jsonrpc": "2.0",
-                        "method": "textDocument/didOpen",
-                        "params": {
-                            "textDocument": {
-                                "uri": uri,
-                                "languageId": "rust",
-                                "version": 1,
-                                "text": file.content
-                            }
-                        }
-                    });
-                    if send_msg(&mut stdin, &did_open).await.is_err() {
-                        break;
-                    }
-                    opened.insert(file_idx);
-                }
-
-                let total_lines = file.line_starts.len();
-                if supports_range && total_lines > RANGE_THRESHOLD {
-                    let end_line = RANGE_LINES.min(total_lines);
-                    let range_id = next_id;
-                    next_id += 1;
-                    let range_req = json!({
-                        "jsonrpc": "2.0",
-                        "id": range_id,
-                        "method": "textDocument/semanticTokens/range",
-                        "params": {
-                            "textDocument": { "uri": uri },
-                            "range": {
-                                "start": { "line": 0, "character": 0 },
-                                "end": { "line": end_line, "character": 0 }
-                            }
-                        }
-                    });
-                    if send_msg(&mut stdin, &range_req).await.is_err() {
-                        break;
-                    }
-                    pending.insert(range_id, (file_idx, true, false));
-                }
-
-                let full_id = next_id;
-                next_id += 1;
-                let full_req = json!({
-                    "jsonrpc": "2.0",
-                    "id": full_id,
-                    "method": "textDocument/semanticTokens/full",
-                    "params": { "textDocument": { "uri": uri } }
-                });
-                if send_msg(&mut stdin, &full_req).await.is_err() {
+                if request_tokens(
+                    &mut stdin,
+                    file,
+                    file_idx,
+                    supports_range,
+                    &mut req_state,
+                    false,
+                )
+                .await
+                .is_err()
+                {
                     break;
                 }
-                pending.insert(full_id, (file_idx, false, false));
             }
 
             // Send the next warmup file; only polled when ready and nothing to read.
@@ -266,62 +305,19 @@ pub async fn run(
                 if !warmup_queue.is_empty() =>
             {
                 let file = &files[file_idx];
-                let uri = format!("file://{}", file.path);
                 log::debug!("warmup send: file_idx={} path={} queue_remaining={}", file_idx, file.path, warmup_queue.len());
-
-                if !opened.contains(&file_idx) {
-                    let did_open = json!({
-                        "jsonrpc": "2.0",
-                        "method": "textDocument/didOpen",
-                        "params": {
-                            "textDocument": {
-                                "uri": uri,
-                                "languageId": "rust",
-                                "version": 1,
-                                "text": file.content
-                            }
-                        }
-                    });
-                    if send_msg(&mut stdin, &did_open).await.is_err() {
-                        break;
-                    }
-                    opened.insert(file_idx);
-                }
-
-                let total_lines = file.line_starts.len();
-                if supports_range && total_lines > RANGE_THRESHOLD {
-                    let end_line = RANGE_LINES.min(total_lines);
-                    let range_id = next_id;
-                    next_id += 1;
-                    let range_req = json!({
-                        "jsonrpc": "2.0",
-                        "id": range_id,
-                        "method": "textDocument/semanticTokens/range",
-                        "params": {
-                            "textDocument": { "uri": uri },
-                            "range": {
-                                "start": { "line": 0, "character": 0 },
-                                "end": { "line": end_line, "character": 0 }
-                            }
-                        }
-                    });
-                    if send_msg(&mut stdin, &range_req).await.is_err() {
-                        break;
-                    }
-                    pending.insert(range_id, (file_idx, true, true));
-                } else {
-                    let full_id = next_id;
-                    next_id += 1;
-                    let full_req = json!({
-                        "jsonrpc": "2.0",
-                        "id": full_id,
-                        "method": "textDocument/semanticTokens/full",
-                        "params": { "textDocument": { "uri": uri } }
-                    });
-                    if send_msg(&mut stdin, &full_req).await.is_err() {
-                        break;
-                    }
-                    pending.insert(full_id, (file_idx, false, true));
+                if request_tokens(
+                    &mut stdin,
+                    file,
+                    file_idx,
+                    supports_range,
+                    &mut req_state,
+                    true,
+                )
+                .await
+                .is_err()
+                {
+                    break;
                 }
             }
         }
@@ -330,14 +326,102 @@ pub async fn run(
     let _ = child.kill().await;
 }
 
-async fn send_msg(stdin: &mut ChildStdin, msg: &Value) -> std::io::Result<()> {
-    let body = msg.to_string();
+struct TokenRequestState {
+    next_id: u64,
+    pending: HashMap<u64, (usize, bool, bool)>,
+    opened: HashSet<usize>,
+}
+
+async fn request_tokens(
+    stdin: &mut ChildStdin,
+    file: &LoadedFile,
+    file_idx: usize,
+    supports_range: bool,
+    state: &mut TokenRequestState,
+    is_warmup: bool,
+) -> std::io::Result<()> {
+    let uri: Uri = format!("file://{}", file.path)
+        .parse()
+        .expect("valid file URI");
+
+    if !state.opened.contains(&file_idx) {
+        let did_open = RpcNotification {
+            jsonrpc: "2.0",
+            method: DidOpenTextDocument::METHOD,
+            params: DidOpenTextDocumentParams {
+                text_document: TextDocumentItem {
+                    uri: uri.clone(),
+                    language_id: "rust".to_string(),
+                    version: 1,
+                    text: file.content.clone(),
+                },
+            },
+        };
+        send_msg(stdin, &did_open).await?;
+        state.opened.insert(file_idx);
+    }
+
+    let total_lines = file.line_starts.len();
+    if supports_range && total_lines > RANGE_THRESHOLD {
+        let end_line = RANGE_LINES.min(total_lines) as u32;
+        let range_id = state.next_id;
+        state.next_id += 1;
+        let range_req = RpcRequest {
+            jsonrpc: "2.0",
+            id: range_id,
+            method: SemanticTokensRangeRequest::METHOD,
+            params: SemanticTokensRangeParams {
+                work_done_progress_params: WorkDoneProgressParams::default(),
+                partial_result_params: PartialResultParams::default(),
+                text_document: TextDocumentIdentifier { uri: uri.clone() },
+                range: Range {
+                    start: Position {
+                        line: 0,
+                        character: 0,
+                    },
+                    end: Position {
+                        line: end_line,
+                        character: 0,
+                    },
+                },
+            },
+        };
+        send_msg(stdin, &range_req).await?;
+        state.pending.insert(range_id, (file_idx, true, is_warmup));
+    }
+
+    // For warmup, skip full request when a range request was already sent.
+    if is_warmup && supports_range && file.line_starts.len() > RANGE_THRESHOLD {
+        return Ok(());
+    }
+
+    let full_id = state.next_id;
+    state.next_id += 1;
+    let full_req = RpcRequest {
+        jsonrpc: "2.0",
+        id: full_id,
+        method: SemanticTokensFullRequest::METHOD,
+        params: SemanticTokensParams {
+            work_done_progress_params: WorkDoneProgressParams::default(),
+            partial_result_params: PartialResultParams::default(),
+            text_document: TextDocumentIdentifier { uri },
+        },
+    };
+    send_msg(stdin, &full_req).await?;
+    state.pending.insert(full_id, (file_idx, false, is_warmup));
+
+    Ok(())
+}
+
+async fn send_msg<T: Serialize>(stdin: &mut ChildStdin, msg: &T) -> std::io::Result<()> {
+    let body = serde_json::to_string(msg)
+        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let framed = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
     stdin.write_all(framed.as_bytes()).await?;
     stdin.flush().await
 }
 
-async fn recv_msg(reader: &mut BufReader<ChildStdout>) -> std::io::Result<Value> {
+async fn recv_msg(reader: &mut BufReader<ChildStdout>) -> std::io::Result<RpcResponse> {
     let mut content_length = 0usize;
     loop {
         let mut line = String::new();
@@ -358,7 +442,7 @@ async fn recv_msg(reader: &mut BufReader<ChildStdout>) -> std::io::Result<Value>
 
 type LineTokens = Vec<(usize, usize, &'static str)>;
 
-fn decode_tokens(data: &[u32], content: &str) -> Vec<ColoredLine> {
+fn decode_tokens(data: &[SemanticToken], content: &str) -> Vec<ColoredLine> {
     let token_types = TOKEN_TYPES.get().map(Vec::as_slice).unwrap_or(&[]);
     let static_types = token_types;
 
@@ -368,11 +452,11 @@ fn decode_tokens(data: &[u32], content: &str) -> Vec<ColoredLine> {
     let mut abs_line = 0usize;
     let mut abs_char = 0usize;
 
-    for chunk in data.chunks_exact(5) {
-        let delta_line = chunk[0] as usize;
-        let delta_start = chunk[1] as usize;
-        let length = chunk[2] as usize;
-        let type_idx = chunk[3] as usize;
+    for token in data {
+        let delta_line = token.delta_line as usize;
+        let delta_start = token.delta_start as usize;
+        let length = token.length as usize;
+        let type_idx = token.token_type as usize;
 
         if delta_line > 0 {
             abs_line += delta_line;
