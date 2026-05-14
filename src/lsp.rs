@@ -22,7 +22,7 @@ macro_rules! log {
     }};
 }
 
-pub type ColoredSpan = (String, Option<[u8; 3]>);
+pub type ColoredSpan = (usize, usize, Option<[u8; 3]>);
 pub type ColoredLine = Vec<ColoredSpan>;
 
 const RANGE_LINES: usize = 200;
@@ -32,7 +32,6 @@ pub async fn run(
     root: Utf8PathBuf,
     files: Arc<Vec<LoadedFile>>,
     mut requests: mpsc::Receiver<usize>,
-    colors: Arc<Mutex<HashMap<usize, Vec<ColoredLine>>>>,
     notify_tx: Arc<Mutex<Option<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>>,
     warmup_ms: Arc<Mutex<Option<u128>>>,
 ) {
@@ -161,9 +160,9 @@ pub async fn run(
                             .filter_map(|v| v.as_u64().map(|n| n as u32))
                             .collect();
                         let lines = decode_tokens(&data, &token_types, &files[file_idx].content);
-                        let mut guard = colors.lock().unwrap();
-                        if !is_range || !guard.contains_key(&file_idx) {
-                            guard.insert(file_idx, lines);
+                        let mut guard = files[file_idx].colored_lines.lock().unwrap();
+                        if !is_range || guard.is_none() {
+                            *guard = Some(lines);
                             drop(guard);
                             notify_pending = true;
                         }
@@ -411,19 +410,19 @@ fn decode_tokens(data: &[u32], token_types: &[String], content: &str) -> Vec<Col
         .map(|(i, line)| {
             let tokens = &line_tokens[i];
             if tokens.is_empty() {
-                return vec![(line.to_string(), None)];
+                return vec![(0, line.len(), None)];
             }
             let mut spans: ColoredLine = Vec::new();
             let mut pos = 0usize;
             for &(start, end, color) in tokens {
                 if pos < start {
-                    spans.push((line[pos..start].to_owned(), None));
+                    spans.push((pos, start, None));
                 }
-                spans.push((line[start..end].to_owned(), color));
+                spans.push((start, end, color));
                 pos = end;
             }
             if pos < line.len() {
-                spans.push((line[pos..].to_owned(), None));
+                spans.push((pos, line.len(), None));
             }
             spans
         })

@@ -1,8 +1,6 @@
 use crate::LoadedFile;
-use crate::lsp::ColoredLine;
 use camino::Utf8PathBuf;
 use r3bl_tui::TerminalWindowMainThreadSignal;
-use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
@@ -15,7 +13,6 @@ pub struct State {
     pub open_file: Option<usize>,
     pub preview_scroll: usize,
     pub preview_page_size: usize,
-    pub lsp_colors: Arc<Mutex<HashMap<usize, Vec<ColoredLine>>>>,
     pub lsp_tx: Option<mpsc::Sender<usize>>,
     pub notify_tx: Arc<Mutex<Option<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>>,
     /// None = warmup in progress, Some(ms) = completed in ms milliseconds
@@ -27,7 +24,6 @@ impl State {
         files: Arc<Vec<LoadedFile>>,
         root: Utf8PathBuf,
         lsp_tx: mpsc::Sender<usize>,
-        lsp_colors: Arc<Mutex<HashMap<usize, Vec<ColoredLine>>>>,
         warmup_ms: Arc<Mutex<Option<u128>>>,
     ) -> Self {
         Self {
@@ -37,7 +33,6 @@ impl State {
             open_file: None,
             preview_scroll: 0,
             preview_page_size: 0,
-            lsp_colors,
             lsp_tx: Some(lsp_tx),
             notify_tx: Arc::new(Mutex::new(None)),
             warmup_ms,
@@ -54,7 +49,6 @@ impl Default for State {
             open_file: None,
             preview_scroll: 0,
             preview_page_size: 0,
-            lsp_colors: Arc::new(Mutex::new(HashMap::new())),
             lsp_tx: None,
             notify_tx: Arc::new(Mutex::new(None)),
             warmup_ms: Arc::new(Mutex::new(None)),

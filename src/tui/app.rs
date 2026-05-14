@@ -2,7 +2,6 @@ use super::file_list::FileListComponent;
 use super::preview::FilePreviewComponent;
 use super::state::{AppSignal, State};
 use crate::LoadedFile;
-use crate::lsp::ColoredLine;
 use camino::Utf8PathBuf;
 use r3bl_tui::{
     App, BoxedSafeApp, CommonResult, ComponentRegistry, ComponentRegistryMap, ContainsResult,
@@ -14,8 +13,7 @@ use r3bl_tui::{
     req_size_pc, row, surface, throws, throws_with_return, tui_color, tui_styled_text,
     tui_styled_texts, tui_stylesheet,
 };
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 #[repr(u8)]
@@ -320,10 +318,9 @@ pub fn build_state(
     files: Arc<Vec<LoadedFile>>,
     root: Utf8PathBuf,
     lsp_tx: mpsc::Sender<usize>,
-    lsp_colors: Arc<Mutex<HashMap<usize, Vec<ColoredLine>>>>,
-    warmup_ms: Arc<Mutex<Option<u128>>>,
+    warmup_ms: Arc<std::sync::Mutex<Option<u128>>>,
 ) -> State {
-    State::new(files, root, lsp_tx, lsp_colors, warmup_ms)
+    State::new(files, root, lsp_tx, warmup_ms)
 }
 
 pub async fn run(initial_state: State) -> CommonResult<()> {

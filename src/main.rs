@@ -1,6 +1,5 @@
 use camino::Utf8PathBuf;
 use jwalk::WalkDir;
-use std::collections::HashMap;
 use std::env;
 use std::ffi::OsString;
 use std::fs;
@@ -14,6 +13,7 @@ pub struct LoadedFile {
     pub path: Utf8PathBuf,
     pub content: String,
     pub line_starts: Vec<usize>,
+    pub colored_lines: Mutex<Option<Vec<lsp::ColoredLine>>>,
 }
 
 fn find_git_root() -> PathBuf {
@@ -44,6 +44,7 @@ fn load_file(path: PathBuf) -> Option<LoadedFile> {
         path,
         content,
         line_starts,
+        colored_lines: Mutex::new(None),
     })
 }
 
@@ -73,8 +74,6 @@ async fn main() {
         .collect();
 
     let files = Arc::new(files);
-    let lsp_colors: Arc<Mutex<HashMap<usize, Vec<lsp::ColoredLine>>>> =
-        Arc::new(Mutex::new(HashMap::new()));
     let warmup_ms: Arc<Mutex<Option<u128>>> = Arc::new(Mutex::new(None));
     let (lsp_tx, lsp_rx) = tokio::sync::mpsc::channel(32);
 
@@ -82,22 +81,13 @@ async fn main() {
         Arc::clone(&files),
         root.clone(),
         lsp_tx,
-        Arc::clone(&lsp_colors),
         Arc::clone(&warmup_ms),
     );
     let notify_tx = Arc::clone(&initial_state.notify_tx);
 
     let lsp_files = Arc::clone(&files);
     tokio::spawn(async move {
-        lsp::run(
-            root.clone(),
-            lsp_files,
-            lsp_rx,
-            lsp_colors,
-            notify_tx,
-            warmup_ms,
-        )
-        .await;
+        lsp::run(root.clone(), lsp_files, lsp_rx, notify_tx, warmup_ms).await;
     });
 
     tui::run(initial_state).await.expect("TUI error");

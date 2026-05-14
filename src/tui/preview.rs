@@ -93,8 +93,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             let scroll = state.preview_scroll;
             let total_lines = file.line_starts.len();
 
-            let guard = state.lsp_colors.lock().unwrap();
-            let colored = guard.get(&file_idx);
+            let colored_guard = file.colored_lines.lock().unwrap();
 
             for row_offset in 0..visible_rows {
                 let line_idx = scroll + row_offset;
@@ -105,22 +104,21 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                     RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset));
                 render_ops += RenderOpCommon::ResetColor;
 
-                if let Some(spans) = colored.and_then(|lines| lines.get(line_idx)) {
-                    for (text, color) in spans {
+                if let Some(spans) = colored_guard.as_ref().and_then(|lines| lines.get(line_idx)) {
+                    let line_content = file_line(&file.content, &file.line_starts, line_idx);
+                    for &(start, end, color) in spans {
+                        let text = &line_content[start..end];
                         if let Some([r, g, b]) = color {
-                            let fg = tui_color!(*r, *g, *b);
+                            let fg = tui_color!(r, g, b);
                             let style = new_style!(color_fg: {fg});
                             render_ops += RenderOpCommon::ApplyColors(Some(style));
-                            render_ops += RenderOpIR::PaintTextWithAttributes(
-                                text.as_str().into(),
-                                Some(style),
-                            );
+                            render_ops +=
+                                RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
                             render_ops += RenderOpCommon::ResetColor;
                         } else {
                             let default_style = new_style!(color_fg: {tui_color!(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2])});
                             render_ops += RenderOpCommon::ApplyColors(Some(default_style));
-                            render_ops +=
-                                RenderOpIR::PaintTextWithAttributes(text.as_str().into(), None);
+                            render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), None);
                         }
                     }
                     continue;
