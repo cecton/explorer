@@ -79,11 +79,10 @@ async fn main() {
         .collect();
 
     let files = Arc::new(files);
-    let warmup_ms: Arc<Mutex<Option<u128>>> = Arc::new(Mutex::new(None));
 
-    let initial_state = tui::build_state(Arc::clone(&files), root.clone(), Arc::clone(&warmup_ms));
+    let initial_state = tui::build_state(Arc::clone(&files), root.clone());
 
-    tui::run(initial_state, files, root, warmup_ms)
+    tui::run(initial_state, files, root)
         .await
         .expect("TUI error");
 }

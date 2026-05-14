@@ -1,7 +1,7 @@
 use crate::LoadedFile;
 use camino::Utf8PathBuf;
 use std::fmt::{Debug, Display, Formatter};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 #[derive(Clone)]
 pub struct State {
@@ -11,16 +11,10 @@ pub struct State {
     pub open_file: Option<usize>,
     pub preview_scroll: usize,
     pub preview_page_size: usize,
-    /// None = warmup in progress, Some(ms) = completed in ms milliseconds
-    pub warmup_ms: Arc<Mutex<Option<u128>>>,
 }
 
 impl State {
-    pub fn new(
-        files: Arc<Vec<LoadedFile>>,
-        root: Utf8PathBuf,
-        warmup_ms: Arc<Mutex<Option<u128>>>,
-    ) -> Self {
+    pub fn new(files: Arc<Vec<LoadedFile>>, root: Utf8PathBuf) -> Self {
         Self {
             files,
             root,
@@ -28,7 +22,6 @@ impl State {
             open_file: None,
             preview_scroll: 0,
             preview_page_size: 0,
-            warmup_ms,
         }
     }
 }
@@ -42,7 +35,6 @@ impl Default for State {
             open_file: None,
             preview_scroll: 0,
             preview_page_size: 0,
-            warmup_ms: Arc::new(Mutex::new(None)),
         }
     }
 }

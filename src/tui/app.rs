@@ -14,7 +14,7 @@ use r3bl_tui::{
     req_size_pc, row, surface, throws, throws_with_return, tui_color, tui_styled_text,
     tui_styled_texts, tui_stylesheet,
 };
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use tokio::sync::mpsc;
 
 #[repr(u8)]
@@ -42,22 +42,16 @@ pub struct AppMain {
     lsp_rx: Option<mpsc::Receiver<usize>>,
     files: Arc<Vec<LoadedFile>>,
     root: Utf8PathBuf,
-    warmup_ms: Arc<Mutex<Option<u128>>>,
 }
 
 impl AppMain {
-    fn new_boxed(
-        files: Arc<Vec<LoadedFile>>,
-        root: Utf8PathBuf,
-        warmup_ms: Arc<Mutex<Option<u128>>>,
-    ) -> BoxedSafeApp<State, AppSignal> {
+    fn new_boxed(files: Arc<Vec<LoadedFile>>, root: Utf8PathBuf) -> BoxedSafeApp<State, AppSignal> {
         let (lsp_tx, lsp_rx) = mpsc::channel(32);
         Box::new(Self {
             lsp_tx,
             lsp_rx: Some(lsp_rx),
             files,
             root,
-            warmup_ms,
         })
     }
 }
@@ -163,9 +157,8 @@ impl App for AppMain {
                     let notify_tx = global_data.main_thread_channel_sender.clone();
                     let files = Arc::clone(&self.files);
                     let root = self.root.clone();
-                    let warmup_ms = Arc::clone(&self.warmup_ms);
                     tokio::spawn(async move {
-                        lsp::run(root, files, lsp_rx, notify_tx, warmup_ms).await;
+                        lsp::run(root, files, lsp_rx, notify_tx).await;
                     });
                 }
             }
@@ -194,11 +187,7 @@ impl App for AppMain {
                 it
             };
 
-            render_status_bar(
-                &mut surface.render_pipeline,
-                window_size,
-                *global_data.state.warmup_ms.lock().unwrap(),
-            );
+            render_status_bar(&mut surface.render_pipeline, window_size);
 
             surface.render_pipeline
         });
@@ -293,30 +282,14 @@ fn create_stylesheet() -> CommonResult<TuiStylesheet> {
     })
 }
 
-fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, warmup_ms: Option<u128>) {
+fn render_status_bar(pipeline: &mut RenderPipeline, size: Size) {
     let color_bg = tui_color!(30, 30, 50);
     let color_fg = tui_color!(180, 180, 220);
-    let color_warm_fg = tui_color!(120, 220, 120);
-    let color_pending_fg = tui_color!(220, 180, 80);
-
-    let warmup_text = match warmup_ms {
-        Some(ms) => format!("  warmed up in {ms}ms"),
-        None => "  warming up…".to_string(),
-    };
-    let warmup_color = if warmup_ms.is_some() {
-        color_warm_fg
-    } else {
-        color_pending_fg
-    };
 
     let styled_texts = tui_styled_texts! {
         tui_styled_text! {
             @style: new_style!(bold color_fg: {color_fg} color_bg: {color_bg}),
             @text: " q:Quit  ↑↓:Navigate  Enter:Open  PgUp/PgDn:Scroll"
-        },
-        tui_styled_text! {
-            @style: new_style!(color_fg: {warmup_color} color_bg: {color_bg}),
-            @text: warmup_text
         }
     };
 
@@ -334,21 +307,16 @@ fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, warmup_ms: Optio
     pipeline.push(ZOrder::Normal, render_ops);
 }
 
-pub fn build_state(
-    files: Arc<Vec<LoadedFile>>,
-    root: Utf8PathBuf,
-    warmup_ms: Arc<std::sync::Mutex<Option<u128>>>,
-) -> State {
-    State::new(files, root, warmup_ms)
+pub fn build_state(files: Arc<Vec<LoadedFile>>, root: Utf8PathBuf) -> State {
+    State::new(files, root)
 }
 
 pub async fn run(
     initial_state: State,
     files: Arc<Vec<LoadedFile>>,
     root: Utf8PathBuf,
-    warmup_ms: Arc<std::sync::Mutex<Option<u128>>>,
 ) -> CommonResult<()> {
-    let app = AppMain::new_boxed(files, root, warmup_ms);
+    let app = AppMain::new_boxed(files, root);
     let exit_keys = &[InputEvent::Keyboard(key_press! { @char 'q' })];
     let _unused: (GlobalData<_, _>, InputDevice, OutputDevice) =
         TerminalWindow::main_event_loop(app, exit_keys, initial_state)?.await?;

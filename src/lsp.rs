@@ -5,7 +5,7 @@ use r3bl_tui::TerminalWindowMainThreadSignal;
 use serde_json::{Value, json};
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::process::Stdio;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::process::{ChildStdin, ChildStdout, Command};
@@ -24,7 +24,6 @@ pub async fn run(
     files: Arc<Vec<LoadedFile>>,
     mut requests: mpsc::Receiver<usize>,
     notify_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-    warmup_ms: Arc<Mutex<Option<u128>>>,
 ) {
     let Ok(mut child) = Command::new("rust-analyzer")
         .stdin(Stdio::piped())
@@ -164,9 +163,8 @@ pub async fn run(
                             warmup_remaining -= 1;
                             if warmup_remaining == 0 {
                                 let elapsed = warmup_start.elapsed().as_millis();
-                                *warmup_ms.lock().unwrap() = Some(elapsed);
                                 notify_pending = true;
-                                log::debug!("warmup complete: elapsed={}ms", elapsed);
+                                log::info!("warmup complete: elapsed={}ms", elapsed);
                             }
                         }
                     } else if is_warmup {
@@ -183,12 +181,10 @@ pub async fn run(
                                 warmup_remaining -= 1;
                                 if warmup_remaining == 0 {
                                     let elapsed = warmup_start.elapsed().as_millis();
-                                    *warmup_ms.lock().unwrap() = Some(elapsed);
                                     notify_pending = true;
-                                    log::debug!("warmup complete (with gave-up files): elapsed={}ms", elapsed);
+                                    log::info!("warmup complete (with gave-up files): elapsed={}ms", elapsed);
                                 }
-                            }
-                        }
+                            }                        }
                     }
                 }
 
