@@ -14,7 +14,7 @@ pub struct LoadedFile {
     pub path: Utf8PathBuf,
     pub content: String,
     pub line_starts: Vec<usize>,
-    pub colored_lines: Mutex<Option<Vec<lsp::ColoredLine>>>,
+    pub colored_lines: Mutex<Vec<lsp::ColoredLine>>,
 }
 
 fn find_git_root() -> PathBuf {
@@ -45,7 +45,7 @@ fn load_file(path: PathBuf) -> Option<LoadedFile> {
         path,
         content,
         line_starts,
-        colored_lines: Mutex::new(None),
+        colored_lines: Mutex::new(vec![]),
     })
 }
 

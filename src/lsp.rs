@@ -155,8 +155,8 @@ pub async fn run(
                             .collect();
                         let lines = decode_tokens(&data, &files[file_idx].content);
                         let mut guard = files[file_idx].colored_lines.lock().unwrap();
-                        if !is_range || guard.is_none() {
-                            *guard = Some(lines);
+                        if !is_range || guard.is_empty() {
+                            *guard = lines;
                             drop(guard);
                             notify_pending = true;
                         }

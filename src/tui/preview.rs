@@ -104,7 +104,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                     RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset));
                 render_ops += RenderOpCommon::ResetColor;
 
-                if let Some(spans) = colored_guard.as_ref().and_then(|lines| lines.get(line_idx)) {
+                if let Some(spans) = colored_guard.get(line_idx) {
                     let line_content = file_line(&file.content, &file.line_starts, line_idx);
                     for &(start, end, token_type) in spans {
                         let text = &line_content[start..end];
