@@ -4,8 +4,10 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+arc-swap = "1"
 camino = "1"
 jwalk = "0.8"
+notify = "8"
 lsp-types = { version = "0.97", features = ["proposed"] }
 nucleo = "0.5"
 pico-args = "0.5"

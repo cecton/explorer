@@ -1,3 +1,4 @@
+use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use jwalk::WalkDir;
 use r3bl_tui::log::{TracingConfig, WriterConfig, try_initialize_logging_global};
@@ -8,6 +9,7 @@ mod cli;
 mod loader;
 mod lsp;
 mod tui;
+mod watcher;
 
 use loader::{LoadedFile, find_git_root};
 
@@ -46,7 +48,7 @@ async fn main() {
         })
         .collect();
 
-    let files = Arc::new(files);
+    let files = Arc::new(ArcSwap::from_pointee(files));
 
     let initial_state = tui::build_state(Arc::clone(&files), root.clone());
 

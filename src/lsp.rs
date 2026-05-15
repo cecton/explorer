@@ -1,5 +1,6 @@
 use crate::loader::LoadedFile;
 use crate::tui::state::AppSignal;
+use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use lsp_types::notification::{DidOpenTextDocument, Initialized, Notification};
 use lsp_types::request::{
@@ -56,7 +57,7 @@ struct RpcResponse {
 
 pub async fn run(
     root: Utf8PathBuf,
-    files: Arc<Vec<LoadedFile>>,
+    files: Arc<ArcSwap<Vec<LoadedFile>>>,
     mut requests: mpsc::Receiver<usize>,
     notify_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
 ) {
@@ -186,12 +187,15 @@ pub async fn run(
     };
 
     // Queue of file indices still needing warmup sends; drained inside the select loop.
-    let mut warmup_queue: VecDeque<usize> = files
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| f.path.extension() == Some("rs"))
-        .map(|(i, _)| i)
-        .collect();
+    let mut warmup_queue: VecDeque<usize> = {
+        let snapshot = files.load();
+        snapshot
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| f.path.extension() == Some("rs"))
+            .map(|(i, _)| i)
+            .collect()
+    };
     let mut warmup_remaining = warmup_queue.len();
     let warmup_start = Instant::now();
     // Retry counts for warmup files that returned null; give up after 3 attempts.
@@ -233,8 +237,13 @@ pub async fn run(
                         id, file_idx, is_range, is_warmup, has_data, warmup_remaining);
 
                     if let Some(SemanticTokens { data, .. }) = tokens {
-                        let lines = decode_tokens(&data, &files[file_idx].content);
-                        let mut guard = files[file_idx].colored_lines.lock().unwrap();
+                        let snapshot = files.load();
+                        let file = &snapshot[file_idx];
+                        let lines = {
+                            let d = file.data.lock().unwrap();
+                            decode_tokens(&data, &d.content)
+                        };
+                        let mut guard = file.colored_lines.lock().unwrap();
                         if !is_range || guard.is_empty() {
                             *guard = lines;
                             drop(guard);
@@ -281,7 +290,8 @@ pub async fn run(
             file_idx = requests.recv() => {
                 let Some(file_idx) = file_idx else { break };
                 tracing::debug!("user request: file_idx={}", file_idx);
-                let file = &files[file_idx];
+                let snapshot = files.load();
+                let file = &snapshot[file_idx];
                 if file.path.extension() != Some("rs") {
                     continue;
                 }
@@ -304,7 +314,8 @@ pub async fn run(
             Some(file_idx) = async { warmup_queue.pop_front() },
                 if !warmup_queue.is_empty() =>
             {
-                let file = &files[file_idx];
+                let snapshot = files.load();
+                let file = &snapshot[file_idx];
                 tracing::debug!("warmup send: file_idx={} path={} queue_remaining={}", file_idx, file.path, warmup_queue.len());
                 if request_tokens(
                     &mut stdin,
@@ -345,6 +356,7 @@ async fn request_tokens(
         .expect("valid file URI");
 
     if !state.opened.contains(&file_idx) {
+        let content = file.data.lock().unwrap().content.clone();
         let did_open = RpcNotification {
             jsonrpc: "2.0",
             method: DidOpenTextDocument::METHOD,
@@ -353,7 +365,7 @@ async fn request_tokens(
                     uri: uri.clone(),
                     language_id: "rust".to_string(),
                     version: 1,
-                    text: file.content.clone(),
+                    text: content,
                 },
             },
         };
@@ -361,7 +373,7 @@ async fn request_tokens(
         state.opened.insert(file_idx);
     }
 
-    let total_lines = file.line_starts.len();
+    let total_lines = file.data.lock().unwrap().line_starts.len();
     if supports_range && total_lines > RANGE_THRESHOLD {
         let end_line = RANGE_LINES.min(total_lines) as u32;
         let range_id = state.next_id;
@@ -391,7 +403,8 @@ async fn request_tokens(
     }
 
     // For warmup, skip full request when a range request was already sent.
-    if is_warmup && supports_range && file.line_starts.len() > RANGE_THRESHOLD {
+    if is_warmup && supports_range && file.data.lock().unwrap().line_starts.len() > RANGE_THRESHOLD
+    {
         return Ok(());
     }
 

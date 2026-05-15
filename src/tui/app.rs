@@ -3,6 +3,8 @@ use super::preview::FilePreviewComponent;
 use super::state::{AppSignal, State};
 use crate::loader::LoadedFile;
 use crate::lsp;
+use crate::watcher::{BatchedWatchEvent, start_watcher};
+use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use nucleo::Matcher;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
@@ -14,12 +16,13 @@ use r3bl_tui::{
     PerformPositioningAndSizing, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
     SPACER_GLYPH, Size, Surface, SurfaceProps, SurfaceRender, TerminalWindow,
     TerminalWindowMainThreadSignal, TuiStylesheet, ZOrder, box_end, box_start, col, height,
-    key_press, new_style, ok, render_component_in_current_box, render_tui_styled_texts_into,
-    req_size_pc, row, send_signal, surface, throws, throws_with_return, tui_color, tui_styled_text,
-    tui_styled_texts, tui_stylesheet,
+    new_style, ok, render_component_in_current_box, render_tui_styled_texts_into, req_size_pc, row,
+    send_signal, surface, throws, throws_with_return, tui_color, tui_styled_text, tui_styled_texts,
+    tui_stylesheet,
 };
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
 
 type PickerResultMsg = (u64, Vec<(usize, Vec<u32>)>);
@@ -47,17 +50,22 @@ impl From<Id> for FlexBoxId {
 pub struct AppMain {
     lsp_tx: mpsc::Sender<usize>,
     lsp_rx: Option<mpsc::Receiver<usize>>,
-    files: Arc<Vec<LoadedFile>>,
+    files: Arc<ArcSwap<Vec<LoadedFile>>>,
     root: Utf8PathBuf,
     picker_results_tx: mpsc::Sender<PickerResultMsg>,
     picker_results_rx: mpsc::Receiver<PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
+    watcher_rx: mpsc::Receiver<BatchedWatchEvent>,
 }
 
 impl AppMain {
-    fn new_boxed(files: Arc<Vec<LoadedFile>>, root: Utf8PathBuf) -> BoxedSafeApp<State, AppSignal> {
+    fn new_boxed(
+        files: Arc<ArcSwap<Vec<LoadedFile>>>,
+        root: Utf8PathBuf,
+    ) -> BoxedSafeApp<State, AppSignal> {
         let (lsp_tx, lsp_rx) = mpsc::channel(32);
         let (picker_results_tx, picker_results_rx) = mpsc::channel(32);
+        let watcher_rx = start_watcher(&root);
         Box::new(Self {
             lsp_tx,
             lsp_rx: Some(lsp_rx),
@@ -66,21 +74,32 @@ impl AppMain {
             picker_results_tx,
             picker_results_rx,
             picker_generation: Arc::new(AtomicU64::new(0)),
+            watcher_rx,
         })
     }
 
     fn trigger_match(&self, query: String) {
         let generation = self.picker_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let files = Arc::clone(&self.files);
+        let snapshot = self.files.load_full();
         let root = self.root.clone();
         let tx = self.picker_results_tx.clone();
         let gen_counter = Arc::clone(&self.picker_generation);
         tokio::task::spawn_blocking(move || {
-            let results = run_file_name_match(&query, &files, &root);
+            let results = run_file_name_match(&query, &snapshot, &root);
             if gen_counter.load(Ordering::Relaxed) == generation {
                 let _ = tx.try_send((generation, results));
             }
         });
+    }
+
+    /// Builds the initial all-files results list, skipping removed files.
+    fn all_files_results(files: &[LoadedFile]) -> Vec<(usize, Vec<u32>)> {
+        files
+            .iter()
+            .enumerate()
+            .filter(|(_, f)| !f.removed.load(Ordering::Relaxed))
+            .map(|(i, _)| (i, vec![]))
+            .collect()
     }
 }
 
@@ -92,7 +111,7 @@ fn run_file_name_match(
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
     if pattern.atoms.is_empty() {
-        return (0..files.len()).map(|i| (i, vec![])).collect();
+        return AppMain::all_files_results(files);
     }
 
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
@@ -100,6 +119,7 @@ fn run_file_name_match(
     let mut scored: Vec<(usize, u32, Vec<u32>)> = files
         .iter()
         .enumerate()
+        .filter(|(_, f)| !f.removed.load(Ordering::Relaxed))
         .filter_map(|(i, file)| {
             let rel = file.path.strip_prefix(root).unwrap_or(&file.path);
             let haystack = Utf32Str::new(rel.as_str(), &mut buf);
@@ -193,8 +213,8 @@ impl App for AppMain {
                     state.file_name_picker_open = true;
                     state.file_name_picker_query.clear();
                     state.file_name_picker_selected = 0;
-                    state.file_name_picker_results =
-                        (0..state.files.len()).map(|i| (i, vec![])).collect();
+                    let snapshot = state.files.load();
+                    state.file_name_picker_results = AppMain::all_files_results(&snapshot);
                     has_focus.set_id(FlexBoxId::from(Id::FileNamePicker));
                 }
                 AppSignal::CloseFileNamePicker => {
@@ -212,8 +232,8 @@ impl App for AppMain {
                     state.file_name_picker_query.pop();
                     state.file_name_picker_selected = 0;
                     if state.file_name_picker_query.is_empty() {
-                        state.file_name_picker_results =
-                            (0..state.files.len()).map(|i| (i, vec![])).collect();
+                        let snapshot = state.files.load();
+                        state.file_name_picker_results = AppMain::all_files_results(&snapshot);
                     }
                 }
                 AppSignal::FileNamePickerSelectNext => {
@@ -292,6 +312,91 @@ impl App for AppMain {
             if arrived_generation == current_generation {
                 global_data.state.file_name_picker_results = results;
             }
+        }
+
+        // Drain batched filesystem watch events.
+        let mut files_changed = false;
+        while let Ok(batch) = self.watcher_rx.try_recv() {
+            let snapshot = self.files.load_full();
+
+            // Handle removals — mark in-place, no vec clone needed.
+            for path in &batch.removed {
+                if let Some(file) = snapshot.iter().find(|f| &f.path == path) {
+                    file.removed.store(true, Ordering::Relaxed);
+                    files_changed = true;
+                }
+            }
+
+            // Handle modifications — reload in-place.
+            for path in &batch.modified {
+                if let Some(file) = snapshot
+                    .iter()
+                    .find(|f| &f.path == path && !f.removed.load(Ordering::Relaxed))
+                {
+                    file.reload();
+                    files_changed = true;
+                }
+            }
+
+            // Handle creations — need to extend the vec and swap.
+            let new_files: Vec<LoadedFile> = batch
+                .created
+                .iter()
+                .filter_map(|p| LoadedFile::load(p.clone().into_std_path_buf()))
+                .collect();
+
+            if !new_files.is_empty() {
+                let mut next: Vec<LoadedFile> = snapshot
+                    .iter()
+                    .map(|f| {
+                        // Shallow-copy the immutable parts; share the Mutex data via re-wrapping.
+                        // Since LoadedFile is not Clone, we rebuild from existing data.
+                        LoadedFile {
+                            path: f.path.clone(),
+                            data: std::sync::Mutex::new({
+                                let d = f.data.lock().unwrap();
+                                crate::loader::FileData {
+                                    content: d.content.clone(),
+                                    line_starts: d.line_starts.clone(),
+                                }
+                            }),
+                            colored_lines: std::sync::Mutex::new(
+                                f.colored_lines.lock().unwrap().clone(),
+                            ),
+                            removed: std::sync::atomic::AtomicBool::new(
+                                f.removed.load(Ordering::Relaxed),
+                            ),
+                        }
+                    })
+                    .collect();
+                next.extend(new_files);
+                self.files.store(Arc::new(next));
+                files_changed = true;
+            }
+        }
+
+        // After any filesystem change: refresh state, re-trigger fuzzy match, force re-render.
+        if files_changed {
+            let snapshot = self.files.load();
+            let state = &mut global_data.state;
+
+            // If the currently open file was modified, reset scroll so preview re-renders from top.
+            // (Content already updated in-place; preview will pick it up naturally.)
+
+            // If picker is open, refresh results.
+            if state.file_name_picker_open {
+                if state.file_name_picker_query.is_empty() {
+                    state.file_name_picker_results = AppMain::all_files_results(&snapshot);
+                } else {
+                    let query = state.file_name_picker_query.clone();
+                    self.trigger_match(query);
+                }
+            }
+
+            send_signal!(
+                global_data.main_thread_channel_sender,
+                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::Noop)
+            );
         }
 
         throws_with_return!({
@@ -441,13 +546,13 @@ fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, picker_open: boo
     pipeline.push(ZOrder::Normal, render_ops);
 }
 
-pub fn build_state(files: Arc<Vec<LoadedFile>>, root: Utf8PathBuf) -> State {
+pub fn build_state(files: Arc<ArcSwap<Vec<LoadedFile>>>, root: Utf8PathBuf) -> State {
     State::new(files, root)
 }
 
 pub async fn run(
     initial_state: State,
-    files: Arc<Vec<LoadedFile>>,
+    files: Arc<ArcSwap<Vec<LoadedFile>>>,
     root: Utf8PathBuf,
 ) -> CommonResult<()> {
     let app = AppMain::new_boxed(files, root);

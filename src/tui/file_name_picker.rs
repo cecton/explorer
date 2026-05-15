@@ -95,29 +95,27 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                     _ => {}
                 }
             }
-            if !consumed {
-                if let InputEvent::Mouse(mouse_input) = input_event {
-                    match mouse_input.kind {
-                        MouseInputKind::ScrollUp => {
-                            consumed = true;
-                            send_signal!(
-                                global_data.main_thread_channel_sender,
-                                TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                    AppSignal::FileNamePickerSelectPrev,
-                                )
-                            );
-                        }
-                        MouseInputKind::ScrollDown => {
-                            consumed = true;
-                            send_signal!(
-                                global_data.main_thread_channel_sender,
-                                TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                    AppSignal::FileNamePickerSelectNext,
-                                )
-                            );
-                        }
-                        _ => {}
+            if !consumed && let InputEvent::Mouse(mouse_input) = input_event {
+                match mouse_input.kind {
+                    MouseInputKind::ScrollUp => {
+                        consumed = true;
+                        send_signal!(
+                            global_data.main_thread_channel_sender,
+                            TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                AppSignal::FileNamePickerSelectPrev,
+                            )
+                        );
                     }
+                    MouseInputKind::ScrollDown => {
+                        consumed = true;
+                        send_signal!(
+                            global_data.main_thread_channel_sender,
+                            TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                AppSignal::FileNamePickerSelectNext,
+                            )
+                        );
+                    }
+                    _ => {}
                 }
             }
             if consumed {
@@ -188,7 +186,8 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                 }
 
                 let (file_idx, ref matched_positions) = state.file_name_picker_results[result_idx];
-                let file = &state.files[file_idx];
+                let snapshot = state.files.load();
+                let file = &snapshot[file_idx];
                 let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
                 let path_str = rel.as_str();
                 let is_selected = result_idx == selected;

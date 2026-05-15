@@ -130,10 +130,53 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                 return Ok(pipeline);
             };
 
-            let file = &state.files[file_idx];
-            let scroll = state.preview_scroll;
-            let total_lines = file.line_starts.len();
+            let snapshot = state.files.load();
+            let file = &snapshot[file_idx];
 
+            // If the file was removed from disk, show a notice on the first line.
+            if file.removed.load(std::sync::atomic::Ordering::Relaxed) {
+                let color_removed_fg = tui_color!(220, 80, 80);
+                let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
+                let notice = format!("[deleted] {}", rel);
+                render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+                render_ops += RenderOpCommon::ResetColor;
+                render_ops += RenderOpCommon::ApplyColors(Some(
+                    new_style!(bold color_fg: {color_removed_fg}),
+                ));
+                render_ops += RenderOpIR::PaintTextWithAttributes(notice.into(), None);
+                render_ops += RenderOpCommon::ResetColor;
+
+                // Still render the cached content below the notice.
+                let data = file.data.lock().unwrap();
+                let scroll = state.preview_scroll;
+                let total_lines = data.line_starts.len();
+                let colored_guard = file.colored_lines.lock().unwrap();
+
+                for row_offset in 1..visible_rows {
+                    let line_idx = scroll + row_offset - 1;
+                    if line_idx >= total_lines {
+                        break;
+                    }
+                    render_ops +=
+                        RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset));
+                    render_ops += RenderOpCommon::ResetColor;
+                    paint_line(
+                        &mut render_ops,
+                        &data.content,
+                        &data.line_starts,
+                        &colored_guard,
+                        line_idx,
+                    );
+                }
+
+                let mut pipeline = render_pipeline!();
+                pipeline.push(ZOrder::Normal, render_ops);
+                return Ok(pipeline);
+            }
+
+            let data = file.data.lock().unwrap();
+            let scroll = state.preview_scroll;
+            let total_lines = data.line_starts.len();
             let colored_guard = file.colored_lines.lock().unwrap();
 
             for row_offset in 0..visible_rows {
@@ -144,33 +187,12 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                 render_ops +=
                     RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset));
                 render_ops += RenderOpCommon::ResetColor;
-
-                if let Some(spans) = colored_guard.get(line_idx) {
-                    let line_content = file_line(&file.content, &file.line_starts, line_idx);
-                    for &(start, end, token_type) in spans {
-                        let text = &line_content[start..end];
-                        if let Some([r, g, b]) = token_color(token_type) {
-                            let fg = tui_color!(r, g, b);
-                            let style = new_style!(color_fg: {fg});
-                            render_ops += RenderOpCommon::ApplyColors(Some(style));
-                            render_ops +=
-                                RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                            render_ops += RenderOpCommon::ResetColor;
-                        } else {
-                            let default_style = new_style!(color_fg: {tui_color!(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2])});
-                            render_ops += RenderOpCommon::ApplyColors(Some(default_style));
-                            render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), None);
-                        }
-                    }
-                    continue;
-                }
-
-                let default_style =
-                    new_style!(color_fg: {tui_color!(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2])});
-                render_ops += RenderOpCommon::ApplyColors(Some(default_style));
-                render_ops += RenderOpIR::PaintTextWithAttributes(
-                    file_line(&file.content, &file.line_starts, line_idx).into(),
-                    None,
+                paint_line(
+                    &mut render_ops,
+                    &data.content,
+                    &data.line_starts,
+                    &colored_guard,
+                    line_idx,
                 );
             }
 
@@ -179,6 +201,40 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             pipeline
         });
     }
+}
+
+fn paint_line(
+    render_ops: &mut RenderOpIRVec,
+    content: &str,
+    line_starts: &[usize],
+    colored_guard: &[crate::lsp::ColoredLine],
+    line_idx: usize,
+) {
+    if let Some(spans) = colored_guard.get(line_idx) {
+        let line_content = file_line(content, line_starts, line_idx);
+        for &(start, end, token_type) in spans {
+            let text = &line_content[start..end];
+            if let Some([r, g, b]) = token_color(token_type) {
+                let fg = tui_color!(r, g, b);
+                let style = new_style!(color_fg: {fg});
+                *render_ops += RenderOpCommon::ApplyColors(Some(style));
+                *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+                *render_ops += RenderOpCommon::ResetColor;
+            } else {
+                let default_style =
+                    new_style!(color_fg: {tui_color!(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2])});
+                *render_ops += RenderOpCommon::ApplyColors(Some(default_style));
+                *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), None);
+            }
+        }
+        return;
+    }
+
+    let default_style =
+        new_style!(color_fg: {tui_color!(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2])});
+    *render_ops += RenderOpCommon::ApplyColors(Some(default_style));
+    *render_ops +=
+        RenderOpIR::PaintTextWithAttributes(file_line(content, line_starts, line_idx).into(), None);
 }
 
 fn token_color(token_type: &str) -> Option<[u8; 3]> {
