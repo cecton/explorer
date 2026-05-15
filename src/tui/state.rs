@@ -19,15 +19,16 @@ pub struct State {
 
 impl State {
     pub fn new(files: Arc<Vec<LoadedFile>>, root: Utf8PathBuf) -> Self {
+        let file_name_picker_results = (0..files.len()).map(|i| (i, vec![])).collect();
         Self {
             files,
             root,
             open_file: None,
             preview_scroll: 0,
             preview_page_size: 0,
-            file_name_picker_open: false,
+            file_name_picker_open: true,
             file_name_picker_query: String::new(),
-            file_name_picker_results: Vec::new(),
+            file_name_picker_results,
             file_name_picker_selected: 0,
         }
     }

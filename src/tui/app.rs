@@ -149,7 +149,7 @@ impl App for AppMain {
         }
 
         if has_focus.get_id().is_none() {
-            has_focus.set_id(preview_id);
+            has_focus.set_id(FlexBoxId::from(Id::FileNamePicker));
         }
     }
 
