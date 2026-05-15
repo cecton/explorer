@@ -338,14 +338,27 @@ impl App for AppMain {
                 }
             }
 
-            // Handle creations — need to extend the vec and swap.
-            let new_files: Vec<LoadedFile> = batch
-                .created
-                .iter()
-                .filter_map(|p| LoadedFile::load(p.clone().into_std_path_buf()))
-                .collect();
+            // Handle creations — resurrect removed entries in-place; only add truly new paths.
+            let mut need_new_vec = false;
+            let mut new_files: Vec<LoadedFile> = vec![];
+            for path in &batch.created {
+                if let Some(file) = snapshot
+                    .iter()
+                    .find(|f| &f.path == path && f.removed.load(Ordering::Relaxed))
+                {
+                    // File was previously removed and is now back — resurrect in-place.
+                    file.removed.store(false, Ordering::Relaxed);
+                    file.reload();
+                    files_changed = true;
+                } else if !snapshot.iter().any(|f| &f.path == path)
+                    && let Some(loaded) = LoadedFile::load(path.clone().into_std_path_buf())
+                {
+                    new_files.push(loaded);
+                    need_new_vec = true;
+                }
+            }
 
-            if !new_files.is_empty() {
+            if need_new_vec {
                 let mut next: Vec<LoadedFile> = snapshot
                     .iter()
                     .map(|f| {

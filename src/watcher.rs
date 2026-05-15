@@ -2,7 +2,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use std::collections::HashMap;
 use tokio::sync::mpsc;
-use tokio::time::{Duration, Instant, sleep_until};
+use tokio::time::Duration;
 
 const DEBOUNCE_MS: u64 = 50;
 
@@ -22,6 +22,8 @@ pub struct BatchedWatchEvent {
 pub fn start_watcher(root: &Utf8Path) -> mpsc::Receiver<BatchedWatchEvent> {
     let (batch_tx, batch_rx) = mpsc::channel(32);
     let (raw_tx, raw_rx) = std::sync::mpsc::channel::<(Utf8PathBuf, RawKind)>();
+    // Bridge: std::thread does a blocking recv loop and forwards into tokio mpsc.
+    let (bridge_tx, bridge_rx) = mpsc::channel::<(Utf8PathBuf, RawKind)>(128);
 
     let root_clone = root.to_owned();
     let mut watcher = RecommendedWatcher::new(
@@ -56,28 +58,43 @@ pub fn start_watcher(root: &Utf8Path) -> mpsc::Receiver<BatchedWatchEvent> {
         .watch(root.as_std_path(), RecursiveMode::Recursive)
         .expect("failed to watch root");
 
-    tokio::spawn(debounce_task(raw_rx, batch_tx, watcher));
+    // Blocking bridge thread: parks when no events, zero CPU when idle.
+    std::thread::spawn(move || {
+        while let Ok(event) = raw_rx.recv() {
+            if bridge_tx.blocking_send(event).is_err() {
+                break;
+            }
+        }
+    });
+
+    tokio::spawn(debounce_task(bridge_rx, batch_tx, watcher));
 
     batch_rx
 }
 
 async fn debounce_task(
-    raw_rx: std::sync::mpsc::Receiver<(Utf8PathBuf, RawKind)>,
+    tokio_rx: mpsc::Receiver<(Utf8PathBuf, RawKind)>,
     batch_tx: mpsc::Sender<BatchedWatchEvent>,
     // Kept alive for the duration of the task.
     _watcher: RecommendedWatcher,
 ) {
     let mut pending: HashMap<Utf8PathBuf, RawKind> = HashMap::new();
-    let mut deadline: Option<Instant> = None;
+    let mut tokio_rx = tokio_rx;
 
     loop {
-        let until = deadline.unwrap_or_else(|| Instant::now() + Duration::from_secs(3600));
-
-        tokio::select! {
-            biased;
-
-            _ = sleep_until(until), if deadline.is_some() => {
-                deadline = None;
+        match tokio::time::timeout(Duration::from_millis(DEBOUNCE_MS), tokio_rx.recv()).await {
+            Ok(Some((path, kind))) => {
+                let entry = pending.entry(path).or_insert(kind);
+                // Conflict resolution: removed wins; created+modified collapses to created.
+                match (*entry, kind) {
+                    (_, RawKind::Removed) => *entry = RawKind::Removed,
+                    (RawKind::Created, RawKind::Modified) => {}
+                    (RawKind::Modified, RawKind::Created) => *entry = RawKind::Created,
+                    _ => *entry = kind,
+                }
+            }
+            Ok(None) => return,
+            Err(_timeout) => {
                 if pending.is_empty() {
                     continue;
                 }
@@ -95,25 +112,6 @@ async fn debounce_task(
                 }
                 if batch_tx.send(batch).await.is_err() {
                     return;
-                }
-            }
-
-            // Poll raw events from the sync watcher channel without blocking.
-            _ = tokio::task::yield_now() => {
-                let mut got_any = false;
-                for (path, kind) in raw_rx.try_iter() {
-                    got_any = true;
-                    let entry = pending.entry(path).or_insert(kind);
-                    // Conflict resolution: removed wins; created+modified collapses to created.
-                    match (*entry, kind) {
-                        (_, RawKind::Removed) => *entry = RawKind::Removed,
-                        (RawKind::Created, RawKind::Modified) => {}
-                        (RawKind::Modified, RawKind::Created) => *entry = RawKind::Created,
-                        _ => *entry = kind,
-                    }
-                }
-                if got_any && deadline.is_none() {
-                    deadline = Some(Instant::now() + Duration::from_millis(DEBOUNCE_MS));
                 }
             }
         }
