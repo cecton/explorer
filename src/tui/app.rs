@@ -678,10 +678,10 @@ impl App for AppMain {
             let surface = {
                 let mut it = surface!(stylesheet: create_stylesheet()?);
                 it.surface_start(SurfaceProps {
-                    pos: col(0) + row(0),
+                    pos: col(0) + row(1),
                     size: {
                         let col_count = window_size.col_width;
-                        let row_count = window_size.row_height - height(1);
+                        let row_count = window_size.row_height - height(2);
                         col_count + row_count
                     },
                 })?;
@@ -705,6 +705,14 @@ impl App for AppMain {
                 &mut pipeline,
                 window_size,
                 picker_open,
+                focused_window.as_ref(),
+                &global_data.state,
+            );
+
+            render_title_bars(
+                &mut pipeline,
+                window_size,
+                &visible,
                 focused_window.as_ref(),
                 &global_data.state,
             );
@@ -882,6 +890,95 @@ fn render_status_bar(
     render_ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row_idx);
     render_tui_styled_texts_into(&styled_texts, &mut render_ops);
     pipeline.push(ZOrder::Normal, render_ops);
+}
+
+fn render_title_bars(
+    pipeline: &mut RenderPipeline,
+    _size: Size,
+    visible: &[(Window, u16)],
+    focused_window: Option<&Window>,
+    state: &State,
+) {
+    let color_bg_active = tui_color!(50, 50, 90);
+    let color_fg_active = tui_color!(220, 220, 255);
+    let color_bg_inactive = tui_color!(25, 25, 45);
+    let color_fg_inactive = tui_color!(120, 120, 160);
+    let color_fg_deleted = tui_color!(220, 80, 80);
+
+    let snapshot = state.files.load();
+
+    let mut col_offset: u16 = 0;
+    for (window, pane_width) in visible.iter() {
+        let is_focused = focused_window == Some(window);
+
+        let is_deleted = match window {
+            Window::FilePreview(key) => snapshot[key.0]
+                .removed
+                .load(std::sync::atomic::Ordering::Relaxed),
+            Window::FileNamePicker => false,
+        };
+
+        let color_bg = if is_focused {
+            color_bg_active
+        } else {
+            color_bg_inactive
+        };
+        let color_fg = if is_deleted {
+            color_fg_deleted
+        } else if is_focused {
+            color_fg_active
+        } else {
+            color_fg_inactive
+        };
+
+        let title = match window {
+            Window::FileNamePicker => state
+                .root
+                .file_name()
+                .unwrap_or(state.root.as_str())
+                .to_string(),
+            Window::FilePreview(key) => {
+                let file = &snapshot[key.0];
+                let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
+                let removed = file.removed.load(std::sync::atomic::Ordering::Relaxed);
+                if removed {
+                    format!("[deleted] {}", rel)
+                } else {
+                    rel.as_str().to_string()
+                }
+            }
+        };
+
+        let available = *pane_width as usize;
+        let padded = format!(" {title} ");
+        let display = if padded.len() > available {
+            let truncated = &padded[..available.saturating_sub(1)];
+            format!("{truncated}…")
+        } else {
+            padded
+        };
+
+        let mut render_ops = RenderOpIRVec::new();
+        render_ops += RenderOpCommon::MoveCursorPositionAbs(col(col_offset) + row(0));
+        render_ops += RenderOpCommon::ResetColor;
+        render_ops += RenderOpCommon::SetBgColor(color_bg);
+        render_ops += RenderOpIR::PaintTextWithAttributes(
+            SPACER_GLYPH.repeat(*pane_width as usize).into(),
+            None,
+        );
+        render_ops += RenderOpCommon::MoveCursorPositionAbs(col(col_offset) + row(0));
+        render_ops += RenderOpIR::PaintTextWithAttributes(
+            display.into(),
+            Some(if is_focused {
+                new_style!(bold color_fg: {color_fg} color_bg: {color_bg})
+            } else {
+                new_style!(color_fg: {color_fg} color_bg: {color_bg})
+            }),
+        );
+        pipeline.push(ZOrder::Normal, render_ops);
+
+        col_offset += pane_width;
+    }
 }
 
 pub fn build_state(files: Arc<ArcSwap<Vec<LoadedFile>>>, root: Utf8PathBuf) -> State {

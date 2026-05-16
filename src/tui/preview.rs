@@ -164,45 +164,6 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             let snapshot = state.files.load();
             let file = &snapshot[file_key.0];
 
-            if file.removed.load(std::sync::atomic::Ordering::Relaxed) {
-                let color_removed_fg = tui_color!(220, 80, 80);
-                let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
-                let notice = format!("[deleted] {}", rel);
-                render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
-                render_ops += RenderOpCommon::ResetColor;
-                render_ops += RenderOpCommon::ApplyColors(Some(
-                    new_style!(bold color_fg: {color_removed_fg}),
-                ));
-                render_ops += RenderOpIR::PaintTextWithAttributes(notice.into(), None);
-                render_ops += RenderOpCommon::ResetColor;
-
-                let data = file.data.lock().unwrap();
-                let scroll = state.window_scroll(&window);
-                let total_lines = data.line_starts.len();
-                let colored_guard = file.colored_lines.lock().unwrap();
-
-                for row_offset in 1..visible_rows {
-                    let line_idx = scroll + row_offset - 1;
-                    if line_idx >= total_lines {
-                        break;
-                    }
-                    render_ops +=
-                        RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset));
-                    render_ops += RenderOpCommon::ResetColor;
-                    paint_line(
-                        &mut render_ops,
-                        &data.content,
-                        &data.line_starts,
-                        &colored_guard,
-                        line_idx,
-                    );
-                }
-
-                let mut pipeline = render_pipeline!();
-                pipeline.push(ZOrder::Normal, render_ops);
-                return Ok(pipeline);
-            }
-
             let data = file.data.lock().unwrap();
             let scroll = state.window_scroll(&window);
             let total_lines = data.line_starts.len();
