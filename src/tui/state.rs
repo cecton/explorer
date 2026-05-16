@@ -109,7 +109,7 @@ pub enum AppSignal {
     FileNamePickerConfirm,
     ScrollPreviewDown(usize),
     ScrollPreviewUp(usize),
-    FilesChanged(BatchedWatchEvent),
+    FilesChanged(Arc<BatchedWatchEvent>),
     #[default]
     Noop,
 }

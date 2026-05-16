@@ -3,6 +3,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use r3bl_tui::TerminalWindowMainThreadSignal;
 use std::collections::HashMap;
+use std::sync::Arc;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
 
@@ -97,7 +98,7 @@ async fn debounce_task(
                 }
                 if signal_tx
                     .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                        AppSignal::FilesChanged(batch),
+                        AppSignal::FilesChanged(Arc::new(batch)),
                     ))
                     .await
                     .is_err()
