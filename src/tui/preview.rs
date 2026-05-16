@@ -1,7 +1,9 @@
-use super::state::{AppSignal, State};
+use super::app::Id;
+use super::state::{AppSignal, State, Window};
+use crate::loader::FileKey;
 use r3bl_tui::{
-    BoxedSafeComponent, CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData,
-    HasFocus, InputEvent, Key, KeyPress, MouseInputKind, RenderOpCommon, RenderOpIR, RenderOpIRVec,
+    CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData, HasFocus,
+    InputEvent, Key, KeyPress, MouseInputKind, RenderOpCommon, RenderOpIR, RenderOpIRVec,
     RenderPipeline, SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal, ZOrder, col,
     new_style, render_pipeline, row, send_signal, throws_with_return, tui_color,
 };
@@ -13,8 +15,30 @@ pub struct FilePreviewComponent {
 }
 
 impl FilePreviewComponent {
-    pub fn new_boxed(id: FlexBoxId) -> BoxedSafeComponent<State, AppSignal> {
-        Box::new(Self { id })
+    pub fn new(id: FlexBoxId) -> Self {
+        Self { id }
+    }
+
+    /// Returns the `FileKey` this pane slot should render, or `None` if the slot holds a
+    /// non-preview window or the stack has no entry for this slot.
+    pub(super) fn file_key(&self, state: &State) -> Option<FileKey> {
+        let slot = pane_slot(self.id)?;
+        match state.window_stack.get(slot)? {
+            Window::FilePreview(key) => Some(*key),
+            Window::FileNamePicker => None,
+        }
+    }
+}
+
+/// Maps a pane `FlexBoxId` back to its zero-based slot index.
+fn pane_slot(id: FlexBoxId) -> Option<usize> {
+    match id.inner {
+        x if x == Id::Pane0 as u8 => Some(0),
+        x if x == Id::Pane1 as u8 => Some(1),
+        x if x == Id::Pane2 as u8 => Some(2),
+        x if x == Id::Pane3 as u8 => Some(3),
+        x if x == Id::Pane4 as u8 => Some(4),
+        _ => None,
     }
 }
 
@@ -32,12 +56,16 @@ impl Component<State, AppSignal> for FilePreviewComponent {
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
         throws_with_return!({
+            let Some(key) = self.file_key(&global_data.state) else {
+                return Ok(EventPropagation::Propagate);
+            };
+            let window = Window::FilePreview(key);
             let mut consumed = false;
-            if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event {
-                match key {
+            if let InputEvent::Keyboard(KeyPress::Plain { key: kb_key }) = input_event {
+                match kb_key {
                     Key::SpecialKey(SpecialKey::PageUp) => {
                         consumed = true;
-                        let page = global_data.state.preview_page_size;
+                        let page = global_data.state.window_page_size(&window);
                         send_signal!(
                             global_data.main_thread_channel_sender,
                             TerminalWindowMainThreadSignal::ApplyAppSignal(
@@ -47,7 +75,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                     }
                     Key::SpecialKey(SpecialKey::PageDown) => {
                         consumed = true;
-                        let page = global_data.state.preview_page_size;
+                        let page = global_data.state.window_page_size(&window);
                         send_signal!(
                             global_data.main_thread_channel_sender,
                             TerminalWindowMainThreadSignal::ApplyAppSignal(
@@ -119,21 +147,23 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             let bounds = current_box.style_adjusted_bounds_size;
             let visible_rows = bounds.row_height.as_usize();
 
-            global_data.state.preview_page_size = visible_rows;
+            let Some(file_key) = self.file_key(&global_data.state) else {
+                let mut pipeline = render_pipeline!();
+                pipeline.push(ZOrder::Normal, RenderOpIRVec::new());
+                return Ok(pipeline);
+            };
+
+            let window = Window::FilePreview(file_key);
+            global_data
+                .state
+                .set_window_page_size(&window, visible_rows);
 
             let state = &global_data.state;
             let mut render_ops = RenderOpIRVec::new();
 
-            let Some(file_idx) = state.open_file else {
-                let mut pipeline = render_pipeline!();
-                pipeline.push(ZOrder::Normal, render_ops);
-                return Ok(pipeline);
-            };
-
             let snapshot = state.files.load();
-            let file = &snapshot[file_idx];
+            let file = &snapshot[file_key.0];
 
-            // If the file was removed from disk, show a notice on the first line.
             if file.removed.load(std::sync::atomic::Ordering::Relaxed) {
                 let color_removed_fg = tui_color!(220, 80, 80);
                 let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
@@ -146,9 +176,8 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                 render_ops += RenderOpIR::PaintTextWithAttributes(notice.into(), None);
                 render_ops += RenderOpCommon::ResetColor;
 
-                // Still render the cached content below the notice.
                 let data = file.data.lock().unwrap();
-                let scroll = state.preview_scroll;
+                let scroll = state.window_scroll(&window);
                 let total_lines = data.line_starts.len();
                 let colored_guard = file.colored_lines.lock().unwrap();
 
@@ -175,7 +204,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             }
 
             let data = file.data.lock().unwrap();
-            let scroll = state.preview_scroll;
+            let scroll = state.window_scroll(&window);
             let total_lines = data.line_starts.len();
             let colored_guard = file.colored_lines.lock().unwrap();
 

@@ -1,4 +1,4 @@
-use crate::loader::LoadedFile;
+use crate::loader::{FileKey, LoadedFile};
 use crate::supervisor::TaskStatus;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
@@ -11,19 +11,39 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
 
+/// A pane that can appear in the window stack.
+///
+/// Each variant is unique: there is at most one `FileNamePicker` and at most one
+/// `FilePreview` per `FileKey` in the stack at any time.
+#[derive(Clone, PartialEq, Eq, Hash, Debug)]
+pub enum Window {
+    FilePreview(FileKey),
+    FileNamePicker,
+}
+
+/// Scroll and page-size state for a single window pane.
+#[derive(Clone, Debug, Default)]
+pub struct WindowState {
+    pub scroll: usize,
+    pub page_size: usize,
+}
+
 #[derive(Clone)]
 pub struct State {
     pub files: Arc<ArcSwap<Vec<LoadedFile>>>,
     /// Incremented whenever file contents change so PartialEq detects mutations.
     pub files_version: u64,
     pub root: Utf8PathBuf,
-    pub open_file: Option<usize>,
-    pub preview_scroll: usize,
-    pub preview_page_size: usize,
+    /// Stack of open windows, most-recently-opened first (index 0 = leftmost pane).
+    pub window_stack: Vec<Window>,
+    /// The window that currently receives keyboard input.
+    pub focused_window: Option<Window>,
+    /// Per-window scroll and page-size state.
+    pub window_states: HashMap<Window, WindowState>,
     pub file_name_picker_open: bool,
-    /// Each entry: (index into files snapshot, sorted+deduped matched char positions from nucleo).
-    pub file_name_picker_results: Vec<(usize, Vec<u32>)>,
-    pub file_name_picker_selected: Option<camino::Utf8PathBuf>,
+    /// Each entry: (FileKey into files vec, sorted+deduped matched char positions).
+    pub file_name_picker_results: Vec<(FileKey, Vec<u32>)>,
+    pub file_name_picker_selected: Option<FileKey>,
     /// Last known status for each supervised task, keyed by task name.
     pub task_statuses: Vec<(&'static str, TaskStatus)>,
     pub editor_buffers: HashMap<FlexBoxId, EditorBuffer>,
@@ -68,25 +88,112 @@ impl State {
             .collect();
         parts.join(", ")
     }
+
+    /// Moves `window` to the front of the stack (index 0). If it is not present, inserts it.
+    pub fn push_window(&mut self, window: Window) {
+        if let Some(pos) = self.window_stack.iter().position(|w| w == &window) {
+            self.window_stack.remove(pos);
+        }
+        self.window_stack.insert(0, window);
+    }
+
+    /// Removes `window` from the stack entirely.
+    pub fn remove_window(&mut self, window: &Window) {
+        self.window_stack.retain(|w| w != window);
+        self.window_states.remove(window);
+        if self.focused_window.as_ref() == Some(window) {
+            self.focused_window = self.window_stack.first().cloned();
+        }
+    }
+
+    /// Moves `window` to the back of the stack (last position).
+    pub fn send_to_back(&mut self, window: &Window) {
+        if let Some(pos) = self.window_stack.iter().position(|w| w == window) {
+            let w = self.window_stack.remove(pos);
+            self.window_stack.push(w);
+        }
+        if self.focused_window.as_ref() == Some(window) {
+            self.focused_window = self.window_stack.first().cloned();
+        }
+    }
+
+    /// Returns the windows that fit in `surface_cols`, along with their assigned column
+    /// widths. Each pane requires at least `MIN_PANE_WIDTH` columns; extra space is
+    /// distributed equally among all visible panes.
+    pub fn visible_windows(&self, surface_cols: u16) -> Vec<(Window, u16)> {
+        const MIN_PANE_WIDTH: u16 = 100;
+        if surface_cols < MIN_PANE_WIDTH {
+            return vec![];
+        }
+        let count = (surface_cols / MIN_PANE_WIDTH) as usize;
+        let n = self.window_stack.len().min(count) as u16;
+        if n == 0 {
+            return vec![];
+        }
+        let base_width = surface_cols / n;
+        let remainder = surface_cols % n;
+        self.window_stack
+            .iter()
+            .take(n as usize)
+            .enumerate()
+            .map(|(i, w)| {
+                let width = if (i as u16) < remainder {
+                    base_width + 1
+                } else {
+                    base_width
+                };
+                (w.clone(), width)
+            })
+            .collect()
+    }
+
+    pub fn window_scroll(&self, window: &Window) -> usize {
+        self.window_states
+            .get(window)
+            .map(|s| s.scroll)
+            .unwrap_or(0)
+    }
+
+    pub fn window_page_size(&self, window: &Window) -> usize {
+        self.window_states
+            .get(window)
+            .map(|s| s.page_size)
+            .unwrap_or(0)
+    }
+
+    pub fn set_window_scroll(&mut self, window: &Window, scroll: usize) {
+        self.window_states.entry(window.clone()).or_default().scroll = scroll;
+    }
+
+    pub fn set_window_page_size(&mut self, window: &Window, page_size: usize) {
+        self.window_states
+            .entry(window.clone())
+            .or_default()
+            .page_size = page_size;
+    }
 }
 
 impl State {
     pub fn new(files: Arc<ArcSwap<Vec<LoadedFile>>>, root: Utf8PathBuf) -> Self {
         let snapshot = files.load();
-        let file_name_picker_results = (0..snapshot.len()).map(|i| (i, vec![])).collect();
-        Self {
+        let file_name_picker_results = (0..snapshot.len()).map(|i| (FileKey(i), vec![])).collect();
+        let mut state = Self {
             files,
             files_version: 0,
             root,
-            open_file: None,
-            preview_scroll: 0,
-            preview_page_size: 0,
+            window_stack: vec![Window::FileNamePicker],
+            focused_window: Some(Window::FileNamePicker),
+            window_states: HashMap::new(),
             file_name_picker_open: true,
             file_name_picker_results,
             file_name_picker_selected: None,
             task_statuses: Vec::new(),
             editor_buffers: HashMap::new(),
-        }
+        };
+        state
+            .window_states
+            .insert(Window::FileNamePicker, WindowState::default());
+        state
     }
 }
 
@@ -96,9 +203,9 @@ impl Default for State {
             files: Arc::new(ArcSwap::from_pointee(Vec::new())),
             files_version: 0,
             root: Utf8PathBuf::new(),
-            open_file: None,
-            preview_scroll: 0,
-            preview_page_size: 0,
+            window_stack: Vec::new(),
+            focused_window: None,
+            window_states: HashMap::new(),
             file_name_picker_open: false,
             file_name_picker_results: Vec::new(),
             file_name_picker_selected: None,
@@ -112,8 +219,8 @@ impl PartialEq for State {
     fn eq(&self, other: &Self) -> bool {
         Arc::ptr_eq(&self.files, &other.files)
             && self.files_version == other.files_version
-            && self.open_file == other.open_file
-            && self.preview_scroll == other.preview_scroll
+            && self.window_stack == other.window_stack
+            && self.focused_window == other.focused_window
             && self.file_name_picker_open == other.file_name_picker_open
             && self.file_name_picker_selected == other.file_name_picker_selected
             && self.file_name_picker_results.len() == other.file_name_picker_results.len()
@@ -127,8 +234,8 @@ impl Debug for State {
         let count = self.files.load().len();
         write!(
             f,
-            "State {{ files: {}, open_file: {:?}, picker_open: {} }}",
-            count, self.open_file, self.file_name_picker_open
+            "State {{ files: {}, stack: {:?}, focused: {:?} }}",
+            count, self.window_stack, self.focused_window
         )
     }
 }
@@ -150,6 +257,9 @@ pub enum AppSignal {
     FileNamePickerConfirm,
     ScrollPreviewDown(usize),
     ScrollPreviewUp(usize),
+    SendFocusedWindowToBack,
+    FocusNextPane,
+    FocusPrevPane,
     FilesChanged(Arc<BatchedWatchEvent>),
     TaskRestarting(&'static str),
     TaskRunning(&'static str),

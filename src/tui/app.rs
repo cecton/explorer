@@ -1,7 +1,7 @@
 use super::file_name_picker::FileNamePickerComponent;
 use super::preview::FilePreviewComponent;
-use super::state::{AppSignal, State};
-use crate::loader::LoadedFile;
+use super::state::{AppSignal, State, Window};
+use crate::loader::{FileKey, LoadedFile};
 use crate::lsp;
 use crate::supervisor::{Supervisor, TaskStatus};
 use crate::watcher::start_watcher;
@@ -11,11 +11,12 @@ use nucleo::Matcher;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Utf32Str};
 use r3bl_tui::{
-    App, BoxedSafeApp, CommonResult, ComponentRegistry, ComponentRegistryMap, ContainsResult,
-    EditorBuffer, EventPropagation, FlexBoxId, GlobalData, HasFocus, InputDevice, InputEvent, Key,
-    KeyPress, LayoutDirection, LayoutManagement, LengthOps, ModifierKeysMask, OutputDevice,
-    PerformPositioningAndSizing, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
-    SPACER_GLYPH, Size, SpecialKey, Surface, SurfaceProps, SurfaceRender, TerminalWindow,
+    App, BoxedSafeApp, BoxedSafeComponent, CommonResult, Component, ComponentRegistry,
+    ComponentRegistryMap, ContainsResult, EditorBuffer, EventPropagation, FlexBox, FlexBoxId,
+    GlobalData, HasFocus, InputDevice, InputEvent, Key, KeyPress, LayoutDirection,
+    LayoutManagement, LengthOps, ModifierKeysMask, OutputDevice, PerformPositioningAndSizing,
+    RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SPACER_GLYPH, Size, SpecialKey,
+    Surface, SurfaceBounds, SurfaceProps, SurfaceRender, TerminalWindow,
     TerminalWindowMainThreadSignal, TuiStylesheet, ZOrder, box_end, box_start, col, height,
     new_style, ok, render_component_in_current_box, render_tui_styled_texts_into, req_size_pc, row,
     send_signal, surface, throws, throws_with_return, tui_color, tui_styled_text, tui_styled_texts,
@@ -26,7 +27,7 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-type PickerResultMsg = (u64, Vec<(usize, Vec<u32>)>);
+type PickerResultMsg = (u64, Vec<(FileKey, Vec<u32>)>);
 
 /// Shared slot holding the sender side of the active LSP request channel.
 ///
@@ -34,13 +35,33 @@ type PickerResultMsg = (u64, Vec<(usize, Vec<u32>)>);
 /// (re)spawn and stores `tx` here, so `AppMain` always sends to the live task.
 type LspTxSlot = Arc<Mutex<mpsc::Sender<usize>>>;
 
+/// Maximum number of simultaneously visible panes. Terminals wider than 500 cols are not
+/// expected in practice (500 / MIN_PANE_WIDTH = 5).
+const MAX_PANES: usize = 5;
+
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Id {
     Container = 1,
-    FileNamePicker = 2,
-    Preview = 3,
-    FileNamePickerEditor = 4,
+    /// Pane slots 0-4 (positional, not tied to a specific window).
+    Pane0 = 2,
+    Pane1 = 3,
+    Pane2 = 4,
+    Pane3 = 5,
+    Pane4 = 6,
+    FileNamePickerEditor = 7,
+}
+
+impl Id {
+    pub fn pane(slot: usize) -> Self {
+        match slot {
+            0 => Id::Pane0,
+            1 => Id::Pane1,
+            2 => Id::Pane2,
+            3 => Id::Pane3,
+            _ => Id::Pane4,
+        }
+    }
 }
 
 impl From<Id> for u8 {
@@ -52,6 +73,81 @@ impl From<Id> for u8 {
 impl From<Id> for FlexBoxId {
     fn from(id: Id) -> FlexBoxId {
         FlexBoxId::new(id)
+    }
+}
+
+/// Dispatcher component for a single pane slot. Holds both inner component types and
+/// delegates to the correct one based on which `Window` is currently assigned to this slot
+/// in `state.window_stack`.
+struct PaneComponent {
+    id: FlexBoxId,
+    slot: usize,
+    picker: FileNamePickerComponent,
+    preview: FilePreviewComponent,
+}
+
+impl PaneComponent {
+    fn new_boxed(slot: usize, id: FlexBoxId) -> BoxedSafeComponent<State, AppSignal> {
+        Box::new(Self {
+            id,
+            slot,
+            picker: FileNamePickerComponent::new(id),
+            preview: FilePreviewComponent::new(id),
+        })
+    }
+
+    fn active_window<'s>(&self, state: &'s State) -> Option<&'s Window> {
+        state.window_stack.get(self.slot)
+    }
+}
+
+impl Component<State, AppSignal> for PaneComponent {
+    fn reset(&mut self) {
+        self.picker.reset();
+        self.preview.reset();
+    }
+
+    fn get_id(&self) -> FlexBoxId {
+        self.id
+    }
+
+    fn handle_event(
+        &mut self,
+        global_data: &mut GlobalData<State, AppSignal>,
+        input_event: InputEvent,
+        has_focus: &mut HasFocus,
+    ) -> CommonResult<EventPropagation> {
+        match self.active_window(&global_data.state).cloned() {
+            Some(Window::FileNamePicker) => {
+                self.picker
+                    .handle_event(global_data, input_event, has_focus)
+            }
+            Some(Window::FilePreview(_)) => {
+                self.preview
+                    .handle_event(global_data, input_event, has_focus)
+            }
+            None => Ok(EventPropagation::Propagate),
+        }
+    }
+
+    fn render(
+        &mut self,
+        global_data: &mut GlobalData<State, AppSignal>,
+        current_box: FlexBox,
+        surface_bounds: SurfaceBounds,
+        has_focus: &mut HasFocus,
+    ) -> CommonResult<RenderPipeline> {
+        match self.active_window(&global_data.state).cloned() {
+            Some(Window::FileNamePicker) => {
+                self.picker
+                    .render(global_data, current_box, surface_bounds, has_focus)
+            }
+            Some(Window::FilePreview(_)) => {
+                self.preview
+                    .render(global_data, current_box, surface_bounds, has_focus)
+            }
+            None => Ok(r3bl_tui::render_pipeline!()),
+        }
     }
 }
 
@@ -103,12 +199,12 @@ impl AppMain {
         });
     }
 
-    fn all_files_results(files: &[LoadedFile]) -> Vec<(usize, Vec<u32>)> {
+    fn all_files_results(files: &[LoadedFile]) -> Vec<(FileKey, Vec<u32>)> {
         files
             .iter()
             .enumerate()
             .filter(|(_, f)| !f.removed.load(Ordering::Relaxed))
-            .map(|(i, _)| (i, vec![]))
+            .map(|(i, _)| (FileKey(i), vec![]))
             .collect()
     }
 }
@@ -117,7 +213,7 @@ fn run_file_name_match(
     query: &str,
     files: &[LoadedFile],
     root: &Utf8PathBuf,
-) -> Vec<(usize, Vec<u32>)> {
+) -> Vec<(FileKey, Vec<u32>)> {
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
     if pattern.atoms.is_empty() {
@@ -126,7 +222,7 @@ fn run_file_name_match(
 
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
     let mut buf = Vec::new();
-    let mut scored: Vec<(usize, u32, Vec<u32>)> = files
+    let mut scored: Vec<(FileKey, u32, Vec<u32>)> = files
         .iter()
         .enumerate()
         .filter(|(_, f)| !f.removed.load(Ordering::Relaxed))
@@ -139,26 +235,25 @@ fn run_file_name_match(
                 .map(|score| {
                     indices.sort_unstable();
                     indices.dedup();
-                    (i, score, indices)
+                    (FileKey(i), score, indices)
                 })
         })
         .collect();
     scored.sort_by_key(|&(_, score, _)| std::cmp::Reverse(score));
-    scored.into_iter().map(|(i, _, idx)| (i, idx)).collect()
+    scored.into_iter().map(|(key, _, idx)| (key, idx)).collect()
 }
 
 pub(super) fn resolve_selected(
-    selected: &Option<camino::Utf8PathBuf>,
-    results: &[(usize, Vec<u32>)],
-    files: &[LoadedFile],
+    selected: &Option<FileKey>,
+    results: &[(FileKey, Vec<u32>)],
 ) -> usize {
-    let path = match selected {
+    let key = match selected {
         None => return 0,
-        Some(p) => p,
+        Some(k) => k,
     };
     results
         .iter()
-        .position(|(file_idx, _)| files[*file_idx].path == *path)
+        .position(|(result_key, _)| result_key == key)
         .unwrap_or(0)
 }
 
@@ -171,30 +266,21 @@ impl App for AppMain {
         component_registry_map: &mut ComponentRegistryMap<Self::S, Self::AS>,
         has_focus: &mut HasFocus,
     ) {
-        let picker_id = FlexBoxId::from(Id::FileNamePicker);
-        if let ContainsResult::DoesNotContain =
-            ComponentRegistry::contains(component_registry_map, picker_id)
-        {
-            ComponentRegistry::put(
-                component_registry_map,
-                picker_id,
-                FileNamePickerComponent::new_boxed(picker_id),
-            );
-        }
-
-        let preview_id = FlexBoxId::from(Id::Preview);
-        if let ContainsResult::DoesNotContain =
-            ComponentRegistry::contains(component_registry_map, preview_id)
-        {
-            ComponentRegistry::put(
-                component_registry_map,
-                preview_id,
-                FilePreviewComponent::new_boxed(preview_id),
-            );
+        for slot in 0..MAX_PANES {
+            let pane_id = FlexBoxId::from(Id::pane(slot));
+            if let ContainsResult::DoesNotContain =
+                ComponentRegistry::contains(component_registry_map, pane_id)
+            {
+                ComponentRegistry::put(
+                    component_registry_map,
+                    pane_id,
+                    PaneComponent::new_boxed(slot, pane_id),
+                );
+            }
         }
 
         if has_focus.get_id().is_none() {
-            has_focus.set_id(FlexBoxId::from(Id::FileNamePicker));
+            has_focus.set_id(FlexBoxId::from(Id::Pane0));
         }
     }
 
@@ -208,8 +294,6 @@ impl App for AppMain {
         let files = Arc::clone(&self.files);
         let root = self.root.clone();
 
-        // The spawn closure creates a fresh channel pair on every (re)spawn:
-        // stores tx in the shared slot so AppMain always sends to the live task.
         let lsp_tx_slot = Arc::clone(&self.lsp_tx);
         let lsp_notify = notify_tx.clone();
         let lsp_files = Arc::clone(&files);
@@ -260,12 +344,33 @@ impl App for AppMain {
         {
             send_signal!(
                 global_data.main_thread_channel_sender,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::OpenFileNamePicker,)
+                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::OpenFileNamePicker)
             );
             return Ok(EventPropagation::ConsumedRender);
         }
 
+        if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event {
+            match key {
+                Key::SpecialKey(SpecialKey::Tab) => {
+                    send_signal!(
+                        global_data.main_thread_channel_sender,
+                        TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::FocusNextPane)
+                    );
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                Key::SpecialKey(SpecialKey::BackTab) => {
+                    send_signal!(
+                        global_data.main_thread_channel_sender,
+                        TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::FocusPrevPane)
+                    );
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                _ => {}
+            }
+        }
+
         if global_data.state.file_name_picker_open
+            && global_data.state.focused_window == Some(Window::FileNamePicker)
             && let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
         {
             match key {
@@ -309,6 +414,20 @@ impl App for AppMain {
             }
         }
 
+        if matches!(
+            global_data.state.focused_window,
+            Some(Window::FilePreview(_))
+        ) && let InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::SpecialKey(SpecialKey::Esc),
+        }) = input_event
+        {
+            send_signal!(
+                global_data.main_thread_channel_sender,
+                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::SendFocusedWindowToBack)
+            );
+            return Ok(EventPropagation::ConsumedRender);
+        }
+
         ComponentRegistry::route_event_to_focused_component(
             global_data,
             input_event,
@@ -328,6 +447,8 @@ impl App for AppMain {
             let state = &mut global_data.state;
             match action {
                 AppSignal::OpenFileNamePicker => {
+                    state.push_window(Window::FileNamePicker);
+                    state.focused_window = Some(Window::FileNamePicker);
                     state.file_name_picker_open = true;
                     state.file_name_picker_selected = None;
                     let snapshot = state.files.load();
@@ -340,13 +461,14 @@ impl App for AppMain {
                             .editor_buffers
                             .insert(editor_id, EditorBuffer::new_empty(None, None));
                     }
-                    has_focus.set_id(FlexBoxId::from(Id::FileNamePicker));
+                    has_focus.set_id(focused_pane_id(state));
                 }
                 AppSignal::CloseFileNamePicker => {
+                    state.remove_window(&Window::FileNamePicker);
                     state.file_name_picker_open = false;
                     state.file_name_picker_results.clear();
                     state.file_name_picker_selected = None;
-                    has_focus.set_id(FlexBoxId::from(Id::Preview));
+                    has_focus.set_id(focused_pane_id(state));
                 }
                 AppSignal::FileNamePickerQueryChanged => {
                     let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
@@ -365,51 +487,72 @@ impl App for AppMain {
                 AppSignal::FileNamePickerSelectNext => {
                     let count = state.file_name_picker_results.len();
                     if count > 0 {
-                        let snapshot = state.files.load();
                         let current = resolve_selected(
                             &state.file_name_picker_selected,
                             &state.file_name_picker_results,
-                            &snapshot,
                         );
                         let next = (current + 1).min(count - 1);
-                        let (file_idx, _) = &state.file_name_picker_results[next];
-                        state.file_name_picker_selected = Some(snapshot[*file_idx].path.clone());
+                        let (key, _) = &state.file_name_picker_results[next];
+                        state.file_name_picker_selected = Some(*key);
                     }
                 }
                 AppSignal::FileNamePickerSelectPrev => {
-                    let snapshot = state.files.load();
                     let current = resolve_selected(
                         &state.file_name_picker_selected,
                         &state.file_name_picker_results,
-                        &snapshot,
                     );
                     let prev = current.saturating_sub(1);
-                    if let Some((file_idx, _)) = state.file_name_picker_results.get(prev) {
-                        state.file_name_picker_selected = Some(snapshot[*file_idx].path.clone());
+                    if let Some((key, _)) = state.file_name_picker_results.get(prev) {
+                        state.file_name_picker_selected = Some(*key);
                     }
                 }
                 AppSignal::FileNamePickerConfirm => {
-                    let snapshot = state.files.load();
                     let selected = resolve_selected(
                         &state.file_name_picker_selected,
                         &state.file_name_picker_results,
-                        &snapshot,
                     );
-                    if let Some(&(file_idx, _)) = state.file_name_picker_results.get(selected) {
-                        state.open_file = Some(file_idx);
-                        state.preview_scroll = 0;
-                        let _ = self.lsp_tx.lock().unwrap().try_send(file_idx);
+                    if let Some(&(key, _)) = state.file_name_picker_results.get(selected) {
+                        if !state.window_states.contains_key(&Window::FilePreview(key)) {
+                            state.set_window_scroll(&Window::FilePreview(key), 0);
+                        }
+                        state.push_window(Window::FilePreview(key));
+                        state.focused_window = Some(Window::FilePreview(key));
+                        let _ = self.lsp_tx.lock().unwrap().try_send(key.0);
                     }
+                    state.remove_window(&Window::FileNamePicker);
                     state.file_name_picker_open = false;
                     state.file_name_picker_results.clear();
                     state.file_name_picker_selected = None;
-                    has_focus.set_id(FlexBoxId::from(Id::Preview));
+                    has_focus.set_id(focused_pane_id(state));
                 }
                 AppSignal::ScrollPreviewDown(n) => {
-                    state.preview_scroll = state.preview_scroll.saturating_add(*n);
+                    if let Some(window) = state.focused_window.clone() {
+                        let current = state.window_scroll(&window);
+                        state.set_window_scroll(&window, current.saturating_add(*n));
+                    }
                 }
                 AppSignal::ScrollPreviewUp(n) => {
-                    state.preview_scroll = state.preview_scroll.saturating_sub(*n);
+                    if let Some(window) = state.focused_window.clone() {
+                        let current = state.window_scroll(&window);
+                        state.set_window_scroll(&window, current.saturating_sub(*n));
+                    }
+                }
+                AppSignal::SendFocusedWindowToBack => {
+                    if let Some(window) = state.focused_window.clone() {
+                        state.send_to_back(&window);
+                        has_focus.set_id(focused_pane_id(state));
+                    }
+                }
+                AppSignal::FocusNextPane => {
+                    let visible = state.visible_windows(
+                        // Use a generous default; actual width is corrected at render time.
+                        u16::MAX,
+                    );
+                    cycle_focus(state, has_focus, &visible, 1);
+                }
+                AppSignal::FocusPrevPane => {
+                    let visible = state.visible_windows(u16::MAX);
+                    cycle_focus(state, has_focus, &visible, -1);
                 }
                 AppSignal::FilesChanged(batch) => {
                     let snapshot = self.files.load_full();
@@ -516,7 +659,21 @@ impl App for AppMain {
 
         throws_with_return!({
             let window_size = global_data.window_size;
-            let picker_open = global_data.state.file_name_picker_open;
+            let surface_cols = window_size.col_width.as_u16();
+
+            let visible = global_data.state.visible_windows(surface_cols);
+
+            // Sync focused window with actual visible windows: if the currently focused
+            // window is not visible, focus the frontmost visible one.
+            let focused = global_data.state.focused_window.clone();
+            let focused_is_visible = focused
+                .as_ref()
+                .map(|f| visible.iter().any(|(w, _)| w == f))
+                .unwrap_or(false);
+            if !focused_is_visible && let Some((front, _)) = visible.first() {
+                global_data.state.focused_window = Some(front.clone());
+                has_focus.set_id(FlexBoxId::from(Id::pane(0)));
+            }
 
             let surface = {
                 let mut it = surface!(stylesheet: create_stylesheet()?);
@@ -529,7 +686,7 @@ impl App for AppMain {
                     },
                 })?;
 
-                ContainerRenderer { picker_open }.render_in_surface(
+                PanesRenderer { visible: &visible }.render_in_surface(
                     &mut it,
                     global_data,
                     component_registry_map,
@@ -542,18 +699,60 @@ impl App for AppMain {
 
             let mut pipeline = surface.render_pipeline;
 
-            render_status_bar(&mut pipeline, window_size, picker_open, &global_data.state);
+            let picker_open = global_data.state.file_name_picker_open;
+            let focused_window = global_data.state.focused_window.clone();
+            render_status_bar(
+                &mut pipeline,
+                window_size,
+                picker_open,
+                focused_window.as_ref(),
+                &global_data.state,
+            );
 
             pipeline
         });
     }
 }
 
-struct ContainerRenderer {
-    picker_open: bool,
+/// Returns the `FlexBoxId` for the pane slot that corresponds to the focused window.
+fn focused_pane_id(state: &State) -> FlexBoxId {
+    let Some(focused) = &state.focused_window else {
+        return FlexBoxId::from(Id::Pane0);
+    };
+    let slot = state
+        .window_stack
+        .iter()
+        .position(|w| w == focused)
+        .unwrap_or(0);
+    FlexBoxId::from(Id::pane(slot))
 }
 
-impl SurfaceRender<State, AppSignal> for ContainerRenderer {
+fn cycle_focus(
+    state: &mut State,
+    has_focus: &mut HasFocus,
+    visible: &[(Window, u16)],
+    direction: i32,
+) {
+    if visible.is_empty() {
+        return;
+    }
+    let current_pos = state
+        .focused_window
+        .as_ref()
+        .and_then(|f| visible.iter().position(|(w, _)| w == f))
+        .unwrap_or(0);
+    let len = visible.len() as i32;
+    let next_pos = ((current_pos as i32 + direction).rem_euclid(len)) as usize;
+    let next_window = visible[next_pos].0.clone();
+    state.focused_window = Some(next_window);
+    has_focus.set_id(FlexBoxId::from(Id::pane(next_pos)));
+}
+
+struct PanesRenderer<'a> {
+    visible: &'a [(Window, u16)],
+}
+
+impl SurfaceRender<State, AppSignal> for PanesRenderer<'_> {
     fn render_in_surface(
         &mut self,
         surface: &mut Surface,
@@ -571,35 +770,24 @@ impl SurfaceRender<State, AppSignal> for ContainerRenderer {
                 styles: [container_id],
             );
 
-            if self.picker_open {
-                let picker_id = FlexBoxId::from(Id::FileNamePicker);
+            for (slot, (window, col_width)) in self.visible.iter().enumerate() {
+                let pane_id = FlexBoxId::from(Id::pane(slot));
+
+                // Store which window is in this slot so components can read it from state.
+                global_data.state.window_stack[slot] = window.clone();
+
+                let width_pc: i32 = (*col_width as i32) * 100
+                    / (global_data.window_size.col_width.as_u32().max(1) as i32);
                 box_start!(
                     in: surface,
-                    id: picker_id,
+                    id: pane_id,
                     dir: LayoutDirection::Vertical,
-                    requested_size_percent: req_size_pc!(width: 100, height: 100),
-                    styles: [picker_id],
+                    requested_size_percent: req_size_pc!(width: {width_pc}, height: 100),
+                    styles: [pane_id],
                 );
                 render_component_in_current_box!(
                     in: surface,
-                    component_id: picker_id,
-                    from: component_registry_map,
-                    global_data: global_data,
-                    has_focus: has_focus
-                );
-                box_end!(in: surface);
-            } else {
-                let preview_id = FlexBoxId::from(Id::Preview);
-                box_start!(
-                    in: surface,
-                    id: preview_id,
-                    dir: LayoutDirection::Vertical,
-                    requested_size_percent: req_size_pc!(width: 100, height: 100),
-                    styles: [preview_id],
-                );
-                render_component_in_current_box!(
-                    in: surface,
-                    component_id: preview_id,
+                    component_id: pane_id,
                     from: component_registry_map,
                     global_data: global_data,
                     has_focus: has_focus
@@ -615,16 +803,29 @@ impl SurfaceRender<State, AppSignal> for ContainerRenderer {
 fn create_stylesheet() -> CommonResult<TuiStylesheet> {
     throws_with_return!({
         tui_stylesheet! {
+            new_style!(id: {Id::Container}),
             new_style!(
-                id: {Id::Container}
-            ),
-            new_style!(
-                id: {Id::FileNamePicker}
+                id: {Id::Pane0}
                 padding: {1}
-                color_bg: {tui_color!(18, 18, 28)}
+                color_bg: {tui_color!(15, 15, 25)}
             ),
             new_style!(
-                id: {Id::Preview}
+                id: {Id::Pane1}
+                padding: {1}
+                color_bg: {tui_color!(15, 15, 25)}
+            ),
+            new_style!(
+                id: {Id::Pane2}
+                padding: {1}
+                color_bg: {tui_color!(15, 15, 25)}
+            ),
+            new_style!(
+                id: {Id::Pane3}
+                padding: {1}
+                color_bg: {tui_color!(15, 15, 25)}
+            ),
+            new_style!(
+                id: {Id::Pane4}
                 padding: {1}
                 color_bg: {tui_color!(15, 15, 25)}
             )
@@ -632,15 +833,26 @@ fn create_stylesheet() -> CommonResult<TuiStylesheet> {
     })
 }
 
-fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, picker_open: bool, state: &State) {
+fn render_status_bar(
+    pipeline: &mut RenderPipeline,
+    size: Size,
+    picker_open: bool,
+    focused_window: Option<&Window>,
+    state: &State,
+) {
     let color_bg = tui_color!(30, 30, 50);
     let color_fg = tui_color!(180, 180, 220);
     let color_warn = tui_color!(220, 160, 60);
 
     let hint = if picker_open {
-        " Esc:Close  ↑↓:Select  Enter:Open  Ctrl+C:Quit"
+        " Esc:Close  ↑↓:Select  Enter:Open  Tab:Switch  Ctrl+P:Picker  Ctrl+C:Quit"
     } else {
-        " Ctrl+P:Open file  ↑↓/PgUp/PgDn:Scroll  Ctrl+C:Quit"
+        match focused_window {
+            Some(Window::FilePreview(_)) => {
+                " Esc:Send to back  ↑↓/PgUp/PgDn:Scroll  Tab:Switch  Ctrl+P:Picker  Ctrl+C:Quit"
+            }
+            _ => " Ctrl+P:Open file  Tab:Switch  Ctrl+C:Quit",
+        }
     };
 
     let task_note = state.task_status_line();

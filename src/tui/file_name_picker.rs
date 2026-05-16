@@ -1,11 +1,11 @@
 use super::app::{Id, resolve_selected};
 use super::state::{AppSignal, State};
 use r3bl_tui::{
-    BoxedSafeComponent, CommonResult, Component, EditMode, EditorComponent, EditorEngineConfig,
-    EventPropagation, FlexBox, FlexBoxId, GlobalData, HasFocus, InputEvent, LayoutDirection,
-    LineMode, MouseInputKind, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
-    SurfaceBounds, SyntaxHighlightMode, TerminalWindowMainThreadSignal, ZOrder, col, height,
-    new_style, row, send_signal, throws_with_return, tui_color,
+    CommonResult, Component, EditMode, EditorComponent, EditorEngineConfig, EventPropagation,
+    FlexBox, FlexBoxId, GlobalData, HasFocus, InputEvent, LayoutDirection, LineMode,
+    MouseInputKind, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SurfaceBounds,
+    SyntaxHighlightMode, TerminalWindowMainThreadSignal, ZOrder, col, height, new_style, row,
+    send_signal, throws_with_return, tui_color,
 };
 use std::collections::HashSet;
 use tokio::sync::mpsc;
@@ -17,7 +17,7 @@ pub struct FileNamePickerComponent {
 }
 
 impl FileNamePickerComponent {
-    pub fn new_boxed(id: FlexBoxId) -> BoxedSafeComponent<State, AppSignal> {
+    pub fn new(id: FlexBoxId) -> Self {
         let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
 
         fn on_buffer_change(
@@ -38,11 +38,11 @@ impl FileNamePickerComponent {
             edit_mode: EditMode::ReadWrite,
         };
 
-        Box::new(Self {
+        Self {
             id,
             scroll_offset: 0,
             editor: EditorComponent::new(editor_id, config, on_buffer_change),
-        })
+        }
     }
 }
 
@@ -84,7 +84,6 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                 }
             }
 
-            // Forward all other input to the editor component.
             self.editor
                 .handle_event(global_data, input_event, has_focus)?
         });
@@ -112,15 +111,12 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                 style_adjusted_bounds_size: bounds.col_width + height(1),
                 ..Default::default()
             };
-            // Temporarily give focus to the editor id so render_caret paints the
-            // reverse-video fake caret, then restore focus to the picker id.
             has_focus.set_id(FlexBoxId::from(Id::FileNamePickerEditor));
             let mut pipeline =
                 self.editor
                     .render(global_data, editor_box, surface_bounds, has_focus)?;
             has_focus.set_id(self.id);
 
-            // Remaining rows: results list.
             if total_rows < 2 {
                 return Ok(pipeline);
             }
@@ -135,14 +131,10 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
 
             let mut render_ops = RenderOpIRVec::new();
 
-            let selected = {
-                let snapshot = global_data.state.files.load();
-                resolve_selected(
-                    &global_data.state.file_name_picker_selected,
-                    &global_data.state.file_name_picker_results,
-                    &snapshot,
-                )
-            };
+            let selected = resolve_selected(
+                &global_data.state.file_name_picker_selected,
+                &global_data.state.file_name_picker_results,
+            );
             let result_count = global_data.state.file_name_picker_results.len();
 
             if selected < self.scroll_offset {
@@ -166,13 +158,13 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                     continue;
                 }
 
-                let (file_idx, matched_positions) = {
-                    let (idx, ref pos) = global_data.state.file_name_picker_results[result_idx];
-                    (idx, pos.clone())
+                let (file_key, matched_positions) = {
+                    let (key, ref pos) = global_data.state.file_name_picker_results[result_idx];
+                    (key, pos.clone())
                 };
                 let root = global_data.state.root.clone();
                 let snapshot = global_data.state.files.load_full();
-                let file = &snapshot[file_idx];
+                let file = &snapshot[file_key.0];
                 let rel = file.path.strip_prefix(&root).unwrap_or(&file.path);
                 let path_str = rel.to_string();
                 let is_selected = result_idx == selected;

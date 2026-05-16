@@ -7,6 +7,14 @@ use std::sync::atomic::AtomicBool;
 
 use crate::lsp;
 
+/// Stable index into the file list.
+///
+/// The underlying `Vec<LoadedFile>` is append-only: files are never removed or reordered,
+/// only marked `removed = true`. This makes the raw `usize` permanently stable. The
+/// newtype exists to prevent accidental confusion with other `usize` values.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FileKey(pub usize);
+
 pub struct FileData {
     pub content: String,
     pub line_starts: Vec<usize>,
