@@ -1,5 +1,7 @@
+use crate::tui::state::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
+use r3bl_tui::TerminalWindowMainThreadSignal;
 use std::collections::HashMap;
 use tokio::sync::mpsc;
 use tokio::time::Duration;
@@ -13,16 +15,17 @@ enum RawKind {
     Removed,
 }
 
+#[derive(Debug, Clone)]
 pub struct BatchedWatchEvent {
     pub modified: Vec<Utf8PathBuf>,
     pub created: Vec<Utf8PathBuf>,
     pub removed: Vec<Utf8PathBuf>,
 }
 
-pub fn start_watcher(root: &Utf8Path) -> mpsc::Receiver<BatchedWatchEvent> {
-    let (batch_tx, batch_rx) = mpsc::channel(32);
-    // notify v9 with the tokio feature implements EventHandler for
-    // UnboundedSender<Result<Event>> directly — no bridge thread needed.
+pub fn start_watcher(
+    root: &Utf8Path,
+    signal_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+) {
     let (raw_tx, raw_rx) = mpsc::unbounded_channel::<notify::Result<notify::Event>>();
 
     let mut watcher = RecommendedWatcher::new(raw_tx, notify::Config::default())
@@ -32,15 +35,13 @@ pub fn start_watcher(root: &Utf8Path) -> mpsc::Receiver<BatchedWatchEvent> {
         .watch(root.as_std_path(), RecursiveMode::Recursive)
         .expect("failed to watch root");
 
-    tokio::spawn(debounce_task(root.to_owned(), raw_rx, batch_tx, watcher));
-
-    batch_rx
+    tokio::spawn(debounce_task(root.to_owned(), raw_rx, signal_tx, watcher));
 }
 
 async fn debounce_task(
     root: Utf8PathBuf,
     mut raw_rx: mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
-    batch_tx: mpsc::Sender<BatchedWatchEvent>,
+    signal_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
     // Kept alive for the duration of the task.
     _watcher: RecommendedWatcher,
 ) {
@@ -94,7 +95,13 @@ async fn debounce_task(
                         RawKind::Removed => batch.removed.push(path),
                     }
                 }
-                if batch_tx.send(batch).await.is_err() {
+                if signal_tx
+                    .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                        AppSignal::FilesChanged(batch),
+                    ))
+                    .await
+                    .is_err()
+                {
                     return;
                 }
             }

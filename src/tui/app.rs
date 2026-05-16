@@ -3,7 +3,7 @@ use super::preview::FilePreviewComponent;
 use super::state::{AppSignal, State};
 use crate::loader::LoadedFile;
 use crate::lsp;
-use crate::watcher::{BatchedWatchEvent, start_watcher};
+use crate::watcher::start_watcher;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use nucleo::Matcher;
@@ -55,7 +55,7 @@ pub struct AppMain {
     picker_results_tx: mpsc::Sender<PickerResultMsg>,
     picker_results_rx: mpsc::Receiver<PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
-    watcher_rx: mpsc::Receiver<BatchedWatchEvent>,
+    watcher_started: bool,
 }
 
 impl AppMain {
@@ -65,7 +65,6 @@ impl AppMain {
     ) -> BoxedSafeApp<State, AppSignal> {
         let (lsp_tx, lsp_rx) = mpsc::channel(32);
         let (picker_results_tx, picker_results_rx) = mpsc::channel(32);
-        let watcher_rx = start_watcher(&root);
         Box::new(Self {
             lsp_tx,
             lsp_rx: Some(lsp_rx),
@@ -74,7 +73,7 @@ impl AppMain {
             picker_results_tx,
             picker_results_rx,
             picker_generation: Arc::new(AtomicU64::new(0)),
-            watcher_rx,
+            watcher_started: false,
         })
     }
 
@@ -268,6 +267,74 @@ impl App for AppMain {
                 AppSignal::ScrollPreviewUp(n) => {
                     state.preview_scroll = state.preview_scroll.saturating_sub(*n);
                 }
+                AppSignal::FilesChanged(batch) => {
+                    let snapshot = self.files.load_full();
+
+                    for path in &batch.removed {
+                        if let Some(file) = snapshot.iter().find(|f| &f.path == path) {
+                            file.removed.store(true, Ordering::Relaxed);
+                        }
+                    }
+
+                    for path in &batch.modified {
+                        if let Some(file) = snapshot
+                            .iter()
+                            .find(|f| &f.path == path && !f.removed.load(Ordering::Relaxed))
+                        {
+                            file.reload();
+                        }
+                    }
+
+                    let mut new_files: Vec<LoadedFile> = vec![];
+                    for path in &batch.created {
+                        if let Some(file) = snapshot
+                            .iter()
+                            .find(|f| &f.path == path && f.removed.load(Ordering::Relaxed))
+                        {
+                            file.removed.store(false, Ordering::Relaxed);
+                            file.reload();
+                        } else if !snapshot.iter().any(|f| &f.path == path)
+                            && let Some(loaded) = LoadedFile::load(path.clone().into_std_path_buf())
+                        {
+                            new_files.push(loaded);
+                        }
+                    }
+
+                    if !new_files.is_empty() {
+                        let mut next: Vec<LoadedFile> = snapshot
+                            .iter()
+                            .map(|f| LoadedFile {
+                                path: f.path.clone(),
+                                data: std::sync::Mutex::new({
+                                    let d = f.data.lock().unwrap();
+                                    crate::loader::FileData {
+                                        content: d.content.clone(),
+                                        line_starts: d.line_starts.clone(),
+                                    }
+                                }),
+                                colored_lines: std::sync::Mutex::new(
+                                    f.colored_lines.lock().unwrap().clone(),
+                                ),
+                                removed: std::sync::atomic::AtomicBool::new(
+                                    f.removed.load(Ordering::Relaxed),
+                                ),
+                            })
+                            .collect();
+                        next.extend(new_files);
+                        self.files.store(Arc::new(next));
+                    }
+
+                    let snapshot = self.files.load();
+                    if state.file_name_picker_open {
+                        if state.file_name_picker_query.is_empty() {
+                            state.file_name_picker_results = AppMain::all_files_results(&snapshot);
+                        } else {
+                            let query = state.file_name_picker_query.clone();
+                            self.trigger_match(query);
+                        }
+                    }
+                    state.bump_files_version();
+                }
                 AppSignal::Noop => {}
             }
 
@@ -296,7 +363,7 @@ impl App for AppMain {
         component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
         has_focus: &mut HasFocus,
     ) -> CommonResult<RenderPipeline> {
-        // Start the LSP task on the first render.
+        // Start the LSP task and filesystem watcher on the first render.
         if let Some(lsp_rx) = self.lsp_rx.take() {
             let notify_tx = global_data.main_thread_channel_sender.clone();
             let files = Arc::clone(&self.files);
@@ -305,6 +372,10 @@ impl App for AppMain {
                 lsp::run(root, files, lsp_rx, notify_tx).await;
             });
         }
+        if !self.watcher_started {
+            self.watcher_started = true;
+            start_watcher(&self.root, global_data.main_thread_channel_sender.clone());
+        }
 
         // Drain async picker results; apply the latest matching generation.
         let current_generation = self.picker_generation.load(Ordering::Relaxed);
@@ -312,104 +383,6 @@ impl App for AppMain {
             if arrived_generation == current_generation {
                 global_data.state.file_name_picker_results = results;
             }
-        }
-
-        // Drain batched filesystem watch events.
-        let mut files_changed = false;
-        while let Ok(batch) = self.watcher_rx.try_recv() {
-            let snapshot = self.files.load_full();
-
-            // Handle removals — mark in-place, no vec clone needed.
-            for path in &batch.removed {
-                if let Some(file) = snapshot.iter().find(|f| &f.path == path) {
-                    file.removed.store(true, Ordering::Relaxed);
-                    files_changed = true;
-                }
-            }
-
-            // Handle modifications — reload in-place.
-            for path in &batch.modified {
-                if let Some(file) = snapshot
-                    .iter()
-                    .find(|f| &f.path == path && !f.removed.load(Ordering::Relaxed))
-                {
-                    file.reload();
-                    files_changed = true;
-                }
-            }
-
-            // Handle creations — resurrect removed entries in-place; only add truly new paths.
-            let mut need_new_vec = false;
-            let mut new_files: Vec<LoadedFile> = vec![];
-            for path in &batch.created {
-                if let Some(file) = snapshot
-                    .iter()
-                    .find(|f| &f.path == path && f.removed.load(Ordering::Relaxed))
-                {
-                    // File was previously removed and is now back — resurrect in-place.
-                    file.removed.store(false, Ordering::Relaxed);
-                    file.reload();
-                    files_changed = true;
-                } else if !snapshot.iter().any(|f| &f.path == path)
-                    && let Some(loaded) = LoadedFile::load(path.clone().into_std_path_buf())
-                {
-                    new_files.push(loaded);
-                    need_new_vec = true;
-                }
-            }
-
-            if need_new_vec {
-                let mut next: Vec<LoadedFile> = snapshot
-                    .iter()
-                    .map(|f| {
-                        // Shallow-copy the immutable parts; share the Mutex data via re-wrapping.
-                        // Since LoadedFile is not Clone, we rebuild from existing data.
-                        LoadedFile {
-                            path: f.path.clone(),
-                            data: std::sync::Mutex::new({
-                                let d = f.data.lock().unwrap();
-                                crate::loader::FileData {
-                                    content: d.content.clone(),
-                                    line_starts: d.line_starts.clone(),
-                                }
-                            }),
-                            colored_lines: std::sync::Mutex::new(
-                                f.colored_lines.lock().unwrap().clone(),
-                            ),
-                            removed: std::sync::atomic::AtomicBool::new(
-                                f.removed.load(Ordering::Relaxed),
-                            ),
-                        }
-                    })
-                    .collect();
-                next.extend(new_files);
-                self.files.store(Arc::new(next));
-                files_changed = true;
-            }
-        }
-
-        // After any filesystem change: refresh state, re-trigger fuzzy match, force re-render.
-        if files_changed {
-            let snapshot = self.files.load();
-            let state = &mut global_data.state;
-
-            // If the currently open file was modified, reset scroll so preview re-renders from top.
-            // (Content already updated in-place; preview will pick it up naturally.)
-
-            // If picker is open, refresh results.
-            if state.file_name_picker_open {
-                if state.file_name_picker_query.is_empty() {
-                    state.file_name_picker_results = AppMain::all_files_results(&snapshot);
-                } else {
-                    let query = state.file_name_picker_query.clone();
-                    self.trigger_match(query);
-                }
-            }
-
-            send_signal!(
-                global_data.main_thread_channel_sender,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::Noop)
-            );
         }
 
         throws_with_return!({
