@@ -1,4 +1,5 @@
 use crate::loader::LoadedFile;
+use crate::supervisor::TaskStatus;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
@@ -22,11 +23,34 @@ pub struct State {
     /// Each entry: (index into files snapshot, sorted+deduped matched char positions from nucleo).
     pub file_name_picker_results: Vec<(usize, Vec<u32>)>,
     pub file_name_picker_selected: usize,
+    /// Last known status for each supervised task, keyed by task name.
+    pub task_statuses: Vec<(&'static str, TaskStatus)>,
 }
 
 impl State {
     pub fn bump_files_version(&mut self) {
         self.files_version = FILES_VERSION.fetch_add(1, Ordering::Relaxed) + 1;
+    }
+
+    pub fn set_task_status(&mut self, name: &'static str, status: TaskStatus) {
+        if let Some(entry) = self.task_statuses.iter_mut().find(|(n, _)| *n == name) {
+            entry.1 = status;
+        } else {
+            self.task_statuses.push((name, status));
+        }
+    }
+
+    /// Returns a short status string for tasks that are not Running, or empty if all healthy.
+    pub fn task_status_line(&self) -> String {
+        let parts: Vec<String> = self
+            .task_statuses
+            .iter()
+            .filter_map(|(name, status)| match status {
+                TaskStatus::Restarting => Some(format!("{name}: restarting")),
+                TaskStatus::Running => None,
+            })
+            .collect();
+        parts.join(", ")
     }
 }
 
@@ -45,6 +69,7 @@ impl State {
             file_name_picker_query: String::new(),
             file_name_picker_results,
             file_name_picker_selected: 0,
+            task_statuses: Vec::new(),
         }
     }
 }
@@ -62,6 +87,7 @@ impl Default for State {
             file_name_picker_query: String::new(),
             file_name_picker_results: Vec::new(),
             file_name_picker_selected: 0,
+            task_statuses: Vec::new(),
         }
     }
 }
@@ -110,6 +136,8 @@ pub enum AppSignal {
     ScrollPreviewDown(usize),
     ScrollPreviewUp(usize),
     FilesChanged(Arc<BatchedWatchEvent>),
+    TaskRestarting(&'static str),
+    TaskRunning(&'static str),
     #[default]
     Noop,
 }

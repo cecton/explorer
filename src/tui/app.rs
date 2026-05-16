@@ -3,6 +3,7 @@ use super::preview::FilePreviewComponent;
 use super::state::{AppSignal, State};
 use crate::loader::LoadedFile;
 use crate::lsp;
+use crate::supervisor::{Supervisor, TaskStatus};
 use crate::watcher::start_watcher;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
@@ -20,12 +21,18 @@ use r3bl_tui::{
     send_signal, surface, throws, throws_with_return, tui_color, tui_styled_text, tui_styled_texts,
     tui_stylesheet,
 };
-use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
 type PickerResultMsg = (u64, Vec<(usize, Vec<u32>)>);
+
+/// Shared slot holding the sender side of the active LSP request channel.
+///
+/// The supervisor spawn closure creates a fresh `(tx, rx)` pair on every
+/// (re)spawn and stores `tx` here, so `AppMain` always sends to the live task.
+type LspTxSlot = Arc<Mutex<mpsc::Sender<usize>>>;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -48,14 +55,13 @@ impl From<Id> for FlexBoxId {
 }
 
 pub struct AppMain {
-    lsp_tx: mpsc::Sender<usize>,
-    lsp_rx: Option<mpsc::Receiver<usize>>,
+    lsp_tx: LspTxSlot,
     files: Arc<ArcSwap<Vec<LoadedFile>>>,
     root: Utf8PathBuf,
     picker_results_tx: mpsc::Sender<PickerResultMsg>,
     picker_results_rx: mpsc::Receiver<PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
-    watcher_started: bool,
+    supervisor: Supervisor,
 }
 
 impl AppMain {
@@ -63,17 +69,16 @@ impl AppMain {
         files: Arc<ArcSwap<Vec<LoadedFile>>>,
         root: Utf8PathBuf,
     ) -> BoxedSafeApp<State, AppSignal> {
-        let (lsp_tx, lsp_rx) = mpsc::channel(32);
+        let (lsp_tx, _) = mpsc::channel(32);
         let (picker_results_tx, picker_results_rx) = mpsc::channel(32);
         Box::new(Self {
-            lsp_tx,
-            lsp_rx: Some(lsp_rx),
+            lsp_tx: Arc::new(Mutex::new(lsp_tx)),
             files,
             root,
             picker_results_tx,
             picker_results_rx,
             picker_generation: Arc::new(AtomicU64::new(0)),
-            watcher_started: false,
+            supervisor: Supervisor::new(),
         })
     }
 
@@ -91,7 +96,6 @@ impl AppMain {
         });
     }
 
-    /// Builds the initial all-files results list, skipping removed files.
     fn all_files_results(files: &[LoadedFile]) -> Vec<(usize, Vec<u32>)> {
         files
             .iter()
@@ -169,6 +173,39 @@ impl App for AppMain {
 
         if has_focus.get_id().is_none() {
             has_focus.set_id(FlexBoxId::from(Id::FileNamePicker));
+        }
+    }
+
+    fn app_start(
+        &mut self,
+        global_data: &mut GlobalData<State, AppSignal>,
+        _component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
+        _has_focus: &mut HasFocus,
+    ) {
+        let notify_tx = global_data.main_thread_channel_sender.clone();
+        let files = Arc::clone(&self.files);
+        let root = self.root.clone();
+
+        // The spawn closure creates a fresh channel pair on every (re)spawn:
+        // stores tx in the shared slot so AppMain always sends to the live task.
+        let lsp_tx_slot = Arc::clone(&self.lsp_tx);
+        let lsp_notify = notify_tx.clone();
+        let lsp_files = Arc::clone(&files);
+        let lsp_root = root.clone();
+        self.supervisor.add(
+            "lsp",
+            Box::new(move || {
+                let (tx, rx) = mpsc::channel(32);
+                *lsp_tx_slot.lock().unwrap() = tx;
+                let notify = lsp_notify.clone();
+                let f = Arc::clone(&lsp_files);
+                let r = lsp_root.clone();
+                Box::pin(lsp::run(r, f, rx, notify))
+            }),
+        );
+
+        if let Err(e) = start_watcher(&root, notify_tx) {
+            tracing::warn!("watcher failed to start: {e}");
         }
     }
 
@@ -253,7 +290,7 @@ impl App for AppMain {
                     {
                         state.open_file = Some(file_idx);
                         state.preview_scroll = 0;
-                        let _ = self.lsp_tx.try_send(file_idx);
+                        let _ = self.lsp_tx.lock().unwrap().try_send(file_idx);
                     }
                     state.file_name_picker_open = false;
                     state.file_name_picker_query.clear();
@@ -335,10 +372,15 @@ impl App for AppMain {
                     }
                     state.bump_files_version();
                 }
+                AppSignal::TaskRestarting(name) => {
+                    state.set_task_status(name, TaskStatus::Restarting);
+                }
+                AppSignal::TaskRunning(name) => {
+                    state.set_task_status(name, TaskStatus::Running);
+                }
                 AppSignal::Noop => {}
             }
 
-            // Trigger async match for non-empty queries only.
             match action {
                 AppSignal::FileNamePickerChar(_) => {
                     let query = global_data.state.file_name_picker_query.clone();
@@ -363,21 +405,17 @@ impl App for AppMain {
         component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
         has_focus: &mut HasFocus,
     ) -> CommonResult<RenderPipeline> {
-        // Start the LSP task and filesystem watcher on the first render.
-        if let Some(lsp_rx) = self.lsp_rx.take() {
-            let notify_tx = global_data.main_thread_channel_sender.clone();
-            let files = Arc::clone(&self.files);
-            let root = self.root.clone();
-            tokio::spawn(async move {
-                lsp::run(root, files, lsp_rx, notify_tx).await;
-            });
-        }
-        if !self.watcher_started {
-            self.watcher_started = true;
-            start_watcher(&self.root, global_data.main_thread_channel_sender.clone());
+        for (name, status) in self.supervisor.poll() {
+            let signal = match status {
+                TaskStatus::Restarting => AppSignal::TaskRestarting(name),
+                TaskStatus::Running => AppSignal::TaskRunning(name),
+            };
+            send_signal!(
+                global_data.main_thread_channel_sender,
+                TerminalWindowMainThreadSignal::ApplyAppSignal(signal)
+            );
         }
 
-        // Drain async picker results; apply the latest matching generation.
         let current_generation = self.picker_generation.load(Ordering::Relaxed);
         while let Ok((arrived_generation, results)) = self.picker_results_rx.try_recv() {
             if arrived_generation == current_generation {
@@ -411,7 +449,12 @@ impl App for AppMain {
                 it
             };
 
-            render_status_bar(&mut surface.render_pipeline, window_size, picker_open);
+            render_status_bar(
+                &mut surface.render_pipeline,
+                window_size,
+                picker_open,
+                &global_data.state,
+            );
 
             surface.render_pipeline
         });
@@ -501,9 +544,10 @@ fn create_stylesheet() -> CommonResult<TuiStylesheet> {
     })
 }
 
-fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, picker_open: bool) {
+fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, picker_open: bool, state: &State) {
     let color_bg = tui_color!(30, 30, 50);
     let color_fg = tui_color!(180, 180, 220);
+    let color_warn = tui_color!(220, 160, 60);
 
     let hint = if picker_open {
         " Esc:Close  ↑↓:Select  Enter:Open"
@@ -511,10 +555,18 @@ fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, picker_open: boo
         " Ctrl+P:Open file  ↑↓/PgUp/PgDn:Scroll  Ctrl+C:Quit"
     };
 
+    let task_note = state.task_status_line();
+
+    let (text, fg) = if task_note.is_empty() {
+        (hint.to_string(), color_fg)
+    } else {
+        (format!("{hint}  [{task_note}]"), color_warn)
+    };
+
     let styled_texts = tui_styled_texts! {
         tui_styled_text! {
-            @style: new_style!(bold color_fg: {color_fg} color_bg: {color_bg}),
-            @text: hint
+            @style: new_style!(bold color_fg: {fg} color_bg: {color_bg}),
+            @text: text
         }
     };
 

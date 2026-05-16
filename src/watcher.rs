@@ -26,17 +26,14 @@ pub struct BatchedWatchEvent {
 pub fn start_watcher(
     root: &Utf8Path,
     signal_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-) {
+) -> notify::Result<()> {
     let (raw_tx, raw_rx) = mpsc::unbounded_channel::<notify::Result<notify::Event>>();
 
-    let mut watcher = RecommendedWatcher::new(raw_tx, notify::Config::default())
-        .expect("failed to create watcher");
-
-    watcher
-        .watch(root.as_std_path(), RecursiveMode::Recursive)
-        .expect("failed to watch root");
+    let mut watcher = RecommendedWatcher::new(raw_tx, notify::Config::default())?;
+    watcher.watch(root.as_std_path(), RecursiveMode::Recursive)?;
 
     tokio::spawn(debounce_task(root.to_owned(), raw_rx, signal_tx, watcher));
+    Ok(())
 }
 
 async fn debounce_task(
