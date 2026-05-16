@@ -49,6 +49,8 @@ async fn main() {
         })
         .collect();
 
+    let mut files = files;
+    files.sort_by(|a, b| a.path.cmp(&b.path));
     let files = Arc::new(ArcSwap::from_pointee(files));
 
     let initial_state = tui::build_state(Arc::clone(&files), root.clone());

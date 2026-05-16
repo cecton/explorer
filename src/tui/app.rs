@@ -365,6 +365,7 @@ impl App for AppMain {
                             })
                             .collect();
                         next.extend(new_files);
+                        next.sort_by(|a, b| a.path.cmp(&b.path));
                         self.files.store(Arc::new(next));
                     }
 
