@@ -21,79 +21,63 @@ pub struct BatchedWatchEvent {
 
 pub fn start_watcher(root: &Utf8Path) -> mpsc::Receiver<BatchedWatchEvent> {
     let (batch_tx, batch_rx) = mpsc::channel(32);
-    let (raw_tx, raw_rx) = std::sync::mpsc::channel::<(Utf8PathBuf, RawKind)>();
-    // Bridge: std::thread does a blocking recv loop and forwards into tokio mpsc.
-    let (bridge_tx, bridge_rx) = mpsc::channel::<(Utf8PathBuf, RawKind)>(128);
+    // notify v9 with the tokio feature implements EventHandler for
+    // UnboundedSender<Result<Event>> directly — no bridge thread needed.
+    let (raw_tx, raw_rx) = mpsc::unbounded_channel::<notify::Result<notify::Event>>();
 
-    let root_clone = root.to_owned();
-    let mut watcher = RecommendedWatcher::new(
-        move |res: notify::Result<notify::Event>| {
-            let Ok(event) = res else { return };
-            let kind = match event.kind {
-                EventKind::Create(_) => RawKind::Created,
-                EventKind::Modify(_) => RawKind::Modified,
-                EventKind::Remove(_) => RawKind::Removed,
-                _ => return,
-            };
-            for path in event.paths {
-                let Ok(utf8) = Utf8PathBuf::from_path_buf(path) else {
-                    continue;
-                };
-                // Filter out .git and target subtrees.
-                let Ok(rel) = utf8.strip_prefix(&root_clone) else {
-                    continue;
-                };
-                let first = rel.components().next().map(|c| c.as_str());
-                if matches!(first, Some(".git") | Some("target")) {
-                    continue;
-                }
-                let _ = raw_tx.send((utf8, kind));
-            }
-        },
-        notify::Config::default(),
-    )
-    .expect("failed to create watcher");
+    let mut watcher = RecommendedWatcher::new(raw_tx, notify::Config::default())
+        .expect("failed to create watcher");
 
     watcher
         .watch(root.as_std_path(), RecursiveMode::Recursive)
         .expect("failed to watch root");
 
-    // Blocking bridge thread: parks when no events, zero CPU when idle.
-    std::thread::spawn(move || {
-        while let Ok(event) = raw_rx.recv() {
-            if bridge_tx.blocking_send(event).is_err() {
-                break;
-            }
-        }
-    });
-
-    tokio::spawn(debounce_task(bridge_rx, batch_tx, watcher));
+    tokio::spawn(debounce_task(root.to_owned(), raw_rx, batch_tx, watcher));
 
     batch_rx
 }
 
 async fn debounce_task(
-    tokio_rx: mpsc::Receiver<(Utf8PathBuf, RawKind)>,
+    root: Utf8PathBuf,
+    mut raw_rx: mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
     batch_tx: mpsc::Sender<BatchedWatchEvent>,
     // Kept alive for the duration of the task.
     _watcher: RecommendedWatcher,
 ) {
     let mut pending: HashMap<Utf8PathBuf, RawKind> = HashMap::new();
-    let mut tokio_rx = tokio_rx;
 
     loop {
-        match tokio::time::timeout(Duration::from_millis(DEBOUNCE_MS), tokio_rx.recv()).await {
-            Ok(Some((path, kind))) => {
-                let entry = pending.entry(path).or_insert(kind);
-                // Conflict resolution: removed wins; created+modified collapses to created.
-                match (*entry, kind) {
-                    (_, RawKind::Removed) => *entry = RawKind::Removed,
-                    (RawKind::Created, RawKind::Modified) => {}
-                    (RawKind::Modified, RawKind::Created) => *entry = RawKind::Created,
-                    _ => *entry = kind,
+        match tokio::time::timeout(Duration::from_millis(DEBOUNCE_MS), raw_rx.recv()).await {
+            Ok(Some(Ok(event))) => {
+                let kind = match event.kind {
+                    EventKind::Create(_) => RawKind::Created,
+                    EventKind::Modify(_) => RawKind::Modified,
+                    EventKind::Remove(_) => RawKind::Removed,
+                    _ => continue,
+                };
+                for path in event.paths {
+                    let Ok(utf8) = Utf8PathBuf::from_path_buf(path) else {
+                        continue;
+                    };
+                    // Filter out .git and target subtrees.
+                    let Ok(rel) = utf8.strip_prefix(&root) else {
+                        continue;
+                    };
+                    let first = rel.components().next().map(|c| c.as_str());
+                    if matches!(first, Some(".git") | Some("target")) {
+                        continue;
+                    }
+                    let entry = pending.entry(utf8).or_insert(kind);
+                    // Conflict resolution: removed wins; created+modified collapses to created.
+                    match (*entry, kind) {
+                        (_, RawKind::Removed) => *entry = RawKind::Removed,
+                        (RawKind::Created, RawKind::Modified) => {}
+                        (RawKind::Modified, RawKind::Created) => *entry = RawKind::Created,
+                        _ => *entry = kind,
+                    }
                 }
             }
-            Ok(None) => return,
+            Ok(Some(Err(_))) | Ok(None) => return,
             Err(_timeout) => {
                 if pending.is_empty() {
                     continue;

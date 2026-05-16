@@ -7,7 +7,7 @@ edition = "2024"
 arc-swap = "1"
 camino = "1"
 jwalk = "0.8"
-notify = "8"
+notify = { version = "9.0.0-rc.4", features = ["tokio"] }
 lsp-types = { version = "0.97", features = ["proposed"] }
 nucleo = "0.5"
 pico-args = "0.5"
