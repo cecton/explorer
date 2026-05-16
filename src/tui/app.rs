@@ -233,6 +233,13 @@ impl App for AppMain {
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
         if let InputEvent::Keyboard(KeyPress::WithModifiers { key, mask }) = input_event
+            && key == Key::Character('c')
+            && mask == ModifierKeysMask::new().with_ctrl()
+        {
+            return Ok(EventPropagation::ExitMainEventLoop);
+        }
+
+        if let InputEvent::Keyboard(KeyPress::WithModifiers { key, mask }) = input_event
             && key == Key::Character('p')
             && mask == ModifierKeysMask::new().with_ctrl()
         {
@@ -599,7 +606,7 @@ fn render_status_bar(pipeline: &mut RenderPipeline, size: Size, picker_open: boo
     let color_warn = tui_color!(220, 160, 60);
 
     let hint = if picker_open {
-        " Esc:Close  ↑↓:Select  Enter:Open"
+        " Esc:Close  ↑↓:Select  Enter:Open  Ctrl+C:Quit"
     } else {
         " Ctrl+P:Open file  ↑↓/PgUp/PgDn:Scroll  Ctrl+C:Quit"
     };
