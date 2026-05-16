@@ -1,4 +1,4 @@
-use super::app::Id;
+use super::app::{Id, resolve_selected};
 use super::state::{AppSignal, State};
 use r3bl_tui::{
     BoxedSafeComponent, CommonResult, Component, EditMode, EditorComponent, EditorEngineConfig,
@@ -135,7 +135,14 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
 
             let mut render_ops = RenderOpIRVec::new();
 
-            let selected = global_data.state.file_name_picker_selected;
+            let selected = {
+                let snapshot = global_data.state.files.load();
+                resolve_selected(
+                    &global_data.state.file_name_picker_selected,
+                    &global_data.state.file_name_picker_results,
+                    &snapshot,
+                )
+            };
             let result_count = global_data.state.file_name_picker_results.len();
 
             if selected < self.scroll_offset {

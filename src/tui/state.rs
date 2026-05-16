@@ -23,7 +23,7 @@ pub struct State {
     pub file_name_picker_open: bool,
     /// Each entry: (index into files snapshot, sorted+deduped matched char positions from nucleo).
     pub file_name_picker_results: Vec<(usize, Vec<u32>)>,
-    pub file_name_picker_selected: usize,
+    pub file_name_picker_selected: Option<camino::Utf8PathBuf>,
     /// Last known status for each supervised task, keyed by task name.
     pub task_statuses: Vec<(&'static str, TaskStatus)>,
     pub editor_buffers: HashMap<FlexBoxId, EditorBuffer>,
@@ -83,7 +83,7 @@ impl State {
             preview_page_size: 0,
             file_name_picker_open: true,
             file_name_picker_results,
-            file_name_picker_selected: 0,
+            file_name_picker_selected: None,
             task_statuses: Vec::new(),
             editor_buffers: HashMap::new(),
         }
@@ -101,7 +101,7 @@ impl Default for State {
             preview_page_size: 0,
             file_name_picker_open: false,
             file_name_picker_results: Vec::new(),
-            file_name_picker_selected: 0,
+            file_name_picker_selected: None,
             task_statuses: Vec::new(),
             editor_buffers: HashMap::new(),
         }
@@ -116,6 +116,7 @@ impl PartialEq for State {
             && self.preview_scroll == other.preview_scroll
             && self.file_name_picker_open == other.file_name_picker_open
             && self.file_name_picker_selected == other.file_name_picker_selected
+            && self.file_name_picker_results.len() == other.file_name_picker_results.len()
     }
 }
 

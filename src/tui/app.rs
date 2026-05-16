@@ -147,6 +147,21 @@ fn run_file_name_match(
     scored.into_iter().map(|(i, _, idx)| (i, idx)).collect()
 }
 
+pub(super) fn resolve_selected(
+    selected: &Option<camino::Utf8PathBuf>,
+    results: &[(usize, Vec<u32>)],
+    files: &[LoadedFile],
+) -> usize {
+    let path = match selected {
+        None => return 0,
+        Some(p) => p,
+    };
+    results
+        .iter()
+        .position(|(file_idx, _)| files[*file_idx].path == *path)
+        .unwrap_or(0)
+}
+
 impl App for AppMain {
     type S = State;
     type AS = AppSignal;
@@ -314,7 +329,7 @@ impl App for AppMain {
             match action {
                 AppSignal::OpenFileNamePicker => {
                     state.file_name_picker_open = true;
-                    state.file_name_picker_selected = 0;
+                    state.file_name_picker_selected = None;
                     let snapshot = state.files.load();
                     state.file_name_picker_results = AppMain::all_files_results(&snapshot);
                     let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
@@ -330,11 +345,10 @@ impl App for AppMain {
                 AppSignal::CloseFileNamePicker => {
                     state.file_name_picker_open = false;
                     state.file_name_picker_results.clear();
-                    state.file_name_picker_selected = 0;
+                    state.file_name_picker_selected = None;
                     has_focus.set_id(FlexBoxId::from(Id::Preview));
                 }
                 AppSignal::FileNamePickerQueryChanged => {
-                    state.file_name_picker_selected = 0;
                     let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
                     let query = state
                         .editor_buffers
@@ -351,26 +365,44 @@ impl App for AppMain {
                 AppSignal::FileNamePickerSelectNext => {
                     let count = state.file_name_picker_results.len();
                     if count > 0 {
-                        state.file_name_picker_selected =
-                            (state.file_name_picker_selected + 1).min(count - 1);
+                        let snapshot = state.files.load();
+                        let current = resolve_selected(
+                            &state.file_name_picker_selected,
+                            &state.file_name_picker_results,
+                            &snapshot,
+                        );
+                        let next = (current + 1).min(count - 1);
+                        let (file_idx, _) = &state.file_name_picker_results[next];
+                        state.file_name_picker_selected = Some(snapshot[*file_idx].path.clone());
                     }
                 }
                 AppSignal::FileNamePickerSelectPrev => {
-                    state.file_name_picker_selected =
-                        state.file_name_picker_selected.saturating_sub(1);
+                    let snapshot = state.files.load();
+                    let current = resolve_selected(
+                        &state.file_name_picker_selected,
+                        &state.file_name_picker_results,
+                        &snapshot,
+                    );
+                    let prev = current.saturating_sub(1);
+                    if let Some((file_idx, _)) = state.file_name_picker_results.get(prev) {
+                        state.file_name_picker_selected = Some(snapshot[*file_idx].path.clone());
+                    }
                 }
                 AppSignal::FileNamePickerConfirm => {
-                    if let Some(&(file_idx, _)) = state
-                        .file_name_picker_results
-                        .get(state.file_name_picker_selected)
-                    {
+                    let snapshot = state.files.load();
+                    let selected = resolve_selected(
+                        &state.file_name_picker_selected,
+                        &state.file_name_picker_results,
+                        &snapshot,
+                    );
+                    if let Some(&(file_idx, _)) = state.file_name_picker_results.get(selected) {
                         state.open_file = Some(file_idx);
                         state.preview_scroll = 0;
                         let _ = self.lsp_tx.lock().unwrap().try_send(file_idx);
                     }
                     state.file_name_picker_open = false;
                     state.file_name_picker_results.clear();
-                    state.file_name_picker_selected = 0;
+                    state.file_name_picker_selected = None;
                     has_focus.set_id(FlexBoxId::from(Id::Preview));
                 }
                 AppSignal::ScrollPreviewDown(n) => {
