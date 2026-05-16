@@ -3,6 +3,8 @@ use crate::supervisor::TaskStatus;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
+use r3bl_tui::{EditorBuffer, FlexBoxId, HasEditorBuffers};
+use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -19,12 +21,26 @@ pub struct State {
     pub preview_scroll: usize,
     pub preview_page_size: usize,
     pub file_name_picker_open: bool,
-    pub file_name_picker_query: String,
     /// Each entry: (index into files snapshot, sorted+deduped matched char positions from nucleo).
     pub file_name_picker_results: Vec<(usize, Vec<u32>)>,
     pub file_name_picker_selected: usize,
     /// Last known status for each supervised task, keyed by task name.
     pub task_statuses: Vec<(&'static str, TaskStatus)>,
+    pub editor_buffers: HashMap<FlexBoxId, EditorBuffer>,
+}
+
+impl HasEditorBuffers for State {
+    fn get_mut_editor_buffer(&mut self, id: FlexBoxId) -> Option<&mut EditorBuffer> {
+        self.editor_buffers.get_mut(&id)
+    }
+
+    fn insert_editor_buffer(&mut self, id: FlexBoxId, buffer: EditorBuffer) {
+        self.editor_buffers.insert(id, buffer);
+    }
+
+    fn contains_editor_buffer(&self, id: FlexBoxId) -> bool {
+        self.editor_buffers.contains_key(&id)
+    }
 }
 
 impl State {
@@ -66,10 +82,10 @@ impl State {
             preview_scroll: 0,
             preview_page_size: 0,
             file_name_picker_open: true,
-            file_name_picker_query: String::new(),
             file_name_picker_results,
             file_name_picker_selected: 0,
             task_statuses: Vec::new(),
+            editor_buffers: HashMap::new(),
         }
     }
 }
@@ -84,10 +100,10 @@ impl Default for State {
             preview_scroll: 0,
             preview_page_size: 0,
             file_name_picker_open: false,
-            file_name_picker_query: String::new(),
             file_name_picker_results: Vec::new(),
             file_name_picker_selected: 0,
             task_statuses: Vec::new(),
+            editor_buffers: HashMap::new(),
         }
     }
 }
@@ -99,7 +115,6 @@ impl PartialEq for State {
             && self.open_file == other.open_file
             && self.preview_scroll == other.preview_scroll
             && self.file_name_picker_open == other.file_name_picker_open
-            && self.file_name_picker_query == other.file_name_picker_query
             && self.file_name_picker_selected == other.file_name_picker_selected
     }
 }
@@ -128,8 +143,7 @@ impl Display for State {
 pub enum AppSignal {
     OpenFileNamePicker,
     CloseFileNamePicker,
-    FileNamePickerChar(char),
-    FileNamePickerBackspace,
+    FileNamePickerQueryChanged,
     FileNamePickerSelectNext,
     FileNamePickerSelectPrev,
     FileNamePickerConfirm,

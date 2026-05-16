@@ -12,10 +12,10 @@ use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Utf32Str};
 use r3bl_tui::{
     App, BoxedSafeApp, CommonResult, ComponentRegistry, ComponentRegistryMap, ContainsResult,
-    EventPropagation, FlexBoxId, GlobalData, HasFocus, InputDevice, InputEvent, Key, KeyPress,
-    LayoutDirection, LayoutManagement, LengthOps, ModifierKeysMask, OutputDevice,
+    EditorBuffer, EventPropagation, FlexBoxId, GlobalData, HasFocus, InputDevice, InputEvent, Key,
+    KeyPress, LayoutDirection, LayoutManagement, LengthOps, ModifierKeysMask, OutputDevice,
     PerformPositioningAndSizing, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
-    SPACER_GLYPH, Size, Surface, SurfaceProps, SurfaceRender, TerminalWindow,
+    SPACER_GLYPH, Size, SpecialKey, Surface, SurfaceProps, SurfaceRender, TerminalWindow,
     TerminalWindowMainThreadSignal, TuiStylesheet, ZOrder, box_end, box_start, col, height,
     new_style, ok, render_component_in_current_box, render_tui_styled_texts_into, req_size_pc, row,
     send_signal, surface, throws, throws_with_return, tui_color, tui_styled_text, tui_styled_texts,
@@ -40,6 +40,7 @@ pub enum Id {
     Container = 1,
     FileNamePicker = 2,
     Preview = 3,
+    FileNamePickerEditor = 4,
 }
 
 impl From<Id> for u8 {
@@ -80,7 +81,11 @@ impl AppMain {
         })
     }
 
-    fn trigger_match(&self, query: String) {
+    fn trigger_match(
+        &self,
+        query: String,
+        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+    ) {
         let generation = self.picker_generation.fetch_add(1, Ordering::Relaxed) + 1;
         let snapshot = self.files.load_full();
         let root = self.root.clone();
@@ -90,6 +95,10 @@ impl AppMain {
             let results = run_file_name_match(&query, &snapshot, &root);
             if gen_counter.load(Ordering::Relaxed) == generation {
                 let _ = tx.try_send((generation, results));
+                send_signal!(
+                    main_tx,
+                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::Noop)
+                );
             }
         });
     }
@@ -234,6 +243,50 @@ impl App for AppMain {
             return Ok(EventPropagation::ConsumedRender);
         }
 
+        if global_data.state.file_name_picker_open
+            && let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
+        {
+            match key {
+                Key::SpecialKey(SpecialKey::Esc) => {
+                    send_signal!(
+                        global_data.main_thread_channel_sender,
+                        TerminalWindowMainThreadSignal::ApplyAppSignal(
+                            AppSignal::CloseFileNamePicker
+                        )
+                    );
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                Key::SpecialKey(SpecialKey::Enter) => {
+                    send_signal!(
+                        global_data.main_thread_channel_sender,
+                        TerminalWindowMainThreadSignal::ApplyAppSignal(
+                            AppSignal::FileNamePickerConfirm
+                        )
+                    );
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                Key::SpecialKey(SpecialKey::Up) => {
+                    send_signal!(
+                        global_data.main_thread_channel_sender,
+                        TerminalWindowMainThreadSignal::ApplyAppSignal(
+                            AppSignal::FileNamePickerSelectPrev
+                        )
+                    );
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                Key::SpecialKey(SpecialKey::Down) => {
+                    send_signal!(
+                        global_data.main_thread_channel_sender,
+                        TerminalWindowMainThreadSignal::ApplyAppSignal(
+                            AppSignal::FileNamePickerSelectNext
+                        )
+                    );
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                _ => {}
+            }
+        }
+
         ComponentRegistry::route_event_to_focused_component(
             global_data,
             input_event,
@@ -254,29 +307,38 @@ impl App for AppMain {
             match action {
                 AppSignal::OpenFileNamePicker => {
                     state.file_name_picker_open = true;
-                    state.file_name_picker_query.clear();
                     state.file_name_picker_selected = 0;
                     let snapshot = state.files.load();
                     state.file_name_picker_results = AppMain::all_files_results(&snapshot);
+                    let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
+                    if let Some(buf) = state.editor_buffers.get_mut(&editor_id) {
+                        buf.init_with([""])
+                    } else {
+                        state
+                            .editor_buffers
+                            .insert(editor_id, EditorBuffer::new_empty(None, None));
+                    }
                     has_focus.set_id(FlexBoxId::from(Id::FileNamePicker));
                 }
                 AppSignal::CloseFileNamePicker => {
                     state.file_name_picker_open = false;
-                    state.file_name_picker_query.clear();
                     state.file_name_picker_results.clear();
                     state.file_name_picker_selected = 0;
                     has_focus.set_id(FlexBoxId::from(Id::Preview));
                 }
-                AppSignal::FileNamePickerChar(c) => {
-                    state.file_name_picker_query.push(*c);
+                AppSignal::FileNamePickerQueryChanged => {
                     state.file_name_picker_selected = 0;
-                }
-                AppSignal::FileNamePickerBackspace => {
-                    state.file_name_picker_query.pop();
-                    state.file_name_picker_selected = 0;
-                    if state.file_name_picker_query.is_empty() {
+                    let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
+                    let query = state
+                        .editor_buffers
+                        .get(&editor_id)
+                        .map(|b| b.get_as_string_with_newlines().to_string())
+                        .unwrap_or_default();
+                    if query.is_empty() {
                         let snapshot = state.files.load();
                         state.file_name_picker_results = AppMain::all_files_results(&snapshot);
+                    } else {
+                        self.trigger_match(query, global_data.main_thread_channel_sender.clone());
                     }
                 }
                 AppSignal::FileNamePickerSelectNext => {
@@ -300,7 +362,6 @@ impl App for AppMain {
                         let _ = self.lsp_tx.lock().unwrap().try_send(file_idx);
                     }
                     state.file_name_picker_open = false;
-                    state.file_name_picker_query.clear();
                     state.file_name_picker_results.clear();
                     state.file_name_picker_selected = 0;
                     has_focus.set_id(FlexBoxId::from(Id::Preview));
@@ -371,11 +432,19 @@ impl App for AppMain {
 
                     let snapshot = self.files.load();
                     if state.file_name_picker_open {
-                        if state.file_name_picker_query.is_empty() {
+                        let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
+                        let query = state
+                            .editor_buffers
+                            .get(&editor_id)
+                            .map(|b| b.get_as_string_with_newlines().to_string())
+                            .unwrap_or_default();
+                        if query.is_empty() {
                             state.file_name_picker_results = AppMain::all_files_results(&snapshot);
                         } else {
-                            let query = state.file_name_picker_query.clone();
-                            self.trigger_match(query);
+                            self.trigger_match(
+                                query,
+                                global_data.main_thread_channel_sender.clone(),
+                            );
                         }
                     }
                     state.bump_files_version();
@@ -387,20 +456,6 @@ impl App for AppMain {
                     state.set_task_status(name, TaskStatus::Running);
                 }
                 AppSignal::Noop => {}
-            }
-
-            match action {
-                AppSignal::FileNamePickerChar(_) => {
-                    let query = global_data.state.file_name_picker_query.clone();
-                    self.trigger_match(query);
-                }
-                AppSignal::FileNamePickerBackspace
-                    if !global_data.state.file_name_picker_query.is_empty() =>
-                {
-                    let query = global_data.state.file_name_picker_query.clone();
-                    self.trigger_match(query);
-                }
-                _ => {}
             }
 
             EventPropagation::ConsumedRender
@@ -424,7 +479,7 @@ impl App for AppMain {
             let window_size = global_data.window_size;
             let picker_open = global_data.state.file_name_picker_open;
 
-            let mut surface = {
+            let surface = {
                 let mut it = surface!(stylesheet: create_stylesheet()?);
                 it.surface_start(SurfaceProps {
                     pos: col(0) + row(0),
@@ -446,14 +501,11 @@ impl App for AppMain {
                 it
             };
 
-            render_status_bar(
-                &mut surface.render_pipeline,
-                window_size,
-                picker_open,
-                &global_data.state,
-            );
+            let mut pipeline = surface.render_pipeline;
 
-            surface.render_pipeline
+            render_status_bar(&mut pipeline, window_size, picker_open, &global_data.state);
+
+            pipeline
         });
     }
 }
