@@ -1,6 +1,7 @@
 use std::future::Future;
 use std::pin::Pin;
 use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 /// How long a task must stay alive before its restart counter is reset.
@@ -11,6 +12,9 @@ const BASE_RESTART_DELAY: Duration = Duration::from_secs(1);
 
 /// Maximum back-off delay regardless of failure count.
 const MAX_RESTART_DELAY: Duration = Duration::from_secs(30);
+
+/// How often the background supervisor task polls for task health.
+const POLL_INTERVAL: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum TaskStatus {
@@ -54,8 +58,9 @@ impl Entry {
 
 /// Lightweight supervisor for a small, fixed set of long-lived async tasks.
 ///
-/// Call [`Supervisor::poll`] regularly (e.g. on every render) to detect
-/// failures and apply scheduled restarts. No background task is spawned.
+/// Call [`Supervisor::start`] once to hand off supervision to a background task
+/// that polls every [`POLL_INTERVAL`] and sends status-change signals on the
+/// provided channel.
 pub struct Supervisor {
     entries: Vec<Entry>,
 }
@@ -74,10 +79,30 @@ impl Supervisor {
         self.entries.push(Entry::new(name, spawn));
     }
 
-    /// Poll all tasks. Returns a list of names that changed status this call.
+    /// Consume the supervisor and start a background tokio task that polls
+    /// every [`POLL_INTERVAL`], restarting tasks and forwarding status-change
+    /// signals on `sender`.
+    pub fn start<S>(
+        mut self,
+        sender: mpsc::Sender<S>,
+        make_signal: impl Fn(&'static str, TaskStatus) -> S + Send + 'static,
+    ) where
+        S: Send + 'static,
+    {
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(POLL_INTERVAL).await;
+                for (name, status) in self.poll() {
+                    let _ = sender.send(make_signal(name, status)).await;
+                }
+            }
+        });
+    }
+
+    /// Poll all tasks. Returns entries that changed status this call.
     ///
-    /// Call this on every render frame; `is_finished()` is non-blocking.
-    pub fn poll(&mut self) -> Vec<(&'static str, TaskStatus)> {
+    /// `is_finished()` is non-blocking.
+    fn poll(&mut self) -> Vec<(&'static str, TaskStatus)> {
         let now = Instant::now();
         let mut events = Vec::new();
 

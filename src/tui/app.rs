@@ -61,7 +61,6 @@ pub struct AppMain {
     picker_results_tx: mpsc::Sender<PickerResultMsg>,
     picker_results_rx: mpsc::Receiver<PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
-    supervisor: Supervisor,
 }
 
 impl AppMain {
@@ -78,7 +77,6 @@ impl AppMain {
             picker_results_tx,
             picker_results_rx,
             picker_generation: Arc::new(AtomicU64::new(0)),
-            supervisor: Supervisor::new(),
         })
     }
 
@@ -192,7 +190,8 @@ impl App for AppMain {
         let lsp_notify = notify_tx.clone();
         let lsp_files = Arc::clone(&files);
         let lsp_root = root.clone();
-        self.supervisor.add(
+        let mut supervisor = Supervisor::new();
+        supervisor.add(
             "lsp",
             Box::new(move || {
                 let (tx, rx) = mpsc::channel(32);
@@ -203,6 +202,14 @@ impl App for AppMain {
                 Box::pin(lsp::run(r, f, rx, notify))
             }),
         );
+
+        supervisor.start(notify_tx.clone(), |name, status| {
+            let signal = match status {
+                TaskStatus::Restarting => AppSignal::TaskRestarting(name),
+                TaskStatus::Running => AppSignal::TaskRunning(name),
+            };
+            TerminalWindowMainThreadSignal::ApplyAppSignal(signal)
+        });
 
         if let Err(e) = start_watcher(&root, notify_tx) {
             tracing::warn!("watcher failed to start: {e}");
@@ -405,17 +412,6 @@ impl App for AppMain {
         component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
         has_focus: &mut HasFocus,
     ) -> CommonResult<RenderPipeline> {
-        for (name, status) in self.supervisor.poll() {
-            let signal = match status {
-                TaskStatus::Restarting => AppSignal::TaskRestarting(name),
-                TaskStatus::Running => AppSignal::TaskRunning(name),
-            };
-            send_signal!(
-                global_data.main_thread_channel_sender,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(signal)
-            );
-        }
-
         let current_generation = self.picker_generation.load(Ordering::Relaxed);
         while let Ok((arrived_generation, results)) = self.picker_results_rx.try_recv() {
             if arrived_generation == current_generation {
