@@ -24,7 +24,7 @@ use r3bl_tui::{
 };
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 use tokio::sync::mpsc;
 
 type PickerResultMsg = (u64, Vec<(FileKey, Vec<u32>)>);
@@ -158,12 +158,14 @@ pub struct AppMain {
     picker_results_tx: mpsc::Sender<PickerResultMsg>,
     picker_results_rx: mpsc::Receiver<PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
+    exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
 }
 
 impl AppMain {
     fn new_boxed(
         files: Arc<ArcSwap<Vec<LoadedFile>>>,
         root: Utf8PathBuf,
+        exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
     ) -> BoxedSafeApp<State, AppSignal> {
         let (lsp_tx, _) = mpsc::channel(32);
         let (picker_results_tx, picker_results_rx) = mpsc::channel(32);
@@ -174,6 +176,7 @@ impl AppMain {
             picker_results_tx,
             picker_results_rx,
             picker_generation: Arc::new(AtomicU64::new(0)),
+            exit_tx,
         })
     }
 
@@ -291,6 +294,9 @@ impl App for AppMain {
         _has_focus: &mut HasFocus,
     ) {
         let notify_tx = global_data.main_thread_channel_sender.clone();
+
+        // Publish the channel sender so the SIGTERM handler can request a clean exit.
+        let _ = self.exit_tx.set(notify_tx.clone());
         let files = Arc::clone(&self.files);
         let root = self.root.clone();
 
@@ -990,12 +996,47 @@ pub async fn run(
     files: Arc<ArcSwap<Vec<LoadedFile>>>,
     root: Utf8PathBuf,
 ) -> CommonResult<()> {
-    let app = AppMain::new_boxed(files, root);
+    let exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>> =
+        Arc::new(OnceLock::new());
+    let exit_message: Arc<OnceLock<&'static str>> = Arc::new(OnceLock::new());
+
+    // Send Exit to the TUI event loop on SIGTERM/SIGINT so RawMode::end() runs cleanly.
+    for (kind, message) in [
+        (
+            tokio::signal::unix::SignalKind::terminate(),
+            "MUST TERMINATE ALL HUMANS",
+        ),
+        (
+            tokio::signal::unix::SignalKind::interrupt(),
+            "How DARE you interrupt me!",
+        ),
+    ] {
+        let exit_tx_signal = Arc::clone(&exit_tx);
+        let exit_message_signal = Arc::clone(&exit_message);
+        tokio::spawn(async move {
+            if tokio::signal::unix::signal(kind)
+                .expect("failed to register signal handler")
+                .recv()
+                .await
+                .is_some()
+            {
+                let _ = exit_message_signal.set(message);
+                if let Some(tx) = exit_tx_signal.get() {
+                    let _ = tx.send(TerminalWindowMainThreadSignal::Exit).await;
+                }
+            }
+        });
+    }
+
+    let app = AppMain::new_boxed(files, root, exit_tx);
     let exit_keys = &[InputEvent::Keyboard(KeyPress::WithModifiers {
         key: Key::Character('c'),
         mask: ModifierKeysMask::new().with_ctrl(),
     })];
     let _unused: (GlobalData<_, _>, InputDevice, OutputDevice) =
         TerminalWindow::main_event_loop(app, exit_keys, initial_state)?.await?;
+    if let Some(msg) = exit_message.get() {
+        eprintln!("{msg}");
+    }
     ok!()
 }
