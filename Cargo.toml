@@ -10,7 +10,8 @@ edition = "2024"
 arc-swap = "1"
 camino = "1"
 jwalk = "0.8"
-notify = { version = "9.0.0-rc.4", features = ["tokio"] }
+miette = "7"
+notify = "8"
 lsp-types = { version = "0.97", features = ["proposed"] }
 nucleo = "0.5"
 pico-args = "0.5"
@@ -23,6 +24,7 @@ tracing-core = "0.1"
 
 [patch.crates-io]
 # incremental = false  # Disable to avoid rustc dep graph ICE on nightly
+
 # Temporary patch: proc-macro2 1.0.106 is broken with nightly-2026-02-15
 # (missing #![feature(proc_macro_span)] in main crate compilation).
 # Remove before merge once a fixed release is published.

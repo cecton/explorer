@@ -1,13 +1,16 @@
 use crate::tui::state::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use r3bl_tui::TerminalWindowMainThreadSignal;
+use r3bl_tui::{Continuation, RRT, RRTEvent, RRTSoftwareInterrupt, RRTWorker, RestartPolicy};
 use std::collections::HashMap;
-use std::sync::Arc;
-use tokio::sync::mpsc;
-use tokio::time::Duration;
+use std::fmt::Debug;
+use std::sync::mpsc;
+use std::time::Duration;
+use tokio::sync::broadcast::Sender;
 
-const DEBOUNCE_MS: u64 = 50;
+const DEBOUNCE: Duration = Duration::from_millis(50);
+
+pub static WATCHER_RRT: RRT<WatcherWorker> = RRT::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RawKind {
@@ -23,51 +26,86 @@ pub struct BatchedWatchEvent {
     pub removed: Vec<Utf8PathBuf>,
 }
 
-pub fn start_watcher(
-    root: &Utf8Path,
-    signal_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-) -> notify::Result<()> {
-    let (raw_tx, raw_rx) = mpsc::unbounded_channel::<notify::Result<notify::Event>>();
+#[derive(Debug)]
+pub struct NoOpInterrupt;
 
-    let mut watcher = RecommendedWatcher::new(raw_tx, notify::Config::default())?;
-    watcher.watch(root.as_std_path(), RecursiveMode::Recursive)?;
-
-    tokio::spawn(debounce_task(root.to_owned(), raw_rx, signal_tx, watcher));
-    Ok(())
+impl RRTSoftwareInterrupt for NoOpInterrupt {
+    fn trigger_software_interrupt(&self) {}
 }
 
-async fn debounce_task(
+pub struct WatcherWorker {
     root: Utf8PathBuf,
-    mut raw_rx: mpsc::UnboundedReceiver<notify::Result<notify::Event>>,
-    signal_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-    // Kept alive for the duration of the task.
+    rx: mpsc::Receiver<notify::Result<notify::Event>>,
+    pending: HashMap<Utf8PathBuf, RawKind>,
+    // Held to keep the watcher alive for the duration of the worker.
     _watcher: RecommendedWatcher,
-) {
-    let mut pending: HashMap<Utf8PathBuf, RawKind> = HashMap::new();
+}
 
-    loop {
-        match tokio::time::timeout(Duration::from_millis(DEBOUNCE_MS), raw_rx.recv()).await {
-            Ok(Some(Ok(event))) => {
+impl Debug for WatcherWorker {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WatcherWorker")
+            .field("root", &self.root)
+            .finish()
+    }
+}
+
+impl RRTWorker for WatcherWorker {
+    type Event = AppSignal;
+    type Interrupt = NoOpInterrupt;
+
+    fn create_and_register_os_sources() -> miette::Result<(Self, Self::Interrupt)> {
+        // Root is stored on the static at startup; read it from the global.
+        let root = WATCHER_ROOT
+            .get()
+            .expect("WATCHER_ROOT must be set before subscribing")
+            .clone();
+
+        let (tx, rx) = mpsc::channel();
+        let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())
+            .map_err(|e| miette::miette!("notify watcher error: {e}"))?;
+        watcher
+            .watch(root.as_std_path(), RecursiveMode::Recursive)
+            .map_err(|e| miette::miette!("notify watch error: {e}"))?;
+
+        Ok((
+            Self {
+                root,
+                rx,
+                pending: HashMap::new(),
+                _watcher: watcher,
+            },
+            NoOpInterrupt,
+        ))
+    }
+
+    fn restart_policy() -> RestartPolicy {
+        RestartPolicy::default()
+    }
+
+    fn block_until_ready_then_dispatch(
+        &mut self,
+        sender: &Sender<RRTEvent<Self::Event>>,
+    ) -> Continuation {
+        match self.rx.recv_timeout(DEBOUNCE) {
+            Ok(Ok(event)) => {
                 let kind = match event.kind {
                     EventKind::Create(_) => RawKind::Created,
                     EventKind::Modify(_) => RawKind::Modified,
                     EventKind::Remove(_) => RawKind::Removed,
-                    _ => continue,
+                    _ => return Continuation::Continue,
                 };
                 for path in event.paths {
                     let Ok(utf8) = Utf8PathBuf::from_path_buf(path) else {
                         continue;
                     };
-                    // Filter out .git and target subtrees.
-                    let Ok(rel) = utf8.strip_prefix(&root) else {
+                    let Ok(rel) = utf8.strip_prefix(&self.root) else {
                         continue;
                     };
                     let first = rel.components().next().map(|c| c.as_str());
                     if matches!(first, Some(".git") | Some("target")) {
                         continue;
                     }
-                    let entry = pending.entry(utf8).or_insert(kind);
-                    // Conflict resolution: removed wins; created+modified collapses to created.
+                    let entry = self.pending.entry(utf8).or_insert(kind);
                     match (*entry, kind) {
                         (_, RawKind::Removed) => *entry = RawKind::Removed,
                         (RawKind::Created, RawKind::Modified) => {}
@@ -75,34 +113,37 @@ async fn debounce_task(
                         _ => *entry = kind,
                     }
                 }
+                Continuation::Continue
             }
-            Ok(Some(Err(_))) | Ok(None) => return,
-            Err(_timeout) => {
-                if pending.is_empty() {
-                    continue;
+            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => Continuation::Restart,
+            Err(mpsc::RecvTimeoutError::Timeout) => {
+                if self.pending.is_empty() {
+                    return Continuation::Continue;
                 }
                 let mut batch = BatchedWatchEvent {
                     modified: vec![],
                     created: vec![],
                     removed: vec![],
                 };
-                for (path, kind) in pending.drain() {
+                for (path, kind) in self.pending.drain() {
                     match kind {
                         RawKind::Created => batch.created.push(path),
                         RawKind::Modified => batch.modified.push(path),
                         RawKind::Removed => batch.removed.push(path),
                     }
                 }
-                if signal_tx
-                    .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                        AppSignal::FilesChanged(Arc::new(batch)),
-                    ))
-                    .await
-                    .is_err()
-                {
-                    return;
+                let signal = AppSignal::FilesChanged(std::sync::Arc::new(batch));
+                if sender.send(RRTEvent::Worker(signal)).is_err() {
+                    return Continuation::Stop;
                 }
+                Continuation::Continue
             }
         }
     }
+}
+
+static WATCHER_ROOT: std::sync::OnceLock<Utf8PathBuf> = std::sync::OnceLock::new();
+
+pub fn set_watcher_root(root: &Utf8Path) {
+    let _ = WATCHER_ROOT.set(root.to_owned());
 }

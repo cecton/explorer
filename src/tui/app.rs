@@ -4,7 +4,7 @@ use super::state::{AppSignal, State, Window};
 use crate::loader::{FileKey, LoadedFile};
 use crate::lsp;
 use crate::supervisor::{Supervisor, TaskStatus};
-use crate::watcher::start_watcher;
+use crate::watcher::{WATCHER_RRT, set_watcher_root};
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use nucleo::Matcher;
@@ -325,8 +325,27 @@ impl App for AppMain {
             TerminalWindowMainThreadSignal::ApplyAppSignal(signal)
         });
 
-        if let Err(e) = start_watcher(&root, notify_tx) {
-            tracing::warn!("watcher failed to start: {e}");
+        set_watcher_root(&root);
+        match WATCHER_RRT.try_subscribe() {
+            Ok(guard) => {
+                let watcher_notify = notify_tx.clone();
+                tokio::spawn(async move {
+                    let mut rx = guard.receiver;
+                    loop {
+                        match rx.recv().await {
+                            Ok(r3bl_tui::RRTEvent::Worker(signal)) => {
+                                let _ = watcher_notify
+                                    .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
+                                    .await;
+                            }
+                            Ok(r3bl_tui::RRTEvent::Shutdown(_)) | Err(_) => break,
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!("watcher failed to start: {e}");
+            }
         }
     }
 
