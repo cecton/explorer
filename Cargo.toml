@@ -14,7 +14,7 @@ notify = { version = "9.0.0-rc.4", features = ["tokio"] }
 lsp-types = { version = "0.97", features = ["proposed"] }
 nucleo = "0.5"
 pico-args = "0.5"
-r3bl_tui = "0.7"
+r3bl_tui = { path = "vendor/r3bl-open-core/tui" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
@@ -22,4 +22,10 @@ tracing = "0.1"
 tracing-core = "0.1"
 
 [patch.crates-io]
-r3bl_tui = { path = "../r3bl-open-core/tui" }
+# incremental = false  # Disable to avoid rustc dep graph ICE on nightly
+# Temporary patch: proc-macro2 1.0.106 is broken with nightly-2026-02-15
+# (missing #![feature(proc_macro_span)] in main crate compilation).
+# Remove before merge once a fixed release is published.
+proc-macro2 = { git = "https://github.com/dtolnay/proc-macro2" }
+
+[workspace.lints]

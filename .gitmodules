@@ -1,0 +1,4 @@
+[submodule "vendor/r3bl-open-core"]
+	path = vendor/r3bl-open-core
+	url = https://github.com/cecton/r3bl-open-core
+	branch = fix-rrt-with-sane-types

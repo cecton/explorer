@@ -13,14 +13,14 @@ use nucleo::{Config, Utf32Str};
 use r3bl_tui::{
     App, BoxedSafeApp, BoxedSafeComponent, CommonResult, Component, ComponentRegistry,
     ComponentRegistryMap, ContainsResult, EditorBuffer, EventPropagation, FlexBox, FlexBoxId,
-    GlobalData, HasFocus, InputDevice, InputEvent, Key, KeyPress, LayoutDirection,
+    GlobalData, HasFocus, InputDevice, InputEvent, IntoErr, Key, KeyPress, LayoutDirection,
     LayoutManagement, LengthOps, ModifierKeysMask, OutputDevice, PerformPositioningAndSizing,
     RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SPACER_GLYPH, Size, SpecialKey,
     Surface, SurfaceBounds, SurfaceProps, SurfaceRender, TerminalWindow,
-    TerminalWindowMainThreadSignal, TuiStylesheet, ZOrder, box_end, box_start, col, height,
-    new_style, ok, render_component_in_current_box, render_tui_styled_texts_into, req_size_pc, row,
-    send_signal, surface, throws, throws_with_return, tui_color, tui_styled_text, tui_styled_texts,
-    tui_stylesheet,
+    TerminalWindowMainThreadSignal, TuiAvailability, TuiStylesheet, ZOrder, box_end, box_start,
+    col, height, new_style, ok, render_component_in_current_box, render_tui_styled_texts_into,
+    req_size_pc, row, send_signal, surface, throws, throws_with_return, tui_color, tui_styled_text,
+    tui_styled_texts, tui_stylesheet,
 };
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -1034,7 +1034,10 @@ pub async fn run(
         mask: ModifierKeysMask::new().with_ctrl(),
     })];
     let _unused: (GlobalData<_, _>, InputDevice, OutputDevice) =
-        TerminalWindow::main_event_loop(app, exit_keys, initial_state)?.await?;
+        match TerminalWindow::main_event_loop(app, exit_keys, initial_state) {
+            TuiAvailability::Available(future) => future.await?,
+            it => return it.into_err(),
+        };
     if let Some(msg) = exit_message.get() {
         eprintln!("{msg}");
     }
