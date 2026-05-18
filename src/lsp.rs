@@ -115,6 +115,13 @@ pub struct LspWorker {
     supports_range: bool,
 }
 
+impl Drop for LspWorker {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
 impl Debug for LspWorker {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LspWorker").finish()
@@ -313,7 +320,6 @@ impl RRTWorker for LspWorker {
                 )
                 .is_err()
                 {
-                    let _ = self.child.kill();
                     return Continuation::Restart;
                 }
             }
@@ -353,7 +359,6 @@ impl RRTWorker for LspWorker {
         let msg = match recv_msg(&mut self.reader) {
             Ok(m) => m,
             Err(_) => {
-                let _ = self.child.kill();
                 return Continuation::Restart;
             }
         };
@@ -374,7 +379,6 @@ impl RRTWorker for LspWorker {
             tracing::debug!("replying to server request: method={:?} id={}", method, id);
             let reply = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null});
             if send_msg(&mut self.stdin, &reply).is_err() {
-                let _ = self.child.kill();
                 return Continuation::Restart;
             }
         }
@@ -478,7 +482,7 @@ fn poll_readable(fd: std::os::unix::io::RawFd, timeout: std::time::Duration) -> 
     };
     let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
     let ret = unsafe { libc::poll(&mut pfd, 1, ms) };
-    ret > 0 && (pfd.revents & libc::POLLIN) != 0
+    ret > 0 && (pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR)) != 0
 }
 
 fn send_msg<T: Serialize>(stdin: &mut ChildStdin, msg: &T) -> std::io::Result<()> {
