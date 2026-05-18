@@ -8,7 +8,6 @@ use std::sync::Arc;
 mod cli;
 mod loader;
 mod lsp;
-mod supervisor;
 mod tui;
 mod watcher;
 

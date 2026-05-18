@@ -7,8 +7,8 @@ don't write migration or retro-compatibility code.
 Every change you make must be committed with a clear title and description. Run
 `cargo fmt` before every commit. Always use the git skill before committing.
 
-When working on r3bl repository, never try to compile the code or format or use
-rustup.
+When working on r3bl repository (vendor/r3bl-open-core), never try to compile
+the code or format or use rustup.
 
 ---
 

@@ -912,6 +912,7 @@ dependencies = [
  "arc-swap",
  "camino",
  "jwalk",
+ "libc",
  "lsp-types",
  "miette",
  "notify",

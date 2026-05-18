@@ -2,8 +2,7 @@ use super::file_name_picker::FileNamePickerComponent;
 use super::preview::FilePreviewComponent;
 use super::state::{AppSignal, State, Window};
 use crate::loader::{FileKey, LoadedFile};
-use crate::lsp;
-use crate::supervisor::{Supervisor, TaskStatus};
+use crate::lsp::{self, LSP_RRT};
 use crate::watcher::{WATCHER_RRT, set_watcher_root};
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
@@ -24,16 +23,10 @@ use r3bl_tui::{
 };
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 
 type PickerResultMsg = (u64, Vec<(FileKey, Vec<u32>)>);
-
-/// Shared slot holding the sender side of the active LSP request channel.
-///
-/// The supervisor spawn closure creates a fresh `(tx, rx)` pair on every
-/// (re)spawn and stores `tx` here, so `AppMain` always sends to the live task.
-type LspTxSlot = Arc<Mutex<mpsc::Sender<usize>>>;
 
 /// Maximum number of simultaneously visible panes. Terminals wider than 500 cols are not
 /// expected in practice (500 / MIN_PANE_WIDTH = 5).
@@ -152,7 +145,6 @@ impl Component<State, AppSignal> for PaneComponent {
 }
 
 pub struct AppMain {
-    lsp_tx: LspTxSlot,
     files: Arc<ArcSwap<Vec<LoadedFile>>>,
     root: Utf8PathBuf,
     picker_results_tx: mpsc::Sender<PickerResultMsg>,
@@ -167,10 +159,8 @@ impl AppMain {
         root: Utf8PathBuf,
         exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
     ) -> BoxedSafeApp<State, AppSignal> {
-        let (lsp_tx, _) = mpsc::channel(32);
         let (picker_results_tx, picker_results_rx) = mpsc::channel(32);
         Box::new(Self {
-            lsp_tx: Arc::new(Mutex::new(lsp_tx)),
             files,
             root,
             picker_results_tx,
@@ -300,30 +290,30 @@ impl App for AppMain {
         let files = Arc::clone(&self.files);
         let root = self.root.clone();
 
-        let lsp_tx_slot = Arc::clone(&self.lsp_tx);
-        let lsp_notify = notify_tx.clone();
-        let lsp_files = Arc::clone(&files);
-        let lsp_root = root.clone();
-        let mut supervisor = Supervisor::new();
-        supervisor.add(
-            "lsp",
-            Box::new(move || {
-                let (tx, rx) = mpsc::channel(32);
-                *lsp_tx_slot.lock().unwrap() = tx;
-                let notify = lsp_notify.clone();
-                let f = Arc::clone(&lsp_files);
-                let r = lsp_root.clone();
-                Box::pin(lsp::run(r, f, rx, notify))
-            }),
-        );
-
-        supervisor.start(notify_tx.clone(), |name, status| {
-            let signal = match status {
-                TaskStatus::Restarting => AppSignal::TaskRestarting(name),
-                TaskStatus::Running => AppSignal::TaskRunning(name),
-            };
-            TerminalWindowMainThreadSignal::ApplyAppSignal(signal)
-        });
+        lsp::set_lsp_config(root.clone(), Arc::clone(&files));
+        match LSP_RRT.try_subscribe() {
+            Ok(guard) => {
+                let lsp_notify = notify_tx.clone();
+                tokio::spawn(async move {
+                    let mut rx = guard.receiver;
+                    loop {
+                        match rx.recv().await {
+                            Ok(r3bl_tui::RRTEvent::Worker(_)) => {
+                                let _ = lsp_notify
+                                    .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                        AppSignal::Noop,
+                                    ))
+                                    .await;
+                            }
+                            Ok(r3bl_tui::RRTEvent::Shutdown(_)) | Err(_) => break,
+                        }
+                    }
+                });
+            }
+            Err(e) => {
+                tracing::warn!("LSP worker failed to start: {e}");
+            }
+        }
 
         set_watcher_root(&root);
         match WATCHER_RRT.try_subscribe() {
@@ -542,7 +532,7 @@ impl App for AppMain {
                         }
                         state.push_window(Window::FilePreview(key));
                         state.focused_window = Some(Window::FilePreview(key));
-                        let _ = self.lsp_tx.lock().unwrap().try_send(key.0);
+                        lsp::send_file_request(key.0);
                     }
                     state.remove_window(&Window::FileNamePicker);
                     state.file_name_picker_open = false;
@@ -656,12 +646,6 @@ impl App for AppMain {
                     }
                     state.bump_files_version();
                 }
-                AppSignal::TaskRestarting(name) => {
-                    state.set_task_status(name, TaskStatus::Restarting);
-                }
-                AppSignal::TaskRunning(name) => {
-                    state.set_task_status(name, TaskStatus::Running);
-                }
                 AppSignal::Noop => {}
             }
 
@@ -731,7 +715,6 @@ impl App for AppMain {
                 window_size,
                 picker_open,
                 focused_window.as_ref(),
-                &global_data.state,
             );
 
             render_title_bars(
@@ -871,11 +854,9 @@ fn render_status_bar(
     size: Size,
     picker_open: bool,
     focused_window: Option<&Window>,
-    state: &State,
 ) {
     let color_bg = tui_color!(30, 30, 50);
     let color_fg = tui_color!(180, 180, 220);
-    let color_warn = tui_color!(220, 160, 60);
 
     let hint = if picker_open {
         " Esc:Close  ↑↓:Select  Enter:Open  Tab:Switch  Ctrl+P:Picker  Ctrl+C:Quit"
@@ -888,18 +869,10 @@ fn render_status_bar(
         }
     };
 
-    let task_note = state.task_status_line();
-
-    let (text, fg) = if task_note.is_empty() {
-        (hint.to_string(), color_fg)
-    } else {
-        (format!("{hint}  [{task_note}]"), color_warn)
-    };
-
     let styled_texts = tui_styled_texts! {
         tui_styled_text! {
-            @style: new_style!(bold color_fg: {fg} color_bg: {color_bg}),
-            @text: text
+            @style: new_style!(bold color_fg: {color_fg} color_bg: {color_bg}),
+            @text: hint.to_string()
         }
     };
 

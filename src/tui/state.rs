@@ -1,5 +1,4 @@
 use crate::loader::{FileKey, LoadedFile};
-use crate::supervisor::TaskStatus;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
@@ -44,8 +43,6 @@ pub struct State {
     /// Each entry: (FileKey into files vec, sorted+deduped matched char positions).
     pub file_name_picker_results: Vec<(FileKey, Vec<u32>)>,
     pub file_name_picker_selected: Option<FileKey>,
-    /// Last known status for each supervised task, keyed by task name.
-    pub task_statuses: Vec<(&'static str, TaskStatus)>,
     pub editor_buffers: HashMap<FlexBoxId, EditorBuffer>,
 }
 
@@ -66,27 +63,6 @@ impl HasEditorBuffers for State {
 impl State {
     pub fn bump_files_version(&mut self) {
         self.files_version = FILES_VERSION.fetch_add(1, Ordering::Relaxed) + 1;
-    }
-
-    pub fn set_task_status(&mut self, name: &'static str, status: TaskStatus) {
-        if let Some(entry) = self.task_statuses.iter_mut().find(|(n, _)| *n == name) {
-            entry.1 = status;
-        } else {
-            self.task_statuses.push((name, status));
-        }
-    }
-
-    /// Returns a short status string for tasks that are not Running, or empty if all healthy.
-    pub fn task_status_line(&self) -> String {
-        let parts: Vec<String> = self
-            .task_statuses
-            .iter()
-            .filter_map(|(name, status)| match status {
-                TaskStatus::Restarting => Some(format!("{name}: restarting")),
-                TaskStatus::Running => None,
-            })
-            .collect();
-        parts.join(", ")
     }
 
     /// Moves `window` to the front of the stack (index 0). If it is not present, inserts it.
@@ -187,7 +163,6 @@ impl State {
             file_name_picker_open: true,
             file_name_picker_results,
             file_name_picker_selected: None,
-            task_statuses: Vec::new(),
             editor_buffers: HashMap::new(),
         };
         state
@@ -209,7 +184,6 @@ impl Default for State {
             file_name_picker_open: false,
             file_name_picker_results: Vec::new(),
             file_name_picker_selected: None,
-            task_statuses: Vec::new(),
             editor_buffers: HashMap::new(),
         }
     }
@@ -261,8 +235,6 @@ pub enum AppSignal {
     FocusNextPane,
     FocusPrevPane,
     FilesChanged(Arc<BatchedWatchEvent>),
-    TaskRestarting(&'static str),
-    TaskRunning(&'static str),
     #[default]
     Noop,
 }
