@@ -4,8 +4,8 @@ use r3bl_tui::{
     CommonResult, Component, EditMode, EditorComponent, EditorEngineConfig, EventPropagation,
     FlexBox, FlexBoxId, GlobalData, HasFocus, InputEvent, LayoutDirection, LineMode,
     MouseInputKind, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SurfaceBounds,
-    SyntaxHighlightMode, TerminalWindowMainThreadSignal, ZOrder, col, height, new_style, row,
-    send_signal, throws_with_return, tui_color,
+    SyntaxHighlightMode, TerminalWindowMainThreadSignal, ZOrder, col, height, new_style,
+    render_pipeline, row, send_signal, throws_with_return, tui_color,
 };
 use std::collections::HashSet;
 use tokio::sync::mpsc;
@@ -100,8 +100,27 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
             let origin = current_box.style_adjusted_origin_pos;
             let bounds = current_box.style_adjusted_bounds_size;
             let total_rows = bounds.row_height.as_usize();
+            let pane_width = bounds.col_width.as_usize();
 
-            // Row 0: editor input bar.
+            let bg_rgb = global_data
+                .state
+                .theme
+                .ui_bg("ui.background")
+                .unwrap_or([15, 15, 25]);
+            let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
+            let bg_style = new_style!(color_bg: {color_bg});
+
+            // Fill editor row with pane background, then render editor on top.
+            let mut pipeline = render_pipeline!();
+            let mut editor_bg_ops = RenderOpIRVec::new();
+            editor_bg_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+            editor_bg_ops += RenderOpCommon::ApplyColors(Some(bg_style));
+            editor_bg_ops += RenderOpIR::PaintTextWithAttributes(
+                " ".repeat(pane_width).as_str().into(),
+                Some(bg_style),
+            );
+            pipeline.push(ZOrder::Normal, editor_bg_ops);
+
             let editor_box = FlexBox {
                 id: FlexBoxId::from(Id::FileNamePickerEditor),
                 dir: LayoutDirection::Horizontal,
@@ -112,9 +131,10 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                 ..Default::default()
             };
             has_focus.set_id(FlexBoxId::from(Id::FileNamePickerEditor));
-            let mut pipeline =
+            let editor_pipeline =
                 self.editor
                     .render(global_data, editor_box, surface_bounds, has_focus)?;
+            pipeline.join_into(editor_pipeline);
             has_focus.set_id(self.id);
 
             if total_rows < 2 {
@@ -124,10 +144,24 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
             let results_origin = origin + height(1);
             let result_rows = total_rows - 1;
 
-            let color_match_fg = tui_color!(255, 200, 60);
-            let color_normal_fg = tui_color!(170, 170, 200);
-            let color_selected_bg = tui_color!(50, 50, 90);
-            let color_dim_fg = tui_color!(90, 90, 110);
+            let match_rgb = global_data
+                .state
+                .theme
+                .ui_fg("ui.cursor.match")
+                .unwrap_or([255, 200, 60]);
+            let normal_rgb = global_data
+                .state
+                .theme
+                .ui_fg("ui.text")
+                .unwrap_or([170, 170, 200]);
+            let selected_rgb = global_data
+                .state
+                .theme
+                .ui_bg("ui.selection")
+                .unwrap_or([50, 50, 90]);
+            let color_match_fg = tui_color!(match_rgb[0], match_rgb[1], match_rgb[2]);
+            let color_normal_fg = tui_color!(normal_rgb[0], normal_rgb[1], normal_rgb[2]);
+            let color_selected_bg = tui_color!(selected_rgb[0], selected_rgb[1], selected_rgb[2]);
 
             let mut render_ops = RenderOpIRVec::new();
 
@@ -150,13 +184,28 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                     col(0) + row(row_offset),
                 );
 
+                let is_selected = result_idx < result_count && result_idx == selected;
+                let row_bg = if is_selected {
+                    color_selected_bg
+                } else {
+                    color_bg
+                };
+                let row_bg_style = new_style!(color_bg: {row_bg});
+
+                render_ops += RenderOpCommon::ApplyColors(Some(row_bg_style));
+                render_ops += RenderOpIR::PaintTextWithAttributes(
+                    " ".repeat(pane_width).as_str().into(),
+                    Some(row_bg_style),
+                );
+
                 if result_idx >= result_count {
-                    render_ops += RenderOpIR::PaintTextWithAttributes(
-                        " ".into(),
-                        Some(new_style!(color_fg: {color_dim_fg})),
-                    );
                     continue;
                 }
+
+                render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                    results_origin,
+                    col(0) + row(row_offset),
+                );
 
                 let (file_key, matched_positions) = {
                     let (key, ref pos) = global_data.state.file_name_picker_results[result_idx];
@@ -167,13 +216,8 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                 let file = &snapshot[file_key.0];
                 let rel = file.path.strip_prefix(&root).unwrap_or(&file.path);
                 let path_str = rel.to_string();
-                let is_selected = result_idx == selected;
 
                 let matched_set: HashSet<u32> = matched_positions.iter().copied().collect();
-
-                if is_selected {
-                    render_ops += RenderOpCommon::SetBgColor(color_selected_bg);
-                }
 
                 for (char_idx, ch) in path_str.chars().enumerate() {
                     let is_match = matched_set.contains(&(char_idx as u32));
@@ -183,23 +227,19 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                         color_normal_fg
                     };
                     let style = if is_selected && is_match {
-                        new_style!(bold color_fg: {fg} color_bg: {color_selected_bg})
+                        new_style!(bold color_fg: {fg} color_bg: {row_bg})
                     } else if is_selected {
-                        new_style!(color_fg: {fg} color_bg: {color_selected_bg})
+                        new_style!(color_fg: {fg} color_bg: {row_bg})
                     } else if is_match {
-                        new_style!(bold color_fg: {fg})
+                        new_style!(bold color_fg: {fg} color_bg: {row_bg})
                     } else {
-                        new_style!(color_fg: {fg})
+                        new_style!(color_fg: {fg} color_bg: {row_bg})
                     };
                     let mut buf = [0u8; 4];
                     render_ops += RenderOpIR::PaintTextWithAttributes(
                         ch.encode_utf8(&mut buf).to_string().into(),
                         Some(style),
                     );
-                }
-
-                if is_selected {
-                    render_ops += RenderOpCommon::ResetColor;
                 }
             }
 

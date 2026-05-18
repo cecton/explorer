@@ -1,6 +1,7 @@
 use super::file_name_picker::FileNamePickerComponent;
 use super::preview::FilePreviewComponent;
 use super::state::{AppSignal, State, Window};
+use super::theme::HelixTheme;
 use crate::loader::{FileKey, LoadedFile};
 use crate::lsp::{self, LSP_RRT};
 use crate::watcher::{WATCHER_RRT, set_watcher_root};
@@ -130,17 +131,53 @@ impl Component<State, AppSignal> for PaneComponent {
         surface_bounds: SurfaceBounds,
         has_focus: &mut HasFocus,
     ) -> CommonResult<RenderPipeline> {
-        match self.active_window(&global_data.state).cloned() {
-            Some(Window::FileNamePicker) => {
-                self.picker
-                    .render(global_data, current_box, surface_bounds, has_focus)
+        throws_with_return!({
+            let active_window = self.active_window(&global_data.state).cloned();
+            let add_title = active_window.is_some();
+
+            let mut title_ops = RenderOpIRVec::new();
+            if add_title {
+                render_pane_title(
+                    &mut title_ops,
+                    &current_box,
+                    &global_data.state,
+                    active_window.as_ref().unwrap(),
+                    has_focus.get_id() == Some(self.id),
+                );
             }
-            Some(Window::FilePreview(_)) => {
-                self.preview
-                    .render(global_data, current_box, surface_bounds, has_focus)
+
+            let content_box = if add_title {
+                FlexBox {
+                    style_adjusted_origin_pos: current_box.style_adjusted_origin_pos + height(1),
+                    style_adjusted_bounds_size: current_box.style_adjusted_bounds_size.col_width
+                        + (current_box.style_adjusted_bounds_size.row_height - height(1)),
+                    ..current_box
+                }
+            } else {
+                current_box
+            };
+
+            let inner_pipeline = match active_window {
+                Some(Window::FileNamePicker) => {
+                    self.picker
+                        .render(global_data, content_box, surface_bounds, has_focus)?
+                }
+                Some(Window::FilePreview(_)) => {
+                    self.preview
+                        .render(global_data, content_box, surface_bounds, has_focus)?
+                }
+                None => r3bl_tui::render_pipeline!(),
+            };
+
+            if add_title {
+                let mut pipeline = r3bl_tui::render_pipeline!();
+                pipeline.push(ZOrder::Normal, title_ops);
+                pipeline.join_into(inner_pipeline);
+                pipeline
+            } else {
+                inner_pipeline
             }
-            None => Ok(r3bl_tui::render_pipeline!()),
-        }
+        });
     }
 }
 
@@ -675,12 +712,12 @@ impl App for AppMain {
             }
 
             let surface = {
-                let mut it = surface!(stylesheet: create_stylesheet()?);
+                let mut it = surface!(stylesheet: create_stylesheet(&global_data.state.theme)?);
                 it.surface_start(SurfaceProps {
-                    pos: col(0) + row(1),
+                    pos: col(0) + row(0),
                     size: {
                         let col_count = window_size.col_width;
-                        let row_count = window_size.row_height - height(2);
+                        let row_count = window_size.row_height - height(1);
                         col_count + row_count
                     },
                 })?;
@@ -705,14 +742,7 @@ impl App for AppMain {
                 window_size,
                 picker_open,
                 focused_window.as_ref(),
-            );
-
-            render_title_bars(
-                &mut pipeline,
-                window_size,
-                &visible,
-                focused_window.as_ref(),
-                &global_data.state,
+                &global_data.state.theme,
             );
 
             pipeline
@@ -806,34 +836,38 @@ impl SurfaceRender<State, AppSignal> for PanesRenderer<'_> {
     }
 }
 
-fn create_stylesheet() -> CommonResult<TuiStylesheet> {
+fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
+    let bg = theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
     throws_with_return!({
         tui_stylesheet! {
-            new_style!(id: {Id::Container}),
+            new_style!(
+                id: {Id::Container}
+                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
+            ),
             new_style!(
                 id: {Id::Pane0}
-                padding: {1}
-                color_bg: {tui_color!(15, 15, 25)}
+                padding: {0}
+                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
             ),
             new_style!(
                 id: {Id::Pane1}
-                padding: {1}
-                color_bg: {tui_color!(15, 15, 25)}
+                padding: {0}
+                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
             ),
             new_style!(
                 id: {Id::Pane2}
-                padding: {1}
-                color_bg: {tui_color!(15, 15, 25)}
+                padding: {0}
+                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
             ),
             new_style!(
                 id: {Id::Pane3}
-                padding: {1}
-                color_bg: {tui_color!(15, 15, 25)}
+                padding: {0}
+                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
             ),
             new_style!(
                 id: {Id::Pane4}
-                padding: {1}
-                color_bg: {tui_color!(15, 15, 25)}
+                padding: {0}
+                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
             )
         }
     })
@@ -844,9 +878,12 @@ fn render_status_bar(
     size: Size,
     picker_open: bool,
     focused_window: Option<&Window>,
+    theme: &HelixTheme,
 ) {
-    let color_bg = tui_color!(30, 30, 50);
-    let color_fg = tui_color!(180, 180, 220);
+    let bg_rgb = theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]);
+    let fg_rgb = theme.ui_fg("ui.statusline").unwrap_or([180, 180, 220]);
+    let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
+    let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
 
     let hint = if picker_open {
         " Esc:Close  ↑↓:Select  Enter:Open  Tab:Switch  Ctrl+P:Picker  Ctrl+C:Quit"
@@ -880,97 +917,100 @@ fn render_status_bar(
     pipeline.push(ZOrder::Normal, render_ops);
 }
 
-fn render_title_bars(
-    pipeline: &mut RenderPipeline,
-    _size: Size,
-    visible: &[(Window, u16)],
-    focused_window: Option<&Window>,
+fn render_pane_title(
+    mut render_ops: &mut RenderOpIRVec,
+    pane_box: &FlexBox,
     state: &State,
+    window: &Window,
+    focused: bool,
 ) {
-    let color_bg_active = tui_color!(50, 50, 90);
-    let color_fg_active = tui_color!(220, 220, 255);
-    let color_bg_inactive = tui_color!(25, 25, 45);
-    let color_fg_inactive = tui_color!(120, 120, 160);
-    let color_fg_deleted = tui_color!(220, 80, 80);
+    let origin = pane_box.style_adjusted_origin_pos;
+    let width = pane_box.style_adjusted_bounds_size.col_width.as_usize();
+
+    let theme = &state.theme;
+    let (bg_active_rgb, fg_active_rgb) = (
+        theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]),
+        theme.ui_fg("ui.text").unwrap_or([220, 220, 255]),
+    );
+    let bg_inactive_rgb = theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]);
+    let fg_inactive_rgb = theme.ui_fg("ui.statusline").unwrap_or([180, 180, 220]);
+    let fg_deleted_rgb = theme.ui_fg("error").unwrap_or([220, 80, 80]);
+
+    let color_bg_active = tui_color!(bg_active_rgb[0], bg_active_rgb[1], bg_active_rgb[2]);
+    let color_fg_active = tui_color!(fg_active_rgb[0], fg_active_rgb[1], fg_active_rgb[2]);
+    let color_bg_inactive = tui_color!(bg_inactive_rgb[0], bg_inactive_rgb[1], bg_inactive_rgb[2]);
+    let color_fg_inactive = tui_color!(fg_inactive_rgb[0], fg_inactive_rgb[1], fg_inactive_rgb[2]);
+    let color_fg_deleted = tui_color!(fg_deleted_rgb[0], fg_deleted_rgb[1], fg_deleted_rgb[2]);
 
     let snapshot = state.files.load();
 
-    let mut col_offset: u16 = 0;
-    for (window, pane_width) in visible.iter() {
-        let is_focused = focused_window == Some(window);
+    let is_deleted = match window {
+        Window::FilePreview(key) => snapshot[key.0]
+            .removed
+            .load(std::sync::atomic::Ordering::Relaxed),
+        Window::FileNamePicker => false,
+    };
 
-        let is_deleted = match window {
-            Window::FilePreview(key) => snapshot[key.0]
-                .removed
-                .load(std::sync::atomic::Ordering::Relaxed),
-            Window::FileNamePicker => false,
-        };
+    let color_bg = if focused {
+        color_bg_active
+    } else {
+        color_bg_inactive
+    };
+    let color_fg = if is_deleted {
+        color_fg_deleted
+    } else if focused {
+        color_fg_active
+    } else {
+        color_fg_inactive
+    };
 
-        let color_bg = if is_focused {
-            color_bg_active
-        } else {
-            color_bg_inactive
-        };
-        let color_fg = if is_deleted {
-            color_fg_deleted
-        } else if is_focused {
-            color_fg_active
-        } else {
-            color_fg_inactive
-        };
-
-        let title = match window {
-            Window::FileNamePicker => state
-                .root
-                .file_name()
-                .unwrap_or(state.root.as_str())
-                .to_string(),
-            Window::FilePreview(key) => {
-                let file = &snapshot[key.0];
-                let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
-                let removed = file.removed.load(std::sync::atomic::Ordering::Relaxed);
-                if removed {
-                    format!("[deleted] {}", rel)
-                } else {
-                    rel.as_str().to_string()
-                }
-            }
-        };
-
-        let available = *pane_width as usize;
-        let padded = format!(" {title} ");
-        let display = if padded.len() > available {
-            let truncated = &padded[..available.saturating_sub(1)];
-            format!("{truncated}…")
-        } else {
-            padded
-        };
-
-        let mut render_ops = RenderOpIRVec::new();
-        render_ops += RenderOpCommon::MoveCursorPositionAbs(col(col_offset) + row(0));
-        render_ops += RenderOpCommon::ResetColor;
-        render_ops += RenderOpCommon::SetBgColor(color_bg);
-        render_ops += RenderOpIR::PaintTextWithAttributes(
-            SPACER_GLYPH.repeat(*pane_width as usize).into(),
-            None,
-        );
-        render_ops += RenderOpCommon::MoveCursorPositionAbs(col(col_offset) + row(0));
-        render_ops += RenderOpIR::PaintTextWithAttributes(
-            display.into(),
-            Some(if is_focused {
-                new_style!(bold color_fg: {color_fg} color_bg: {color_bg})
+    let title = match window {
+        Window::FileNamePicker => state
+            .root
+            .file_name()
+            .unwrap_or(state.root.as_str())
+            .to_string(),
+        Window::FilePreview(key) => {
+            let file = &snapshot[key.0];
+            let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
+            let removed = file.removed.load(std::sync::atomic::Ordering::Relaxed);
+            if removed {
+                format!("[deleted] {}", rel)
             } else {
-                new_style!(color_fg: {color_fg} color_bg: {color_bg})
-            }),
-        );
-        pipeline.push(ZOrder::Normal, render_ops);
+                rel.as_str().to_string()
+            }
+        }
+    };
 
-        col_offset += pane_width;
-    }
+    let padded = format!(" {title} ");
+    let display = if padded.len() > width {
+        let truncated = &padded[..width.saturating_sub(1)];
+        format!("{truncated}…")
+    } else {
+        padded
+    };
+
+    render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+    render_ops += RenderOpCommon::ResetColor;
+    render_ops += RenderOpCommon::SetBgColor(color_bg);
+    render_ops += RenderOpIR::PaintTextWithAttributes(SPACER_GLYPH.repeat(width).into(), None);
+    render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+    render_ops += RenderOpIR::PaintTextWithAttributes(
+        display.into(),
+        Some(if focused {
+            new_style!(bold color_fg: {color_fg} color_bg: {color_bg})
+        } else {
+            new_style!(color_fg: {color_fg} color_bg: {color_bg})
+        }),
+    );
 }
 
-pub fn build_state(files: Arc<ArcSwap<Vec<LoadedFile>>>, root: Utf8PathBuf) -> State {
-    State::new(files, root)
+pub fn build_state(
+    files: Arc<ArcSwap<Vec<LoadedFile>>>,
+    root: Utf8PathBuf,
+    theme: crate::tui::theme::HelixTheme,
+) -> State {
+    State::new(files, root, theme)
 }
 
 pub async fn run(

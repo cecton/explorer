@@ -52,7 +52,17 @@ async fn main() {
     files.sort_by(|a, b| a.path.cmp(&b.path));
     let files = Arc::new(ArcSwap::from_pointee(files));
 
-    let initial_state = tui::build_state(Arc::clone(&files), root.clone());
+    let theme = {
+        let name = &args.theme;
+        if let Some(t) = tui::theme::HelixTheme::from_name(name) {
+            t
+        } else {
+            eprintln!("unknown theme '{name}', using default");
+            tui::theme::HelixTheme::default()
+        }
+    };
+
+    let initial_state = tui::build_state(Arc::clone(&files), root.clone(), theme);
 
     tui::run(initial_state, files, root)
         .await

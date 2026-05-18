@@ -3,6 +3,7 @@ use tracing_core::LevelFilter;
 pub struct Args {
     pub log_file: Option<String>,
     pub log_level: LevelFilter,
+    pub theme: String,
 }
 
 pub fn parse_args() -> Args {
@@ -24,8 +25,18 @@ pub fn parse_args() -> Args {
             LevelFilter::DEBUG
         }
     };
+    let theme: String = args
+        .opt_value_from_str("--theme")
+        .expect("invalid --theme")
+        .unwrap_or_else(|| {
+            crate::tui::theme::HelixTheme::theme_names()
+                .next()
+                .unwrap_or("catppuccin_mocha")
+                .to_string()
+        });
     Args {
         log_file,
         log_level,
+        theme,
     }
 }

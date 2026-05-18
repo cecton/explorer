@@ -1,4 +1,5 @@
 use crate::loader::{FileKey, LoadedFile};
+use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
@@ -44,6 +45,7 @@ pub struct State {
     pub file_name_picker_results: Vec<(FileKey, Vec<u32>)>,
     pub file_name_picker_selected: Option<FileKey>,
     pub editor_buffers: HashMap<FlexBoxId, EditorBuffer>,
+    pub theme: HelixTheme,
 }
 
 impl HasEditorBuffers for State {
@@ -150,7 +152,7 @@ impl State {
 }
 
 impl State {
-    pub fn new(files: Arc<ArcSwap<Vec<LoadedFile>>>, root: Utf8PathBuf) -> Self {
+    pub fn new(files: Arc<ArcSwap<Vec<LoadedFile>>>, root: Utf8PathBuf, theme: HelixTheme) -> Self {
         let snapshot = files.load();
         let file_name_picker_results = (0..snapshot.len()).map(|i| (FileKey(i), vec![])).collect();
         let mut state = Self {
@@ -164,6 +166,7 @@ impl State {
             file_name_picker_results,
             file_name_picker_selected: None,
             editor_buffers: HashMap::new(),
+            theme,
         };
         state
             .window_states
@@ -185,6 +188,7 @@ impl Default for State {
             file_name_picker_results: Vec::new(),
             file_name_picker_selected: None,
             editor_buffers: HashMap::new(),
+            theme: HelixTheme::default(),
         }
     }
 }

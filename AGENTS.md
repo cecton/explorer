@@ -49,8 +49,8 @@ cargo run --release
 # Format (required before every commit)
 cargo fmt
 
-# Lint
-cargo clippy
+# Lint (skips vendored r3bl dependencies)
+cargo clippy --no-deps
 
 # Check without producing a binary
 cargo check
@@ -77,7 +77,7 @@ cargo test <module>::<test_name>
 
 1. Run `cargo fmt` — no exceptions. Commits must have formatted code.
 2. Run `cargo build` (or `cargo check`) to confirm there are no compile errors.
-3. Run `cargo clippy` and address any warnings before merging.
+3. Run `cargo clippy --no-deps` and address any warnings before merging.
 
 ---
 

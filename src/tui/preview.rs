@@ -1,5 +1,6 @@
 use super::app::Id;
 use super::state::{AppSignal, State, Window};
+use super::theme::HelixTheme;
 use crate::loader::FileKey;
 use r3bl_tui::{
     CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData, HasFocus,
@@ -7,8 +8,6 @@ use r3bl_tui::{
     RenderPipeline, SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal, ZOrder, col,
     new_style, render_pipeline, row, send_signal, throws_with_return, tui_color,
 };
-
-const DEFAULT_FG: [u8; 3] = [212, 212, 212];
 
 pub struct FilePreviewComponent {
     id: FlexBoxId,
@@ -169,6 +168,10 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             let total_lines = data.line_starts.len();
             let colored_guard = file.colored_lines.lock().unwrap();
 
+            let pane_bg = state.theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
+            let pane_width = bounds.col_width.as_usize();
+            let bg = tui_color!(pane_bg[0], pane_bg[1], pane_bg[2]);
+            let bg_style = new_style!(color_bg: {bg});
             for row_offset in 0..visible_rows {
                 let line_idx = scroll + row_offset;
                 if line_idx >= total_lines {
@@ -176,13 +179,21 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                 }
                 render_ops +=
                     RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset));
-                render_ops += RenderOpCommon::ResetColor;
+                render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
+                render_ops += RenderOpIR::PaintTextWithAttributes(
+                    " ".repeat(pane_width).as_str().into(),
+                    Some(bg_style),
+                );
+                render_ops +=
+                    RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset));
                 paint_line(
                     &mut render_ops,
                     &data.content,
                     &data.line_starts,
                     &colored_guard,
                     line_idx,
+                    &state.theme,
+                    pane_bg,
                 );
             }
 
@@ -199,50 +210,31 @@ fn paint_line(
     line_starts: &[usize],
     colored_guard: &[crate::lsp::ColoredLine],
     line_idx: usize,
+    theme: &HelixTheme,
+    pane_bg: [u8; 3],
 ) {
+    let default_fg = theme.ui_fg("ui.text").unwrap_or([212, 212, 212]);
+    let bg = tui_color!(pane_bg[0], pane_bg[1], pane_bg[2]);
     if let Some(spans) = colored_guard.get(line_idx) {
         let line_content = file_line(content, line_starts, line_idx);
         for &(start, end, token_type) in spans {
             let text = &line_content[start..end];
-            if let Some([r, g, b]) = token_color(token_type) {
-                let fg = tui_color!(r, g, b);
-                let style = new_style!(color_fg: {fg});
-                *render_ops += RenderOpCommon::ApplyColors(Some(style));
-                *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                *render_ops += RenderOpCommon::ResetColor;
-            } else {
-                let default_style =
-                    new_style!(color_fg: {tui_color!(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2])});
-                *render_ops += RenderOpCommon::ApplyColors(Some(default_style));
-                *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), None);
-            }
+            let fg_rgb = theme.color_for_lsp_token(token_type).unwrap_or(default_fg);
+            let fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+            let style = new_style!(color_fg: {fg} color_bg: {bg});
+            *render_ops += RenderOpCommon::ApplyColors(Some(style));
+            *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
         }
         return;
     }
 
-    let default_style =
-        new_style!(color_fg: {tui_color!(DEFAULT_FG[0], DEFAULT_FG[1], DEFAULT_FG[2])});
-    *render_ops += RenderOpCommon::ApplyColors(Some(default_style));
-    *render_ops +=
-        RenderOpIR::PaintTextWithAttributes(file_line(content, line_starts, line_idx).into(), None);
-}
-
-fn token_color(token_type: &str) -> Option<[u8; 3]> {
-    match token_type {
-        "keyword" | "modifier" | "selfKeyword" | "boolean" => Some([204, 120, 50]),
-        "string" | "comment" | "character" | "escapeSequence" => Some([106, 153, 85]),
-        "number" | "const" | "static" => Some([181, 206, 168]),
-        "type" | "class" | "struct" | "enum" | "interface" | "namespace" | "builtinType"
-        | "typeAlias" | "typeParameter" | "constParameter" | "generic" | "toolModule" => {
-            Some([78, 201, 176])
-        }
-        "function" | "method" => Some([220, 220, 170]),
-        "macro" | "attributeBracket" | "builtinAttribute" | "decorator" => Some([189, 99, 197]),
-        "variable" | "parameter" => Some([156, 220, 254]),
-        "property" | "enumMember" => Some([206, 145, 120]),
-        "operator" | "lifetime" => Some([212, 212, 212]),
-        _ => None,
-    }
+    let fg = tui_color!(default_fg[0], default_fg[1], default_fg[2]);
+    let style = new_style!(color_fg: {fg} color_bg: {bg});
+    *render_ops += RenderOpCommon::ApplyColors(Some(style));
+    *render_ops += RenderOpIR::PaintTextWithAttributes(
+        file_line(content, line_starts, line_idx).into(),
+        Some(style),
+    );
 }
 
 fn file_line<'a>(content: &'a str, line_starts: &[usize], idx: usize) -> &'a str {
