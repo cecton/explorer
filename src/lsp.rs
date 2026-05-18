@@ -309,8 +309,8 @@ impl RRTWorker for LspWorker {
             tracing::debug!("user request: file_idx={}", file_idx);
             let snapshot = self.files.load();
             let file = &snapshot[file_idx];
-            if file.path.extension() == Some("rs") {
-                if request_tokens(
+            if file.path.extension() == Some("rs")
+                && request_tokens(
                     &mut self.stdin,
                     file,
                     file_idx,
@@ -319,9 +319,8 @@ impl RRTWorker for LspWorker {
                     false,
                 )
                 .is_err()
-                {
-                    return Continuation::Restart;
-                }
+            {
+                return Continuation::Restart;
             }
         }
 
@@ -462,12 +461,11 @@ impl RRTWorker for LspWorker {
 static REQUEST_SLOT: OnceLock<std::sync::Mutex<Option<mpsc::SyncSender<usize>>>> = OnceLock::new();
 
 pub fn send_file_request(file_idx: usize) {
-    if let Some(slot) = REQUEST_SLOT.get() {
-        if let Ok(guard) = slot.lock() {
-            if let Some(ref tx) = *guard {
-                let _ = tx.try_send(file_idx);
-            }
-        }
+    if let Some(slot) = REQUEST_SLOT.get()
+        && let Ok(guard) = slot.lock()
+        && let Some(ref tx) = *guard
+    {
+        let _ = tx.try_send(file_idx);
     }
 }
 

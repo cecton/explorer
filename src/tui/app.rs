@@ -296,17 +296,12 @@ impl App for AppMain {
                 let lsp_notify = notify_tx.clone();
                 tokio::spawn(async move {
                     let mut rx = guard.receiver;
-                    loop {
-                        match rx.recv().await {
-                            Ok(r3bl_tui::RRTEvent::Worker(_)) => {
-                                let _ = lsp_notify
-                                    .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                        AppSignal::Noop,
-                                    ))
-                                    .await;
-                            }
-                            Ok(r3bl_tui::RRTEvent::Shutdown(_)) | Err(_) => break,
-                        }
+                    while let Ok(r3bl_tui::RRTEvent::Worker(_)) = rx.recv().await {
+                        let _ = lsp_notify
+                            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                AppSignal::Noop,
+                            ))
+                            .await;
                     }
                 });
             }
@@ -321,15 +316,10 @@ impl App for AppMain {
                 let watcher_notify = notify_tx.clone();
                 tokio::spawn(async move {
                     let mut rx = guard.receiver;
-                    loop {
-                        match rx.recv().await {
-                            Ok(r3bl_tui::RRTEvent::Worker(signal)) => {
-                                let _ = watcher_notify
-                                    .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
-                                    .await;
-                            }
-                            Ok(r3bl_tui::RRTEvent::Shutdown(_)) | Err(_) => break,
-                        }
+                    while let Ok(r3bl_tui::RRTEvent::Worker(signal)) = rx.recv().await {
+                        let _ = watcher_notify
+                            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
+                            .await;
                     }
                 });
             }
