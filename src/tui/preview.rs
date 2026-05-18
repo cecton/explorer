@@ -111,7 +111,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                         send_signal!(
                             global_data.main_thread_channel_sender,
                             TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::ScrollPreviewUp(1),
+                                AppSignal::ScrollPreviewUp(3),
                             )
                         );
                     }
@@ -120,7 +120,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                         send_signal!(
                             global_data.main_thread_channel_sender,
                             TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::ScrollPreviewDown(1),
+                                AppSignal::ScrollPreviewDown(3),
                             )
                         );
                     }
