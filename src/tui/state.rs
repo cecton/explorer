@@ -3,11 +3,13 @@ use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
-use r3bl_tui::{EditorBuffer, FlexBoxId, HasEditorBuffers};
+use r3bl_tui::{EditorBuffer, FlexBox, FlexBoxId, HasEditorBuffers};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+
+pub const MAX_PANES: usize = 5;
 
 static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
 
@@ -46,6 +48,8 @@ pub struct State {
     pub file_name_picker_selected: Option<FileKey>,
     pub editor_buffers: HashMap<FlexBoxId, EditorBuffer>,
     pub theme: HelixTheme,
+    /// Current `FlexBox` for each pane slot (index 0..MAX_PANES).
+    pub pane_boxes: [FlexBox; MAX_PANES],
 }
 
 impl HasEditorBuffers for State {
@@ -167,6 +171,7 @@ impl State {
             file_name_picker_selected: None,
             editor_buffers: HashMap::new(),
             theme,
+            pane_boxes: [FlexBox::default(); MAX_PANES],
         };
         state
             .window_states
@@ -189,6 +194,7 @@ impl Default for State {
             file_name_picker_selected: None,
             editor_buffers: HashMap::new(),
             theme: HelixTheme::default(),
+            pane_boxes: [FlexBox::default(); MAX_PANES],
         }
     }
 }

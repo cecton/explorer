@@ -1,6 +1,6 @@
 use super::file_name_picker::FileNamePickerComponent;
 use super::preview::FilePreviewComponent;
-use super::state::{AppSignal, State, Window};
+use super::state::{AppSignal, MAX_PANES, State, Window};
 use super::theme::HelixTheme;
 use crate::loader::{FileKey, LoadedFile};
 use crate::lsp::{self, LSP_RRT};
@@ -14,12 +14,12 @@ use r3bl_tui::{
     App, BoxedSafeApp, BoxedSafeComponent, CommonResult, Component, ComponentRegistry,
     ComponentRegistryMap, ContainsResult, EditorBuffer, EventPropagation, FlexBox, FlexBoxId,
     GlobalData, HasFocus, InputDevice, InputEvent, IntoErr, Key, KeyPress, LayoutDirection,
-    LayoutManagement, LengthOps, ModifierKeysMask, OutputDevice, PerformPositioningAndSizing,
-    RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SPACER_GLYPH, Size, SpecialKey,
-    Surface, SurfaceBounds, SurfaceProps, SurfaceRender, TerminalWindow,
-    TerminalWindowMainThreadSignal, TuiAvailability, TuiStylesheet, ZOrder, box_end, box_start,
-    col, height, new_style, ok, render_component_in_current_box, render_pipeline,
-    render_tui_styled_texts_into, req_size_pc, row, send_signal, surface, throws,
+    LayoutManagement, LengthOps, ModifierKeysMask, MouseInputKind, OutputDevice,
+    PerformPositioningAndSizing, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
+    SPACER_GLYPH, Size, SpecialKey, Surface, SurfaceBounds, SurfaceProps, SurfaceRender,
+    TerminalWindow, TerminalWindowMainThreadSignal, TuiAvailability, TuiStylesheet, ZOrder,
+    box_end, box_start, col, height, new_style, ok, render_component_in_current_box,
+    render_pipeline, render_tui_styled_texts_into, req_size_pc, row, send_signal, surface, throws,
     throws_with_return, tui_color, tui_styled_text, tui_styled_texts, tui_stylesheet,
 };
 use std::sync::atomic::AtomicU64;
@@ -28,10 +28,6 @@ use std::sync::{Arc, OnceLock};
 use tokio::sync::mpsc;
 
 type PickerResultMsg = (u64, Vec<(FileKey, Vec<u32>)>);
-
-/// Maximum number of simultaneously visible panes. Terminals wider than 500 cols are not
-/// expected in practice (500 / MIN_PANE_WIDTH = 5).
-const MAX_PANES: usize = 5;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -132,6 +128,8 @@ impl Component<State, AppSignal> for PaneComponent {
         has_focus: &mut HasFocus,
     ) -> CommonResult<RenderPipeline> {
         throws_with_return!({
+            global_data.state.pane_boxes[self.slot] = current_box;
+
             let active_window = self.active_window(&global_data.state).cloned();
             let add_title = active_window.is_some();
 
@@ -468,6 +466,29 @@ impl App for AppMain {
                 TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::SendFocusedWindowToBack)
             );
             return Ok(EventPropagation::ConsumedRender);
+        }
+
+        if let InputEvent::Mouse(mouse) = &input_event
+            && mouse.kind == MouseInputKind::MouseMove
+        {
+            let px = mouse.pos.col_index;
+            let py = mouse.pos.row_index;
+            for (slot, box_) in global_data.state.pane_boxes.iter().enumerate() {
+                let ox = box_.style_adjusted_origin_pos.col_index;
+                let oy = box_.style_adjusted_origin_pos.row_index;
+                let w = box_.style_adjusted_bounds_size.col_width;
+                let h = box_.style_adjusted_bounds_size.row_height;
+                if px >= ox && px < ox + w && py >= oy && py < oy + h {
+                    if let Some(window) = global_data.state.window_stack.get(slot)
+                        && global_data.state.focused_window.as_ref() != Some(window)
+                    {
+                        global_data.state.focused_window = Some(window.clone());
+                        has_focus.set_id(FlexBoxId::from(Id::pane(slot)));
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                    break;
+                }
+            }
         }
 
         ComponentRegistry::route_event_to_focused_component(
