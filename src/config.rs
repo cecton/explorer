@@ -50,11 +50,8 @@ pub fn save_theme(theme_name: &str) -> Result<(), String> {
     let mut found = false;
     for node in doc.nodes_mut() {
         if node.name().value() == "theme" {
-            if let Some(entry) = node.entry_mut(0usize) {
-                entry.set_value(theme_name);
-            } else {
-                node.push(kdl::KdlEntry::new(theme_name));
-            }
+            node.entries_mut().clear();
+            node.push(kdl::KdlEntry::new(theme_name));
             found = true;
             break;
         }

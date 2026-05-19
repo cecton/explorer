@@ -800,7 +800,9 @@ impl App for AppMain {
                         &state.theme_picker_results,
                     );
                     if let Some((name, _)) = state.theme_picker_results.get(selected) {
-                        let _ = crate::config::save_theme(name);
+                        if let Err(e) = crate::config::save_theme(name) {
+                            tracing::error!("Failed to save theme to config: {e}");
+                        }
                     }
                     state.remove_window(&Window::ThemePicker);
                     state.theme_picker_open = false;
