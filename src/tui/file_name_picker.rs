@@ -130,12 +130,15 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                 style_adjusted_bounds_size: bounds.col_width + height(1),
                 ..Default::default()
             };
+            let saved_focus = has_focus.get_id();
             has_focus.set_id(FlexBoxId::from(Id::FileNamePickerEditor));
             let editor_pipeline =
                 self.editor
                     .render(global_data, editor_box, surface_bounds, has_focus)?;
             pipeline.join_into(editor_pipeline);
-            has_focus.set_id(self.id);
+            if let Some(id) = saved_focus {
+                has_focus.set_id(id);
+            }
 
             if total_rows < 2 {
                 return Ok(pipeline);
