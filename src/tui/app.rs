@@ -1,7 +1,9 @@
 use super::file_name_picker::FileNamePickerComponent;
+use super::fuzzy_picker::resolve_selected_index;
 use super::preview::FilePreviewComponent;
 use super::state::{AppSignal, MAX_PANES, State, Window};
 use super::theme::HelixTheme;
+use super::theme_picker::ThemePickerComponent;
 use crate::loader::{FileKey, LoadedFile};
 use crate::lsp::{self, LSP_RRT};
 use crate::watcher::{WATCHER_RRT, set_watcher_root};
@@ -40,6 +42,7 @@ pub enum Id {
     Pane3 = 5,
     Pane4 = 6,
     FileNamePickerEditor = 7,
+    ThemePickerEditor = 8,
 }
 
 impl Id {
@@ -73,6 +76,7 @@ struct PaneComponent {
     id: FlexBoxId,
     slot: usize,
     picker: FileNamePickerComponent,
+    theme_picker: ThemePickerComponent,
     preview: FilePreviewComponent,
     /// Origin row of the content area (below title bar), used for scrollbar mouse events.
     content_origin_row: u16,
@@ -94,6 +98,7 @@ impl PaneComponent {
             id,
             slot,
             picker: FileNamePickerComponent::new(id),
+            theme_picker: ThemePickerComponent::new(id),
             preview: FilePreviewComponent::new(id),
             content_origin_row: 0,
             content_col_count: 0,
@@ -209,6 +214,20 @@ impl PaneComponent {
                 }
                 EventPropagation::ConsumedRender
             }
+            Window::ThemePicker => {
+                let scroll_max = state.window_scroll_max(window);
+                if scroll_max == 0 {
+                    return EventPropagation::ConsumedRender;
+                }
+                let idx = target.min(scroll_max.saturating_sub(1));
+                if let Some((name, _)) = state.theme_picker_results.get(idx) {
+                    state.theme_picker_selected = Some(name.clone());
+                    if let Some(theme) = HelixTheme::from_name(name) {
+                        state.theme = theme;
+                    }
+                }
+                EventPropagation::ConsumedRender
+            }
         }
     }
 }
@@ -246,6 +265,7 @@ fn scroll_from_y(
 impl Component<State, AppSignal> for PaneComponent {
     fn reset(&mut self) {
         self.picker.reset();
+        self.theme_picker.reset();
         self.preview.reset();
     }
 
@@ -281,6 +301,10 @@ impl Component<State, AppSignal> for PaneComponent {
         match self.active_window(&global_data.state).cloned() {
             Some(Window::FileNamePicker) => {
                 self.picker
+                    .handle_event(global_data, input_event, has_focus)
+            }
+            Some(Window::ThemePicker) => {
+                self.theme_picker
                     .handle_event(global_data, input_event, has_focus)
             }
             Some(Window::FilePreview(_)) => {
@@ -362,6 +386,12 @@ impl Component<State, AppSignal> for PaneComponent {
                     self.picker
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
+                Some(Window::ThemePicker) => self.theme_picker.render(
+                    global_data,
+                    inner_bounds,
+                    surface_bounds,
+                    has_focus,
+                )?,
                 Some(Window::FilePreview(_)) => {
                     self.preview
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
@@ -493,18 +523,35 @@ fn run_file_name_match(
     scored.into_iter().map(|(key, _, idx)| (key, idx)).collect()
 }
 
-pub(super) fn resolve_selected(
-    selected: &Option<FileKey>,
-    results: &[(FileKey, Vec<u32>)],
-) -> usize {
-    let key = match selected {
-        None => return 0,
-        Some(k) => k,
-    };
-    results
-        .iter()
-        .position(|(result_key, _)| result_key == key)
-        .unwrap_or(0)
+fn run_theme_name_match(query: &str) -> Vec<(String, Vec<u32>)> {
+    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+
+    if pattern.atoms.is_empty() {
+        return HelixTheme::theme_names()
+            .map(|n| (n.to_string(), vec![]))
+            .collect();
+    }
+
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut buf = Vec::new();
+    let mut scored: Vec<(String, u32, Vec<u32>)> = HelixTheme::theme_names()
+        .filter_map(|name| {
+            let haystack = Utf32Str::new(name, &mut buf);
+            let mut indices = Vec::new();
+            pattern
+                .indices(haystack, &mut matcher, &mut indices)
+                .map(|score| {
+                    indices.sort_unstable();
+                    indices.dedup();
+                    (name.to_string(), score, indices)
+                })
+        })
+        .collect();
+    scored.sort_by_key(|&(_, score, _)| std::cmp::Reverse(score));
+    scored
+        .into_iter()
+        .map(|(name, _, idx)| (name, idx))
+        .collect()
 }
 
 impl App for AppMain {
@@ -623,6 +670,35 @@ impl App for AppMain {
             return Ok(EventPropagation::ConsumedRender);
         }
 
+        if let InputEvent::Keyboard(KeyPress::WithModifiers { key, mask }) = input_event
+            && key == Key::Character('t')
+            && mask == ModifierKeysMask::new().with_ctrl()
+        {
+            let state = &mut global_data.state;
+            state.push_window(Window::ThemePicker);
+            state.focused_window = Some(Window::ThemePicker);
+            state.theme_picker_open = true;
+            state.saved_theme = state.theme.clone();
+            let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
+                .map(|n| (n.to_string(), vec![]))
+                .collect();
+            state.theme_picker_selected = all_themes
+                .iter()
+                .position(|(n, _)| n == state.theme.name())
+                .and_then(|i| all_themes.get(i).map(|(n, _)| n.clone()));
+            state.theme_picker_results = all_themes;
+            let editor_id = FlexBoxId::from(Id::ThemePickerEditor);
+            if let Some(buf) = state.editor_buffers.get_mut(&editor_id) {
+                buf.init_with([""])
+            } else {
+                state
+                    .editor_buffers
+                    .insert(editor_id, EditorBuffer::new_empty(None, None));
+            }
+            has_focus.set_id(focused_pane_id(state));
+            return Ok(EventPropagation::ConsumedRender);
+        }
+
         if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event {
             match key {
                 Key::SpecialKey(SpecialKey::Tab) => {
@@ -656,7 +732,7 @@ impl App for AppMain {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Key::SpecialKey(SpecialKey::Enter) => {
-                    let selected = resolve_selected(
+                    let selected = resolve_selected_index(
                         &state.file_name_picker_selected,
                         &state.file_name_picker_results,
                     );
@@ -676,7 +752,7 @@ impl App for AppMain {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Key::SpecialKey(SpecialKey::Up) => {
-                    let current = resolve_selected(
+                    let current = resolve_selected_index(
                         &state.file_name_picker_selected,
                         &state.file_name_picker_results,
                     );
@@ -689,13 +765,77 @@ impl App for AppMain {
                 Key::SpecialKey(SpecialKey::Down) => {
                     let count = state.file_name_picker_results.len();
                     if count > 0 {
-                        let current = resolve_selected(
+                        let current = resolve_selected_index(
                             &state.file_name_picker_selected,
                             &state.file_name_picker_results,
                         );
                         let next = (current + 1).min(count - 1);
                         let (key, _) = &state.file_name_picker_results[next];
                         state.file_name_picker_selected = Some(*key);
+                    }
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                _ => {}
+            }
+        }
+
+        if global_data.state.theme_picker_open
+            && global_data.state.focused_window == Some(Window::ThemePicker)
+            && let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
+        {
+            let state = &mut global_data.state;
+            match key {
+                Key::SpecialKey(SpecialKey::Esc) => {
+                    state.theme = state.saved_theme.clone();
+                    state.remove_window(&Window::ThemePicker);
+                    state.theme_picker_open = false;
+                    state.theme_picker_results.clear();
+                    state.theme_picker_selected = None;
+                    has_focus.set_id(focused_pane_id(state));
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                Key::SpecialKey(SpecialKey::Enter) => {
+                    let selected = resolve_selected_index(
+                        &state.theme_picker_selected,
+                        &state.theme_picker_results,
+                    );
+                    if let Some((name, _)) = state.theme_picker_results.get(selected) {
+                        let _ = crate::config::save_theme(name);
+                    }
+                    state.remove_window(&Window::ThemePicker);
+                    state.theme_picker_open = false;
+                    state.theme_picker_results.clear();
+                    state.theme_picker_selected = None;
+                    has_focus.set_id(focused_pane_id(state));
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                Key::SpecialKey(SpecialKey::Up) => {
+                    let current = resolve_selected_index(
+                        &state.theme_picker_selected,
+                        &state.theme_picker_results,
+                    );
+                    let prev = current.saturating_sub(1);
+                    if let Some((name, _)) = state.theme_picker_results.get(prev) {
+                        state.theme_picker_selected = Some(name.clone());
+                        if let Some(theme) = HelixTheme::from_name(name) {
+                            state.theme = theme;
+                        }
+                    }
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                Key::SpecialKey(SpecialKey::Down) => {
+                    let count = state.theme_picker_results.len();
+                    if count > 0 {
+                        let current = resolve_selected_index(
+                            &state.theme_picker_selected,
+                            &state.theme_picker_results,
+                        );
+                        let next = (current + 1).min(count - 1);
+                        let (name, _) = &state.theme_picker_results[next];
+                        state.theme_picker_selected = Some(name.clone());
+                        if let Some(theme) = HelixTheme::from_name(name) {
+                            state.theme = theme;
+                        }
                     }
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -771,6 +911,21 @@ impl App for AppMain {
                         state.file_name_picker_results = AppMain::all_files_results(&snapshot);
                     } else {
                         self.trigger_match(query, global_data.main_thread_channel_sender.clone());
+                    }
+                }
+                AppSignal::ThemePickerQueryChanged => {
+                    let editor_id = FlexBoxId::from(Id::ThemePickerEditor);
+                    let query = state
+                        .editor_buffers
+                        .get(&editor_id)
+                        .map(|b| b.get_as_string_with_newlines().to_string())
+                        .unwrap_or_default();
+                    state.theme_picker_results = run_theme_name_match(&query);
+                    if let Some((name, _)) = state.theme_picker_results.first() {
+                        state.theme_picker_selected = Some(name.clone());
+                        if let Some(theme) = HelixTheme::from_name(name) {
+                            state.theme = theme;
+                        }
                     }
                 }
                 AppSignal::FilesChanged(batch) => {
@@ -938,12 +1093,10 @@ impl App for AppMain {
             fill_pipeline.join_into(pipeline);
             pipeline = fill_pipeline;
 
-            let picker_open = global_data.state.file_name_picker_open;
             let focused_window = global_data.state.focused_window.clone();
             render_status_bar(
                 &mut pipeline,
                 window_size,
-                picker_open,
                 focused_window.as_ref(),
                 &global_data.state.theme,
             );
@@ -1079,7 +1232,6 @@ fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
 fn render_status_bar(
     pipeline: &mut RenderPipeline,
     size: Size,
-    picker_open: bool,
     focused_window: Option<&Window>,
     theme: &HelixTheme,
 ) {
@@ -1088,15 +1240,17 @@ fn render_status_bar(
     let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
     let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
 
-    let hint = if picker_open {
-        " Esc:Close  ↑↓:Select  PgUp/PgDn:Page  Enter:Open  Tab:Switch  Ctrl+P:Picker  Ctrl+C:Quit"
-    } else {
-        match focused_window {
-            Some(Window::FilePreview(_)) => {
-                " Esc:Send to back  ↑↓/PgUp/PgDn:Scroll  Tab:Switch  Ctrl+P:Picker  Ctrl+C:Quit"
-            }
-            _ => " Ctrl+P:Open file  Tab:Switch  Ctrl+C:Quit",
+    let hint = match focused_window {
+        Some(Window::FileNamePicker) => {
+            " Esc:Close  ↑↓:Select  PgUp/PgDn:Page  Enter:Open  Tab:Switch  Ctrl+P:Picker  Ctrl+T:Theme  Ctrl+C:Quit"
         }
+        Some(Window::ThemePicker) => {
+            " Esc:Cancel  ↑↓:Select  PgUp/PgDn:Page  Enter:Save  Tab:Switch  Ctrl+P:Picker  Ctrl+T:Theme  Ctrl+C:Quit"
+        }
+        Some(Window::FilePreview(_)) => {
+            " Esc:Send to back  ↑↓/PgUp/PgDn:Scroll  Tab:Switch  Ctrl+P:Picker  Ctrl+T:Theme  Ctrl+C:Quit"
+        }
+        _ => " Ctrl+P:Open file  Ctrl+T:Theme  Tab:Switch  Ctrl+C:Quit",
     };
 
     let styled_texts = tui_styled_texts! {
@@ -1151,7 +1305,7 @@ fn render_pane_title(
         Window::FilePreview(key) => snapshot[key.0]
             .removed
             .load(std::sync::atomic::Ordering::Relaxed),
-        Window::FileNamePicker => false,
+        Window::FileNamePicker | Window::ThemePicker => false,
     };
 
     let color_bg = if focused {
@@ -1173,6 +1327,7 @@ fn render_pane_title(
             .file_name()
             .unwrap_or(state.root.as_str())
             .to_string(),
+        Window::ThemePicker => "Theme".to_string(),
         Window::FilePreview(key) => {
             let file = &snapshot[key.0];
             let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);

@@ -21,6 +21,7 @@ static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
 pub enum Window {
     FilePreview(FileKey),
     FileNamePicker,
+    ThemePicker,
 }
 
 /// Scroll and page-size state for a single window pane.
@@ -47,8 +48,14 @@ pub struct State {
     /// Each entry: (FileKey into files vec, sorted+deduped matched char positions).
     pub file_name_picker_results: Vec<(FileKey, Vec<u32>)>,
     pub file_name_picker_selected: Option<FileKey>,
+    pub theme_picker_open: bool,
+    /// Each entry: (theme name, sorted+deduped matched char positions).
+    pub theme_picker_results: Vec<(String, Vec<u32>)>,
+    pub theme_picker_selected: Option<String>,
     pub editor_buffers: HashMap<FlexBoxId, EditorBuffer>,
     pub theme: HelixTheme,
+    /// Theme to restore if the user cancels the picker.
+    pub saved_theme: HelixTheme,
     /// Current `FlexBox` for each pane slot (index 0..MAX_PANES).
     pub pane_boxes: [FlexBox; MAX_PANES],
 }
@@ -186,6 +193,7 @@ impl State {
     pub fn new(files: Arc<ArcSwap<Vec<LoadedFile>>>, root: Utf8PathBuf, theme: HelixTheme) -> Self {
         let snapshot = files.load();
         let file_name_picker_results = (0..snapshot.len()).map(|i| (FileKey(i), vec![])).collect();
+        let saved_theme = theme.clone();
         let mut state = Self {
             files,
             files_version: 0,
@@ -196,8 +204,12 @@ impl State {
             file_name_picker_open: true,
             file_name_picker_results,
             file_name_picker_selected: None,
+            theme_picker_open: false,
+            theme_picker_results: Vec::new(),
+            theme_picker_selected: None,
             editor_buffers: HashMap::new(),
             theme,
+            saved_theme,
             pane_boxes: [FlexBox::default(); MAX_PANES],
         };
         state
@@ -219,8 +231,12 @@ impl Default for State {
             file_name_picker_open: false,
             file_name_picker_results: Vec::new(),
             file_name_picker_selected: None,
+            theme_picker_open: false,
+            theme_picker_results: Vec::new(),
+            theme_picker_selected: None,
             editor_buffers: HashMap::new(),
             theme: HelixTheme::default(),
+            saved_theme: HelixTheme::default(),
             pane_boxes: [FlexBox::default(); MAX_PANES],
         }
     }
@@ -235,6 +251,10 @@ impl PartialEq for State {
             && self.file_name_picker_open == other.file_name_picker_open
             && self.file_name_picker_selected == other.file_name_picker_selected
             && self.file_name_picker_results.len() == other.file_name_picker_results.len()
+            && self.theme_picker_open == other.theme_picker_open
+            && self.theme_picker_selected == other.theme_picker_selected
+            && self.theme_picker_results.len() == other.theme_picker_results.len()
+            && self.theme == other.theme
     }
 }
 
@@ -261,6 +281,7 @@ impl Display for State {
 #[non_exhaustive]
 pub enum AppSignal {
     FileNamePickerQueryChanged,
+    ThemePickerQueryChanged,
     FilesChanged(Arc<BatchedWatchEvent>),
     #[default]
     Noop,

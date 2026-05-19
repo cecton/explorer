@@ -10,15 +10,15 @@ use r3bl_tui::{
 };
 use tokio::sync::mpsc;
 
-pub struct FileNamePickerComponent {
+pub struct ThemePickerComponent {
     id: FlexBoxId,
     picker: FuzzyPicker,
     editor: EditorComponent<State, AppSignal>,
 }
 
-impl FileNamePickerComponent {
+impl ThemePickerComponent {
     pub fn new(id: FlexBoxId) -> Self {
-        let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
+        let editor_id = FlexBoxId::from(Id::ThemePickerEditor);
 
         fn on_buffer_change(
             _id: FlexBoxId,
@@ -26,9 +26,7 @@ impl FileNamePickerComponent {
         ) {
             send_signal!(
                 main_tx,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(
-                    AppSignal::FileNamePickerQueryChanged
-                )
+                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::ThemePickerQueryChanged)
             );
         }
 
@@ -46,7 +44,7 @@ impl FileNamePickerComponent {
     }
 }
 
-impl Component<State, AppSignal> for FileNamePickerComponent {
+impl Component<State, AppSignal> for ThemePickerComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -59,13 +57,18 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
         input_event: InputEvent,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
-        let page_size = global_data.state.window_page_size(&Window::FileNamePicker);
-        let results = &global_data.state.file_name_picker_results;
-        let selected = &mut global_data.state.file_name_picker_selected;
+        let page_size = global_data.state.window_page_size(&Window::ThemePicker);
+        let results = &global_data.state.theme_picker_results;
+        let selected = &mut global_data.state.theme_picker_selected;
         if let Some(result) =
             self.picker
                 .handle_navigation(&input_event, page_size, results, selected)
         {
+            if let Some(ref name) = global_data.state.theme_picker_selected {
+                if let Some(theme) = crate::tui::theme::HelixTheme::from_name(name) {
+                    global_data.state.theme = theme;
+                }
+            }
             return Ok(result);
         }
         self.editor
@@ -129,8 +132,8 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
             let results_origin = origin + height(1);
             let result_rows = total_rows - 1;
 
-            let results = &global_data.state.file_name_picker_results;
-            let selected = &global_data.state.file_name_picker_selected;
+            let results = &global_data.state.theme_picker_results;
+            let selected = &global_data.state.theme_picker_selected;
             let result_ops = self.picker.render_results(
                 &global_data.state,
                 results_origin,
@@ -138,24 +141,19 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                 pane_width,
                 results,
                 selected,
-                |key, state| {
-                    let snapshot = state.files.load_full();
-                    let file = &snapshot[key.0];
-                    let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
-                    rel.to_string()
-                },
+                |name, _state| name.clone(),
             );
             let result_count = results.len();
 
             global_data
                 .state
-                .set_window_scroll(&Window::FileNamePicker, self.picker.scroll_offset);
+                .set_window_scroll(&Window::ThemePicker, self.picker.scroll_offset);
             global_data
                 .state
-                .set_window_scroll_max(&Window::FileNamePicker, result_count);
+                .set_window_scroll_max(&Window::ThemePicker, result_count);
             global_data
                 .state
-                .set_window_page_size(&Window::FileNamePicker, result_rows);
+                .set_window_page_size(&Window::ThemePicker, result_rows);
 
             pipeline.push(ZOrder::Normal, result_ops);
             pipeline

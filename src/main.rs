@@ -8,6 +8,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 
 mod cli;
+mod config;
 mod loader;
 mod lsp;
 mod tui;
@@ -54,14 +55,29 @@ async fn main() {
     files.sort_by(|a, b| a.path.cmp(&b.path));
     let files = Arc::new(ArcSwap::from_pointee(files));
 
-    let theme = {
-        let name = &args.theme;
-        if let Some(t) = tui::theme::HelixTheme::from_name(name) {
-            t
-        } else {
-            eprintln!("unknown theme '{name}', using default");
-            tui::theme::HelixTheme::default()
+    let config = match config::Config::load() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("{e}");
+            std::process::exit(1);
         }
+    };
+
+    let theme_name = args
+        .theme
+        .or(config.and_then(|c| c.theme))
+        .unwrap_or_else(|| {
+            tui::theme::HelixTheme::theme_names()
+                .next()
+                .unwrap_or("catppuccin_mocha")
+                .to_string()
+        });
+
+    let theme = if let Some(t) = tui::theme::HelixTheme::from_name(&theme_name) {
+        t
+    } else {
+        eprintln!("unknown theme '{theme_name}', using default");
+        tui::theme::HelixTheme::default()
     };
 
     let initial_state = tui::build_state(Arc::clone(&files), root.clone(), theme);

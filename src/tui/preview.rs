@@ -22,10 +22,10 @@ impl FilePreviewComponent {
     /// non-preview window or the stack has no entry for this slot.
     pub(super) fn file_key(&self, state: &State) -> Option<FileKey> {
         let slot = pane_slot(self.id)?;
-        match state.window_stack.get(slot)? {
-            Window::FilePreview(key) => Some(*key),
-            Window::FileNamePicker => None,
-        }
+        let Window::FilePreview(key) = state.window_stack.get(slot)? else {
+            return None;
+        };
+        Some(*key)
     }
 }
 

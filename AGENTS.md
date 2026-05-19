@@ -23,6 +23,7 @@ the code or format or use rustup.
 Source is organized as:
 - `src/main.rs` — async entry point, wires CLI → loader → TUI
 - `src/cli.rs` — CLI argument parsing via `pico-args`
+- `src/config.rs` — KDL configuration file parsing (theme, future fields)
 - `src/loader.rs` — parallel file walking and `LoadedFile` construction
 - `src/lsp.rs` — LSP client (JSON-RPC over stdio)
 - `src/tui/mod.rs` — module declarations
@@ -30,6 +31,8 @@ Source is organized as:
 - `src/tui/app.rs` — `App` trait impl, layout, `run()` entry point
 - `src/tui/file_list.rs` — `FileListComponent` (left pane)
 - `src/tui/file_name_picker.rs` — fuzzy file-name picker overlay
+- `src/tui/fuzzy_picker.rs` — shared fuzzy list picker component
+- `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview
 - `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane)
 
 ---

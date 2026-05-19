@@ -3,12 +3,13 @@ use std::collections::HashMap;
 
 include!("../../themes/themes.rs");
 
-#[derive(Clone)]
+#[derive(Clone, PartialEq)]
 pub struct HelixTheme {
+    name: String,
     styles: HashMap<String, Style>,
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Style {
     pub fg: Option<[u8; 3]>,
     pub bg: Option<[u8; 3]>,
@@ -35,6 +36,10 @@ impl HelixTheme {
         THEMES.iter().map(|(n, _)| *n)
     }
 
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
     fn build(name: &str, toml_str: &str) -> Self {
         let chain = collect_chain(name, toml_str);
 
@@ -55,7 +60,10 @@ impl HelixTheme {
             }
         }
 
-        Self { styles }
+        Self {
+            name: name.to_string(),
+            styles,
+        }
     }
 
     pub fn color_for_scope(&self, scope: &str) -> Option<[u8; 3]> {
