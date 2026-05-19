@@ -260,17 +260,7 @@ impl Display for State {
 #[derive(Default, Clone, Debug)]
 #[non_exhaustive]
 pub enum AppSignal {
-    OpenFileNamePicker,
-    CloseFileNamePicker,
     FileNamePickerQueryChanged,
-    FileNamePickerSelectNext,
-    FileNamePickerSelectPrev,
-    FileNamePickerConfirm,
-    ScrollPreviewDown(usize),
-    ScrollPreviewUp(usize),
-    SendFocusedWindowToBack,
-    FocusNextPane,
-    FocusPrevPane,
     FilesChanged(Arc<BatchedWatchEvent>),
     #[default]
     Noop,

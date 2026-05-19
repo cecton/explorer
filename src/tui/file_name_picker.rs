@@ -63,21 +63,32 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
             if let InputEvent::Mouse(mouse_input) = input_event {
                 match mouse_input.kind {
                     MouseInputKind::ScrollUp => {
-                        send_signal!(
-                            global_data.main_thread_channel_sender,
-                            TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::FileNamePickerSelectPrev,
-                            )
-                        );
+                        let state = &mut global_data.state;
+                        let count = state.file_name_picker_results.len();
+                        if count > 0 {
+                            let current = resolve_selected(
+                                &state.file_name_picker_selected,
+                                &state.file_name_picker_results,
+                            );
+                            let prev = current.saturating_sub(1);
+                            if let Some((key, _)) = state.file_name_picker_results.get(prev) {
+                                state.file_name_picker_selected = Some(*key);
+                            }
+                        }
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     MouseInputKind::ScrollDown => {
-                        send_signal!(
-                            global_data.main_thread_channel_sender,
-                            TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::FileNamePickerSelectNext,
-                            )
-                        );
+                        let state = &mut global_data.state;
+                        let count = state.file_name_picker_results.len();
+                        if count > 0 {
+                            let current = resolve_selected(
+                                &state.file_name_picker_selected,
+                                &state.file_name_picker_results,
+                            );
+                            let next = (current + 1).min(count - 1);
+                            let (key, _) = &state.file_name_picker_results[next];
+                            state.file_name_picker_selected = Some(*key);
+                        }
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     _ => {

@@ -604,27 +604,37 @@ impl App for AppMain {
             && key == Key::Character('p')
             && mask == ModifierKeysMask::new().with_ctrl()
         {
-            send_signal!(
-                global_data.main_thread_channel_sender,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::OpenFileNamePicker)
-            );
+            let state = &mut global_data.state;
+            state.push_window(Window::FileNamePicker);
+            state.focused_window = Some(Window::FileNamePicker);
+            state.file_name_picker_open = true;
+            state.file_name_picker_selected = None;
+            let snapshot = state.files.load();
+            state.file_name_picker_results = AppMain::all_files_results(&snapshot);
+            let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
+            if let Some(buf) = state.editor_buffers.get_mut(&editor_id) {
+                buf.init_with([""])
+            } else {
+                state
+                    .editor_buffers
+                    .insert(editor_id, EditorBuffer::new_empty(None, None));
+            }
+            has_focus.set_id(focused_pane_id(state));
             return Ok(EventPropagation::ConsumedRender);
         }
 
         if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event {
             match key {
                 Key::SpecialKey(SpecialKey::Tab) => {
-                    send_signal!(
-                        global_data.main_thread_channel_sender,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::FocusNextPane)
-                    );
+                    let state = &mut global_data.state;
+                    let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
+                    cycle_focus(state, has_focus, &visible, 1);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Key::SpecialKey(SpecialKey::BackTab) => {
-                    send_signal!(
-                        global_data.main_thread_channel_sender,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::FocusPrevPane)
-                    );
+                    let state = &mut global_data.state;
+                    let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
+                    cycle_focus(state, has_focus, &visible, -1);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 _ => {}
@@ -635,41 +645,58 @@ impl App for AppMain {
             && global_data.state.focused_window == Some(Window::FileNamePicker)
             && let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
         {
+            let state = &mut global_data.state;
             match key {
                 Key::SpecialKey(SpecialKey::Esc) => {
-                    send_signal!(
-                        global_data.main_thread_channel_sender,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(
-                            AppSignal::CloseFileNamePicker
-                        )
-                    );
+                    state.remove_window(&Window::FileNamePicker);
+                    state.file_name_picker_open = false;
+                    state.file_name_picker_results.clear();
+                    state.file_name_picker_selected = None;
+                    has_focus.set_id(focused_pane_id(state));
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Key::SpecialKey(SpecialKey::Enter) => {
-                    send_signal!(
-                        global_data.main_thread_channel_sender,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(
-                            AppSignal::FileNamePickerConfirm
-                        )
+                    let selected = resolve_selected(
+                        &state.file_name_picker_selected,
+                        &state.file_name_picker_results,
                     );
+                    if let Some(&(key, _)) = state.file_name_picker_results.get(selected) {
+                        if !state.window_states.contains_key(&Window::FilePreview(key)) {
+                            state.set_window_scroll(&Window::FilePreview(key), 0);
+                        }
+                        state.push_window(Window::FilePreview(key));
+                        state.focused_window = Some(Window::FilePreview(key));
+                        lsp::send_file_request(key.0);
+                    }
+                    state.remove_window(&Window::FileNamePicker);
+                    state.file_name_picker_open = false;
+                    state.file_name_picker_results.clear();
+                    state.file_name_picker_selected = None;
+                    has_focus.set_id(focused_pane_id(state));
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Key::SpecialKey(SpecialKey::Up) => {
-                    send_signal!(
-                        global_data.main_thread_channel_sender,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(
-                            AppSignal::FileNamePickerSelectPrev
-                        )
+                    let current = resolve_selected(
+                        &state.file_name_picker_selected,
+                        &state.file_name_picker_results,
                     );
+                    let prev = current.saturating_sub(1);
+                    if let Some((key, _)) = state.file_name_picker_results.get(prev) {
+                        state.file_name_picker_selected = Some(*key);
+                    }
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Key::SpecialKey(SpecialKey::Down) => {
-                    send_signal!(
-                        global_data.main_thread_channel_sender,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(
-                            AppSignal::FileNamePickerSelectNext
-                        )
-                    );
+                    let count = state.file_name_picker_results.len();
+                    if count > 0 {
+                        let current = resolve_selected(
+                            &state.file_name_picker_selected,
+                            &state.file_name_picker_results,
+                        );
+                        let next = (current + 1).min(count - 1);
+                        let (key, _) = &state.file_name_picker_results[next];
+                        state.file_name_picker_selected = Some(*key);
+                    }
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 _ => {}
@@ -683,10 +710,11 @@ impl App for AppMain {
             key: Key::SpecialKey(SpecialKey::Esc),
         }) = input_event
         {
-            send_signal!(
-                global_data.main_thread_channel_sender,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::SendFocusedWindowToBack)
-            );
+            let state = &mut global_data.state;
+            if let Some(window) = state.focused_window.clone() {
+                state.send_to_back(&window);
+                has_focus.set_id(focused_pane_id(state));
+            }
             return Ok(EventPropagation::ConsumedRender);
         }
 
@@ -726,35 +754,11 @@ impl App for AppMain {
         action: &AppSignal,
         global_data: &mut GlobalData<State, AppSignal>,
         _component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
-        has_focus: &mut HasFocus,
+        _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
         throws_with_return!({
             let state = &mut global_data.state;
             match action {
-                AppSignal::OpenFileNamePicker => {
-                    state.push_window(Window::FileNamePicker);
-                    state.focused_window = Some(Window::FileNamePicker);
-                    state.file_name_picker_open = true;
-                    state.file_name_picker_selected = None;
-                    let snapshot = state.files.load();
-                    state.file_name_picker_results = AppMain::all_files_results(&snapshot);
-                    let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
-                    if let Some(buf) = state.editor_buffers.get_mut(&editor_id) {
-                        buf.init_with([""])
-                    } else {
-                        state
-                            .editor_buffers
-                            .insert(editor_id, EditorBuffer::new_empty(None, None));
-                    }
-                    has_focus.set_id(focused_pane_id(state));
-                }
-                AppSignal::CloseFileNamePicker => {
-                    state.remove_window(&Window::FileNamePicker);
-                    state.file_name_picker_open = false;
-                    state.file_name_picker_results.clear();
-                    state.file_name_picker_selected = None;
-                    has_focus.set_id(focused_pane_id(state));
-                }
                 AppSignal::FileNamePickerQueryChanged => {
                     let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
                     let query = state
@@ -768,78 +772,6 @@ impl App for AppMain {
                     } else {
                         self.trigger_match(query, global_data.main_thread_channel_sender.clone());
                     }
-                }
-                AppSignal::FileNamePickerSelectNext => {
-                    let count = state.file_name_picker_results.len();
-                    if count > 0 {
-                        let current = resolve_selected(
-                            &state.file_name_picker_selected,
-                            &state.file_name_picker_results,
-                        );
-                        let next = (current + 1).min(count - 1);
-                        let (key, _) = &state.file_name_picker_results[next];
-                        state.file_name_picker_selected = Some(*key);
-                    }
-                }
-                AppSignal::FileNamePickerSelectPrev => {
-                    let current = resolve_selected(
-                        &state.file_name_picker_selected,
-                        &state.file_name_picker_results,
-                    );
-                    let prev = current.saturating_sub(1);
-                    if let Some((key, _)) = state.file_name_picker_results.get(prev) {
-                        state.file_name_picker_selected = Some(*key);
-                    }
-                }
-                AppSignal::FileNamePickerConfirm => {
-                    let selected = resolve_selected(
-                        &state.file_name_picker_selected,
-                        &state.file_name_picker_results,
-                    );
-                    if let Some(&(key, _)) = state.file_name_picker_results.get(selected) {
-                        if !state.window_states.contains_key(&Window::FilePreview(key)) {
-                            state.set_window_scroll(&Window::FilePreview(key), 0);
-                        }
-                        state.push_window(Window::FilePreview(key));
-                        state.focused_window = Some(Window::FilePreview(key));
-                        lsp::send_file_request(key.0);
-                    }
-                    state.remove_window(&Window::FileNamePicker);
-                    state.file_name_picker_open = false;
-                    state.file_name_picker_results.clear();
-                    state.file_name_picker_selected = None;
-                    has_focus.set_id(focused_pane_id(state));
-                }
-                AppSignal::ScrollPreviewDown(n) => {
-                    if let Some(window) = state.focused_window.clone() {
-                        let current = state.window_scroll(&window);
-                        state.set_window_scroll(&window, current.saturating_add(*n));
-                        state.clamp_scroll(&window);
-                    }
-                }
-                AppSignal::ScrollPreviewUp(n) => {
-                    if let Some(window) = state.focused_window.clone() {
-                        let current = state.window_scroll(&window);
-                        state.set_window_scroll(&window, current.saturating_sub(*n));
-                        state.clamp_scroll(&window);
-                    }
-                }
-                AppSignal::SendFocusedWindowToBack => {
-                    if let Some(window) = state.focused_window.clone() {
-                        state.send_to_back(&window);
-                        has_focus.set_id(focused_pane_id(state));
-                    }
-                }
-                AppSignal::FocusNextPane => {
-                    let visible = state.visible_windows(
-                        // Use a generous default; actual width is corrected at render time.
-                        u16::MAX,
-                    );
-                    cycle_focus(state, has_focus, &visible, 1);
-                }
-                AppSignal::FocusPrevPane => {
-                    let visible = state.visible_windows(u16::MAX);
-                    cycle_focus(state, has_focus, &visible, -1);
                 }
                 AppSignal::FilesChanged(batch) => {
                     let snapshot = self.files.load_full();

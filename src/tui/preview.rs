@@ -5,8 +5,8 @@ use crate::loader::FileKey;
 use r3bl_tui::{
     CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData, HasFocus,
     InputEvent, Key, KeyPress, MouseInputKind, RenderOpCommon, RenderOpIR, RenderOpIRVec,
-    RenderPipeline, SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal, ZOrder, col,
-    new_style, render_pipeline, row, send_signal, throws_with_return, tui_color,
+    RenderPipeline, SpecialKey, SurfaceBounds, ZOrder, col, new_style, render_pipeline, row,
+    throws_with_return, tui_color,
 };
 
 pub struct FilePreviewComponent {
@@ -59,46 +59,35 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                 return Ok(EventPropagation::Propagate);
             };
             let window = Window::FilePreview(key);
+            let state = &mut global_data.state;
             let mut consumed = false;
             if let InputEvent::Keyboard(KeyPress::Plain { key: kb_key }) = input_event {
                 match kb_key {
                     Key::SpecialKey(SpecialKey::PageUp) => {
                         consumed = true;
-                        let page = global_data.state.window_page_size(&window);
-                        send_signal!(
-                            global_data.main_thread_channel_sender,
-                            TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::ScrollPreviewUp(page),
-                            )
-                        );
+                        let page = state.window_page_size(&window);
+                        let current = state.window_scroll(&window);
+                        state.set_window_scroll(&window, current.saturating_sub(page));
+                        state.clamp_scroll(&window);
                     }
                     Key::SpecialKey(SpecialKey::PageDown) => {
                         consumed = true;
-                        let page = global_data.state.window_page_size(&window);
-                        send_signal!(
-                            global_data.main_thread_channel_sender,
-                            TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::ScrollPreviewDown(page),
-                            )
-                        );
+                        let page = state.window_page_size(&window);
+                        let current = state.window_scroll(&window);
+                        state.set_window_scroll(&window, current.saturating_add(page));
+                        state.clamp_scroll(&window);
                     }
                     Key::SpecialKey(SpecialKey::Up) => {
                         consumed = true;
-                        send_signal!(
-                            global_data.main_thread_channel_sender,
-                            TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::ScrollPreviewUp(1),
-                            )
-                        );
+                        let current = state.window_scroll(&window);
+                        state.set_window_scroll(&window, current.saturating_sub(1));
+                        state.clamp_scroll(&window);
                     }
                     Key::SpecialKey(SpecialKey::Down) => {
                         consumed = true;
-                        send_signal!(
-                            global_data.main_thread_channel_sender,
-                            TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::ScrollPreviewDown(1),
-                            )
-                        );
+                        let current = state.window_scroll(&window);
+                        state.set_window_scroll(&window, current.saturating_add(1));
+                        state.clamp_scroll(&window);
                     }
                     _ => {}
                 }
@@ -107,21 +96,15 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                 match mouse.kind {
                     MouseInputKind::ScrollUp => {
                         consumed = true;
-                        send_signal!(
-                            global_data.main_thread_channel_sender,
-                            TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::ScrollPreviewUp(3),
-                            )
-                        );
+                        let current = state.window_scroll(&window);
+                        state.set_window_scroll(&window, current.saturating_sub(3));
+                        state.clamp_scroll(&window);
                     }
                     MouseInputKind::ScrollDown => {
                         consumed = true;
-                        send_signal!(
-                            global_data.main_thread_channel_sender,
-                            TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::ScrollPreviewDown(3),
-                            )
-                        );
+                        let current = state.window_scroll(&window);
+                        state.set_window_scroll(&window, current.saturating_add(3));
+                        state.clamp_scroll(&window);
                     }
                     _ => {}
                 }
