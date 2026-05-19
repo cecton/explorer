@@ -403,12 +403,22 @@ impl RRTWorker for LspWorker {
             if let Some(SemanticTokens { data, .. }) = tokens {
                 let snapshot = self.files.load();
                 let file = &snapshot[file_idx];
-                let lines = {
+                let (lines, total_lines) = {
                     let d = file.data.lock().unwrap();
-                    decode_tokens(&data, &d.content)
+                    let total_lines = d.line_starts.len();
+                    let mut lines = decode_tokens(&data, &d.content);
+                    if is_range {
+                        lines.truncate(RANGE_LINES.min(total_lines));
+                    }
+                    (lines, total_lines)
                 };
                 let mut guard = file.colored_lines.lock().unwrap();
-                if !is_range || guard.is_empty() {
+                let should_write = if lines.len() == total_lines {
+                    guard.len() != total_lines
+                } else {
+                    guard.is_empty()
+                };
+                if should_write {
                     *guard = lines;
                     drop(guard);
                     notify = true;
@@ -524,6 +534,12 @@ fn request_tokens(
         .parse()
         .expect("valid file URI");
 
+    let total_lines = file.data.lock().unwrap().line_starts.len();
+    let colored_len = file.colored_lines.lock().unwrap().len();
+    if colored_len == total_lines {
+        return Ok(());
+    }
+
     if !state.opened.contains(&file_idx) {
         let content = file.data.lock().unwrap().content.clone();
         let did_open = RpcNotification {
@@ -542,8 +558,7 @@ fn request_tokens(
         state.opened.insert(file_idx);
     }
 
-    let total_lines = file.data.lock().unwrap().line_starts.len();
-    if supports_range && total_lines > RANGE_THRESHOLD {
+    if supports_range && total_lines > RANGE_THRESHOLD && colored_len == 0 {
         let end_line = RANGE_LINES.min(total_lines) as u32;
         let range_id = state.next_id;
         state.next_id += 1;
@@ -571,8 +586,7 @@ fn request_tokens(
         state.pending.insert(range_id, (file_idx, true, is_warmup));
     }
 
-    if is_warmup && supports_range && file.data.lock().unwrap().line_starts.len() > RANGE_THRESHOLD
-    {
+    if is_warmup && supports_range && total_lines > RANGE_THRESHOLD {
         return Ok(());
     }
 
