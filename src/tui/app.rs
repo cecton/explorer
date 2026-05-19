@@ -1225,9 +1225,32 @@ fn render_scrollbar(
     let scroll_col =
         (content_box.style_adjusted_bounds_size.col_width.as_usize()).saturating_sub(1);
 
-    // Always render the scrollbar track. Rail uses inactive title bar bg, cursor uses active title bar bg.
-    let track_rgb = theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]);
-    let thumb_rgb = theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]);
+    // Track: theme scrollbar bg -> virtual ruler -> default.
+    let track_rgb = theme
+        .ui_bg("ui.menu.scroll")
+        .or_else(|| theme.ui_bg("ui.virtual.ruler"))
+        .unwrap_or([30, 30, 50]);
+
+    // Thumb: theme scrollbar fg -> selection -> cursorline -> default.
+    let mut thumb_rgb = theme
+        .ui_fg("ui.menu.scroll")
+        .or_else(|| theme.ui_bg("ui.selection"))
+        .or_else(|| theme.ui_bg("ui.cursorline.primary"))
+        .or_else(|| theme.ui_bg("ui.cursorline"))
+        .unwrap_or([50, 50, 90]);
+
+    // If thumb and track are the same, force contrast using cursor/text accent.
+    if thumb_rgb == track_rgb {
+        thumb_rgb = theme
+            .ui_bg("ui.cursor")
+            .or_else(|| theme.ui_fg("ui.text.focus"))
+            .or_else(|| theme.ui_fg("ui.text"))
+            .unwrap_or([120, 120, 160]);
+    }
+    // Last resort: if every theme fallback still collides, hardcode contrast.
+    if thumb_rgb == track_rgb {
+        thumb_rgb = [120, 120, 160];
+    }
     let track_bg = tui_color!(track_rgb[0], track_rgb[1], track_rgb[2]);
     let thumb_bg = tui_color!(thumb_rgb[0], thumb_rgb[1], thumb_rgb[2]);
 
