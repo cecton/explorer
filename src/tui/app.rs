@@ -18,9 +18,9 @@ use r3bl_tui::{
     RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SPACER_GLYPH, Size, SpecialKey,
     Surface, SurfaceBounds, SurfaceProps, SurfaceRender, TerminalWindow,
     TerminalWindowMainThreadSignal, TuiAvailability, TuiStylesheet, ZOrder, box_end, box_start,
-    col, height, new_style, ok, render_component_in_current_box, render_tui_styled_texts_into,
-    req_size_pc, row, send_signal, surface, throws, throws_with_return, tui_color, tui_styled_text,
-    tui_styled_texts, tui_stylesheet,
+    col, height, new_style, ok, render_component_in_current_box, render_pipeline,
+    render_tui_styled_texts_into, req_size_pc, row, send_signal, surface, throws,
+    throws_with_return, tui_color, tui_styled_text, tui_styled_texts, tui_stylesheet,
 };
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -734,6 +734,32 @@ impl App for AppMain {
             };
 
             let mut pipeline = surface.render_pipeline;
+
+            // Fill entire surface area with pane background (covers padding
+            // between panes, which the FlexBox layout system does not fill).
+            let bg_rgb = global_data
+                .state
+                .theme
+                .ui_bg("ui.background")
+                .unwrap_or([15, 15, 25]);
+            let bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
+            let bg_style = new_style!(color_bg: {bg});
+            let mut bg_ops = RenderOpIRVec::new();
+            let surface_rows = (window_size.row_height - height(2)).as_usize();
+            let surface_col_count = window_size.col_width.as_usize();
+            for row_idx in 0..surface_rows {
+                let abs_row: u16 = 1 + row_idx as u16;
+                bg_ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row(abs_row));
+                bg_ops += RenderOpCommon::ApplyColors(Some(bg_style));
+                bg_ops += RenderOpIR::PaintTextWithAttributes(
+                    " ".repeat(surface_col_count).as_str().into(),
+                    Some(bg_style),
+                );
+            }
+            let mut fill_pipeline = render_pipeline!();
+            fill_pipeline.push(ZOrder::Normal, bg_ops);
+            fill_pipeline.join_into(pipeline);
+            pipeline = fill_pipeline;
 
             let picker_open = global_data.state.file_name_picker_open;
             let focused_window = global_data.state.focused_window.clone();
