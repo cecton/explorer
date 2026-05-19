@@ -11,16 +11,16 @@ use nucleo::Matcher;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Utf32Str};
 use r3bl_tui::{
-    App, BoxedSafeApp, BoxedSafeComponent, CommonResult, Component, ComponentRegistry,
+    App, BoxedSafeApp, BoxedSafeComponent, Button, CommonResult, Component, ComponentRegistry,
     ComponentRegistryMap, ContainsResult, EditorBuffer, EventPropagation, FlexBox, FlexBoxId,
     GlobalData, HasFocus, InputDevice, InputEvent, IntoErr, Key, KeyPress, LayoutDirection,
-    LayoutManagement, LengthOps, ModifierKeysMask, MouseInputKind, OutputDevice,
+    LayoutManagement, LengthOps, ModifierKeysMask, MouseInput, MouseInputKind, OutputDevice,
     PerformPositioningAndSizing, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
     SPACER_GLYPH, Size, SpecialKey, Surface, SurfaceBounds, SurfaceProps, SurfaceRender,
     TerminalWindow, TerminalWindowMainThreadSignal, TuiAvailability, TuiStylesheet, ZOrder,
     box_end, box_start, col, height, new_style, ok, render_component_in_current_box,
     render_pipeline, render_tui_styled_texts_into, req_size_pc, row, send_signal, surface, throws,
-    throws_with_return, tui_color, tui_styled_text, tui_styled_texts, tui_stylesheet,
+    throws_with_return, tui_color, tui_styled_text, tui_styled_texts, tui_stylesheet, width,
 };
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
@@ -74,6 +74,18 @@ struct PaneComponent {
     slot: usize,
     picker: FileNamePickerComponent,
     preview: FilePreviewComponent,
+    /// Origin row of the content area (below title bar), used for scrollbar mouse events.
+    content_origin_row: u16,
+    /// Total columns in the content area (full width including scrollbar column).
+    content_col_count: u16,
+    /// Total rows in the content area.
+    content_row_count: u16,
+    /// Origin column of the content area, used for absolute scrollbar column calculation.
+    content_origin_col: u16,
+    /// Whether the user is currently dragging the scrollbar thumb.
+    scrollbar_dragging: bool,
+    /// (scroll, rel_y) at thumb grab time (None if drag started on track).
+    scrollbar_grab_state: Option<(usize, usize)>,
 }
 
 impl PaneComponent {
@@ -83,12 +95,152 @@ impl PaneComponent {
             slot,
             picker: FileNamePickerComponent::new(id),
             preview: FilePreviewComponent::new(id),
+            content_origin_row: 0,
+            content_col_count: 0,
+            content_row_count: 0,
+            content_origin_col: 0,
+            scrollbar_dragging: false,
+            scrollbar_grab_state: None,
         })
     }
 
     fn active_window<'s>(&self, state: &'s State) -> Option<&'s Window> {
         state.window_stack.get(self.slot)
     }
+
+    fn handle_scrollbar(
+        &mut self,
+        mouse: MouseInput,
+        global_data: &mut GlobalData<State, AppSignal>,
+    ) -> EventPropagation {
+        let Some(window) = self.active_window(&global_data.state).cloned() else {
+            return EventPropagation::Propagate;
+        };
+
+        let row = mouse.pos.row_index.as_usize();
+        let rel_y = row.saturating_sub(self.content_origin_row as usize);
+
+        let state = &mut global_data.state;
+        let scroll = state.window_scroll(&window);
+        let scroll_max = state.window_scroll_max(&window);
+        let page_size = state.window_page_size(&window);
+        let scrollbar_height = self.content_row_count as usize;
+
+        match mouse.kind {
+            MouseInputKind::MouseDown(Button::Left) => {
+                if scroll_max > page_size && scrollbar_height > 0 {
+                    let thumb_height = thumb_size(scrollbar_height, page_size, scroll_max);
+                    let thumb_pos = thumb_position(
+                        scroll,
+                        scrollbar_height,
+                        thumb_height,
+                        scroll_max,
+                        page_size,
+                    );
+                    if rel_y >= thumb_pos && rel_y < thumb_pos + thumb_height {
+                        // Grab the thumb: snapshot current state, no scroll jump.
+                        self.scrollbar_dragging = true;
+                        self.scrollbar_grab_state = Some((scroll, rel_y));
+                        return EventPropagation::ConsumedRender;
+                    } else {
+                        // Click on track: jump directly to clicked position.
+                        self.scrollbar_dragging = true;
+                        self.scrollbar_grab_state = None;
+                        let target = scroll_from_y(rel_y, scrollbar_height, scroll_max, page_size);
+                        return self.apply_scroll(state, &window, target);
+                    }
+                }
+                EventPropagation::ConsumedRender
+            }
+            MouseInputKind::MouseDrag(Button::Left) if self.scrollbar_dragging => {
+                if scroll_max > page_size && scrollbar_height > 0 {
+                    let target = if let Some((grab_scroll, grab_rel_y)) = self.scrollbar_grab_state
+                    {
+                        let thumb_height = thumb_size(scrollbar_height, page_size, scroll_max);
+                        let denom = (scrollbar_height - thumb_height).max(1);
+                        let range = scroll_max - page_size;
+                        let delta_y = (rel_y as isize) - (grab_rel_y as isize);
+                        let delta_scroll = delta_y * (range as isize) / (denom as isize);
+                        ((grab_scroll as isize) + delta_scroll).max(0) as usize
+                    } else {
+                        scroll_from_y(rel_y, scrollbar_height, scroll_max, page_size)
+                    };
+                    return self.apply_scroll(state, &window, target);
+                }
+                EventPropagation::ConsumedRender
+            }
+            MouseInputKind::MouseUp(Button::Left) => {
+                self.scrollbar_dragging = false;
+                self.scrollbar_grab_state = None;
+                EventPropagation::ConsumedRender
+            }
+            MouseInputKind::ScrollUp => {
+                let target = scroll.saturating_sub(3);
+                self.apply_scroll(state, &window, target)
+            }
+            MouseInputKind::ScrollDown => {
+                let target = scroll.saturating_add(3);
+                self.apply_scroll(state, &window, target)
+            }
+            _ => EventPropagation::ConsumedRender,
+        }
+    }
+
+    fn apply_scroll(
+        &mut self,
+        state: &mut State,
+        window: &Window,
+        target: usize,
+    ) -> EventPropagation {
+        match window {
+            Window::FilePreview(_) => {
+                state.set_window_scroll(window, target);
+                state.clamp_scroll(window);
+                EventPropagation::ConsumedRender
+            }
+            Window::FileNamePicker => {
+                let scroll_max = state.window_scroll_max(window);
+                if scroll_max == 0 {
+                    return EventPropagation::ConsumedRender;
+                }
+                let idx = target.min(scroll_max.saturating_sub(1));
+                if let Some((key, _)) = state.file_name_picker_results.get(idx) {
+                    state.file_name_picker_selected = Some(*key);
+                }
+                EventPropagation::ConsumedRender
+            }
+        }
+    }
+}
+
+fn thumb_size(scrollbar_height: usize, page_size: usize, scroll_max: usize) -> usize {
+    std::cmp::max(1, (scrollbar_height * page_size) / scroll_max.max(1))
+}
+
+fn thumb_position(
+    scroll: usize,
+    scrollbar_height: usize,
+    thumb_height: usize,
+    scroll_max: usize,
+    page_size: usize,
+) -> usize {
+    if scroll_max <= page_size {
+        0
+    } else {
+        (scroll * (scrollbar_height - thumb_height)) / (scroll_max - page_size)
+    }
+}
+
+fn scroll_from_y(
+    rel_y: usize,
+    scrollbar_height: usize,
+    scroll_max: usize,
+    page_size: usize,
+) -> usize {
+    if scroll_max <= page_size || scrollbar_height == 0 {
+        return 0;
+    }
+    (rel_y * (scroll_max - page_size)) / (scrollbar_height.saturating_sub(1).max(1))
 }
 
 impl Component<State, AppSignal> for PaneComponent {
@@ -107,6 +259,25 @@ impl Component<State, AppSignal> for PaneComponent {
         input_event: InputEvent,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        // Check for scrollbar mouse interaction first.
+        if let InputEvent::Mouse(mouse) = input_event {
+            let col = mouse.pos.col_index.as_usize();
+            let row = mouse.pos.row_index.as_usize();
+            let origin_col = self.content_origin_col as usize;
+            let origin_row = self.content_origin_row as usize;
+            let col_count = self.content_col_count as usize;
+            let scrollbar_col = origin_col + col_count.saturating_sub(1);
+            let bottom_row = origin_row + self.content_row_count as usize;
+
+            let in_vertical = self.scrollbar_dragging || (row >= origin_row && row < bottom_row);
+            let in_horizontal = col == scrollbar_col
+                || (self.scrollbar_dragging && col >= origin_col && col < origin_col + col_count);
+
+            if self.content_row_count > 0 && in_vertical && in_horizontal {
+                return Ok(self.handle_scrollbar(mouse, global_data));
+            }
+        }
+
         match self.active_window(&global_data.state).cloned() {
             Some(Window::FileNamePicker) => {
                 self.picker
@@ -144,37 +315,88 @@ impl Component<State, AppSignal> for PaneComponent {
                 );
             }
 
-            let content_box = if add_title {
-                FlexBox {
-                    style_adjusted_origin_pos: current_box.style_adjusted_origin_pos + height(1),
-                    style_adjusted_bounds_size: current_box.style_adjusted_bounds_size.col_width
-                        + (current_box.style_adjusted_bounds_size.row_height - height(1)),
+            let (content_box, inner_bounds) = if add_title {
+                let origin = current_box.style_adjusted_origin_pos + height(1);
+                let bounds = current_box.style_adjusted_bounds_size.col_width
+                    + (current_box.style_adjusted_bounds_size.row_height - height(1));
+                let scrollbar_col = bounds.col_width - width(1);
+                let inner_bounds = scrollbar_col + bounds.row_height;
+                let boxed = FlexBox {
+                    style_adjusted_origin_pos: origin,
+                    style_adjusted_bounds_size: bounds,
                     ..current_box
-                }
+                };
+                (
+                    boxed,
+                    FlexBox {
+                        style_adjusted_origin_pos: origin,
+                        style_adjusted_bounds_size: inner_bounds,
+                        ..current_box
+                    },
+                )
             } else {
-                current_box
+                let bounds = current_box.style_adjusted_bounds_size;
+                let scrollbar_col = bounds.col_width - width(1);
+                let inner_bounds = scrollbar_col + bounds.row_height;
+                let boxed = FlexBox {
+                    style_adjusted_bounds_size: bounds,
+                    ..current_box
+                };
+                (
+                    boxed,
+                    FlexBox {
+                        style_adjusted_bounds_size: inner_bounds,
+                        ..current_box
+                    },
+                )
             };
+
+            // Store content area geometry for scrollbar mouse event handling.
+            self.content_origin_row = content_box.style_adjusted_origin_pos.row_index.as_u16();
+            self.content_origin_col = content_box.style_adjusted_origin_pos.col_index.as_u16();
+            self.content_col_count = content_box.style_adjusted_bounds_size.col_width.as_u16();
+            self.content_row_count = content_box.style_adjusted_bounds_size.row_height.as_u16();
 
             let inner_pipeline = match active_window {
                 Some(Window::FileNamePicker) => {
                     self.picker
-                        .render(global_data, content_box, surface_bounds, has_focus)?
+                        .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
                 Some(Window::FilePreview(_)) => {
                     self.preview
-                        .render(global_data, content_box, surface_bounds, has_focus)?
+                        .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
                 None => r3bl_tui::render_pipeline!(),
             };
 
-            if add_title {
-                let mut pipeline = r3bl_tui::render_pipeline!();
-                pipeline.push(ZOrder::Normal, title_ops);
-                pipeline.join_into(inner_pipeline);
-                pipeline
+            let mut pipeline = if add_title {
+                let mut p = r3bl_tui::render_pipeline!();
+                p.push(ZOrder::Normal, title_ops);
+                p.join_into(inner_pipeline);
+                p
             } else {
                 inner_pipeline
+            };
+
+            // Render scrollbar on the rightmost column if there's an active window.
+            if let Some(ref window) = self.active_window(&global_data.state).cloned() {
+                let state = &global_data.state;
+                let scroll = state.window_scroll(window);
+                let scroll_max = state.window_scroll_max(window);
+                let page_size = state.window_page_size(window);
+                let mut scrollbar_ops = RenderOpIRVec::new();
+                render_scrollbar(
+                    &mut scrollbar_ops,
+                    &content_box,
+                    scroll,
+                    scroll_max,
+                    page_size,
+                    &state.theme,
+                );
+                pipeline.push(ZOrder::Normal, scrollbar_ops);
             }
+
+            pipeline
         });
     }
 }
@@ -592,12 +814,14 @@ impl App for AppMain {
                     if let Some(window) = state.focused_window.clone() {
                         let current = state.window_scroll(&window);
                         state.set_window_scroll(&window, current.saturating_add(*n));
+                        state.clamp_scroll(&window);
                     }
                 }
                 AppSignal::ScrollPreviewUp(n) => {
                     if let Some(window) = state.focused_window.clone() {
                         let current = state.window_scroll(&window);
                         state.set_window_scroll(&window, current.saturating_sub(*n));
+                        state.clamp_scroll(&window);
                     }
                 }
                 AppSignal::SendFocusedWindowToBack => {
@@ -1050,6 +1274,62 @@ fn render_pane_title(
             new_style!(color_fg: {color_fg} color_bg: {color_bg})
         }),
     );
+}
+
+fn render_scrollbar(
+    render_ops: &mut RenderOpIRVec,
+    content_box: &FlexBox,
+    scroll: usize,
+    scroll_max: usize,
+    page_size: usize,
+    theme: &HelixTheme,
+) {
+    let visible_rows = content_box.style_adjusted_bounds_size.row_height.as_usize();
+    if visible_rows == 0 {
+        return;
+    }
+
+    let origin = content_box.style_adjusted_origin_pos;
+    let scroll_col =
+        (content_box.style_adjusted_bounds_size.col_width.as_usize()).saturating_sub(1);
+
+    // Always render the scrollbar track. Rail uses inactive title bar bg, cursor uses active title bar bg.
+    let track_rgb = theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]);
+    let thumb_rgb = theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]);
+    let track_bg = tui_color!(track_rgb[0], track_rgb[1], track_rgb[2]);
+    let thumb_bg = tui_color!(thumb_rgb[0], thumb_rgb[1], thumb_rgb[2]);
+
+    // Double the vertical resolution using half-block characters.
+    let sub_rows = visible_rows * 2;
+    let sub_thumb = std::cmp::max(1, (sub_rows * page_size) / scroll_max.max(1));
+    let sub_thumb_start = if scroll_max <= page_size {
+        0
+    } else {
+        (scroll * (sub_rows - sub_thumb)) / (scroll_max - page_size)
+    };
+
+    for row_offset in 0..visible_rows {
+        let sub_top = row_offset * 2;
+        let sub_bot = row_offset * 2 + 1;
+
+        let in_top = sub_top >= sub_thumb_start && sub_top < sub_thumb_start + sub_thumb;
+        let in_bot = sub_bot >= sub_thumb_start && sub_bot < sub_thumb_start + sub_thumb;
+
+        let (ch, bg) = match (in_top, in_bot) {
+            (true, true) => ('█', thumb_bg),
+            (true, false) => ('▀', thumb_bg),
+            (false, true) => ('▄', thumb_bg),
+            (false, false) => (' ', track_bg),
+        };
+
+        let style = new_style!(color_fg: {bg} color_bg: {track_bg});
+        *render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+            origin,
+            col(scroll_col as u16) + row(row_offset),
+        );
+        *render_ops += RenderOpCommon::ApplyColors(Some(style));
+        *render_ops += RenderOpIR::PaintTextWithAttributes(ch.to_string().into(), Some(style));
+    }
 }
 
 pub fn build_state(

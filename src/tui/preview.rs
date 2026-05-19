@@ -157,6 +157,17 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                 .state
                 .set_window_page_size(&window, visible_rows);
 
+            let total_lines = {
+                let snapshot = global_data.state.files.load();
+                let file = &snapshot[file_key.0];
+                let data = file.data.lock().unwrap();
+                data.line_starts.len()
+            };
+            global_data
+                .state
+                .set_window_scroll_max(&window, total_lines);
+            global_data.state.clamp_scroll(&window);
+
             let state = &global_data.state;
             let mut render_ops = RenderOpIRVec::new();
 
@@ -165,7 +176,6 @@ impl Component<State, AppSignal> for FilePreviewComponent {
 
             let data = file.data.lock().unwrap();
             let scroll = state.window_scroll(&window);
-            let total_lines = data.line_starts.len();
             let colored_guard = file.colored_lines.lock().unwrap();
 
             let pane_bg = state.theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);

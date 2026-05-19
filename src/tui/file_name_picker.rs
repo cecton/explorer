@@ -1,5 +1,5 @@
 use super::app::{Id, resolve_selected};
-use super::state::{AppSignal, State};
+use super::state::{AppSignal, State, Window};
 use r3bl_tui::{
     CommonResult, Component, EditMode, EditorComponent, EditorEngineConfig, EventPropagation,
     FlexBox, FlexBoxId, GlobalData, HasFocus, InputEvent, LayoutDirection, LineMode,
@@ -179,6 +179,17 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
             } else if result_count > 0 && selected >= self.scroll_offset + result_rows {
                 self.scroll_offset = selected + 1 - result_rows;
             }
+
+            let picker_window = Window::FileNamePicker;
+            global_data
+                .state
+                .set_window_scroll(&picker_window, self.scroll_offset);
+            global_data
+                .state
+                .set_window_scroll_max(&picker_window, result_count);
+            global_data
+                .state
+                .set_window_page_size(&picker_window, result_rows);
 
             for row_offset in 0..result_rows {
                 let result_idx = self.scroll_offset + row_offset;

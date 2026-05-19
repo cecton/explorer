@@ -28,6 +28,7 @@ pub enum Window {
 pub struct WindowState {
     pub scroll: usize,
     pub page_size: usize,
+    pub scroll_max: usize,
 }
 
 #[derive(Clone)]
@@ -152,6 +153,32 @@ impl State {
             .entry(window.clone())
             .or_default()
             .page_size = page_size;
+    }
+
+    pub fn window_scroll_max(&self, window: &Window) -> usize {
+        self.window_states
+            .get(window)
+            .map(|s| s.scroll_max)
+            .unwrap_or(0)
+    }
+
+    pub fn set_window_scroll_max(&mut self, window: &Window, scroll_max: usize) {
+        self.window_states
+            .entry(window.clone())
+            .or_default()
+            .scroll_max = scroll_max;
+    }
+
+    pub fn clamp_scroll(&mut self, window: &Window) {
+        let state = self.window_states.get(window);
+        let (scroll, page_size, scroll_max) = match state {
+            Some(s) => (s.scroll, s.page_size, s.scroll_max),
+            None => return,
+        };
+        if scroll_max > page_size {
+            let clamped = scroll.min(scroll_max - page_size);
+            self.window_states.get_mut(window).unwrap().scroll = clamped;
+        }
     }
 }
 
