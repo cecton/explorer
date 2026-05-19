@@ -1157,7 +1157,7 @@ fn render_status_bar(
     let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
 
     let hint = if picker_open {
-        " Esc:Close  ↑↓:Select  Enter:Open  Tab:Switch  Ctrl+P:Picker  Ctrl+C:Quit"
+        " Esc:Close  ↑↓:Select  PgUp/PgDn:Page  Enter:Open  Tab:Switch  Ctrl+P:Picker  Ctrl+C:Quit"
     } else {
         match focused_window {
             Some(Window::FilePreview(_)) => {

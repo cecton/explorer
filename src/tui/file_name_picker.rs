@@ -2,10 +2,10 @@ use super::app::{Id, resolve_selected};
 use super::state::{AppSignal, State, Window};
 use r3bl_tui::{
     CommonResult, Component, EditMode, EditorComponent, EditorEngineConfig, EventPropagation,
-    FlexBox, FlexBoxId, GlobalData, HasFocus, InputEvent, LayoutDirection, LineMode,
-    MouseInputKind, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SurfaceBounds,
-    SyntaxHighlightMode, TerminalWindowMainThreadSignal, ZOrder, col, height, new_style,
-    render_pipeline, row, send_signal, throws_with_return, tui_color,
+    FlexBox, FlexBoxId, GlobalData, HasFocus, InputEvent, Key, KeyPress, LayoutDirection, LineMode,
+    MouseInputKind, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SpecialKey,
+    SurfaceBounds, SyntaxHighlightMode, TerminalWindowMainThreadSignal, ZOrder, col, height,
+    new_style, render_pipeline, row, send_signal, throws_with_return, tui_color,
 };
 use std::collections::HashSet;
 use tokio::sync::mpsc;
@@ -80,8 +80,41 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                         );
                         return Ok(EventPropagation::ConsumedRender);
                     }
-                    _ => {}
+                    _ => {
+                        // Fall through to editor component for other mouse events.
+                    }
                 }
+            }
+
+            if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
+                && matches!(
+                    key,
+                    Key::SpecialKey(SpecialKey::PageUp | SpecialKey::PageDown)
+                )
+            {
+                let state = &mut global_data.state;
+                let count = state.file_name_picker_results.len();
+                if count > 0 {
+                    let current = resolve_selected(
+                        &state.file_name_picker_selected,
+                        &state.file_name_picker_results,
+                    );
+                    let page = state
+                        .window_page_size(&Window::FileNamePicker)
+                        .saturating_sub(1)
+                        .max(1);
+                    if key == Key::SpecialKey(SpecialKey::PageDown) {
+                        let next = (current + page).min(count - 1);
+                        let (key, _) = state.file_name_picker_results[next];
+                        state.file_name_picker_selected = Some(key);
+                    } else {
+                        let prev = current.saturating_sub(page);
+                        if let Some((key, _)) = state.file_name_picker_results.get(prev) {
+                            state.file_name_picker_selected = Some(*key);
+                        }
+                    }
+                }
+                return Ok(EventPropagation::ConsumedRender);
             }
 
             self.editor
