@@ -112,10 +112,7 @@ impl State {
     /// distributed equally among all visible panes.
     pub fn visible_windows(&self, surface_cols: u16) -> Vec<(Window, u16)> {
         const MIN_PANE_WIDTH: u16 = 100;
-        if surface_cols < MIN_PANE_WIDTH {
-            return vec![];
-        }
-        let count = (surface_cols / MIN_PANE_WIDTH) as usize;
+        let count = (surface_cols / MIN_PANE_WIDTH).max(1) as usize;
         let n = self.window_stack.len().min(count) as u16;
         if n == 0 {
             return vec![];
