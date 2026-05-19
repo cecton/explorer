@@ -9,6 +9,8 @@ use r3bl_tui::{
     throws_with_return, tui_color,
 };
 
+const GUTTER_GAP: &str = "  ";
+
 pub struct FilePreviewComponent {
     id: FlexBoxId,
 }
@@ -165,6 +167,17 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             let pane_width = bounds.col_width.as_usize();
             let bg = tui_color!(pane_bg[0], pane_bg[1], pane_bg[2]);
             let bg_style = new_style!(color_bg: {bg});
+            let line_num_width = (total_lines.max(1)).to_string().len();
+            let content_start_col = line_num_width + GUTTER_GAP.len();
+            let line_num_fg = state.theme.ui_fg("ui.linenr").unwrap_or({
+                let default_fg = state.theme.ui_fg("ui.text").unwrap_or([212, 212, 212]);
+                [default_fg[0] / 3, default_fg[1] / 3, default_fg[2] / 3]
+            });
+            let line_num_bg = state.theme.ui_bg("ui.linenr").unwrap_or(pane_bg);
+            let line_num_fg_rgb = tui_color!(line_num_fg[0], line_num_fg[1], line_num_fg[2]);
+            let line_num_bg_rgb = tui_color!(line_num_bg[0], line_num_bg[1], line_num_bg[2]);
+            let line_num_style =
+                new_style!(color_fg: {line_num_fg_rgb} color_bg: {line_num_bg_rgb});
             for row_offset in 0..visible_rows {
                 let line_idx = scroll + row_offset;
                 if line_idx >= total_lines {
@@ -177,8 +190,20 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                     " ".repeat(pane_width).as_str().into(),
                     Some(bg_style),
                 );
+                let line_num = line_idx + 1;
                 render_ops +=
                     RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset));
+                render_ops += RenderOpCommon::ApplyColors(Some(line_num_style));
+                let line_num_str =
+                    format!("{:>width$}{GUTTER_GAP}", line_num, width = line_num_width);
+                render_ops += RenderOpIR::PaintTextWithAttributes(
+                    line_num_str.as_str().into(),
+                    Some(line_num_style),
+                );
+                render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                    origin,
+                    col(content_start_col) + row(row_offset),
+                );
                 paint_line(
                     &mut render_ops,
                     &data.content,
