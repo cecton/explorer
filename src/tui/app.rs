@@ -14,9 +14,9 @@ use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Utf32Str};
 use r3bl_tui::{
     App, BoxedSafeApp, BoxedSafeComponent, Button, CommonResult, Component, ComponentRegistry,
-    ComponentRegistryMap, ContainsResult, EditorBuffer, EventPropagation, FlexBox, FlexBoxId,
-    GlobalData, HasFocus, InputDevice, InputEvent, IntoErr, Key, KeyPress, LayoutDirection,
-    LayoutManagement, LengthOps, ModifierKeysMask, MouseInput, MouseInputKind, OutputDevice,
+    ComponentRegistryMap, ContainsResult, EventPropagation, FlexBox, FlexBoxId, GlobalData,
+    HasFocus, InputDevice, InputEvent, IntoErr, Key, KeyPress, LayoutDirection, LayoutManagement,
+    LengthOps, ModifierKeysMask, MouseInput, MouseInputKind, OutputDevice,
     PerformPositioningAndSizing, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
     SPACER_GLYPH, Size, SpecialKey, Surface, SurfaceBounds, SurfaceProps, SurfaceRender,
     TerminalWindow, TerminalWindowMainThreadSignal, TuiAvailability, TuiStylesheet, ZOrder,
@@ -41,8 +41,6 @@ pub enum Id {
     Pane2 = 4,
     Pane3 = 5,
     Pane4 = 6,
-    FileNamePickerEditor = 7,
-    ThemePickerEditor = 8,
 }
 
 impl Id {
@@ -658,14 +656,7 @@ impl App for AppMain {
             state.file_name_picker_selected = None;
             let snapshot = state.files.load();
             state.file_name_picker_results = AppMain::all_files_results(&snapshot);
-            let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
-            if let Some(buf) = state.editor_buffers.get_mut(&editor_id) {
-                buf.init_with([""])
-            } else {
-                state
-                    .editor_buffers
-                    .insert(editor_id, EditorBuffer::new_empty(None, None));
-            }
+            state.file_name_picker_query = String::new();
             has_focus.set_id(focused_pane_id(state));
             return Ok(EventPropagation::ConsumedRender);
         }
@@ -687,14 +678,7 @@ impl App for AppMain {
                 .position(|(n, _)| n == state.theme.name())
                 .and_then(|i| all_themes.get(i).map(|(n, _)| n.clone()));
             state.theme_picker_results = all_themes;
-            let editor_id = FlexBoxId::from(Id::ThemePickerEditor);
-            if let Some(buf) = state.editor_buffers.get_mut(&editor_id) {
-                buf.init_with([""])
-            } else {
-                state
-                    .editor_buffers
-                    .insert(editor_id, EditorBuffer::new_empty(None, None));
-            }
+            state.theme_picker_query = String::new();
             has_focus.set_id(focused_pane_id(state));
             return Ok(EventPropagation::ConsumedRender);
         }
@@ -728,6 +712,7 @@ impl App for AppMain {
                     state.file_name_picker_open = false;
                     state.file_name_picker_results.clear();
                     state.file_name_picker_selected = None;
+                    state.file_name_picker_query = String::new();
                     has_focus.set_id(focused_pane_id(state));
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -748,6 +733,7 @@ impl App for AppMain {
                     state.file_name_picker_open = false;
                     state.file_name_picker_results.clear();
                     state.file_name_picker_selected = None;
+                    state.file_name_picker_query = String::new();
                     has_focus.set_id(focused_pane_id(state));
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -791,6 +777,7 @@ impl App for AppMain {
                     state.theme_picker_open = false;
                     state.theme_picker_results.clear();
                     state.theme_picker_selected = None;
+                    state.theme_picker_query = String::new();
                     has_focus.set_id(focused_pane_id(state));
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -799,15 +786,16 @@ impl App for AppMain {
                         &state.theme_picker_selected,
                         &state.theme_picker_results,
                     );
-                    if let Some((name, _)) = state.theme_picker_results.get(selected) {
-                        if let Err(e) = crate::config::save_theme(name) {
-                            tracing::error!("Failed to save theme to config: {e}");
-                        }
+                    if let Some((name, _)) = state.theme_picker_results.get(selected)
+                        && let Err(e) = crate::config::save_theme(name)
+                    {
+                        tracing::error!("Failed to save theme to config: {e}");
                     }
                     state.remove_window(&Window::ThemePicker);
                     state.theme_picker_open = false;
                     state.theme_picker_results.clear();
                     state.theme_picker_selected = None;
+                    state.theme_picker_query = String::new();
                     has_focus.set_id(focused_pane_id(state));
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -902,12 +890,7 @@ impl App for AppMain {
             let state = &mut global_data.state;
             match action {
                 AppSignal::FileNamePickerQueryChanged => {
-                    let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
-                    let query = state
-                        .editor_buffers
-                        .get(&editor_id)
-                        .map(|b| b.get_as_string_with_newlines().to_string())
-                        .unwrap_or_default();
+                    let query = state.file_name_picker_query.clone();
                     if query.is_empty() {
                         let snapshot = state.files.load();
                         state.file_name_picker_results = AppMain::all_files_results(&snapshot);
@@ -916,12 +899,7 @@ impl App for AppMain {
                     }
                 }
                 AppSignal::ThemePickerQueryChanged => {
-                    let editor_id = FlexBoxId::from(Id::ThemePickerEditor);
-                    let query = state
-                        .editor_buffers
-                        .get(&editor_id)
-                        .map(|b| b.get_as_string_with_newlines().to_string())
-                        .unwrap_or_default();
+                    let query = state.theme_picker_query.clone();
                     state.theme_picker_results = run_theme_name_match(&query);
                     if let Some((name, _)) = state.theme_picker_results.first() {
                         state.theme_picker_selected = Some(name.clone());
@@ -990,12 +968,7 @@ impl App for AppMain {
 
                     let snapshot = self.files.load();
                     if state.file_name_picker_open {
-                        let editor_id = FlexBoxId::from(Id::FileNamePickerEditor);
-                        let query = state
-                            .editor_buffers
-                            .get(&editor_id)
-                            .map(|b| b.get_as_string_with_newlines().to_string())
-                            .unwrap_or_default();
+                        let query = state.file_name_picker_query.clone();
                         if query.is_empty() {
                             state.file_name_picker_results = AppMain::all_files_results(&snapshot);
                         } else {

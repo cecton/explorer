@@ -3,7 +3,7 @@ use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
-use r3bl_tui::{EditorBuffer, FlexBox, FlexBoxId, HasEditorBuffers};
+use r3bl_tui::FlexBox;
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
@@ -52,26 +52,13 @@ pub struct State {
     /// Each entry: (theme name, sorted+deduped matched char positions).
     pub theme_picker_results: Vec<(String, Vec<u32>)>,
     pub theme_picker_selected: Option<String>,
-    pub editor_buffers: HashMap<FlexBoxId, EditorBuffer>,
+    pub file_name_picker_query: String,
+    pub theme_picker_query: String,
     pub theme: HelixTheme,
     /// Theme to restore if the user cancels the picker.
     pub saved_theme: HelixTheme,
     /// Current `FlexBox` for each pane slot (index 0..MAX_PANES).
     pub pane_boxes: [FlexBox; MAX_PANES],
-}
-
-impl HasEditorBuffers for State {
-    fn get_mut_editor_buffer(&mut self, id: FlexBoxId) -> Option<&mut EditorBuffer> {
-        self.editor_buffers.get_mut(&id)
-    }
-
-    fn insert_editor_buffer(&mut self, id: FlexBoxId, buffer: EditorBuffer) {
-        self.editor_buffers.insert(id, buffer);
-    }
-
-    fn contains_editor_buffer(&self, id: FlexBoxId) -> bool {
-        self.editor_buffers.contains_key(&id)
-    }
 }
 
 impl State {
@@ -204,7 +191,8 @@ impl State {
             theme_picker_open: false,
             theme_picker_results: Vec::new(),
             theme_picker_selected: None,
-            editor_buffers: HashMap::new(),
+            file_name_picker_query: String::new(),
+            theme_picker_query: String::new(),
             theme,
             saved_theme,
             pane_boxes: [FlexBox::default(); MAX_PANES],
@@ -231,7 +219,8 @@ impl Default for State {
             theme_picker_open: false,
             theme_picker_results: Vec::new(),
             theme_picker_selected: None,
-            editor_buffers: HashMap::new(),
+            file_name_picker_query: String::new(),
+            theme_picker_query: String::new(),
             theme: HelixTheme::default(),
             saved_theme: HelixTheme::default(),
             pane_boxes: [FlexBox::default(); MAX_PANES],

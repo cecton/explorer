@@ -24,6 +24,7 @@ toml = "0.8"
 tokio = { version = "1", features = ["full"] }
 tracing = "0.1"
 tracing-core = "0.1"
+unicode-segmentation = "1"
 
 [patch.crates-io]
 # incremental = false  # Disable to avoid rustc dep graph ICE on nightly

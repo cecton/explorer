@@ -1,0 +1,358 @@
+use super::state::State;
+use r3bl_tui::{
+    InputEvent, Key, KeyPress, KeyState, Pos, RenderOpCommon, RenderOpIR, RenderOpIRVec,
+    SpecialKey, col, new_style, row, tui_color,
+};
+use unicode_segmentation::UnicodeSegmentation;
+
+pub struct InputLine {
+    cursor: usize,
+}
+
+impl InputLine {
+    pub fn new() -> Self {
+        Self { cursor: 0 }
+    }
+
+    pub fn handle_key(&mut self, input_event: &InputEvent, query: &mut String) -> bool {
+        let grapheme_count = query.graphemes(true).count();
+        self.cursor = self.cursor.min(grapheme_count);
+
+        match input_event {
+            InputEvent::Keyboard(KeyPress::WithModifiers { key, mask })
+                if mask.ctrl_key_state == KeyState::Pressed =>
+            {
+                self.handle_ctrl_key(key, query, grapheme_count)
+            }
+            InputEvent::Keyboard(KeyPress::WithModifiers { key, mask })
+                if mask.alt_key_state == KeyState::Pressed =>
+            {
+                self.handle_alt_key(key, query)
+            }
+            InputEvent::Keyboard(KeyPress::Plain { key }) => {
+                self.handle_plain_key(key, query, grapheme_count)
+            }
+            _ => false,
+        }
+    }
+
+    fn handle_ctrl_key(&mut self, key: &Key, query: &mut String, grapheme_count: usize) -> bool {
+        match key {
+            Key::Character('a') => {
+                self.cursor = 0;
+                true
+            }
+            Key::Character('e') => {
+                self.cursor = grapheme_count;
+                true
+            }
+            Key::Character('d') => self.delete_grapheme(query),
+            Key::Character('b') if self.cursor > 0 => {
+                self.cursor -= 1;
+                true
+            }
+            Key::Character('f') if self.cursor < grapheme_count => {
+                self.cursor += 1;
+                true
+            }
+            Key::Character('k') => self.kill_to_end(query),
+            Key::Character('u') => self.kill_to_start(query),
+            Key::Character('w') => self.kill_word_backward(query),
+            Key::SpecialKey(SpecialKey::Left) => self.cursor_prev_word(query),
+            Key::SpecialKey(SpecialKey::Right) => self.cursor_next_word(query),
+            _ => false,
+        }
+    }
+
+    fn handle_alt_key(&mut self, key: &Key, query: &mut String) -> bool {
+        match key {
+            Key::Character('b') => self.cursor_prev_word(query),
+            Key::Character('f') => self.cursor_next_word(query),
+            Key::Character('d') => self.kill_word_forward(query),
+            Key::SpecialKey(SpecialKey::Backspace) => self.kill_word_backward(query),
+            _ => false,
+        }
+    }
+
+    fn handle_plain_key(&mut self, key: &Key, query: &mut String, grapheme_count: usize) -> bool {
+        match key {
+            Key::Character(ch) => {
+                if ch.is_control() {
+                    return false;
+                }
+                let byte_pos = grapheme_byte_offset(query, self.cursor);
+                query.insert(byte_pos, *ch);
+                self.cursor += 1;
+                true
+            }
+            Key::SpecialKey(SpecialKey::Backspace) => self.backspace_grapheme(query),
+            Key::SpecialKey(SpecialKey::Delete) => self.delete_grapheme(query),
+            Key::SpecialKey(SpecialKey::Home) => {
+                if self.cursor == 0 {
+                    false
+                } else {
+                    self.cursor = 0;
+                    true
+                }
+            }
+            Key::SpecialKey(SpecialKey::End) => {
+                if self.cursor == grapheme_count {
+                    false
+                } else {
+                    self.cursor = grapheme_count;
+                    true
+                }
+            }
+            Key::SpecialKey(SpecialKey::Left) if self.cursor > 0 => {
+                self.cursor -= 1;
+                true
+            }
+            Key::SpecialKey(SpecialKey::Right) if self.cursor < grapheme_count => {
+                self.cursor += 1;
+                true
+            }
+            _ => false,
+        }
+    }
+
+    fn backspace_grapheme(&mut self, query: &mut String) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
+        let target = self.cursor - 1;
+        let start = graphemes[target].0;
+        let end = if target + 1 < graphemes.len() {
+            graphemes[target + 1].0
+        } else {
+            query.len()
+        };
+        query.replace_range(start..end, "");
+        self.cursor = target;
+        true
+    }
+
+    fn delete_grapheme(&mut self, query: &mut String) -> bool {
+        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
+        if self.cursor >= graphemes.len() {
+            return false;
+        }
+        let start = graphemes[self.cursor].0;
+        let end = if self.cursor + 1 < graphemes.len() {
+            graphemes[self.cursor + 1].0
+        } else {
+            query.len()
+        };
+        query.replace_range(start..end, "");
+        true
+    }
+
+    fn kill_to_end(&mut self, query: &mut String) -> bool {
+        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
+        if self.cursor >= graphemes.len() {
+            return false;
+        }
+        let byte = graphemes[self.cursor].0;
+        query.truncate(byte);
+        true
+    }
+
+    fn kill_to_start(&mut self, query: &mut String) -> bool {
+        if self.cursor == 0 {
+            return false;
+        }
+        let end_byte = grapheme_byte_offset(query, self.cursor);
+        *query = query[end_byte..].to_string();
+        self.cursor = 0;
+        true
+    }
+
+    fn kill_word_backward(&mut self, query: &mut String) -> bool {
+        let word_start = self.prev_word_start(query);
+        if word_start >= self.cursor {
+            return false;
+        }
+        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
+        let start_byte = graphemes[word_start].0;
+        let end_byte = if self.cursor < graphemes.len() {
+            graphemes[self.cursor].0
+        } else {
+            query.len()
+        };
+        query.replace_range(start_byte..end_byte, "");
+        self.cursor = word_start;
+        true
+    }
+
+    fn cursor_prev_word(&mut self, query: &str) -> bool {
+        let new = self.prev_word_start(query);
+        if new == self.cursor {
+            return false;
+        }
+        self.cursor = new;
+        true
+    }
+
+    fn cursor_next_word(&mut self, query: &str) -> bool {
+        let new = self.next_word_start(query);
+        if new == self.cursor {
+            return false;
+        }
+        self.cursor = new;
+        true
+    }
+
+    fn is_word_boundary(grapheme: &str) -> bool {
+        grapheme
+            .chars()
+            .all(|c| c.is_whitespace() || c.is_ascii_punctuation())
+    }
+
+    fn prev_word_start(&self, text: &str) -> usize {
+        let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
+        let count = graphemes.len();
+        if count == 0 || self.cursor == 0 {
+            return 0;
+        }
+        let mut idx = self.cursor.saturating_sub(1).min(count - 1);
+        while idx > 0 && Self::is_word_boundary(graphemes[idx].1) {
+            idx -= 1;
+        }
+        if idx == 0 && Self::is_word_boundary(graphemes[0].1) {
+            return 0;
+        }
+        while idx > 0 && !Self::is_word_boundary(graphemes[idx].1) {
+            idx -= 1;
+        }
+        if idx > 0 && Self::is_word_boundary(graphemes[idx].1) {
+            idx += 1;
+        }
+        idx
+    }
+
+    fn next_word_start(&self, text: &str) -> usize {
+        let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
+        let count = graphemes.len();
+        if count == 0 {
+            return 0;
+        }
+        if self.cursor >= count {
+            return count;
+        }
+        let mut idx = self.cursor;
+        while idx < count && !Self::is_word_boundary(graphemes[idx].1) {
+            idx += 1;
+        }
+        if idx >= count {
+            return count;
+        }
+        while idx < count && Self::is_word_boundary(graphemes[idx].1) {
+            idx += 1;
+        }
+        idx
+    }
+
+    fn next_word_end(&self, text: &str) -> usize {
+        let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
+        let count = graphemes.len();
+        if count == 0 {
+            return 0;
+        }
+        if self.cursor >= count {
+            return count;
+        }
+        let mut idx = self.cursor;
+        while idx < count && Self::is_word_boundary(graphemes[idx].1) {
+            idx += 1;
+        }
+        if idx >= count {
+            return count;
+        }
+        while idx < count && !Self::is_word_boundary(graphemes[idx].1) {
+            idx += 1;
+        }
+        idx
+    }
+
+    fn kill_word_forward(&mut self, query: &mut String) -> bool {
+        let word_end = self.next_word_end(query);
+        if word_end <= self.cursor || word_end == 0 {
+            return false;
+        }
+        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
+        let start_byte = if self.cursor < graphemes.len() {
+            graphemes[self.cursor].0
+        } else {
+            query.len()
+        };
+        let end_byte = if word_end < graphemes.len() {
+            graphemes[word_end].0
+        } else {
+            query.len()
+        };
+        query.replace_range(start_byte..end_byte, "");
+        true
+    }
+
+    pub fn render(
+        &self,
+        query: &str,
+        state: &State,
+        origin: Pos,
+        width: u16,
+        focused: bool,
+    ) -> RenderOpIRVec {
+        let width = width as usize;
+        let mut ops = RenderOpIRVec::new();
+
+        let bg_rgb = state.theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
+        let text_rgb = state.theme.ui_fg("ui.text").unwrap_or([220, 220, 255]);
+        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
+        let color_text = tui_color!(text_rgb[0], text_rgb[1], text_rgb[2]);
+        let cursor_style = new_style!(reverse);
+
+        let bg_style = new_style!(color_bg: {color_bg});
+        let text_style = new_style!(color_fg: {color_text} color_bg: {color_bg});
+
+        ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+        ops += RenderOpCommon::ApplyColors(Some(bg_style));
+        ops +=
+            RenderOpIR::PaintTextWithAttributes(" ".repeat(width).as_str().into(), Some(bg_style));
+
+        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
+        let count = graphemes.len();
+        let cursor = self.cursor.min(count);
+
+        let scroll = if count >= width && cursor >= width {
+            cursor - width + 1
+        } else {
+            0
+        };
+
+        ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+
+        for (char_col, (i, &(_, gr))) in graphemes.iter().enumerate().skip(scroll).enumerate() {
+            if char_col >= width {
+                break;
+            }
+            if i == cursor && focused {
+                ops += RenderOpIR::PaintTextWithAttributes(gr.into(), Some(cursor_style));
+            } else {
+                ops += RenderOpIR::PaintTextWithAttributes(gr.into(), Some(text_style));
+            }
+        }
+
+        if cursor >= count && focused && count.saturating_sub(scroll) < width {
+            ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(cursor_style));
+        }
+
+        ops
+    }
+}
+
+fn grapheme_byte_offset(text: &str, grapheme_idx: usize) -> usize {
+    text.grapheme_indices(true)
+        .nth(grapheme_idx)
+        .map(|(byte, _)| byte)
+        .unwrap_or(text.len())
+}
