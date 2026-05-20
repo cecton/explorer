@@ -199,6 +199,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             let bg_style = new_style!(color_bg: {bg});
             let line_num_width = (total_lines.max(1)).to_string().len();
             let content_start_col = line_num_width + GUTTER_GAP.len();
+            let content_width = pane_width.saturating_sub(content_start_col).max(1);
             let line_num_fg = state.theme.ui_fg("ui.linenr").unwrap_or({
                 let default_fg = state.theme.ui_fg("ui.text").unwrap_or([212, 212, 212]);
                 [default_fg[0] / 3, default_fg[1] / 3, default_fg[2] / 3]
@@ -208,41 +209,70 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             let line_num_bg_rgb = tui_color!(line_num_bg[0], line_num_bg[1], line_num_bg[2]);
             let line_num_style =
                 new_style!(color_fg: {line_num_fg_rgb} color_bg: {line_num_bg_rgb});
-            for row_offset in 0..visible_rows {
-                let line_idx = scroll + row_offset;
-                if line_idx >= total_lines {
-                    break;
+
+            let mut rendered = 0usize;
+            'rendered: for line_idx in scroll..total_lines {
+                let line = file_line(&data.content, &data.line_starts, line_idx);
+                let char_len = line.chars().count();
+                let mut seg_start_char = 0_usize;
+                loop {
+                    let seg_end_char = (seg_start_char + content_width).min(char_len);
+                    let is_first_sub = seg_start_char == 0;
+
+                    render_ops +=
+                        RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(rendered));
+                    render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
+                    render_ops += RenderOpIR::PaintTextWithAttributes(
+                        " ".repeat(pane_width).as_str().into(),
+                        Some(bg_style),
+                    );
+
+                    if is_first_sub {
+                        let line_num = line_idx + 1;
+                        render_ops +=
+                            RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(rendered));
+                        render_ops += RenderOpCommon::ApplyColors(Some(line_num_style));
+                        let line_num_str =
+                            format!("{:>width$}{GUTTER_GAP}", line_num, width = line_num_width);
+                        render_ops += RenderOpIR::PaintTextWithAttributes(
+                            line_num_str.as_str().into(),
+                            Some(line_num_style),
+                        );
+                    } else {
+                        render_ops +=
+                            RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(rendered));
+                        render_ops += RenderOpCommon::ApplyColors(Some(line_num_style));
+                        render_ops += RenderOpIR::PaintTextWithAttributes(
+                            " ".repeat(line_num_width + GUTTER_GAP.len())
+                                .as_str()
+                                .into(),
+                            Some(bg_style),
+                        );
+                    }
+
+                    render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                        origin,
+                        col(content_start_col) + row(rendered),
+                    );
+                    paint_line_segment(
+                        &mut render_ops,
+                        (&data.content, &data.line_starts),
+                        &colored_guard,
+                        line_idx,
+                        (seg_start_char, seg_end_char),
+                        &state.theme,
+                        pane_bg,
+                    );
+
+                    rendered += 1;
+                    seg_start_char += content_width;
+                    if seg_start_char >= char_len {
+                        break;
+                    }
+                    if rendered >= visible_rows {
+                        break 'rendered;
+                    }
                 }
-                render_ops +=
-                    RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset));
-                render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
-                render_ops += RenderOpIR::PaintTextWithAttributes(
-                    " ".repeat(pane_width).as_str().into(),
-                    Some(bg_style),
-                );
-                let line_num = line_idx + 1;
-                render_ops +=
-                    RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset));
-                render_ops += RenderOpCommon::ApplyColors(Some(line_num_style));
-                let line_num_str =
-                    format!("{:>width$}{GUTTER_GAP}", line_num, width = line_num_width);
-                render_ops += RenderOpIR::PaintTextWithAttributes(
-                    line_num_str.as_str().into(),
-                    Some(line_num_style),
-                );
-                render_ops += RenderOpCommon::MoveCursorPositionRelTo(
-                    origin,
-                    col(content_start_col) + row(row_offset),
-                );
-                paint_line(
-                    &mut render_ops,
-                    &data.content,
-                    &data.line_starts,
-                    &colored_guard,
-                    line_idx,
-                    &state.theme,
-                    pane_bg,
-                );
             }
 
             let mut pipeline = render_pipeline!();
@@ -252,21 +282,32 @@ impl Component<State, AppSignal> for FilePreviewComponent {
     }
 }
 
-fn paint_line(
+fn paint_line_segment(
     render_ops: &mut RenderOpIRVec,
-    content: &str,
-    line_starts: &[usize],
+    (content, line_starts): (&str, &[usize]),
     colored_guard: &[crate::lsp::ColoredLine],
     line_idx: usize,
+    (seg_start_char, seg_end_char): (usize, usize),
     theme: &HelixTheme,
     pane_bg: [u8; 3],
 ) {
+    if seg_start_char >= seg_end_char {
+        return;
+    }
     let default_fg = theme.ui_fg("ui.text").unwrap_or([212, 212, 212]);
     let bg = tui_color!(pane_bg[0], pane_bg[1], pane_bg[2]);
+    let line_content = file_line(content, line_starts, line_idx);
+    let (seg_byte_start, seg_byte_end) =
+        char_offsets_to_bytes(line_content, seg_start_char, seg_end_char);
+
     if let Some(spans) = colored_guard.get(line_idx) {
-        let line_content = file_line(content, line_starts, line_idx);
-        for &(start, end, token_type) in spans {
-            let text = &line_content[start..end];
+        for &(span_start, span_end, token_type) in spans {
+            let overlap_start = span_start.max(seg_byte_start);
+            let overlap_end = span_end.min(seg_byte_end);
+            if overlap_start >= overlap_end {
+                continue;
+            }
+            let text = &line_content[overlap_start..overlap_end];
             let fg_rgb = theme.color_for_lsp_token(token_type).unwrap_or(default_fg);
             let fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
             let style = new_style!(color_fg: {fg} color_bg: {bg});
@@ -276,13 +317,31 @@ fn paint_line(
         return;
     }
 
+    let text = &line_content[seg_byte_start..seg_byte_end];
     let fg = tui_color!(default_fg[0], default_fg[1], default_fg[2]);
     let style = new_style!(color_fg: {fg} color_bg: {bg});
     *render_ops += RenderOpCommon::ApplyColors(Some(style));
-    *render_ops += RenderOpIR::PaintTextWithAttributes(
-        file_line(content, line_starts, line_idx).into(),
-        Some(style),
-    );
+    *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+}
+
+fn char_offsets_to_bytes(s: &str, start_char: usize, end_char: usize) -> (usize, usize) {
+    let mut char_count = 0usize;
+    let mut byte_start = s.len();
+    let mut byte_end = s.len();
+    for (byte_idx, _ch) in s.char_indices() {
+        if char_count == start_char {
+            byte_start = byte_idx;
+        }
+        if char_count == end_char {
+            byte_end = byte_idx;
+            break;
+        }
+        char_count += 1;
+    }
+    if start_char >= char_count {
+        byte_start = s.len();
+    }
+    (byte_start, byte_end)
 }
 
 fn file_line<'a>(content: &'a str, line_starts: &[usize], idx: usize) -> &'a str {
