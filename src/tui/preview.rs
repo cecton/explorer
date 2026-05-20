@@ -168,6 +168,16 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                         global_data.state.command_mode_active = false;
                         return Ok(EventPropagation::ConsumedRender);
                     }
+                    InputEvent::Keyboard(KeyPress::WithModifiers {
+                        key: Key::Character('d'),
+                        mask,
+                    }) if mask == ModifierKeysMask::new().with_ctrl()
+                        && self.command_mode.as_deref() == Some("") =>
+                    {
+                        self.command_mode = None;
+                        global_data.state.command_mode_active = false;
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
                     _ => {
                         let query = self.command_mode.as_mut().unwrap();
                         self.command_input.handle_key(&input_event, query);

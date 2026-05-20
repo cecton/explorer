@@ -680,10 +680,12 @@ impl App for AppMain {
             && mask == ModifierKeysMask::new().with_ctrl()
         {
             let state = &mut global_data.state;
+            if !state.theme_picker_open {
+                state.saved_theme = state.theme.clone();
+            }
             state.push_window(Window::ThemePicker);
             state.focused_window = Some(Window::ThemePicker);
             state.theme_picker_open = true;
-            state.saved_theme = state.theme.clone();
             let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
                 .map(|n| (n.to_string(), vec![]))
                 .collect();
@@ -779,6 +781,24 @@ impl App for AppMain {
             }
         }
 
+        if global_data.state.file_name_picker_open
+            && global_data.state.focused_window == Some(Window::FileNamePicker)
+            && let InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('d'),
+                mask,
+            }) = input_event
+            && mask == ModifierKeysMask::new().with_ctrl()
+        {
+            let state = &mut global_data.state;
+            state.remove_window(&Window::FileNamePicker);
+            state.file_name_picker_open = false;
+            state.file_name_picker_results.clear();
+            state.file_name_picker_selected = None;
+            state.file_name_picker_query = String::new();
+            has_focus.set_id(focused_pane_id(state));
+            return Ok(EventPropagation::ConsumedRender);
+        }
+
         if global_data.state.theme_picker_open
             && global_data.state.focused_window == Some(Window::ThemePicker)
             && let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
@@ -845,6 +865,25 @@ impl App for AppMain {
                 }
                 _ => {}
             }
+        }
+
+        if global_data.state.theme_picker_open
+            && global_data.state.focused_window == Some(Window::ThemePicker)
+            && let InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('d'),
+                mask,
+            }) = input_event
+            && mask == ModifierKeysMask::new().with_ctrl()
+        {
+            let state = &mut global_data.state;
+            state.theme = state.saved_theme.clone();
+            state.remove_window(&Window::ThemePicker);
+            state.theme_picker_open = false;
+            state.theme_picker_results.clear();
+            state.theme_picker_selected = None;
+            state.theme_picker_query = String::new();
+            has_focus.set_id(focused_pane_id(state));
+            return Ok(EventPropagation::ConsumedRender);
         }
 
         if matches!(
