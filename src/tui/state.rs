@@ -44,6 +44,9 @@ pub struct State {
     pub focused_window: Option<Window>,
     /// Per-window scroll and page-size state.
     pub window_states: HashMap<Window, WindowState>,
+    /// Per-file highlight ranges (1-indexed, inclusive).
+    pub highlight_ranges: HashMap<FileKey, Vec<(usize, usize)>>,
+    pub command_mode_active: bool,
     pub file_name_picker_open: bool,
     /// Each entry: (FileKey into files vec, sorted+deduped matched char positions).
     pub file_name_picker_results: Vec<(FileKey, Vec<u32>)>,
@@ -185,6 +188,8 @@ impl State {
             window_stack: vec![Window::FileNamePicker],
             focused_window: Some(Window::FileNamePicker),
             window_states: HashMap::new(),
+            highlight_ranges: HashMap::new(),
+            command_mode_active: false,
             file_name_picker_open: true,
             file_name_picker_results,
             file_name_picker_selected: None,
@@ -213,6 +218,8 @@ impl Default for State {
             window_stack: Vec::new(),
             focused_window: None,
             window_states: HashMap::new(),
+            highlight_ranges: HashMap::new(),
+            command_mode_active: false,
             file_name_picker_open: false,
             file_name_picker_results: Vec::new(),
             file_name_picker_selected: None,

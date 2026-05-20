@@ -21,6 +21,14 @@ impl FileNamePickerComponent {
             input_line: InputLine::new(),
         }
     }
+
+    pub fn title_text(&self, state: &State) -> String {
+        state
+            .root
+            .file_name()
+            .unwrap_or(state.root.as_str())
+            .to_string()
+    }
 }
 
 impl Component<State, AppSignal> for FileNamePickerComponent {

@@ -328,11 +328,25 @@ impl Component<State, AppSignal> for PaneComponent {
 
             let mut title_ops = RenderOpIRVec::new();
             if add_title {
+                let (title, is_deleted) = match active_window.as_ref().unwrap() {
+                    Window::FileNamePicker => (self.picker.title_text(&global_data.state), false),
+                    Window::ThemePicker => {
+                        (self.theme_picker.title_text(&global_data.state), false)
+                    }
+                    Window::FilePreview(key) => {
+                        let snapshot = global_data.state.files.load();
+                        let removed = snapshot[key.0]
+                            .removed
+                            .load(std::sync::atomic::Ordering::Relaxed);
+                        (self.preview.title_text(&global_data.state), removed)
+                    }
+                };
                 render_pane_title(
                     &mut title_ops,
                     &current_box,
-                    &global_data.state,
-                    active_window.as_ref().unwrap(),
+                    &title,
+                    is_deleted,
+                    &global_data.state.theme,
                     has_focus.get_id() == Some(self.id),
                 );
             }
@@ -839,6 +853,7 @@ impl App for AppMain {
         ) && let InputEvent::Keyboard(KeyPress::Plain {
             key: Key::SpecialKey(SpecialKey::Esc),
         }) = input_event
+            && !global_data.state.command_mode_active
         {
             let state = &mut global_data.state;
             if let Some(window) = state.focused_window.clone() {
@@ -1223,7 +1238,7 @@ fn render_status_bar(
             " Esc:Cancel  ↑↓:Select  PgUp/PgDn:Page  Enter:Save  Tab:Switch  Ctrl+P:Picker  Ctrl+T:Theme  Ctrl+C:Quit"
         }
         Some(Window::FilePreview(_)) => {
-            " Esc:Send to back  ↑↓/PgUp/PgDn/Home/End:Scroll  Tab:Switch  Ctrl+P:Picker  Ctrl+T:Theme  Ctrl+C:Quit"
+            " Esc:Send to back  ↑↓/PgUp/PgDn/Home/End:Scroll  ::Command  Tab:Switch  Ctrl+P:Picker  Ctrl+T:Theme  Ctrl+C:Quit"
         }
         _ => " Ctrl+P:Open file  Ctrl+T:Theme  Tab:Switch  Ctrl+C:Quit",
     };
@@ -1252,14 +1267,14 @@ fn render_status_bar(
 fn render_pane_title(
     mut render_ops: &mut RenderOpIRVec,
     pane_box: &FlexBox,
-    state: &State,
-    window: &Window,
+    title: &str,
+    is_deleted: bool,
+    theme: &HelixTheme,
     focused: bool,
 ) {
     let origin = pane_box.style_adjusted_origin_pos;
     let width = pane_box.style_adjusted_bounds_size.col_width.as_usize();
 
-    let theme = &state.theme;
     let (bg_active_rgb, fg_active_rgb) = (
         theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]),
         theme.ui_fg("ui.text").unwrap_or([220, 220, 255]),
@@ -1274,15 +1289,6 @@ fn render_pane_title(
     let color_fg_inactive = tui_color!(fg_inactive_rgb[0], fg_inactive_rgb[1], fg_inactive_rgb[2]);
     let color_fg_deleted = tui_color!(fg_deleted_rgb[0], fg_deleted_rgb[1], fg_deleted_rgb[2]);
 
-    let snapshot = state.files.load();
-
-    let is_deleted = match window {
-        Window::FilePreview(key) => snapshot[key.0]
-            .removed
-            .load(std::sync::atomic::Ordering::Relaxed),
-        Window::FileNamePicker | Window::ThemePicker => false,
-    };
-
     let color_bg = if focused {
         color_bg_active
     } else {
@@ -1294,25 +1300,6 @@ fn render_pane_title(
         color_fg_active
     } else {
         color_fg_inactive
-    };
-
-    let title = match window {
-        Window::FileNamePicker => state
-            .root
-            .file_name()
-            .unwrap_or(state.root.as_str())
-            .to_string(),
-        Window::ThemePicker => "Theme".to_string(),
-        Window::FilePreview(key) => {
-            let file = &snapshot[key.0];
-            let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
-            let removed = file.removed.load(std::sync::atomic::Ordering::Relaxed);
-            if removed {
-                format!("[deleted] {}", rel)
-            } else {
-                rel.as_str().to_string()
-            }
-        }
     };
 
     let padded = format!(" {title} ");

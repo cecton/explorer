@@ -21,6 +21,10 @@ impl ThemePickerComponent {
             input_line: InputLine::new(),
         }
     }
+
+    pub fn title_text(&self, _state: &State) -> String {
+        "Theme".to_string()
+    }
 }
 
 impl Component<State, AppSignal> for ThemePickerComponent {

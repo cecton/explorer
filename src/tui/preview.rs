@@ -1,4 +1,5 @@
 use super::app::Id;
+use super::input_line::InputLine;
 use super::state::{AppSignal, State, Window};
 use super::theme::HelixTheme;
 use crate::loader::FileKey;
@@ -9,15 +10,101 @@ use r3bl_tui::{
     render_pipeline, row, throws_with_return, tui_color,
 };
 
-const GUTTER_GAP: &str = "  ";
+const GUTTER_GAP: &str = "   ";
 
 pub struct FilePreviewComponent {
     id: FlexBoxId,
+    command_mode: Option<String>,
+    command_input: InputLine,
 }
 
 impl FilePreviewComponent {
     pub fn new(id: FlexBoxId) -> Self {
-        Self { id }
+        Self {
+            id,
+            command_mode: None,
+            command_input: InputLine::new(),
+        }
+    }
+
+    pub fn title_text(&self, state: &State) -> String {
+        if let Some(ref cmd) = self.command_mode {
+            return format!(":{cmd}");
+        }
+        let Some(key) = self.file_key(state) else {
+            return String::new();
+        };
+        let snapshot = state.files.load();
+        let file = &snapshot[key.0];
+        let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
+        if file.removed.load(std::sync::atomic::Ordering::Relaxed) {
+            format!("[deleted] {rel}")
+        } else {
+            rel.as_str().to_string()
+        }
+    }
+
+    fn execute_command(&mut self, state: &mut State, window: &Window) {
+        let Window::FilePreview(file_key) = window else {
+            return;
+        };
+        let Some(ref cmd) = self.command_mode else {
+            return;
+        };
+        let max = state.window_scroll_max(window);
+        if max == 0 {
+            return;
+        }
+        let mut ranges = Vec::new();
+        for spec in cmd.split(',') {
+            let spec = spec.trim();
+            if spec.is_empty() {
+                continue;
+            }
+            if let Some((start_str, end_str)) = spec.split_once('-') {
+                let Ok(start) = start_str.trim().parse::<usize>() else {
+                    continue;
+                };
+                let Ok(end) = end_str.trim().parse::<usize>() else {
+                    continue;
+                };
+                if start > 0 && end > 0 {
+                    let lo = start.min(end).min(max);
+                    let hi = start.max(end).min(max);
+                    ranges.push((lo, hi));
+                }
+            } else if let Ok(n) = spec.trim().parse::<usize>()
+                && n > 0
+                && n <= max
+            {
+                ranges.push((n, n));
+            }
+        }
+
+        if ranges.is_empty() {
+            return;
+        }
+
+        state.highlight_ranges.insert(*file_key, ranges);
+
+        let page_size = state.window_page_size(window);
+        if let Some(ranges) = state.highlight_ranges.get(file_key) {
+            let target = compute_scroll_target(ranges, page_size, max);
+            state.set_window_scroll(window, target);
+            state.clamp_scroll(window);
+        }
+    }
+
+    fn is_line_highlighted(state: &State, file_key: FileKey, line_1_indexed: usize) -> bool {
+        state
+            .highlight_ranges
+            .get(&file_key)
+            .map(|ranges| {
+                ranges
+                    .iter()
+                    .any(|&(lo, hi)| line_1_indexed >= lo && line_1_indexed <= hi)
+            })
+            .unwrap_or(false)
     }
 
     /// Returns the `FileKey` this pane slot should render, or `None` if the slot holds a
@@ -44,7 +131,9 @@ fn pane_slot(id: FlexBoxId) -> Option<usize> {
 }
 
 impl Component<State, AppSignal> for FilePreviewComponent {
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.command_mode = None;
+    }
 
     fn get_id(&self) -> FlexBoxId {
         self.id
@@ -61,6 +150,41 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                 return Ok(EventPropagation::Propagate);
             };
             let window = Window::FilePreview(key);
+
+            if self.command_mode.is_some() {
+                match input_event {
+                    InputEvent::Keyboard(KeyPress::Plain {
+                        key: Key::SpecialKey(SpecialKey::Enter),
+                    }) => {
+                        self.execute_command(&mut global_data.state, &window);
+                        self.command_mode = None;
+                        global_data.state.command_mode_active = false;
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                    InputEvent::Keyboard(KeyPress::Plain {
+                        key: Key::SpecialKey(SpecialKey::Esc),
+                    }) => {
+                        self.command_mode = None;
+                        global_data.state.command_mode_active = false;
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                    _ => {
+                        let query = self.command_mode.as_mut().unwrap();
+                        self.command_input.handle_key(&input_event, query);
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                }
+            }
+
+            if let InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character(':'),
+            }) = input_event
+            {
+                self.command_mode = Some(String::new());
+                global_data.state.command_mode_active = true;
+                return Ok(EventPropagation::ConsumedRender);
+            }
+
             let state = &mut global_data.state;
             let mut consumed = false;
             if let InputEvent::Keyboard(KeyPress::Plain { key: kb_key }) = input_event {
@@ -197,6 +321,9 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             let pane_width = bounds.col_width.as_usize();
             let bg = tui_color!(pane_bg[0], pane_bg[1], pane_bg[2]);
             let bg_style = new_style!(color_bg: {bg});
+            let hl_rgb = state.theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]);
+            let hl_bg = tui_color!(hl_rgb[0], hl_rgb[1], hl_rgb[2]);
+            let hl_bg_style = new_style!(color_bg: {hl_bg});
             let line_num_width = (total_lines.max(1)).to_string().len();
             let content_start_col = line_num_width + GUTTER_GAP.len();
             let content_width = pane_width.saturating_sub(content_start_col).max(1);
@@ -207,46 +334,57 @@ impl Component<State, AppSignal> for FilePreviewComponent {
             let line_num_bg = state.theme.ui_bg("ui.linenr").unwrap_or(pane_bg);
             let line_num_fg_rgb = tui_color!(line_num_fg[0], line_num_fg[1], line_num_fg[2]);
             let line_num_bg_rgb = tui_color!(line_num_bg[0], line_num_bg[1], line_num_bg[2]);
-            let line_num_style =
-                new_style!(color_fg: {line_num_fg_rgb} color_bg: {line_num_bg_rgb});
+            let line_num_style = new_style!(color_fg: {line_num_fg_rgb} color_bg: {bg});
+            let hl_fg_rgb = state.theme.ui_fg("ui.selection").unwrap_or([255, 255, 255]);
+            let hl_line_num_fg = tui_color!(hl_fg_rgb[0], hl_fg_rgb[1], hl_fg_rgb[2]);
+            let hl_line_num_style =
+                new_style!(color_fg: {hl_line_num_fg} color_bg: {line_num_bg_rgb});
 
             let mut rendered = 0usize;
             'rendered: for line_idx in scroll..total_lines {
                 let line = file_line(&data.content, &data.line_starts, line_idx);
                 let char_len = line.chars().count();
                 let mut seg_start_char = 0_usize;
+                let is_hl = Self::is_line_highlighted(state, file_key, line_idx + 1);
+                let row_bg_style = if is_hl { hl_bg_style } else { bg_style };
+                let row_ln_style = if is_hl {
+                    hl_line_num_style
+                } else {
+                    line_num_style
+                };
+                let content_bg = if is_hl { hl_rgb } else { pane_bg };
                 loop {
                     let seg_end_char = (seg_start_char + content_width).min(char_len);
                     let is_first_sub = seg_start_char == 0;
 
                     render_ops +=
                         RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(rendered));
-                    render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
+                    render_ops += RenderOpCommon::ApplyColors(Some(row_bg_style));
                     render_ops += RenderOpIR::PaintTextWithAttributes(
                         " ".repeat(pane_width).as_str().into(),
-                        Some(bg_style),
+                        Some(row_bg_style),
                     );
 
                     if is_first_sub {
                         let line_num = line_idx + 1;
                         render_ops +=
                             RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(rendered));
-                        render_ops += RenderOpCommon::ApplyColors(Some(line_num_style));
+                        render_ops += RenderOpCommon::ApplyColors(Some(row_ln_style));
                         let line_num_str =
                             format!("{:>width$}{GUTTER_GAP}", line_num, width = line_num_width);
                         render_ops += RenderOpIR::PaintTextWithAttributes(
                             line_num_str.as_str().into(),
-                            Some(line_num_style),
+                            Some(row_ln_style),
                         );
                     } else {
                         render_ops +=
                             RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(rendered));
-                        render_ops += RenderOpCommon::ApplyColors(Some(line_num_style));
+                        render_ops += RenderOpCommon::ApplyColors(Some(row_ln_style));
                         render_ops += RenderOpIR::PaintTextWithAttributes(
                             " ".repeat(line_num_width + GUTTER_GAP.len())
                                 .as_str()
                                 .into(),
-                            Some(bg_style),
+                            Some(row_bg_style),
                         );
                     }
 
@@ -261,7 +399,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                         line_idx,
                         (seg_start_char, seg_end_char),
                         &state.theme,
-                        pane_bg,
+                        content_bg,
                     );
 
                     rendered += 1;
@@ -351,4 +489,40 @@ fn file_line<'a>(content: &'a str, line_starts: &[usize], idx: usize) -> &'a str
         .map(|&e| e - 1)
         .unwrap_or(content.len());
     &content[start..end]
+}
+
+fn compute_scroll_target(ranges: &[(usize, usize)], page_size: usize, _max: usize) -> usize {
+    if ranges.is_empty() || page_size == 0 {
+        return 0;
+    }
+
+    let min_start = ranges.iter().map(|&(s, _)| s).min().unwrap();
+    let max_end = ranges.iter().map(|&(_, e)| e).max().unwrap();
+    let total_span = max_end - min_start + 1;
+
+    if ranges.len() == 1 {
+        let (start, end) = ranges[0];
+        compute_single_block_scroll(start, end - start + 1, page_size)
+    } else if total_span <= page_size {
+        compute_single_block_scroll(min_start, total_span, page_size)
+    } else {
+        let (start, end) = ranges[0];
+        compute_single_block_scroll(start, end - start + 1, page_size)
+    }
+}
+
+fn compute_single_block_scroll(
+    start_1_indexed: usize,
+    block_height: usize,
+    page_size: usize,
+) -> usize {
+    if block_height <= page_size {
+        start_1_indexed
+            .saturating_sub(1)
+            .saturating_sub((page_size - block_height) / 2)
+    } else {
+        start_1_indexed
+            .saturating_sub(1)
+            .saturating_sub(page_size * 20 / 100)
+    }
 }
