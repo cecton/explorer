@@ -1250,7 +1250,7 @@ fn render_status_bar(
             " Esc:Cancel  ↑↓:Select  PgUp/PgDn:Page  Enter:Save  Tab:Switch  Ctrl+P:Picker  Ctrl+T:Theme  Ctrl+C:Quit"
         }
         Some(Window::FilePreview(_)) => {
-            " Esc:Send to back  ↑↓/PgUp/PgDn:Scroll  Tab:Switch  Ctrl+P:Picker  Ctrl+T:Theme  Ctrl+C:Quit"
+            " Esc:Send to back  ↑↓/PgUp/PgDn/Home/End:Scroll  Tab:Switch  Ctrl+P:Picker  Ctrl+T:Theme  Ctrl+C:Quit"
         }
         _ => " Ctrl+P:Open file  Ctrl+T:Theme  Tab:Switch  Ctrl+C:Quit",
     };

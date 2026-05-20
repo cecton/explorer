@@ -4,9 +4,9 @@ use super::theme::HelixTheme;
 use crate::loader::FileKey;
 use r3bl_tui::{
     CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData, HasFocus,
-    InputEvent, Key, KeyPress, MouseInputKind, RenderOpCommon, RenderOpIR, RenderOpIRVec,
-    RenderPipeline, SpecialKey, SurfaceBounds, ZOrder, col, new_style, render_pipeline, row,
-    throws_with_return, tui_color,
+    InputEvent, Key, KeyPress, ModifierKeysMask, MouseInputKind, RenderOpCommon, RenderOpIR,
+    RenderOpIRVec, RenderPipeline, SpecialKey, SurfaceBounds, ZOrder, col, new_style,
+    render_pipeline, row, throws_with_return, tui_color,
 };
 
 const GUTTER_GAP: &str = "  ";
@@ -89,6 +89,36 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                         consumed = true;
                         let current = state.window_scroll(&window);
                         state.set_window_scroll(&window, current.saturating_add(1));
+                        state.clamp_scroll(&window);
+                    }
+                    Key::SpecialKey(SpecialKey::Home) => {
+                        consumed = true;
+                        state.set_window_scroll(&window, 0);
+                    }
+                    Key::SpecialKey(SpecialKey::End) => {
+                        consumed = true;
+                        let max = state.window_scroll_max(&window);
+                        state.set_window_scroll(&window, max);
+                        state.clamp_scroll(&window);
+                    }
+                    _ => {}
+                }
+            }
+            if let InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: modifier_key,
+                mask: modifier_mask,
+            }) = input_event
+                && modifier_mask == ModifierKeysMask::new().with_ctrl()
+            {
+                match modifier_key {
+                    Key::Character('a') => {
+                        consumed = true;
+                        state.set_window_scroll(&window, 0);
+                    }
+                    Key::Character('e') => {
+                        consumed = true;
+                        let max = state.window_scroll_max(&window);
+                        state.set_window_scroll(&window, max);
                         state.clamp_scroll(&window);
                     }
                     _ => {}
