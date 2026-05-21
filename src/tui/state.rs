@@ -46,6 +46,7 @@ pub struct State {
     pub window_states: HashMap<Window, WindowState>,
     /// Per-file highlight ranges (1-indexed, inclusive).
     pub highlight_ranges: HashMap<FileKey, Vec<(usize, usize)>>,
+    pub leader_active: bool,
     pub command_mode_active: bool,
     pub file_name_picker_open: bool,
     /// Each entry: (FileKey into files vec, sorted+deduped matched char positions).
@@ -189,6 +190,7 @@ impl State {
             focused_window: Some(Window::FileNamePicker),
             window_states: HashMap::new(),
             highlight_ranges: HashMap::new(),
+            leader_active: false,
             command_mode_active: false,
             file_name_picker_open: true,
             file_name_picker_results,
@@ -219,6 +221,7 @@ impl Default for State {
             focused_window: None,
             window_states: HashMap::new(),
             highlight_ranges: HashMap::new(),
+            leader_active: false,
             command_mode_active: false,
             file_name_picker_open: false,
             file_name_picker_results: Vec::new(),
@@ -241,6 +244,7 @@ impl PartialEq for State {
             && self.files_version == other.files_version
             && self.window_stack == other.window_stack
             && self.focused_window == other.focused_window
+            && self.leader_active == other.leader_active
             && self.file_name_picker_open == other.file_name_picker_open
             && self.file_name_picker_selected == other.file_name_picker_selected
             && self.file_name_picker_results.len() == other.file_name_picker_results.len()
