@@ -1,7 +1,8 @@
 use super::file_name_picker::FileNamePickerComponent;
 use super::fuzzy_picker::resolve_selected_index;
 use super::preview::FilePreviewComponent;
-use super::state::{AppSignal, MAX_PANES, State, Window};
+use super::state::{AppSignal, MAX_PANES, State, TerminalPane, Window};
+use super::terminal_pane::TerminalPaneComponent;
 use super::theme::HelixTheme;
 use super::theme_picker::ThemePickerComponent;
 use crate::loader::{FileKey, LoadedFile};
@@ -12,6 +13,11 @@ use camino::Utf8PathBuf;
 use nucleo::Matcher;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Utf32Str};
+use r3bl_tui::core::osc::OscEvent;
+use r3bl_tui::core::pty::{
+    CursorKeyMode, DefaultPtySessionConfig, PtyOutputEvent, PtySession, PtySessionBuilder,
+    PtySessionConfigOption,
+};
 use r3bl_tui::{
     App, BoxedSafeApp, BoxedSafeComponent, Button, CommonResult, Component, ComponentRegistry,
     ComponentRegistryMap, ContainsResult, EventPropagation, FlexBox, FlexBoxId, GlobalData,
@@ -24,6 +30,7 @@ use r3bl_tui::{
     render_pipeline, render_tui_styled_texts_into, req_size_pc, row, send_signal, surface, throws,
     throws_with_return, tui_color, tui_styled_text, tui_styled_texts, tui_stylesheet, width,
 };
+use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -76,6 +83,7 @@ struct PaneComponent {
     picker: FileNamePickerComponent,
     theme_picker: ThemePickerComponent,
     preview: FilePreviewComponent,
+    terminal: TerminalPaneComponent,
     /// Origin row of the content area (below title bar), used for scrollbar mouse events.
     content_origin_row: u16,
     /// Total columns in the content area (full width including scrollbar column).
@@ -98,6 +106,7 @@ impl PaneComponent {
             picker: FileNamePickerComponent::new(id),
             theme_picker: ThemePickerComponent::new(id),
             preview: FilePreviewComponent::new(id),
+            terminal: TerminalPaneComponent::new(id),
             content_origin_row: 0,
             content_col_count: 0,
             content_row_count: 0,
@@ -226,6 +235,7 @@ impl PaneComponent {
                 }
                 EventPropagation::ConsumedRender
             }
+            Window::Terminal(_) => EventPropagation::ConsumedRender,
         }
     }
 }
@@ -265,6 +275,7 @@ impl Component<State, AppSignal> for PaneComponent {
         self.picker.reset();
         self.theme_picker.reset();
         self.preview.reset();
+        self.terminal.reset();
     }
 
     fn get_id(&self) -> FlexBoxId {
@@ -277,8 +288,13 @@ impl Component<State, AppSignal> for PaneComponent {
         input_event: InputEvent,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        let active_is_terminal = matches!(
+            self.active_window(&global_data.state),
+            Some(Window::Terminal(_))
+        );
+
         // Check for scrollbar mouse interaction first.
-        if let InputEvent::Mouse(mouse) = input_event {
+        if !active_is_terminal && let InputEvent::Mouse(mouse) = input_event {
             let col = mouse.pos.col_index.as_usize();
             let row = mouse.pos.row_index.as_usize();
             let origin_col = self.content_origin_col as usize;
@@ -307,6 +323,10 @@ impl Component<State, AppSignal> for PaneComponent {
             }
             Some(Window::FilePreview(_)) => {
                 self.preview
+                    .handle_event(global_data, input_event, has_focus)
+            }
+            Some(Window::Terminal(_)) => {
+                self.terminal
                     .handle_event(global_data, input_event, has_focus)
             }
             None => Ok(EventPropagation::Propagate),
@@ -339,6 +359,15 @@ impl Component<State, AppSignal> for PaneComponent {
                             .removed
                             .load(std::sync::atomic::Ordering::Relaxed);
                         (self.preview.title_text(&global_data.state), removed)
+                    }
+                    Window::Terminal(id) => {
+                        let title = global_data
+                            .state
+                            .terminal_panes
+                            .get(id)
+                            .and_then(|p| p.title.clone())
+                            .unwrap_or_else(|| format!("Terminal {}", id));
+                        (title, false)
                     }
                 };
                 render_pane_title(
@@ -408,6 +437,10 @@ impl Component<State, AppSignal> for PaneComponent {
                     self.preview
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
+                Some(Window::Terminal(_)) => {
+                    self.terminal
+                        .render(global_data, content_box, surface_bounds, has_focus)?
+                }
                 None => r3bl_tui::render_pipeline!(),
             };
 
@@ -421,7 +454,9 @@ impl Component<State, AppSignal> for PaneComponent {
             };
 
             // Render scrollbar on the rightmost column if there's an active window.
-            if let Some(ref window) = self.active_window(&global_data.state).cloned() {
+            if let Some(ref window) = self.active_window(&global_data.state).cloned()
+                && !matches!(window, Window::Terminal(_))
+            {
                 let state = &global_data.state;
                 let scroll = state.window_scroll(window);
                 let scroll_max = state.window_scroll_max(window);
@@ -450,6 +485,7 @@ pub struct AppMain {
     picker_results_rx: mpsc::Receiver<PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
     exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
+    terminal_sessions: HashMap<usize, PtySession>,
 }
 
 impl AppMain {
@@ -466,6 +502,7 @@ impl AppMain {
             picker_results_rx,
             picker_generation: Arc::new(AtomicU64::new(0)),
             exit_tx,
+            terminal_sessions: HashMap::new(),
         })
     }
 
@@ -498,6 +535,98 @@ impl AppMain {
             .filter(|(_, f)| !f.removed.load(Ordering::Relaxed))
             .map(|(i, _)| (FileKey(i), vec![]))
             .collect()
+    }
+
+    fn open_terminal(
+        &mut self,
+        global_data: &mut GlobalData<State, AppSignal>,
+        has_focus: &mut HasFocus,
+    ) -> CommonResult<EventPropagation> {
+        throws_with_return!({
+            let state = &mut global_data.state;
+            let id = state.next_terminal_id;
+            state.next_terminal_id += 1;
+
+            let window_size = global_data.window_size;
+            let visible_count = state.window_stack.len().max(1) as u16;
+            let pty_cols = (window_size.col_width.as_u16() / visible_count).max(80);
+            let pty_rows = window_size.row_height.as_u16().saturating_sub(2);
+            let pty_size = Size {
+                col_width: width(pty_cols),
+                row_height: height(pty_rows),
+            };
+
+            let session = match PtySessionBuilder::new(shell_command())
+                .env_var("TERM", "xterm-256color")
+                .with_config(DefaultPtySessionConfig + PtySessionConfigOption::Size(pty_size))
+                .start()
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to start PTY: {e}");
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+            };
+
+            let ofs_buf = r3bl_tui::OffscreenBuffer::new_empty(pty_size);
+            let pty_input_tx = Arc::new(session.tx_input_event.clone());
+            let pane = TerminalPane {
+                ofs_buf,
+                cursor_key_mode: CursorKeyMode::Normal,
+                title: None,
+                pty_input_tx,
+                last_size: pty_size,
+            };
+
+            state.terminal_panes.insert(id, pane);
+            self.terminal_sessions.insert(id, session);
+
+            let window = Window::Terminal(id);
+            state.push_window(window.clone());
+            state.focused_window = Some(window);
+            has_focus.set_id(focused_pane_id(state));
+
+            EventPropagation::ConsumedRender
+        });
+    }
+}
+
+fn shell_command() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "bash".into())
+}
+
+fn poll_terminal_output(app: &mut AppMain, state: &mut State) {
+    let mut closed_ids: Vec<usize> = Vec::new();
+    for (&id, session) in &mut app.terminal_sessions {
+        while let Ok(event) = session.rx_output_event.try_recv() {
+            match event {
+                PtyOutputEvent::Output(bytes) => {
+                    if let Some(pane) = state.terminal_panes.get_mut(&id) {
+                        let (osc_events, _, _) = pane.ofs_buf.apply_ansi_bytes(&bytes);
+                        for event in osc_events {
+                            if let OscEvent::SetTitleAndTab(title) = event {
+                                pane.title = Some(title);
+                            }
+                        }
+                    }
+                }
+                PtyOutputEvent::Exit(_) => {
+                    closed_ids.push(id);
+                    break;
+                }
+                PtyOutputEvent::CursorModeChange(mode) => {
+                    if let Some(pane) = state.terminal_panes.get_mut(&id) {
+                        pane.cursor_key_mode = mode;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    for id in closed_ids {
+        app.terminal_sessions.remove(&id);
+        state.terminal_panes.remove(&id);
+        state.remove_window(&Window::Terminal(id));
     }
 }
 
@@ -683,6 +812,9 @@ impl App for AppMain {
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     Key::Character('t') => {
+                        return self.open_terminal(global_data, has_focus);
+                    }
+                    Key::Character('T') => {
                         let state = &mut global_data.state;
                         if !state.theme_picker_open {
                             state.saved_theme = state.theme.clone();
@@ -727,7 +859,9 @@ impl App for AppMain {
             }
         }
 
-        if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event {
+        if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
+            && !matches!(global_data.state.focused_window, Some(Window::Terminal(_)))
+        {
             match key {
                 Key::SpecialKey(SpecialKey::Tab) => {
                     let state = &mut global_data.state;
@@ -1082,6 +1216,8 @@ impl App for AppMain {
             }
         }
 
+        poll_terminal_output(self, &mut global_data.state);
+
         throws_with_return!({
             let window_size = global_data.window_size;
             let surface_cols = window_size.col_width.as_u16();
@@ -1303,6 +1439,7 @@ impl WindowHints for Window {
             Window::FilePreview(_) => {
                 "Esc:Send to back  \u{2191}\u{2193}/PgUp/PgDn/Home/End:Scroll  ::Command"
             }
+            Window::Terminal(_) => "Alt+`:Leader  Leader+Tab:Next pane",
         }
     }
 }
@@ -1325,7 +1462,7 @@ fn render_status_bar(
     let (leader_text, rest_text) = if leader_active {
         (
             " Leader ".to_string(),
-            "f:Picker  t:Theme  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel".to_string(),
+            "f:Picker  t:Term  T:Theme  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel".to_string(),
         )
     } else {
         let pane = match focused_window {
