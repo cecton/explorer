@@ -3,7 +3,9 @@ mod file_name_picker;
 mod fuzzy_picker;
 mod input_line;
 mod preview;
+pub mod rmux_bridge;
 pub mod state;
+mod terminal_pane;
 pub mod theme;
 mod theme_picker;
 

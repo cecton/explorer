@@ -1,9 +1,10 @@
+use super::rmux_bridge::RmuxCommand;
 use crate::loader::{FileKey, LoadedFile};
 use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
-use r3bl_tui::FlexBox;
+use r3bl_tui::{FlexBox, OffscreenBuffer};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
@@ -22,6 +23,7 @@ pub enum Window {
     FilePreview(FileKey),
     FileNamePicker,
     ThemePicker,
+    Terminal(usize),
 }
 
 /// Scroll and page-size state for a single window pane.
@@ -30,6 +32,14 @@ pub struct WindowState {
     pub scroll: usize,
     pub page_size: usize,
     pub scroll_max: usize,
+}
+
+#[derive(Clone)]
+pub struct TerminalPane {
+    pub ofs_buf: OffscreenBuffer,
+    pub title: Option<String>,
+    pub rmux_pane_id: u64,
+    pub rmux_cmd_tx: tokio::sync::mpsc::UnboundedSender<RmuxCommand>,
 }
 
 #[derive(Clone)]
@@ -63,6 +73,8 @@ pub struct State {
     pub saved_theme: HelixTheme,
     /// Current `FlexBox` for each pane slot (index 0..MAX_PANES).
     pub pane_boxes: [FlexBox; MAX_PANES],
+    /// Running PTY terminal panes, keyed by terminal ID (bridge pane_id).
+    pub terminal_panes: HashMap<usize, TerminalPane>,
 }
 
 impl State {
@@ -203,6 +215,7 @@ impl State {
             theme,
             saved_theme,
             pane_boxes: [FlexBox::default(); MAX_PANES],
+            terminal_panes: HashMap::new(),
         };
         state
             .window_states
@@ -234,6 +247,7 @@ impl Default for State {
             theme: HelixTheme::default(),
             saved_theme: HelixTheme::default(),
             pane_boxes: [FlexBox::default(); MAX_PANES],
+            terminal_panes: HashMap::new(),
         }
     }
 }

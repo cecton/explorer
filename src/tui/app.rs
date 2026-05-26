@@ -1,6 +1,7 @@
 use super::file_name_picker::FileNamePickerComponent;
 use super::fuzzy_picker::resolve_selected_index;
 use super::preview::FilePreviewComponent;
+use super::rmux_bridge::{RmuxBridge, RmuxCommand, RmuxEvent};
 use super::state::{AppSignal, MAX_PANES, State, TerminalPane, Window};
 use super::terminal_pane::TerminalPaneComponent;
 use super::theme::HelixTheme;
@@ -13,11 +14,6 @@ use camino::Utf8PathBuf;
 use nucleo::Matcher;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Utf32Str};
-use r3bl_tui::core::osc::OscEvent;
-use r3bl_tui::core::pty::{
-    CursorKeyMode, DefaultPtySessionConfig, PtyOutputEvent, PtySession, PtySessionBuilder,
-    PtySessionConfigOption,
-};
 use r3bl_tui::{
     App, BoxedSafeApp, BoxedSafeComponent, Button, CommonResult, Component, ComponentRegistry,
     ComponentRegistryMap, ContainsResult, EventPropagation, FlexBox, FlexBoxId, GlobalData,
@@ -30,7 +26,6 @@ use r3bl_tui::{
     render_pipeline, render_tui_styled_texts_into, req_size_pc, row, send_signal, surface, throws,
     throws_with_return, tui_color, tui_styled_text, tui_styled_texts, tui_stylesheet, width,
 };
-use std::collections::HashMap;
 use std::sync::atomic::AtomicU64;
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
@@ -485,7 +480,7 @@ pub struct AppMain {
     picker_results_rx: mpsc::Receiver<PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
     exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
-    terminal_sessions: HashMap<usize, PtySession>,
+    rmux_bridge: RmuxBridge,
 }
 
 impl AppMain {
@@ -502,7 +497,7 @@ impl AppMain {
             picker_results_rx,
             picker_generation: Arc::new(AtomicU64::new(0)),
             exit_tx,
-            terminal_sessions: HashMap::new(),
+            rmux_bridge: RmuxBridge::spawn(),
         })
     }
 
@@ -544,8 +539,6 @@ impl AppMain {
     ) -> CommonResult<EventPropagation> {
         throws_with_return!({
             let state = &mut global_data.state;
-            let id = state.next_terminal_id;
-            state.next_terminal_id += 1;
 
             let window_size = global_data.window_size;
             let visible_count = state.window_stack.len().max(1) as u16;
@@ -556,32 +549,38 @@ impl AppMain {
                 row_height: height(pty_rows),
             };
 
-            let session = match PtySessionBuilder::new(shell_command())
-                .env_var("TERM", "xterm-256color")
-                .with_config(DefaultPtySessionConfig + PtySessionConfigOption::Size(pty_size))
-                .start()
+            let (resp_tx, resp_rx) = std::sync::mpsc::channel();
+            if self
+                .rmux_bridge
+                .cmd_tx
+                .send(RmuxCommand::CreatePane {
+                    response_tx: resp_tx,
+                    size: pty_size,
+                })
+                .is_err()
             {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("Failed to start PTY: {e}");
+                tracing::warn!("rmux bridge is not running");
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            let pane_id = match resp_rx.recv() {
+                Ok(id) if id != 0 => id,
+                _ => {
+                    tracing::warn!("rmux bridge failed to create pane");
                     return Ok(EventPropagation::ConsumedRender);
                 }
             };
 
             let ofs_buf = r3bl_tui::OffscreenBuffer::new_empty(pty_size);
-            let pty_input_tx = Arc::new(session.tx_input_event.clone());
             let pane = TerminalPane {
                 ofs_buf,
-                cursor_key_mode: CursorKeyMode::Normal,
                 title: None,
-                pty_input_tx,
-                last_size: pty_size,
+                rmux_pane_id: pane_id,
+                rmux_cmd_tx: self.rmux_bridge.cmd_tx.clone(),
             };
 
-            state.terminal_panes.insert(id, pane);
-            self.terminal_sessions.insert(id, session);
+            state.terminal_panes.insert(pane_id as usize, pane);
 
-            let window = Window::Terminal(id);
+            let window = Window::Terminal(pane_id as usize);
             state.push_window(window.clone());
             state.focused_window = Some(window);
             has_focus.set_id(focused_pane_id(state));
@@ -591,43 +590,34 @@ impl AppMain {
     }
 }
 
-fn shell_command() -> String {
-    std::env::var("SHELL").unwrap_or_else(|_| "bash".into())
-}
-
-fn poll_terminal_output(app: &mut AppMain, state: &mut State) {
+/// Returns true if any [`RmuxEvent::Output`] was processed, so the caller can
+/// request a re-render to display the new content.
+fn poll_terminal_output(app: &mut AppMain, state: &mut State) -> bool {
     let mut closed_ids: Vec<usize> = Vec::new();
-    for (&id, session) in &mut app.terminal_sessions {
-        while let Ok(event) = session.rx_output_event.try_recv() {
-            match event {
-                PtyOutputEvent::Output(bytes) => {
-                    if let Some(pane) = state.terminal_panes.get_mut(&id) {
-                        let (osc_events, _, _) = pane.ofs_buf.apply_ansi_bytes(&bytes);
-                        for event in osc_events {
-                            if let OscEvent::SetTitleAndTab(title) = event {
-                                pane.title = Some(title);
-                            }
+    let mut had_output = false;
+    while let Ok(event) = app.rmux_bridge.event_rx.try_recv() {
+        match event {
+            RmuxEvent::Output { pane_id, data } => {
+                had_output = true;
+                if let Some(pane) = state.terminal_panes.get_mut(&(pane_id as usize)) {
+                    let (osc_events, _, _) = pane.ofs_buf.apply_ansi_bytes(&data);
+                    for osc in osc_events {
+                        if let r3bl_tui::core::osc::OscEvent::SetTitleAndTab(title) = osc {
+                            pane.title = Some(title);
                         }
                     }
                 }
-                PtyOutputEvent::Exit(_) => {
-                    closed_ids.push(id);
-                    break;
-                }
-                PtyOutputEvent::CursorModeChange(mode) => {
-                    if let Some(pane) = state.terminal_panes.get_mut(&id) {
-                        pane.cursor_key_mode = mode;
-                    }
-                }
-                _ => {}
+            }
+            RmuxEvent::Exited { pane_id } => {
+                closed_ids.push(pane_id as usize);
             }
         }
     }
     for id in closed_ids {
-        app.terminal_sessions.remove(&id);
         state.terminal_panes.remove(&id);
         state.remove_window(&Window::Terminal(id));
     }
+    had_output
 }
 
 fn run_file_name_match(
@@ -754,6 +744,15 @@ impl App for AppMain {
                 tracing::warn!("LSP worker failed to start: {e}");
             }
         }
+
+        self.rmux_bridge.set_notify({
+            let signal_tx = notify_tx.clone();
+            Box::new(move || {
+                let _ = signal_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                    AppSignal::Noop,
+                ));
+            })
+        });
 
         set_watcher_root(&root);
         match WATCHER_RRT.try_subscribe() {
@@ -1216,7 +1215,13 @@ impl App for AppMain {
             }
         }
 
-        poll_terminal_output(self, &mut global_data.state);
+        if poll_terminal_output(self, &mut global_data.state)
+            && let Some(tx) = self.exit_tx.get()
+        {
+            let _ = tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                AppSignal::Noop,
+            ));
+        }
 
         throws_with_return!({
             let window_size = global_data.window_size;

@@ -32,6 +32,7 @@ Source is organized as:
 - `src/tui/file_list.rs` — `FileListComponent` (left pane)
 - `src/tui/file_name_picker.rs` — fuzzy file-name picker overlay
 - `src/tui/fuzzy_picker.rs` — shared fuzzy list picker component
+- `src/tui/rmux_bridge.rs` — background thread bridge to rmux daemon for PTY management
 - `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview
 - `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane)
 
