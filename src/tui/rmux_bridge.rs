@@ -106,19 +106,15 @@ async fn run_rmux_bridge(
                         let pane_id = next_pane_id;
                         next_pane_id += 1;
 
-                        let create_result = tokio::task::spawn_blocking(move || {
-                            PtySessionBuilder::new(shell_cmd())
-                                .env_var("TERM", "xterm-256color")
-                                .with_config(
-                                    DefaultPtySessionConfig
-                                        + PtySessionConfigOption::Size(size),
-                                )
-                                .start()
-                        })
-                        .await;
-
-                        match create_result {
-                            Ok(Ok(session)) => {
+                        match PtySessionBuilder::new(shell_cmd())
+                            .env_var("TERM", "xterm-256color")
+                            .with_config(
+                                DefaultPtySessionConfig
+                                    + PtySessionConfigOption::Size(size),
+                            )
+                            .start()
+                        {
+                            Ok(session) => {
                                 let input_tx = session.tx_input_event.clone();
                                 let pid = pane_id;
                                 let et = event_tx.clone();
@@ -153,12 +149,8 @@ async fn run_rmux_bridge(
                                 sessions.insert(pane_id, input_tx);
                                 let _ = response_tx.send(pane_id);
                             }
-                            Ok(Err(e)) => {
-                                tracing::warn!("Failed to start PTY: {e}");
-                                let _ = response_tx.send(0);
-                            }
                             Err(e) => {
-                                tracing::warn!("PTY spawn task failed: {e}");
+                                tracing::warn!("Failed to start PTY: {e}");
                                 let _ = response_tx.send(0);
                             }
                         }

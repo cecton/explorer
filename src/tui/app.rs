@@ -596,15 +596,21 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut State) -> bool {
     let mut closed_ids: Vec<usize> = Vec::new();
     let mut had_output = false;
     while let Ok(event) = app.rmux_bridge.event_rx.try_recv() {
+        had_output = true;
         match event {
             RmuxEvent::Output { pane_id, data } => {
-                had_output = true;
                 if let Some(pane) = state.terminal_panes.get_mut(&(pane_id as usize)) {
-                    let (osc_events, _, _) = pane.ofs_buf.apply_ansi_bytes(&data);
+                    let (osc_events, _, da_responses) = pane.ofs_buf.apply_ansi_bytes(&data);
                     for osc in osc_events {
                         if let r3bl_tui::core::osc::OscEvent::SetTitleAndTab(title) = osc {
                             pane.title = Some(title);
                         }
+                    }
+                    for response in da_responses {
+                        let _ = pane.rmux_cmd_tx.send(RmuxCommand::SendInput {
+                            pane_id,
+                            data: response.into_bytes(),
+                        });
                     }
                 }
             }
