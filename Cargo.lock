@@ -921,6 +921,7 @@ dependencies = [
  "pico-args",
  "r3bl-rmux",
  "r3bl_tui",
+ "rmux-sdk",
  "serde",
  "serde_json",
  "tokio",

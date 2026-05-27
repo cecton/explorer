@@ -101,7 +101,7 @@ cargo test <module>::<test_name>
 | `pico-args`   | 0.5.x   | Lightweight CLI argument parsing (no proc macros) |
 | `r3bl_tui`    | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
 | `r3bl-rmux`   | 0.1.x   | rmux-sdk integration for r3bl: daemon-backed PTY terminal rendering |
-| `rmux-sdk`    | 0.3.x   | Public daemon-backed SDK for RMUX terminal multiplexer (via `r3bl-rmux`) |
+| `rmux-sdk`    | 0.3.x   | Public daemon-backed SDK for RMUX terminal multiplexer (bridge & r3bl-rmux) |
 | `serde`       | 1.x     | Derive macros for serialization (`derive` feature) |
 | `serde_json`  | 1.x     | JSON-RPC message serialization for LSP protocol   |
 | `tokio`       | 1.x     | Async runtime required by `r3bl_tui`              |

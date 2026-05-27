@@ -1,18 +1,14 @@
-use r3bl_tui::core::pty::{
-    DefaultPtySessionConfig, PtyInputEvent, PtyOutputEvent, PtySessionBuilder,
-    PtySessionConfigOption,
-};
-use r3bl_tui::{Size, height, width};
+use r3bl_tui::OffscreenBuffer;
+use rmux_sdk::{EnsureSession, Pane, Rmux, Session, SessionName, SplitDirection, TerminalSizeSpec};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::mpsc::UnboundedReceiver;
 use tokio::sync::mpsc::UnboundedSender;
 
-/// Commands from the TUI main thread to the rmux bridge background thread.
 pub enum RmuxCommand {
     CreatePane {
         response_tx: std::sync::mpsc::Sender<u64>,
-        size: Size,
+        size: r3bl_tui::Size,
     },
     SendInput {
         pane_id: u64,
@@ -26,13 +22,16 @@ pub enum RmuxCommand {
     Shutdown,
 }
 
-/// Events from the rmux bridge background thread back to the TUI main thread.
 pub enum RmuxEvent {
-    Output { pane_id: u64, data: Vec<u8> },
-    Exited { pane_id: u64 },
+    Render {
+        pane_id: u64,
+        ofs_buf: Box<OffscreenBuffer>,
+    },
+    Exited {
+        pane_id: u64,
+    },
 }
 
-/// Handle to the rmux bridge background thread and its communication channels.
 pub struct RmuxBridge {
     pub cmd_tx: UnboundedSender<RmuxCommand>,
     pub event_rx: UnboundedReceiver<RmuxEvent>,
@@ -50,9 +49,9 @@ impl RmuxBridge {
         let thread_handle = std::thread::Builder::new()
             .name("rmux-bridge".into())
             .spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .enable_io()
-                    .enable_time()
+                let rt = tokio::runtime::Builder::new_multi_thread()
+                    .enable_all()
+                    .worker_threads(2)
                     .build()
                     .expect("failed to build tokio runtime for rmux bridge");
                 rt.block_on(run_rmux_bridge(cmd_rx, event_tx, thread_notify));
@@ -67,8 +66,6 @@ impl RmuxBridge {
         }
     }
 
-    /// Set a callback that the bridge thread calls after producing an [`RmuxEvent::Output`].
-    /// Used by the main thread to request a re-render when new terminal output arrives.
     pub fn set_notify(&self, f: Box<dyn Fn() + Send + Sync>) {
         let _ = self.notify.set(f);
     }
@@ -83,12 +80,138 @@ impl Drop for RmuxBridge {
     }
 }
 
+async fn connect_daemon() -> Rmux {
+    match Rmux::connect_or_start().await {
+        Ok(rmux) => rmux,
+        Err(e) => {
+            tracing::warn!("Failed to connect to rmux daemon: {e}");
+            Rmux::builder().build()
+        }
+    }
+}
+
+async fn ensure_session(rmux: &Rmux) -> Option<Session> {
+    let name = match SessionName::new("explorer") {
+        Ok(n) => n,
+        Err(e) => {
+            tracing::warn!("Invalid session name: {e}");
+            return None;
+        }
+    };
+
+    match rmux
+        .ensure_session(
+            EnsureSession::named(name)
+                .shell(shell_cmd())
+                .create_or_reuse(),
+        )
+        .await
+    {
+        Ok(session) => Some(session),
+        Err(e) => {
+            tracing::warn!("Failed to create rmux session: {e}");
+            None
+        }
+    }
+}
+
+async fn create_pane(session: &Session, panes: &HashMap<u64, Pane>, pane_id: u64) -> Option<Pane> {
+    if pane_id == 1 {
+        return Some(session.pane(0, 0));
+    }
+
+    let existing = panes.values().next()?;
+    let shell = shell_cmd();
+
+    match existing
+        .split_with(SplitDirection::Right)
+        .shell(shell)
+        .await
+    {
+        Ok(pane) => Some(pane),
+        Err(e) => {
+            tracing::warn!("Failed to split pane: {e}");
+            None
+        }
+    }
+}
+
+fn spawn_forwarder(
+    pane_id: u64,
+    pane: Pane,
+    event_tx: UnboundedSender<RmuxEvent>,
+    notify: Arc<std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>>,
+) {
+    tokio::spawn(async move {
+        let snapshot = match pane.snapshot().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Initial snapshot failed for pane {pane_id}: {e}");
+                let _ = event_tx.send(RmuxEvent::Exited { pane_id });
+                return;
+            }
+        };
+
+        let ofs_buf = r3bl_rmux::to_offscreen_buffer(&snapshot);
+        let _ = event_tx.send(RmuxEvent::Render {
+            pane_id,
+            ofs_buf: Box::new(ofs_buf),
+        });
+        if let Some(f) = notify.get() {
+            f();
+        }
+
+        let mut stream = match pane.render_stream().await {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!("Render stream failed for pane {pane_id}: {e}");
+                let _ = event_tx.send(RmuxEvent::Exited { pane_id });
+                return;
+            }
+        };
+
+        loop {
+            match stream.next().await {
+                Ok(Some(update)) => {
+                    let snapshot = update.into_snapshot();
+                    let ofs_buf = r3bl_rmux::to_offscreen_buffer(&snapshot);
+                    let _ = event_tx.send(RmuxEvent::Render {
+                        pane_id,
+                        ofs_buf: Box::new(ofs_buf),
+                    });
+                    if let Some(f) = notify.get() {
+                        f();
+                    }
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    tracing::warn!("Render stream error for pane {pane_id}: {e}");
+                    break;
+                }
+            }
+        }
+
+        let _ = event_tx.send(RmuxEvent::Exited { pane_id });
+    });
+}
+
 async fn run_rmux_bridge(
     mut cmd_rx: UnboundedReceiver<RmuxCommand>,
     event_tx: UnboundedSender<RmuxEvent>,
     notify: Arc<std::sync::OnceLock<Box<dyn Fn() + Send + Sync>>>,
 ) {
-    let mut sessions: HashMap<u64, tokio::sync::mpsc::Sender<PtyInputEvent>> = HashMap::new();
+    let rmux = connect_daemon().await;
+    let Some(session) = ensure_session(&rmux).await else {
+        tracing::warn!("rmux bridge: no session, terminal panes will not work");
+        loop {
+            if cmd_rx.recv().await.is_none() {
+                break;
+            }
+        }
+        return;
+    };
+
+    let mut panes: HashMap<u64, Pane> = HashMap::new();
     let mut next_pane_id: u64 = 1;
 
     loop {
@@ -106,58 +229,29 @@ async fn run_rmux_bridge(
                         let pane_id = next_pane_id;
                         next_pane_id += 1;
 
-                        match PtySessionBuilder::new(shell_cmd())
-                            .env_var("TERM", "xterm-256color")
-                            .with_config(
-                                DefaultPtySessionConfig
-                                    + PtySessionConfigOption::Size(size),
-                            )
-                            .start()
-                        {
-                            Ok(session) => {
-                                let input_tx = session.tx_input_event.clone();
-                                let pid = pane_id;
-                                let et = event_tx.clone();
+                        let Some(pane) = create_pane(&session, &panes, pane_id).await else {
+                            let _ = response_tx.send(0);
+                            continue;
+                        };
 
-                                let fwd_notify = notify.clone();
-                                tokio::spawn(async move {
-                                    let mut rx = session.rx_output_event;
-                                    while let Some(event) = rx.recv().await {
-                                        match event {
-                                            PtyOutputEvent::Output(bytes) => {
-                                                let _ =
-                                                    et.send(RmuxEvent::Output {
-                                                        pane_id: pid,
-                                                        data: bytes,
-                                                    });
-                                                if let Some(f) = fwd_notify.get() {
-                                                    f();
-                                                }
-                                            }
-                                            PtyOutputEvent::Exit(_) => {
-                                                let _ =
-                                                    et.send(RmuxEvent::Exited {
-                                                        pane_id: pid,
-                                                    });
-                                                break;
-                                            }
-                                            _ => {}
-                                        }
-                                    }
-                                });
+                        let _ = pane
+                            .resize(TerminalSizeSpec {
+                                cols: size.col_width.as_u16(),
+                                rows: size.row_height.as_u16(),
+                            })
+                            .await;
 
-                                sessions.insert(pane_id, input_tx);
-                                let _ = response_tx.send(pane_id);
-                            }
-                            Err(e) => {
-                                tracing::warn!("Failed to start PTY: {e}");
-                                let _ = response_tx.send(0);
-                            }
-                        }
+                        let et = event_tx.clone();
+                        let n = notify.clone();
+                        spawn_forwarder(pane_id, pane.clone(), et, n);
+
+                        panes.insert(pane_id, pane);
+                        let _ = response_tx.send(pane_id);
                     }
                     RmuxCommand::SendInput { pane_id, data } => {
-                        if let Some(tx) = sessions.get(&pane_id) {
-                            let _ = tx.try_send(PtyInputEvent::Write(data));
+                        if let Some(pane) = panes.get(&pane_id) {
+                            let text = String::from_utf8_lossy(&data);
+                            let _ = pane.send_text(text.as_ref()).await;
                         }
                     }
                     RmuxCommand::ResizePane {
@@ -165,20 +259,18 @@ async fn run_rmux_bridge(
                         cols,
                         rows,
                     } => {
-                        if let Some(tx) = sessions.get(&pane_id) {
-                            let _ = tx.try_send(PtyInputEvent::Resize(Size {
-                                col_width: width(cols),
-                                row_height: height(rows),
-                            }));
+                        if let Some(pane) = panes.get(&pane_id) {
+                            let _ = pane
+                                .resize(TerminalSizeSpec { cols, rows })
+                                .await;
                         }
                     }
-
                 }
             }
         }
     }
 
-    drop(sessions);
+    drop(panes);
     tracing::debug!("rmux bridge thread shut down");
 }
 
