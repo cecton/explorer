@@ -919,6 +919,7 @@ dependencies = [
  "notify",
  "nucleo",
  "pico-args",
+ "r3bl-rmux",
  "r3bl_tui",
  "serde",
  "serde_json",
@@ -2503,6 +2504,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
+name = "r3bl-rmux"
+version = "0.1.0"
+dependencies = [
+ "r3bl_tui",
+ "rmux-sdk",
+ "tokio",
+]
+
+[[package]]
 name = "r3bl_tui"
 version = "0.7.8"
 dependencies = [
@@ -2703,6 +2713,60 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
+]
+
+[[package]]
+name = "rmux-ipc"
+version = "0.3.1"
+dependencies = [
+ "libc",
+ "rmux-os",
+ "rustix 1.1.4",
+ "tokio",
+ "tracing",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rmux-os"
+version = "0.3.1"
+dependencies = [
+ "libc",
+ "rmux-types",
+ "rustix 1.1.4",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rmux-proto"
+version = "0.3.1"
+dependencies = [
+ "bincode",
+ "rmux-types",
+ "serde",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "rmux-sdk"
+version = "0.3.1"
+dependencies = [
+ "libc",
+ "rmux-ipc",
+ "rmux-os",
+ "rmux-proto",
+ "rustix 1.1.4",
+ "serde",
+ "serde_json",
+ "tokio",
+ "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "rmux-types"
+version = "0.3.1"
+dependencies = [
+ "serde",
 ]
 
 [[package]]

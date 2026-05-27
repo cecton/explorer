@@ -21,6 +21,11 @@ the code or format or use rustup.
 4. Displays files in an interactive TUI: left pane is the file list, right pane is a syntax-highlighted preview.
 
 Source is organized as:
+- `crates/r3bl-rmux/src/lib.rs` — re-exports
+- `crates/r3bl-rmux/src/driver.rs` — `R3blPaneDriver` wrapping `rmux_sdk::Pane`
+- `crates/r3bl-rmux/src/state.rs` — `R3blPaneState`, `PaneLifecycle`
+- `crates/r3bl-rmux/src/theme.rs` — color/attribute/glyph mappings from rmux-sdk to r3bl types
+- `crates/r3bl-rmux/src/to_offscreen_buffer.rs` — `PaneSnapshot` → `OffscreenBuffer` conversion
 - `src/main.rs` — async entry point, wires CLI → loader → TUI
 - `src/cli.rs` — CLI argument parsing via `pico-args`
 - `src/config.rs` — KDL configuration file parsing (theme, future fields)
@@ -95,6 +100,8 @@ cargo test <module>::<test_name>
 | `nucleo`      | 0.5.x   | Fuzzy matching for paths and file content         |
 | `pico-args`   | 0.5.x   | Lightweight CLI argument parsing (no proc macros) |
 | `r3bl_tui`    | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
+| `r3bl-rmux`   | 0.1.x   | rmux-sdk integration for r3bl: daemon-backed PTY terminal rendering |
+| `rmux-sdk`    | 0.3.x   | Public daemon-backed SDK for RMUX terminal multiplexer (via `r3bl-rmux`) |
 | `serde`       | 1.x     | Derive macros for serialization (`derive` feature) |
 | `serde_json`  | 1.x     | JSON-RPC message serialization for LSP protocol   |
 | `tokio`       | 1.x     | Async runtime required by `r3bl_tui`              |

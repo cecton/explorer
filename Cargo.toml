@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "xtask"]
+members = [".", "xtask", "crates/r3bl-rmux"]
 
 [package]
 name = "explorer"
@@ -17,6 +17,7 @@ lsp-types = { version = "0.97", features = ["proposed"] }
 nucleo = "0.5"
 pico-args = "0.5"
 r3bl_tui = { path = "vendor/r3bl-open-core/tui" }
+r3bl-rmux = { path = "crates/r3bl-rmux" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 kdl = "6"
