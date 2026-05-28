@@ -263,9 +263,35 @@ async fn run_rmux_bridge(
                             let _ = pane
                                 .resize(TerminalSizeSpec { cols, rows })
                                 .await;
-                            if let Ok(snapshot) = pane.snapshot().await {
-                                let ofs_buf =
-                                    r3bl_rmux::to_offscreen_buffer(&snapshot);
+                            // Daemon processes resize asynchronously; poll
+                            // until the snapshot matches the requested size.
+                            use std::time::Duration;
+                            let deadline =
+                                tokio::time::Instant::now()
+                                    + Duration::from_millis(200);
+                            let mut snapshot = None;
+                            loop {
+                                if let Ok(s) = pane.snapshot().await {
+                                    if s.cols == cols && s.rows == rows {
+                                        snapshot = Some(s);
+                                        break;
+                                    }
+                                    snapshot = Some(s);
+                                }
+                                if tokio::time::Instant::now() >= deadline {
+                                    tracing::debug!(
+                                        "resize {cols}x{rows} not confirmed \
+                                         within timeout for pane {pane_id}"
+                                    );
+                                    break;
+                                }
+                                tokio::time::sleep(Duration::from_millis(10))
+                                    .await;
+                            };
+                            if let Some(snapshot) = snapshot {
+                                let ofs_buf = r3bl_rmux::to_offscreen_buffer(
+                                    &snapshot,
+                                );
                                 let _ = event_tx.send(RmuxEvent::Render {
                                     pane_id,
                                     ofs_buf: Box::new(ofs_buf),
