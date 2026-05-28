@@ -429,7 +429,7 @@ impl Component<State, AppSignal> for PaneComponent {
                         desired_cols != pane.ofs_buf.window_size.col_width.as_u16()
                             || desired_rows != pane.ofs_buf.window_size.row_height.as_u16()
                     });
-                if needs_resize {
+                if needs_resize && desired_cols > 0 && desired_rows > 0 {
                     let (rmux_pane_id, rmux_cmd_tx) = {
                         let pane = global_data.state.terminal_panes.get(id).unwrap();
                         (pane.rmux_pane_id, pane.rmux_cmd_tx.clone())
