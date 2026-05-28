@@ -263,6 +263,17 @@ async fn run_rmux_bridge(
                             let _ = pane
                                 .resize(TerminalSizeSpec { cols, rows })
                                 .await;
+                            if let Ok(snapshot) = pane.snapshot().await {
+                                let ofs_buf =
+                                    r3bl_rmux::to_offscreen_buffer(&snapshot);
+                                let _ = event_tx.send(RmuxEvent::Render {
+                                    pane_id,
+                                    ofs_buf: Box::new(ofs_buf),
+                                });
+                                if let Some(f) = notify.get() {
+                                    f();
+                                }
+                            }
                         }
                     }
                 }
