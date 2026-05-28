@@ -265,48 +265,21 @@ async fn run_rmux_bridge(
                         rows,
                     } => {
                         if let Some(pane) = panes.get(&pane_id) {
-                            if let Err(e) = pane
+                            let result = pane
                                 .resize(TerminalSizeSpec { cols, rows })
-                                .await
-                            {
-                                tracing::error!(
-                                    "resize failed for pane {pane_id}: {e}"
-                                );
-                            }
-                            // Spawn a background task that polls until the
-                            // daemon confirms the new dimensions, then sends
-                            // a Render event.  The already-running forwarder's
-                            // render stream will also deliver the new snapshot
-                            // once the shell re-prompts (SIGWINCH).  This task
-                            // is a fallback so the buffer is updated even if
-                            // the render stream is slow.
-                            let p = pane.clone();
-                            let et = event_tx.clone();
-                            let n = notify.clone();
-                            tokio::spawn(async move {
-                                use std::time::Duration;
-                                for _ in 0..50 {
-                                    tokio::time::sleep(Duration::from_millis(10)).await;
-                                    if let Ok(s) = p.snapshot().await
-                                        && s.cols == cols && s.rows == rows
-                                    {
-                                        let ofs_buf =
-                                            r3bl_rmux::to_offscreen_buffer(&s);
-                                        let _ = et.send(RmuxEvent::Render {
-                                            pane_id,
-                                            ofs_buf: Box::new(ofs_buf),
-                                        });
-                                        if let Some(f) = n.get() {
-                                            f();
-                                        }
-                                        return;
-                                    }
+                                .await;
+                            match &result {
+                                Ok(_) => {
+                                    // resize returned Ok but daemon may not have
+                                    // actually applied it — the forwarder will
+                                    // deliver the real snapshot when it arrives
                                 }
-                                tracing::error!(
-                                    "resize {cols}x{rows} NOT confirmed \
-                                     after 500ms for pane {pane_id}"
-                                );
-                            });
+                                Err(e) => {
+                                    tracing::error!(
+                                        "resize failed for pane {pane_id}: {e}"
+                                    );
+                                }
+                            }
                         }
                     }
                 }
