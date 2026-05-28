@@ -214,6 +214,7 @@ async fn run_rmux_bridge(
 
     let mut panes: HashMap<u64, Pane> = HashMap::new();
     let mut next_pane_id: u64 = 1;
+    let mut last_snapshot_sizes: HashMap<u64, (u16, u16)> = HashMap::new();
 
     loop {
         tokio::select! {
@@ -274,17 +275,23 @@ async fn run_rmux_bridge(
                                     "resize failed for pane {pane_id}: {e}"
                                 );
                             }
-                            // Take a snapshot after resize to update the offscreen
-                            // buffer immediately — the forwarder's render stream
-                            // only fires on PTY output, not on SIGWINCH alone.
+                            // Take a snapshot after resize. Only forward if the
+                            // dimensions actually changed — otherwise we loop
+                            // infinitely on every render cycle (since the render
+                            // stream doesn't fire on SIGWINCH alone).
                             if let Ok(s) = pane.snapshot().await {
-                                let ofs_buf = r3bl_rmux::to_offscreen_buffer(&s);
-                                let _ = event_tx.send(RmuxEvent::Render {
-                                    pane_id,
-                                    ofs_buf: Box::new(ofs_buf),
-                                });
-                                if let Some(f) = notify.get() {
-                                    f();
+                                let new_size = (s.cols, s.rows);
+                                if last_snapshot_sizes.get(&pane_id) != Some(&new_size) {
+                                    let ofs_buf =
+                                        r3bl_rmux::to_offscreen_buffer(&s);
+                                    let _ = event_tx.send(RmuxEvent::Render {
+                                        pane_id,
+                                        ofs_buf: Box::new(ofs_buf),
+                                    });
+                                    if let Some(f) = notify.get() {
+                                        f();
+                                    }
+                                    last_snapshot_sizes.insert(pane_id, new_size);
                                 }
                             }
                         }
