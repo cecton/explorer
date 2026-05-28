@@ -434,21 +434,11 @@ impl Component<State, AppSignal> for PaneComponent {
                         let pane = global_data.state.terminal_panes.get(id).unwrap();
                         (pane.rmux_pane_id, pane.rmux_cmd_tx.clone())
                     };
-                    let new_size = Size {
-                        col_width: width(desired_cols),
-                        row_height: height(desired_rows),
-                    };
                     let _ = rmux_cmd_tx.send(RmuxCommand::ResizePane {
                         pane_id: rmux_pane_id,
                         cols: desired_cols,
                         rows: desired_rows,
                     });
-                    global_data
-                        .state
-                        .terminal_panes
-                        .get_mut(id)
-                        .unwrap()
-                        .ofs_buf = OffscreenBuffer::new_empty(new_size);
                 }
             }
 
@@ -605,7 +595,7 @@ impl AppMain {
                 }
             };
 
-            let ofs_buf = r3bl_tui::OffscreenBuffer::new_empty(pty_size);
+            let ofs_buf = OffscreenBuffer::new_empty(pty_size);
             let pane = TerminalPane {
                 ofs_buf,
                 title: None,
