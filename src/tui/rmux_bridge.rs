@@ -234,12 +234,17 @@ async fn run_rmux_bridge(
                             continue;
                         };
 
-                        let _ = pane
+                        if let Err(e) = pane
                             .resize(TerminalSizeSpec {
                                 cols: size.col_width.as_u16(),
                                 rows: size.row_height.as_u16(),
                             })
-                            .await;
+                            .await
+                        {
+                            tracing::error!(
+                                "initial resize failed for pane {pane_id}: {e}"
+                            );
+                        }
 
                         let et = event_tx.clone();
                         let n = notify.clone();
@@ -260,9 +265,14 @@ async fn run_rmux_bridge(
                         rows,
                     } => {
                         if let Some(pane) = panes.get(&pane_id) {
-                            let _ = pane
+                            if let Err(e) = pane
                                 .resize(TerminalSizeSpec { cols, rows })
-                                .await;
+                                .await
+                            {
+                                tracing::error!(
+                                    "resize failed for pane {pane_id}: {e}"
+                                );
+                            }
                             // Spawn a background task that polls until the
                             // daemon confirms the new dimensions, then sends
                             // a Render event.  The already-running forwarder's
