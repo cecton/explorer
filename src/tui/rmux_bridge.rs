@@ -266,19 +266,25 @@ async fn run_rmux_bridge(
                         rows,
                     } => {
                         if let Some(pane) = panes.get(&pane_id) {
-                            let result = pane
+                            if let Err(e) = pane
                                 .resize(TerminalSizeSpec { cols, rows })
-                                .await;
-                            match &result {
-                                Ok(_) => {
-                                    // resize returned Ok but daemon may not have
-                                    // actually applied it — the forwarder will
-                                    // deliver the real snapshot when it arrives
-                                }
-                                Err(e) => {
-                                    tracing::error!(
-                                        "resize failed for pane {pane_id}: {e}"
-                                    );
+                                .await
+                            {
+                                tracing::error!(
+                                    "resize failed for pane {pane_id}: {e}"
+                                );
+                            }
+                            // Take a snapshot after resize to update the offscreen
+                            // buffer immediately — the forwarder's render stream
+                            // only fires on PTY output, not on SIGWINCH alone.
+                            if let Ok(s) = pane.snapshot().await {
+                                let ofs_buf = r3bl_rmux::to_offscreen_buffer(&s);
+                                let _ = event_tx.send(RmuxEvent::Render {
+                                    pane_id,
+                                    ofs_buf: Box::new(ofs_buf),
+                                });
+                                if let Some(f) = notify.get() {
+                                    f();
                                 }
                             }
                         }
