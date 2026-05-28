@@ -103,6 +103,7 @@ async fn ensure_session(rmux: &Rmux) -> Option<Session> {
         .ensure_session(
             EnsureSession::named(name)
                 .shell(shell_cmd())
+                .size(TerminalSizeSpec::new(120, 65))
                 .create_or_reuse(),
         )
         .await
