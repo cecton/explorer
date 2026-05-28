@@ -212,6 +212,7 @@ async fn run_rmux_bridge(
         return;
     };
 
+    let window = session.window(0);
     let mut panes: HashMap<u64, Pane> = HashMap::new();
     let mut next_pane_id: u64 = 1;
     let mut last_snapshot_sizes: HashMap<u64, (u16, u16)> = HashMap::new();
@@ -236,13 +237,9 @@ async fn run_rmux_bridge(
                             continue;
                         };
 
-                        if let Err(e) = pane
-                            .resize(TerminalSizeSpec {
-                                cols: size.col_width.as_u16(),
-                                rows: size.row_height.as_u16(),
-                            })
-                            .await
-                        {
+                        let cols = size.col_width.as_u16();
+                        let rows = size.row_height.as_u16();
+                        if let Err(e) = window.resize(Some(cols), Some(rows)).await {
                             tracing::error!(
                                 "initial resize failed for pane {pane_id}: {e}"
                             );
@@ -266,15 +263,12 @@ async fn run_rmux_bridge(
                         cols,
                         rows,
                     } => {
+                        if let Err(e) = window.resize(Some(cols), Some(rows)).await {
+                            tracing::error!(
+                                "window resize failed for pane {pane_id}: {e}"
+                            );
+                        }
                         if let Some(pane) = panes.get(&pane_id) {
-                            if let Err(e) = pane
-                                .resize(TerminalSizeSpec { cols, rows })
-                                .await
-                            {
-                                tracing::error!(
-                                    "resize failed for pane {pane_id}: {e}"
-                                );
-                            }
                             // Take a snapshot after resize. Only forward if the
                             // dimensions actually changed — otherwise we loop
                             // infinitely on every render cycle (since the render

@@ -4,5 +4,5 @@
 	branch = fix-rrt-with-sane-types
 [submodule "vendor/rmux"]
 	path = vendor/rmux
-	url = https://github.com/Helvesec/rmux.git
+	url = https://github.com/cecton/rmux.git
 	branch = main
