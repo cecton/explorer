@@ -121,6 +121,7 @@ Planned feature areas and their likely dependencies:
 ### Formatting
 
 - `cargo fmt` is authoritative. Do not hand-format; let rustfmt decide.
+- `.rustfmt.toml` at project root excludes `vendor/**` from formatting via `ignore`.
 - Edition 2024 is in use. Use its idioms (e.g., `let … else`, `if let` chains).
 
 ### Naming Conventions
