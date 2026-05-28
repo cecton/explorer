@@ -421,24 +421,25 @@ impl Component<State, AppSignal> for PaneComponent {
             if let Some(Window::Terminal(id)) = &active_window {
                 let desired_cols = content_box.style_adjusted_bounds_size.col_width.as_u16();
                 let desired_rows = content_box.style_adjusted_bounds_size.row_height.as_u16();
-                let needs_resize = global_data
-                    .state
-                    .terminal_panes
-                    .get(id)
-                    .is_some_and(|pane| {
-                        desired_cols != pane.ofs_buf.window_size.col_width.as_u16()
-                            || desired_rows != pane.ofs_buf.window_size.row_height.as_u16()
-                    });
-                if needs_resize && desired_cols > 0 && desired_rows > 0 {
-                    let (rmux_pane_id, rmux_cmd_tx) = {
-                        let pane = global_data.state.terminal_panes.get(id).unwrap();
-                        (pane.rmux_pane_id, pane.rmux_cmd_tx.clone())
-                    };
-                    let _ = rmux_cmd_tx.send(RmuxCommand::ResizePane {
-                        pane_id: rmux_pane_id,
-                        cols: desired_cols,
-                        rows: desired_rows,
-                    });
+                if let Some(pane) = global_data.state.terminal_panes.get(id) {
+                    let buf_cols = pane.ofs_buf.window_size.col_width.as_u16();
+                    let buf_rows = pane.ofs_buf.window_size.row_height.as_u16();
+                    if (desired_cols != buf_cols || desired_rows != buf_rows)
+                        && desired_cols > 0
+                        && desired_rows > 0
+                    {
+                        let (rmux_pane_id, rmux_cmd_tx) =
+                            (pane.rmux_pane_id, pane.rmux_cmd_tx.clone());
+                        tracing::error!(
+                            "resize pane {id}: ofs_buf {buf_cols}x{buf_rows} \
+                             -> content_box {desired_cols}x{desired_rows}"
+                        );
+                        let _ = rmux_cmd_tx.send(RmuxCommand::ResizePane {
+                            pane_id: rmux_pane_id,
+                            cols: desired_cols,
+                            rows: desired_rows,
+                        });
+                    }
                 }
             }
 
