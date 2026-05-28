@@ -1,6 +1,13 @@
 [workspace]
 members = [".", "xtask", "crates/r3bl-rmux"]
 
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/anomalyco/explorer"
+version = "0.3.1"
+publish = false
+
 [package]
 name = "explorer"
 version = "0.1.0"
@@ -18,7 +25,7 @@ nucleo = "0.5"
 pico-args = "0.5"
 r3bl_tui = { path = "vendor/r3bl-open-core/tui" }
 r3bl-rmux = { path = "crates/r3bl-rmux" }
-rmux-sdk = { path = "../rmux/crates/rmux-sdk" }
+rmux-sdk = { path = "vendor/rmux/crates/rmux-sdk" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 kdl = "6"

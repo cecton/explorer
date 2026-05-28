@@ -2752,7 +2752,10 @@ dependencies = [
 name = "rmux-sdk"
 version = "0.3.1"
 dependencies = [
+ "bincode",
+ "crossterm",
  "libc",
+ "regex",
  "rmux-ipc",
  "rmux-os",
  "rmux-proto",

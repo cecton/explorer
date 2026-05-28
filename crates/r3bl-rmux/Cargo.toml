@@ -5,5 +5,5 @@ edition = "2024"
 
 [dependencies]
 r3bl_tui = { path = "../../vendor/r3bl-open-core/tui" }
-rmux-sdk = { path = "../../../rmux/crates/rmux-sdk" }
+rmux-sdk = { path = "../../vendor/rmux/crates/rmux-sdk" }
 tokio = { version = "1", features = ["sync"] }

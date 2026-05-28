@@ -2,3 +2,7 @@
 	path = vendor/r3bl-open-core
 	url = https://github.com/cecton/r3bl-open-core
 	branch = fix-rrt-with-sane-types
+[submodule "vendor/rmux"]
+	path = vendor/rmux
+	url = https://github.com/Helvesec/rmux.git
+	branch = main
