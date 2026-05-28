@@ -18,7 +18,7 @@ use r3bl_tui::{
     App, BoxedSafeApp, BoxedSafeComponent, Button, CommonResult, Component, ComponentRegistry,
     ComponentRegistryMap, ContainsResult, EventPropagation, FlexBox, FlexBoxId, GlobalData,
     HasFocus, InputDevice, InputEvent, IntoErr, Key, KeyPress, LayoutDirection, LayoutManagement,
-    LengthOps, ModifierKeysMask, MouseInput, MouseInputKind, OutputDevice,
+    LengthOps, ModifierKeysMask, MouseInput, MouseInputKind, OffscreenBuffer, OutputDevice,
     PerformPositioningAndSizing, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
     SPACER_GLYPH, Size, SpecialKey, Surface, SurfaceBounds, SurfaceProps, SurfaceRender,
     TerminalWindow, TerminalWindowMainThreadSignal, TuiAvailability, TuiStylesheet, ZOrder,
@@ -416,6 +416,41 @@ impl Component<State, AppSignal> for PaneComponent {
             self.content_origin_col = content_box.style_adjusted_origin_pos.col_index.as_u16();
             self.content_col_count = content_box.style_adjusted_bounds_size.col_width.as_u16();
             self.content_row_count = content_box.style_adjusted_bounds_size.row_height.as_u16();
+
+            // Sync terminal pane dimensions with the actual rendered content box.
+            if let Some(Window::Terminal(id)) = &active_window {
+                let desired_cols = content_box.style_adjusted_bounds_size.col_width.as_u16();
+                let desired_rows = content_box.style_adjusted_bounds_size.row_height.as_u16();
+                let needs_resize = global_data
+                    .state
+                    .terminal_panes
+                    .get(id)
+                    .is_some_and(|pane| {
+                        desired_cols != pane.ofs_buf.window_size.col_width.as_u16()
+                            || desired_rows != pane.ofs_buf.window_size.row_height.as_u16()
+                    });
+                if needs_resize {
+                    let (rmux_pane_id, rmux_cmd_tx) = {
+                        let pane = global_data.state.terminal_panes.get(id).unwrap();
+                        (pane.rmux_pane_id, pane.rmux_cmd_tx.clone())
+                    };
+                    let new_size = Size {
+                        col_width: width(desired_cols),
+                        row_height: height(desired_rows),
+                    };
+                    let _ = rmux_cmd_tx.send(RmuxCommand::ResizePane {
+                        pane_id: rmux_pane_id,
+                        cols: desired_cols,
+                        rows: desired_rows,
+                    });
+                    global_data
+                        .state
+                        .terminal_panes
+                        .get_mut(id)
+                        .unwrap()
+                        .ofs_buf = OffscreenBuffer::new_empty(new_size);
+                }
+            }
 
             let inner_pipeline = match active_window {
                 Some(Window::FileNamePicker) => {

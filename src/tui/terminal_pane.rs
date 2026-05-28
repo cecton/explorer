@@ -91,13 +91,6 @@ impl Component<State, AppSignal> for TerminalPaneComponent {
                         data: encoded,
                     });
                 }
-                InputEvent::Resize(new_size) => {
-                    let _ = tx.send(RmuxCommand::ResizePane {
-                        pane_id,
-                        cols: new_size.col_width.as_u16(),
-                        rows: new_size.row_height.as_u16(),
-                    });
-                }
                 _ => {}
             }
 
