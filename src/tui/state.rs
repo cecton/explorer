@@ -3,11 +3,13 @@ use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
-use r3bl_tui::FlexBox;
+use r3bl_tui::core::pty::{CursorKeyMode, MouseTrackingMode, PtyInputEvent};
+use r3bl_tui::{FlexBox, OffscreenBuffer, Size};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
+use tokio::sync::mpsc;
 
 pub const MAX_PANES: usize = 5;
 
@@ -22,6 +24,7 @@ pub enum Window {
     FilePreview(FileKey),
     FileNamePicker,
     ThemePicker,
+    Terminal(usize),
 }
 
 /// Scroll and page-size state for a single window pane.
@@ -30,6 +33,29 @@ pub struct WindowState {
     pub scroll: usize,
     pub page_size: usize,
     pub scroll_max: usize,
+}
+
+#[derive(Clone)]
+pub struct TerminalPane {
+    pub ofs_buf: OffscreenBuffer,
+    pub cursor_key_mode: CursorKeyMode,
+    pub mouse_tracking_mode: MouseTrackingMode,
+    pub title: Option<String>,
+    pub pty_input_tx: Arc<mpsc::Sender<PtyInputEvent>>,
+    pub last_size: Size,
+}
+
+impl Debug for TerminalPane {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TerminalPane")
+            .field("ofs_buf", &self.ofs_buf)
+            .field("cursor_key_mode", &self.cursor_key_mode)
+            .field("mouse_tracking_mode", &self.mouse_tracking_mode)
+            .field("title", &self.title)
+            .field("pty_input_tx", &"Sender<..>")
+            .field("last_size", &self.last_size)
+            .finish()
+    }
 }
 
 #[derive(Clone)]
@@ -63,6 +89,11 @@ pub struct State {
     pub saved_theme: HelixTheme,
     /// Current `FlexBox` for each pane slot (index 0..MAX_PANES).
     pub pane_boxes: [FlexBox; MAX_PANES],
+    /// Terminal panes keyed by their unique ID. Behind `Arc<Mutex<>>` so the
+    /// background task can call `apply_ansi_bytes` off the main thread.
+    pub terminal_panes: HashMap<usize, Arc<Mutex<TerminalPane>>>,
+    /// Next available terminal pane ID.
+    pub next_terminal_id: usize,
 }
 
 impl State {
@@ -203,6 +234,8 @@ impl State {
             theme,
             saved_theme,
             pane_boxes: [FlexBox::default(); MAX_PANES],
+            terminal_panes: HashMap::new(),
+            next_terminal_id: 0,
         };
         state
             .window_states
@@ -234,6 +267,8 @@ impl Default for State {
             theme: HelixTheme::default(),
             saved_theme: HelixTheme::default(),
             pane_boxes: [FlexBox::default(); MAX_PANES],
+            terminal_panes: HashMap::new(),
+            next_terminal_id: 0,
         }
     }
 }
@@ -252,6 +287,7 @@ impl PartialEq for State {
             && self.theme_picker_selected == other.theme_picker_selected
             && self.theme_picker_results.len() == other.theme_picker_results.len()
             && self.theme == other.theme
+            && self.terminal_panes.len() == other.terminal_panes.len()
     }
 }
 

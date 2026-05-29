@@ -34,6 +34,7 @@ Source is organized as:
 - `src/tui/fuzzy_picker.rs` — shared fuzzy list picker component
 - `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview
 - `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane)
+- `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation
 
 ---
 

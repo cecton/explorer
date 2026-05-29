@@ -1,7 +1,8 @@
 use super::file_name_picker::FileNamePickerComponent;
 use super::fuzzy_picker::resolve_selected_index;
 use super::preview::FilePreviewComponent;
-use super::state::{AppSignal, MAX_PANES, State, Window};
+use super::state::{AppSignal, MAX_PANES, State, TerminalPane, Window};
+use super::terminal_pane::TerminalPaneComponent;
 use super::theme::HelixTheme;
 use super::theme_picker::ThemePickerComponent;
 use crate::loader::{FileKey, LoadedFile};
@@ -12,6 +13,11 @@ use camino::Utf8PathBuf;
 use nucleo::Matcher;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Utf32Str};
+use r3bl_tui::core::osc::OscEvent;
+use r3bl_tui::core::pty::{
+    CursorKeyMode, DefaultPtySessionConfig, MouseTrackingMode, PtyInputEvent, PtyOutputEvent,
+    PtySessionBuilder, PtySessionConfigOption,
+};
 use r3bl_tui::{
     App, BoxedSafeApp, BoxedSafeComponent, Button, CommonResult, Component, ComponentRegistry,
     ComponentRegistryMap, ContainsResult, EventPropagation, FlexBox, FlexBoxId, GlobalData,
@@ -24,9 +30,9 @@ use r3bl_tui::{
     render_pipeline, render_tui_styled_texts_into, req_size_pc, row, send_signal, surface, throws,
     throws_with_return, tui_color, tui_styled_text, tui_styled_texts, tui_stylesheet, width,
 };
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
-use std::sync::{Arc, OnceLock};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 type PickerResultMsg = (u64, Vec<(FileKey, Vec<u32>)>);
@@ -76,6 +82,7 @@ struct PaneComponent {
     picker: FileNamePickerComponent,
     theme_picker: ThemePickerComponent,
     preview: FilePreviewComponent,
+    terminal: TerminalPaneComponent,
     /// Origin row of the content area (below title bar), used for scrollbar mouse events.
     content_origin_row: u16,
     /// Total columns in the content area (full width including scrollbar column).
@@ -98,6 +105,7 @@ impl PaneComponent {
             picker: FileNamePickerComponent::new(id),
             theme_picker: ThemePickerComponent::new(id),
             preview: FilePreviewComponent::new(id),
+            terminal: TerminalPaneComponent::new(id),
             content_origin_row: 0,
             content_col_count: 0,
             content_row_count: 0,
@@ -226,6 +234,7 @@ impl PaneComponent {
                 }
                 EventPropagation::ConsumedRender
             }
+            Window::Terminal(_) => EventPropagation::ConsumedRender,
         }
     }
 }
@@ -265,6 +274,7 @@ impl Component<State, AppSignal> for PaneComponent {
         self.picker.reset();
         self.theme_picker.reset();
         self.preview.reset();
+        self.terminal.reset();
     }
 
     fn get_id(&self) -> FlexBoxId {
@@ -277,8 +287,13 @@ impl Component<State, AppSignal> for PaneComponent {
         input_event: InputEvent,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        let active_is_terminal = matches!(
+            self.active_window(&global_data.state),
+            Some(Window::Terminal(_))
+        );
+
         // Check for scrollbar mouse interaction first.
-        if let InputEvent::Mouse(mouse) = input_event {
+        if !active_is_terminal && let InputEvent::Mouse(mouse) = input_event {
             let col = mouse.pos.col_index.as_usize();
             let row = mouse.pos.row_index.as_usize();
             let origin_col = self.content_origin_col as usize;
@@ -307,6 +322,10 @@ impl Component<State, AppSignal> for PaneComponent {
             }
             Some(Window::FilePreview(_)) => {
                 self.preview
+                    .handle_event(global_data, input_event, has_focus)
+            }
+            Some(Window::Terminal(_)) => {
+                self.terminal
                     .handle_event(global_data, input_event, has_focus)
             }
             None => Ok(EventPropagation::Propagate),
@@ -339,6 +358,16 @@ impl Component<State, AppSignal> for PaneComponent {
                             .removed
                             .load(std::sync::atomic::Ordering::Relaxed);
                         (self.preview.title_text(&global_data.state), removed)
+                    }
+                    Window::Terminal(id) => {
+                        let title = global_data
+                            .state
+                            .terminal_panes
+                            .get(id)
+                            .and_then(|p| p.lock().ok())
+                            .and_then(|g| g.title.clone())
+                            .unwrap_or_else(|| format!("Terminal {}", id));
+                        (title, false)
                     }
                 };
                 render_pane_title(
@@ -408,6 +437,10 @@ impl Component<State, AppSignal> for PaneComponent {
                     self.preview
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
+                Some(Window::Terminal(_)) => {
+                    self.terminal
+                        .render(global_data, content_box, surface_bounds, has_focus)?
+                }
                 None => r3bl_tui::render_pipeline!(),
             };
 
@@ -421,7 +454,9 @@ impl Component<State, AppSignal> for PaneComponent {
             };
 
             // Render scrollbar on the rightmost column if there's an active window.
-            if let Some(ref window) = self.active_window(&global_data.state).cloned() {
+            if let Some(ref window) = self.active_window(&global_data.state).cloned()
+                && !matches!(window, Window::Terminal(_))
+            {
                 let state = &global_data.state;
                 let scroll = state.window_scroll(window);
                 let scroll_max = state.window_scroll_max(window);
@@ -450,6 +485,8 @@ pub struct AppMain {
     picker_results_rx: mpsc::Receiver<PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
     exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
+    terminal_event_tx: mpsc::UnboundedSender<(usize, PtyOutputEvent)>,
+    terminal_event_rx: mpsc::UnboundedReceiver<(usize, PtyOutputEvent)>,
 }
 
 impl AppMain {
@@ -459,6 +496,7 @@ impl AppMain {
         exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
     ) -> BoxedSafeApp<State, AppSignal> {
         let (picker_results_tx, picker_results_rx) = mpsc::channel(32);
+        let (terminal_event_tx, terminal_event_rx) = mpsc::unbounded_channel();
         Box::new(Self {
             files,
             root,
@@ -466,6 +504,8 @@ impl AppMain {
             picker_results_rx,
             picker_generation: Arc::new(AtomicU64::new(0)),
             exit_tx,
+            terminal_event_tx,
+            terminal_event_rx,
         })
     }
 
@@ -498,6 +538,164 @@ impl AppMain {
             .filter(|(_, f)| !f.removed.load(Ordering::Relaxed))
             .map(|(i, _)| (FileKey(i), vec![]))
             .collect()
+    }
+
+    fn open_terminal(
+        &mut self,
+        global_data: &mut GlobalData<State, AppSignal>,
+        has_focus: &mut HasFocus,
+    ) -> CommonResult<EventPropagation> {
+        throws_with_return!({
+            let state = &mut global_data.state;
+            let id = state.next_terminal_id;
+            state.next_terminal_id += 1;
+
+            let window_size = global_data.window_size;
+            let visible_count = state.window_stack.len().max(1) as u16;
+            let pty_cols = (window_size.col_width.as_u16() / visible_count).max(80);
+            let pty_rows = window_size.row_height.as_u16().saturating_sub(2);
+            let pty_size = Size {
+                col_width: width(pty_cols),
+                row_height: height(pty_rows),
+            };
+
+            let mut session = match PtySessionBuilder::new(shell_command())
+                .env_var("TERM", "xterm-256color")
+                .with_config(DefaultPtySessionConfig + PtySessionConfigOption::Size(pty_size))
+                .start()
+            {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("Failed to start PTY: {e}");
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+            };
+
+            let ofs_buf = r3bl_tui::OffscreenBuffer::new_empty(pty_size);
+            let pty_input_tx = Arc::new(session.tx_input_event.clone());
+            let pane = Arc::new(Mutex::new(TerminalPane {
+                ofs_buf,
+                cursor_key_mode: CursorKeyMode::Normal,
+                mouse_tracking_mode: MouseTrackingMode::None,
+                title: None,
+                pty_input_tx,
+                last_size: pty_size,
+            }));
+
+            state.terminal_panes.insert(id, Arc::clone(&pane));
+
+            let notify_tx = global_data.main_thread_channel_sender.clone();
+            let event_tx = self.terminal_event_tx.clone();
+            tokio::spawn(async move {
+                let mut last_event = Instant::now();
+                let mut backoff: Option<Instant> = None;
+                let mut burst_start: Option<Instant> = None;
+                while let Some(event) = session.rx_output_event.recv().await {
+                    let is_exit = matches!(&event, PtyOutputEvent::Exit(_));
+                    match event {
+                        PtyOutputEvent::Output(bytes) => {
+                            if let Ok(mut pane) = pane.lock() {
+                                let (osc_events, _, da_responses) =
+                                    pane.ofs_buf.apply_ansi_bytes(&bytes);
+                                for osc_event in osc_events {
+                                    if let OscEvent::SetTitleAndTab(title) = osc_event {
+                                        pane.title = Some(title);
+                                    }
+                                }
+                                for da_response in da_responses {
+                                    let _ = pane
+                                        .pty_input_tx
+                                        .try_send(PtyInputEvent::Write(da_response.into_bytes()));
+                                }
+                            }
+                        }
+                        PtyOutputEvent::CursorModeChange(mode) => {
+                            if let Ok(mut pane) = pane.lock() {
+                                pane.cursor_key_mode = mode;
+                            }
+                        }
+                        PtyOutputEvent::MouseModeChange(mode) => {
+                            if let Ok(mut pane) = pane.lock() {
+                                pane.mouse_tracking_mode = mode;
+                            }
+                        }
+                        PtyOutputEvent::Exit(status) => {
+                            if event_tx.send((id, PtyOutputEvent::Exit(status))).is_err() {
+                                break;
+                            }
+                        }
+                        _ => {}
+                    }
+
+                    // Exit: always send Noop (never throttled) so the
+                    // terminal pane is removed from the UI immediately.
+                    if is_exit {
+                        let _ = notify_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                            AppSignal::Noop,
+                        ));
+                        break;
+                    }
+
+                    let now = Instant::now();
+
+                    // Throttle: once the channel has filled (backoff ==
+                    // Some), suppress all Noops as long as events keep
+                    // arriving within 100ms gaps.  This threshold catches
+                    // program output (≥10 events/s) while cleanly
+                    // separating interactive typing (~200ms between keys).
+                    // last_event is updated on every event (including
+                    // suppressed), so a sustained burst keeps the gate
+                    // closed indefinitely.  A gap ≥100ms in events resets
+                    // burst tracking and the task tries to send again.
+                    if last_event.elapsed().as_millis() < 100 {
+                        if backoff.is_some()
+                            || burst_start.is_some_and(|t| t.elapsed().as_secs() >= 3)
+                        {
+                            backoff = Some(now);
+                            last_event = now;
+                            continue;
+                        } else if burst_start.is_none() {
+                            burst_start = Some(now);
+                        }
+                    } else {
+                        burst_start = None;
+                    }
+
+                    // Channel has room (or backoff expired): try to send.
+                    // If it succeeds, clear backoff.  If it fails (buffer
+                    // full at 1000), enter backoff — subsequent events are
+                    // suppressed until activity pauses for >=1s.
+                    match notify_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                        AppSignal::Noop,
+                    )) {
+                        Ok(()) => backoff = None,
+                        Err(_) => backoff = Some(now),
+                    }
+
+                    last_event = now;
+                }
+            });
+
+            let window = Window::Terminal(id);
+            state.push_window(window.clone());
+            state.focused_window = Some(window);
+            has_focus.set_id(focused_pane_id(state));
+
+            EventPropagation::ConsumedRender
+        });
+    }
+}
+
+fn shell_command() -> String {
+    std::env::var("SHELL").unwrap_or_else(|_| "bash".into())
+}
+
+fn poll_terminal_output(app: &mut AppMain, state: &mut State) {
+    while let Ok((id, event)) = app.terminal_event_rx.try_recv() {
+        if let PtyOutputEvent::Exit(_) = event {
+            state.terminal_panes.remove(&id);
+            state.remove_window(&Window::Terminal(id));
+        }
     }
 }
 
@@ -610,6 +808,10 @@ impl App for AppMain {
         match LSP_RRT.try_subscribe() {
             Ok(guard) => {
                 let lsp_notify = notify_tx.clone();
+                // LSP uses blocking send().await — natural backpressure
+                // via the bounded channel (capacity 1000). No explicit
+                // backoff needed; the task blocks when the channel is
+                // full and resumes once the main thread drains it.
                 tokio::spawn(async move {
                     let mut rx = guard.receiver;
                     while let Ok(r3bl_tui::RRTEvent::Worker(_)) = rx.recv().await {
@@ -643,6 +845,20 @@ impl App for AppMain {
                 tracing::warn!("watcher failed to start: {e}");
             }
         }
+
+        // Global 1s refresh timer — catches any final render state that the
+        // per-task 1s debounce might miss (burst ends, no more events).
+        let timer_notify = notify_tx.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(1));
+            interval.tick().await;
+            loop {
+                interval.tick().await;
+                let _ = timer_notify.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                    AppSignal::Noop,
+                ));
+            }
+        });
     }
 
     fn app_handle_input_event(
@@ -683,6 +899,9 @@ impl App for AppMain {
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     Key::Character('t') => {
+                        return self.open_terminal(global_data, has_focus);
+                    }
+                    Key::Character('T') => {
                         let state = &mut global_data.state;
                         if !state.theme_picker_open {
                             state.saved_theme = state.theme.clone();
@@ -727,7 +946,9 @@ impl App for AppMain {
             }
         }
 
-        if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event {
+        if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
+            && !matches!(global_data.state.focused_window, Some(Window::Terminal(_)))
+        {
             match key {
                 Key::SpecialKey(SpecialKey::Tab) => {
                     let state = &mut global_data.state;
@@ -1082,6 +1303,8 @@ impl App for AppMain {
             }
         }
 
+        poll_terminal_output(self, &mut global_data.state);
+
         throws_with_return!({
             let window_size = global_data.window_size;
             let surface_cols = window_size.col_width.as_u16();
@@ -1303,6 +1526,7 @@ impl WindowHints for Window {
             Window::FilePreview(_) => {
                 "Esc:Send to back  \u{2191}\u{2193}/PgUp/PgDn/Home/End:Scroll  ::Command"
             }
+            Window::Terminal(_) => "Alt+`:Leader  Leader+Tab:Next pane",
         }
     }
 }
@@ -1325,7 +1549,7 @@ fn render_status_bar(
     let (leader_text, rest_text) = if leader_active {
         (
             " Leader ".to_string(),
-            "f:Picker  t:Theme  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel".to_string(),
+            "f:Picker  t:Term  T:Theme  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel".to_string(),
         )
     } else {
         let pane = match focused_window {
