@@ -26,6 +26,7 @@ pub enum RmuxEvent {
     Render {
         pane_id: u64,
         ofs_buf: Box<OffscreenBuffer>,
+        mode: u32,
     },
     Exited {
         pane_id: u64,
@@ -153,10 +154,12 @@ fn spawn_forwarder(
             }
         };
 
+        let mode = snapshot.mode;
         let ofs_buf = r3bl_rmux::to_offscreen_buffer(&snapshot);
         let _ = event_tx.send(RmuxEvent::Render {
             pane_id,
             ofs_buf: Box::new(ofs_buf),
+            mode,
         });
         if let Some(f) = notify.get() {
             f();
@@ -175,10 +178,12 @@ fn spawn_forwarder(
             match stream.next().await {
                 Ok(Some(update)) => {
                     let snapshot = update.into_snapshot();
+                    let mode = snapshot.mode;
                     let ofs_buf = r3bl_rmux::to_offscreen_buffer(&snapshot);
                     let _ = event_tx.send(RmuxEvent::Render {
                         pane_id,
                         ofs_buf: Box::new(ofs_buf),
+                        mode,
                     });
                     if let Some(f) = notify.get() {
                         f();
@@ -276,11 +281,13 @@ async fn run_rmux_bridge(
                             if let Ok(s) = pane.snapshot().await {
                                 let new_size = (s.cols, s.rows);
                                 if last_snapshot_sizes.get(&pane_id) != Some(&new_size) {
+                                    let mode = s.mode;
                                     let ofs_buf =
                                         r3bl_rmux::to_offscreen_buffer(&s);
                                     let _ = event_tx.send(RmuxEvent::Render {
                                         pane_id,
                                         ofs_buf: Box::new(ofs_buf),
+                                        mode,
                                     });
                                     if let Some(f) = notify.get() {
                                         f();

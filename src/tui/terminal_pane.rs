@@ -82,6 +82,28 @@ impl Component<State, AppSignal> for TerminalPaneComponent {
                     let Some(slot) = pane_slot(self.id) else {
                         return Ok(EventPropagation::Propagate);
                     };
+
+                    // Only forward mouse events that match the PTY application's
+                    // requested mouse mode.  The daemon's VT parser tracks the
+                    // DEC private modes the PTY app has set via DECSET/DECRST
+                    // (eg. \x1b[?1002h for button-event tracking).
+                    const MODE_MOUSE_STANDARD: u32 = 0x20; // 1000
+                    const MODE_MOUSE_BUTTON: u32 = 0x40; // 1002
+                    const MODE_MOUSE_ALL: u32 = 0x1000; // 1003
+                    let has_mouse =
+                        pane.mode & (MODE_MOUSE_STANDARD | MODE_MOUSE_BUTTON | MODE_MOUSE_ALL) != 0;
+
+                    let should_forward = match mouse.kind {
+                        // Motion events (no button pressed) require mode 1003.
+                        MouseInputKind::MouseMove => has_mouse && pane.mode & MODE_MOUSE_ALL != 0,
+                        // Everything else works under any mouse mode.
+                        _ => has_mouse,
+                    };
+
+                    if !should_forward {
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+
                     let box_ = &global_data.state.pane_boxes[slot];
                     let origin_row = box_.style_adjusted_origin_pos.row_index.as_u16() + 1;
                     let origin_col = box_.style_adjusted_origin_pos.col_index.as_u16();

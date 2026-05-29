@@ -599,6 +599,7 @@ impl AppMain {
             let ofs_buf = OffscreenBuffer::new_empty(pty_size);
             let pane = TerminalPane {
                 ofs_buf,
+                mode: 0,
                 title: None,
                 rmux_pane_id: pane_id,
                 rmux_cmd_tx: self.rmux_bridge.cmd_tx.clone(),
@@ -624,9 +625,14 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut State) -> bool {
     while let Ok(event) = app.rmux_bridge.event_rx.try_recv() {
         had_output = true;
         match event {
-            RmuxEvent::Render { pane_id, ofs_buf } => {
+            RmuxEvent::Render {
+                pane_id,
+                ofs_buf,
+                mode,
+            } => {
                 if let Some(pane) = state.terminal_panes.get_mut(&(pane_id as usize)) {
                     pane.ofs_buf = *ofs_buf;
+                    pane.mode = mode;
                 }
             }
             RmuxEvent::Exited { pane_id } => {

@@ -37,6 +37,7 @@ pub struct WindowState {
 #[derive(Clone)]
 pub struct TerminalPane {
     pub ofs_buf: OffscreenBuffer,
+    pub mode: u32,
     pub title: Option<String>,
     pub rmux_pane_id: u64,
     pub rmux_cmd_tx: tokio::sync::mpsc::UnboundedSender<RmuxCommand>,
