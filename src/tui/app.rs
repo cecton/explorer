@@ -21,14 +21,14 @@ use r3bl_tui::core::pty::{
 use r3bl_tui::{
     App, BoxedSafeApp, BoxedSafeComponent, Button, CommonResult, Component, ComponentRegistry,
     ComponentRegistryMap, ContainsResult, EventPropagation, FlexBox, FlexBoxId, GlobalData,
-    HasFocus, InputDevice, InputEvent, IntoErr, Key, KeyPress, LayoutDirection, LayoutManagement,
-    LengthOps, ModifierKeysMask, MouseInput, MouseInputKind, OutputDevice,
-    PerformPositioningAndSizing, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline,
-    SPACER_GLYPH, Size, SpecialKey, Surface, SurfaceBounds, SurfaceProps, SurfaceRender,
-    TerminalWindow, TerminalWindowMainThreadSignal, TuiAvailability, TuiStylesheet, ZOrder,
-    box_end, box_start, col, height, new_style, ok, render_component_in_current_box,
-    render_pipeline, render_tui_styled_texts_into, req_size_pc, row, send_signal, surface, throws,
-    throws_with_return, tui_color, tui_styled_text, tui_styled_texts, tui_stylesheet, width,
+    HasFocus, InputEvent, IntoErr, Key, KeyPress, LayoutDirection, LayoutManagement, LengthOps,
+    ModifierKeysMask, MouseInput, MouseInputKind, PerformPositioningAndSizing, RenderOpCommon,
+    RenderOpIR, RenderOpIRVec, RenderPipeline, SPACER_GLYPH, Size, SpecialKey, Surface,
+    SurfaceBounds, SurfaceProps, SurfaceRender, TerminalWindow, TerminalWindowMainThreadSignal,
+    TuiAvailability, TuiStylesheet, ZOrder, box_end, box_start, col, height, new_style, ok,
+    render_component_in_current_box, render_pipeline, render_tui_styled_texts_into, req_size_pc,
+    row, send_signal, surface, throws, throws_with_return, tui_color, tui_styled_text,
+    tui_styled_texts, tui_stylesheet, width,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -573,12 +573,14 @@ impl AppMain {
 
             let ofs_buf = r3bl_tui::OffscreenBuffer::new_empty(pty_size);
             let pty_input_tx = Arc::new(session.tx_input_event.clone());
+            let child_killer = session.child_process_termination_handle;
             let pane = Arc::new(Mutex::new(TerminalPane {
                 ofs_buf,
                 cursor_key_mode: CursorKeyMode::Normal,
                 mouse_tracking_mode: MouseTrackingMode::None,
                 title: None,
                 pty_input_tx,
+                child_killer: Some(child_killer),
                 last_size: pty_size,
             }));
 
@@ -1777,11 +1779,22 @@ pub async fn run(
 
     let app = AppMain::new_boxed(files, root, exit_tx);
     let exit_keys: &[InputEvent] = &[];
-    let _unused: (GlobalData<_, _>, InputDevice, OutputDevice) =
+    let (global_data, _, _): (GlobalData<_, _>, _, _) =
         match TerminalWindow::main_event_loop(app, exit_keys, initial_state) {
             TuiAvailability::Available(future) => future.await?,
             it => return it.into_err(),
         };
+
+    // Kill all terminal children gracefully.
+    for pane in global_data.state.terminal_panes.values() {
+        let mut pane = pane.lock().unwrap();
+        if let Some(mut killer) = pane.child_killer.take() {
+            let _ = killer.kill(); // Sends SIGHUP.
+        }
+        let _ = pane.pty_input_tx.try_send(PtyInputEvent::Close);
+    }
+    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
     if let Some(msg) = exit_message.get() {
         eprintln!("{msg}");
     }

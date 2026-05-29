@@ -3,7 +3,9 @@ use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
-use r3bl_tui::core::pty::{CursorKeyMode, MouseTrackingMode, PtyInputEvent};
+use r3bl_tui::core::pty::{
+    ControlledChildTerminationHandle, CursorKeyMode, MouseTrackingMode, PtyInputEvent,
+};
 use r3bl_tui::{FlexBox, OffscreenBuffer, Size};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
@@ -35,13 +37,13 @@ pub struct WindowState {
     pub scroll_max: usize,
 }
 
-#[derive(Clone)]
 pub struct TerminalPane {
     pub ofs_buf: OffscreenBuffer,
     pub cursor_key_mode: CursorKeyMode,
     pub mouse_tracking_mode: MouseTrackingMode,
     pub title: Option<String>,
     pub pty_input_tx: Arc<mpsc::Sender<PtyInputEvent>>,
+    pub child_killer: Option<ControlledChildTerminationHandle>,
     pub last_size: Size,
 }
 
@@ -53,6 +55,10 @@ impl Debug for TerminalPane {
             .field("mouse_tracking_mode", &self.mouse_tracking_mode)
             .field("title", &self.title)
             .field("pty_input_tx", &"Sender<..>")
+            .field(
+                "child_killer",
+                &self.child_killer.as_ref().map(|_| "ChildKiller<..>"),
+            )
             .field("last_size", &self.last_size)
             .finish()
     }
