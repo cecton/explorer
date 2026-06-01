@@ -3,12 +3,15 @@ use super::input_line::InputLine;
 use super::state::{AppSignal, State, Window};
 use super::theme::HelixTheme;
 use crate::loader::FileKey;
+use camino::{Utf8Path, Utf8PathBuf};
 use r3bl_tui::{
     CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData, HasFocus,
-    InputEvent, Key, KeyPress, ModifierKeysMask, MouseInputKind, RenderOpCommon, RenderOpIR,
-    RenderOpIRVec, RenderPipeline, SpecialKey, SurfaceBounds, ZOrder, col, new_style,
-    render_pipeline, row, throws_with_return, tui_color,
+    InputEvent, Key, KeyPress, ModifierKeysMask, MouseInputKind, Pos, RenderOpCommon, RenderOpIR,
+    RenderOpIRVec, RenderPipeline, SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal,
+    ZOrder, col, new_style, render_pipeline, row, send_signal, throws_with_return, tui_color,
+    width,
 };
+use std::time::{Duration, Instant};
 
 const GUTTER_GAP: &str = "   ";
 
@@ -16,6 +19,7 @@ pub struct FilePreviewComponent {
     id: FlexBoxId,
     command_mode: Option<String>,
     command_input: InputLine,
+    error: Option<(String, Instant)>,
 }
 
 impl FilePreviewComponent {
@@ -24,12 +28,16 @@ impl FilePreviewComponent {
             id,
             command_mode: None,
             command_input: InputLine::new(),
+            error: None,
         }
     }
 
-    pub fn title_text(&self, state: &State) -> String {
-        if let Some(ref cmd) = self.command_mode {
-            return format!(":{cmd}");
+    pub fn title_text(&mut self, state: &State) -> String {
+        if let Some((msg, set_at)) = &self.error {
+            if set_at.elapsed() < Duration::from_secs(3) {
+                return msg.clone();
+            }
+            self.error = None;
         }
         let Some(key) = self.file_key(state) else {
             return String::new();
@@ -44,13 +52,79 @@ impl FilePreviewComponent {
         }
     }
 
-    fn execute_command(&mut self, state: &mut State, window: &Window) {
+    pub fn render_title_row(
+        &self,
+        mut ops: &mut RenderOpIRVec,
+        origin: Pos,
+        width_u16: u16,
+        focused: bool,
+        theme: &HelixTheme,
+    ) -> bool {
+        let Some(cmd) = self.command_mode.as_deref() else {
+            return false;
+        };
+        let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
+        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
+        let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+        let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+
+        ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+        ops += RenderOpCommon::SetBgColor(color_bg);
+        ops += RenderOpIR::PaintTextWithAttributes(
+            " ".repeat(width_u16 as usize).as_str().into(),
+            Some(label_style),
+        );
+        ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+        ops += RenderOpIR::PaintTextWithAttributes(":".into(), Some(label_style));
+        self.command_input.render(
+            ops,
+            cmd,
+            origin + width(1),
+            width_u16.saturating_sub(1),
+            focused,
+            bg_rgb,
+            fg_rgb,
+        );
+        true
+    }
+
+    fn execute_command(&mut self, global_data: &mut GlobalData<State, AppSignal>, window: &Window) {
         let Window::FilePreview(file_key) = window else {
             return;
         };
-        let Some(ref cmd) = self.command_mode else {
+        let Some(cmd) = self.command_mode.clone() else {
             return;
         };
+
+        if let Some(shell_cmd) = cmd.strip_prefix('!') {
+            let file_path = {
+                let snapshot = global_data.state.files.load();
+                snapshot[file_key.0].path.clone()
+            };
+            let cwd = global_data.state.root.clone();
+            let open_cmd = if shell_cmd.is_empty() {
+                Ok(None)
+            } else {
+                expand_placeholders(shell_cmd, &file_path, &global_data.state.root).map(Some)
+            };
+            match open_cmd {
+                Ok(cmd_opt) => {
+                    send_signal!(
+                        global_data.main_thread_channel_sender,
+                        TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::OpenTerminal {
+                            cmd: cmd_opt,
+                            cwd,
+                        })
+                    );
+                }
+                Err(msg) => {
+                    self.error = Some((msg, Instant::now()));
+                }
+            }
+            return;
+        }
+
+        let state = &mut global_data.state;
         let max = state.window_scroll_max(window);
         if max == 0 {
             return;
@@ -156,7 +230,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                     InputEvent::Keyboard(KeyPress::Plain {
                         key: Key::SpecialKey(SpecialKey::Enter),
                     }) => {
-                        self.execute_command(&mut global_data.state, &window);
+                        self.execute_command(global_data, &window);
                         self.command_mode = None;
                         global_data.state.command_mode_active = false;
                         return Ok(EventPropagation::ConsumedRender);
@@ -164,6 +238,14 @@ impl Component<State, AppSignal> for FilePreviewComponent {
                     InputEvent::Keyboard(KeyPress::Plain {
                         key: Key::SpecialKey(SpecialKey::Esc),
                     }) => {
+                        self.command_mode = None;
+                        global_data.state.command_mode_active = false;
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                    InputEvent::Keyboard(KeyPress::WithModifiers {
+                        key: Key::Character('c'),
+                        mask,
+                    }) if mask == ModifierKeysMask::new().with_ctrl() => {
                         self.command_mode = None;
                         global_data.state.command_mode_active = false;
                         return Ok(EventPropagation::ConsumedRender);
@@ -430,6 +512,20 @@ impl Component<State, AppSignal> for FilePreviewComponent {
     }
 }
 
+fn title_bar_colors(focused: bool, theme: &HelixTheme) -> ([u8; 3], [u8; 3]) {
+    if focused {
+        (
+            theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]),
+            theme.ui_fg("ui.text").unwrap_or([220, 220, 255]),
+        )
+    } else {
+        (
+            theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]),
+            theme.ui_fg("ui.statusline").unwrap_or([180, 180, 220]),
+        )
+    }
+}
+
 fn paint_line_segment(
     render_ops: &mut RenderOpIRVec,
     (content, line_starts): (&str, &[usize]),
@@ -535,4 +631,96 @@ fn compute_single_block_scroll(
             .saturating_sub(1)
             .saturating_sub(page_size * 20 / 100)
     }
+}
+
+// ── Shell command helpers ─────────────────────────────────────────────────────
+
+/// Wraps a string in single quotes for safe embedding in a `/bin/sh -c` command string.
+fn sh_quote(s: &str) -> String {
+    format!("'{}'", s.replace('\'', "'\\''"))
+}
+
+/// Returns true if `s` does not start with an alphanumeric character or `_`,
+/// i.e. the previous token ended at a word boundary.
+fn is_word_end(s: &str) -> bool {
+    !s.starts_with(|c: char| c.is_alphanumeric() || c == '_')
+}
+
+/// Finds the nearest ancestor directory of `file_path` that contains a `Cargo.toml`.
+fn find_crate_root(file_path: &Utf8Path) -> Option<Utf8PathBuf> {
+    let mut dir = file_path.parent()?;
+    loop {
+        if dir.join("Cargo.toml").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Finds the nearest ancestor directory of `file_path` that contains a `.git` directory.
+fn find_repo_root(file_path: &Utf8Path) -> Option<Utf8PathBuf> {
+    let mut dir = file_path.parent()?;
+    loop {
+        if dir.join(".git").exists() {
+            return Some(dir.to_path_buf());
+        }
+        dir = dir.parent()?;
+    }
+}
+
+/// Expands `%`, `%c`/`%crate`, and `%r`/`%repo` placeholders in `cmd`.
+///
+/// - `%`            → shell-quoted relative path of `file_path` from `root`
+/// - `%d` / `%dir`   → shell-quoted directory of `file_path` (relative to `root`)
+/// - `%c` / `%crate` → shell-quoted path to the nearest `Cargo.toml` ancestor directory
+/// - `%r` / `%repo`  → shell-quoted path to the nearest `.git` ancestor directory
+///
+/// Returns an error string if a placeholder is used but its root cannot be found.
+fn expand_placeholders(cmd: &str, file_path: &Utf8Path, root: &Utf8Path) -> Result<String, String> {
+    let mut result = String::with_capacity(cmd.len());
+    let mut s = cmd;
+    while !s.is_empty() {
+        let Some(pct) = s.find('%') else {
+            result.push_str(s);
+            break;
+        };
+        result.push_str(&s[..pct]);
+        s = &s[pct + 1..];
+
+        if s.starts_with("crate") && is_word_end(&s[5..]) {
+            let root = find_crate_root(file_path)
+                .ok_or_else(|| "no Cargo.toml found (needed by %crate)".to_string())?;
+            result.push_str(&sh_quote(root.as_str()));
+            s = &s[5..];
+        } else if s.starts_with("repo") && is_word_end(&s[4..]) {
+            let root = find_repo_root(file_path)
+                .ok_or_else(|| "no .git found (needed by %repo)".to_string())?;
+            result.push_str(&sh_quote(root.as_str()));
+            s = &s[4..];
+        } else if s.starts_with('c') && is_word_end(&s[1..]) {
+            let root = find_crate_root(file_path)
+                .ok_or_else(|| "no Cargo.toml found (needed by %c)".to_string())?;
+            result.push_str(&sh_quote(root.as_str()));
+            s = &s[1..];
+        } else if s.starts_with("dir") && is_word_end(&s[3..]) {
+            let parent = file_path.parent().unwrap_or(file_path);
+            let rel = parent.strip_prefix(root).unwrap_or(parent);
+            result.push_str(&sh_quote(rel.as_str()));
+            s = &s[3..];
+        } else if s.starts_with('r') && is_word_end(&s[1..]) {
+            let root = find_repo_root(file_path)
+                .ok_or_else(|| "no .git found (needed by %r)".to_string())?;
+            result.push_str(&sh_quote(root.as_str()));
+            s = &s[1..];
+        } else if s.starts_with('d') && is_word_end(&s[1..]) {
+            let parent = file_path.parent().unwrap_or(file_path);
+            let rel = parent.strip_prefix(root).unwrap_or(parent);
+            result.push_str(&sh_quote(rel.as_str()));
+            s = &s[1..];
+        } else {
+            let rel = file_path.strip_prefix(root).unwrap_or(file_path);
+            result.push_str(&sh_quote(rel.as_str()));
+        }
+    }
+    Ok(result)
 }

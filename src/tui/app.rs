@@ -22,13 +22,13 @@ use r3bl_tui::{
     App, BoxedSafeApp, BoxedSafeComponent, Button, CommonResult, Component, ComponentRegistry,
     ComponentRegistryMap, ContainsResult, EventPropagation, FlexBox, FlexBoxId, GlobalData,
     HasFocus, InputEvent, IntoErr, Key, KeyPress, LayoutDirection, LayoutManagement, LengthOps,
-    ModifierKeysMask, MouseInput, MouseInputKind, PerformPositioningAndSizing, RenderOpCommon,
-    RenderOpIR, RenderOpIRVec, RenderPipeline, SPACER_GLYPH, Size, SpecialKey, Surface,
-    SurfaceBounds, SurfaceProps, SurfaceRender, TerminalWindow, TerminalWindowMainThreadSignal,
-    TuiAvailability, TuiStylesheet, ZOrder, box_end, box_start, col, height, new_style, ok,
-    render_component_in_current_box, render_pipeline, render_tui_styled_texts_into, req_size_pc,
-    row, send_signal, surface, throws, throws_with_return, tui_color, tui_styled_text,
-    tui_styled_texts, tui_stylesheet, width,
+    ModifierKeysMask, MouseInput, MouseInputKind, OffscreenBuffer, PerformPositioningAndSizing,
+    PixelChar, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SPACER_GLYPH, Size,
+    SpecialKey, Surface, SurfaceBounds, SurfaceProps, SurfaceRender, TerminalWindow,
+    TerminalWindowMainThreadSignal, TuiAvailability, TuiStylesheet, ZOrder, box_end, box_start,
+    col, height, new_style, ok, render_component_in_current_box, render_pipeline,
+    render_tui_styled_texts_into, req_size_pc, row, send_signal, surface, throws,
+    throws_with_return, tui_color, tui_styled_text, tui_styled_texts, tui_stylesheet, width,
 };
 use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -348,37 +348,93 @@ impl Component<State, AppSignal> for PaneComponent {
 
             let mut title_ops = RenderOpIRVec::new();
             if add_title {
-                let (title, is_deleted) = match active_window.as_ref().unwrap() {
-                    Window::FileNamePicker => (self.picker.title_text(&global_data.state), false),
+                let focused = has_focus.get_id() == Some(self.id);
+                let title_origin = current_box.style_adjusted_origin_pos;
+                let title_width = current_box.style_adjusted_bounds_size.col_width.as_u16();
+                let theme = &global_data.state.theme;
+
+                match active_window.as_ref().unwrap() {
+                    Window::FileNamePicker => {
+                        let query = global_data.state.file_name_picker_query.clone();
+                        self.picker.render_title_row(
+                            &mut title_ops,
+                            title_origin,
+                            title_width,
+                            focused,
+                            theme,
+                            &query,
+                        );
+                    }
                     Window::ThemePicker => {
-                        (self.theme_picker.title_text(&global_data.state), false)
+                        let query = global_data.state.theme_picker_query.clone();
+                        self.theme_picker.render_title_row(
+                            &mut title_ops,
+                            title_origin,
+                            title_width,
+                            focused,
+                            theme,
+                            &query,
+                        );
                     }
                     Window::FilePreview(key) => {
-                        let snapshot = global_data.state.files.load();
-                        let removed = snapshot[key.0]
-                            .removed
-                            .load(std::sync::atomic::Ordering::Relaxed);
-                        (self.preview.title_text(&global_data.state), removed)
+                        if !self.preview.render_title_row(
+                            &mut title_ops,
+                            title_origin,
+                            title_width,
+                            focused,
+                            theme,
+                        ) {
+                            let snapshot = global_data.state.files.load();
+                            let removed = snapshot[key.0]
+                                .removed
+                                .load(std::sync::atomic::Ordering::Relaxed);
+                            let title = self.preview.title_text(&global_data.state);
+                            render_pane_title(
+                                &mut title_ops,
+                                &current_box,
+                                &title,
+                                removed,
+                                theme,
+                                focused,
+                            );
+                        }
                     }
                     Window::Terminal(id) => {
-                        let title = global_data
+                        let (base, exited, exit_code, exit_signal) = global_data
                             .state
                             .terminal_panes
                             .get(id)
                             .and_then(|p| p.lock().ok())
-                            .and_then(|g| g.title.clone())
-                            .unwrap_or_else(|| format!("Terminal {}", id));
-                        (title, false)
+                            .map(|g| {
+                                (
+                                    g.title
+                                        .clone()
+                                        .unwrap_or_else(|| format!("Terminal {}", id)),
+                                    g.exited,
+                                    g.exit_code,
+                                    g.exit_signal.clone(),
+                                )
+                            })
+                            .unwrap_or_else(|| (format!("Terminal {}", id), false, None, None));
+                        let title = if let Some(ref sig) = exit_signal {
+                            format!("{} [{}]", base, sig)
+                        } else if let Some(code) = exit_code {
+                            format!("{} [exit {}]", base, code)
+                        } else if exited {
+                            format!("{} [done]", base)
+                        } else {
+                            base
+                        };
+                        render_pane_title(
+                            &mut title_ops,
+                            &current_box,
+                            &title,
+                            false,
+                            theme,
+                            focused,
+                        );
                     }
-                };
-                render_pane_title(
-                    &mut title_ops,
-                    &current_box,
-                    &title,
-                    is_deleted,
-                    &global_data.state.theme,
-                    has_focus.get_id() == Some(self.id),
-                );
+                }
             }
 
             let (content_box, inner_bounds) = if add_title {
@@ -554,6 +610,8 @@ impl AppMain {
         &mut self,
         global_data: &mut GlobalData<State, AppSignal>,
         has_focus: &mut HasFocus,
+        cmd: Option<String>,
+        cwd: Option<Utf8PathBuf>,
     ) -> CommonResult<EventPropagation> {
         throws_with_return!({
             let state = &mut global_data.state;
@@ -569,8 +627,17 @@ impl AppMain {
                 row_height: height(pty_rows),
             };
 
-            let mut session = match PtySessionBuilder::new(shell_command())
-                .env_var("TERM", "xterm-256color")
+            let is_command_pane = cmd.as_deref().is_some_and(|s| !s.is_empty());
+            let mut builder = if is_command_pane {
+                PtySessionBuilder::new("/bin/sh").cli_args(["-c", cmd.as_deref().unwrap()])
+            } else {
+                PtySessionBuilder::new(shell_command())
+            };
+            builder = builder.env_var("TERM", "xterm-256color");
+            if let Some(ref cwd_path) = cwd {
+                builder = builder.cwd(cwd_path.as_std_path());
+            }
+            let mut session = match builder
                 .with_config(DefaultPtySessionConfig + PtySessionConfigOption::Size(pty_size))
                 .start()
             {
@@ -584,14 +651,19 @@ impl AppMain {
             let ofs_buf = r3bl_tui::OffscreenBuffer::new_empty(pty_size);
             let pty_input_tx = Arc::new(session.tx_input_event.clone());
             let child_killer = session.child_process_termination_handle;
+            let initial_title = cmd.filter(|s| !s.is_empty());
             let pane = Arc::new(Mutex::new(TerminalPane {
                 ofs_buf,
                 cursor_key_mode: CursorKeyMode::Normal,
                 mouse_tracking_mode: MouseTrackingMode::None,
-                title: None,
+                title: initial_title,
                 pty_input_tx,
                 child_killer: Some(child_killer),
                 last_size: pty_size,
+                is_command_pane,
+                exited: false,
+                exit_code: None,
+                exit_signal: None,
             }));
 
             state.terminal_panes.insert(id, Arc::clone(&pane));
@@ -702,11 +774,39 @@ fn shell_command() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "bash".into())
 }
 
+fn is_buffer_empty(ofs_buf: &OffscreenBuffer) -> bool {
+    ofs_buf.buffer.iter().all(|line| {
+        line.iter()
+            .all(|pc| !matches!(pc, PixelChar::PlainText { .. }))
+    })
+}
+
 fn poll_terminal_output(app: &mut AppMain, state: &mut State) {
     while let Ok((id, event)) = app.terminal_event_rx.try_recv() {
-        if let PtyOutputEvent::Exit(_) = event {
-            state.terminal_panes.remove(&id);
-            state.remove_window(&Window::Terminal(id));
+        if let PtyOutputEvent::Exit(status) = event {
+            let exit_code = Some(status.exit_code());
+            let exit_signal = status.signal().map(String::from);
+            let remove_now = state
+                .terminal_panes
+                .get(&id)
+                .and_then(|pane| pane.lock().ok())
+                .is_some_and(|p| is_buffer_empty(&p.ofs_buf));
+
+            if remove_now {
+                if let Some(pane) = state.terminal_panes.remove(&id)
+                    && let Ok(mut p) = pane.lock()
+                    && let Some(mut killer) = p.child_killer.take()
+                {
+                    let _ = killer.kill();
+                }
+                state.remove_window(&Window::Terminal(id));
+            } else if let Some(pane) = state.terminal_panes.get(&id)
+                && let Ok(mut p) = pane.lock()
+            {
+                p.exited = true;
+                p.exit_code = exit_code;
+                p.exit_signal = exit_signal;
+            }
         }
     }
 }
@@ -913,7 +1013,7 @@ impl App for AppMain {
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     Key::Character('t') => {
-                        return self.open_terminal(global_data, has_focus);
+                        return self.open_terminal(global_data, has_focus, None, None);
                     }
                     Key::Character('T') => {
                         let state = &mut global_data.state;
@@ -950,6 +1050,22 @@ impl App for AppMain {
                         let visible =
                             state.visible_windows(global_data.window_size.col_width.as_u16());
                         cycle_focus(state, has_focus, &visible, -1);
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                    Key::Character('x') => {
+                        let state = &mut global_data.state;
+                        let tid = match state.focused_window.clone() {
+                            Some(Window::Terminal(tid)) => tid,
+                            _ => return Ok(EventPropagation::ConsumedRender),
+                        };
+                        if let Some(pane) = state.terminal_panes.remove(&tid)
+                            && let Ok(mut p) = pane.lock()
+                            && let Some(mut killer) = p.child_killer.take()
+                        {
+                            let _ = killer.kill();
+                        }
+                        state.remove_window(&Window::Terminal(tid));
+                        has_focus.set_id(focused_pane_id(state));
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     Key::SpecialKey(SpecialKey::Esc) => {
@@ -996,6 +1112,9 @@ impl App for AppMain {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Key::SpecialKey(SpecialKey::Enter) => {
+                    if state.file_name_picker_results.is_empty() {
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
                     let selected = resolve_selected_index(
                         &state.file_name_picker_selected,
                         &state.file_name_picker_results,
@@ -1047,7 +1166,7 @@ impl App for AppMain {
         if global_data.state.file_name_picker_open
             && global_data.state.focused_window == Some(Window::FileNamePicker)
             && let InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('d'),
+                key: Key::Character('c' | 'd'),
                 mask,
             }) = input_event
             && mask == ModifierKeysMask::new().with_ctrl()
@@ -1133,7 +1252,7 @@ impl App for AppMain {
         if global_data.state.theme_picker_open
             && global_data.state.focused_window == Some(Window::ThemePicker)
             && let InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('d'),
+                key: Key::Character('c' | 'd'),
                 mask,
             }) = input_event
             && mask == ModifierKeysMask::new().with_ctrl()
@@ -1163,6 +1282,34 @@ impl App for AppMain {
                 has_focus.set_id(focused_pane_id(state));
             }
             return Ok(EventPropagation::ConsumedRender);
+        }
+
+        if let Some(Window::Terminal(tid)) = global_data.state.focused_window.clone() {
+            let should_dismiss = global_data
+                .state
+                .terminal_panes
+                .get(&tid)
+                .and_then(|p| p.lock().ok())
+                .map(|p| p.exited)
+                .unwrap_or(false);
+            if should_dismiss
+                && matches!(
+                    input_event,
+                    InputEvent::Keyboard(KeyPress::Plain {
+                        key: Key::SpecialKey(SpecialKey::Esc) | Key::SpecialKey(SpecialKey::Enter)
+                    })
+                )
+            {
+                if let Some(pane) = global_data.state.terminal_panes.remove(&tid)
+                    && let Ok(mut p) = pane.lock()
+                    && let Some(mut killer) = p.child_killer.take()
+                {
+                    let _ = killer.kill();
+                }
+                global_data.state.remove_window(&Window::Terminal(tid));
+                has_focus.set_id(focused_pane_id(&global_data.state));
+                return Ok(EventPropagation::ConsumedRender);
+            }
         }
 
         if let InputEvent::Mouse(mouse) = &input_event
@@ -1203,6 +1350,11 @@ impl App for AppMain {
         _component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        if let AppSignal::OpenTerminal { cmd, cwd } = action {
+            let cmd = cmd.clone();
+            let cwd = cwd.clone();
+            return self.open_terminal(global_data, _has_focus, cmd, Some(cwd));
+        }
         throws_with_return!({
             let state = &mut global_data.state;
             match action {
@@ -1304,6 +1456,7 @@ impl App for AppMain {
                     }
                     state.bump_files_version();
                 }
+                AppSignal::OpenTerminal { .. } => {}
                 AppSignal::Noop => {}
             }
 
@@ -1538,16 +1691,10 @@ pub trait WindowHints {
 impl WindowHints for Window {
     fn pane_key_hints(&self) -> &'static str {
         match self {
-            Window::FileNamePicker => {
-                "Esc:Close  \u{2191}\u{2193}:Select  PgUp/PgDn:Page  Enter:Open"
-            }
-            Window::ThemePicker => {
-                "Esc:Cancel  \u{2191}\u{2193}:Select  PgUp/PgDn:Page  Enter:Save"
-            }
-            Window::FilePreview(_) => {
-                "Esc:Send to back  \u{2191}\u{2193}/PgUp/PgDn/Home/End:Scroll  ::Command"
-            }
-            Window::Terminal(_) => "Alt+`:Leader  Leader+Tab:Next pane",
+            Window::FileNamePicker => "Esc:Close  Enter:Open",
+            Window::ThemePicker => "Esc:Cancel  Enter:Save",
+            Window::FilePreview(_) => "Esc:Send to back  ::Command",
+            Window::Terminal(_) => "",
         }
     }
 }
@@ -1570,7 +1717,8 @@ fn render_status_bar(
     let (leader_text, rest_text) = if leader_active {
         (
             " Leader ".to_string(),
-            "f:Picker  t:Term  T:Theme  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel".to_string(),
+            "f:Picker  t:Term  T:Theme  x:Close  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel"
+                .to_string(),
         )
     } else {
         let pane = match focused_window {
@@ -1582,7 +1730,6 @@ fn render_status_bar(
             rest.push_str("  ");
             rest.push_str(pane);
         }
-        rest.push_str("  Tab:Switch");
         (" Alt+`: Leader ".to_string(), rest)
     };
 

@@ -45,6 +45,15 @@ pub struct TerminalPane {
     pub pty_input_tx: Arc<mpsc::Sender<PtyInputEvent>>,
     pub child_killer: Option<ControlledChildTerminationHandle>,
     pub last_size: Size,
+    /// True when this pane was opened via `:!<cmd>` rather than as an interactive shell.
+    /// Command panes are dismissed by Esc or Enter instead of being auto-closed on PTY exit.
+    pub is_command_pane: bool,
+    /// Set to true when the PTY process has exited; pane stays visible until dismissed.
+    pub exited: bool,
+    /// Exit code of the child process, set when `exited` becomes true.
+    pub exit_code: Option<u32>,
+    /// Signal name (e.g. "SIGSEGV") if the process was terminated by a signal.
+    pub exit_signal: Option<String>,
 }
 
 impl Debug for TerminalPane {
@@ -60,6 +69,10 @@ impl Debug for TerminalPane {
                 &self.child_killer.as_ref().map(|_| "ChildKiller<..>"),
             )
             .field("last_size", &self.last_size)
+            .field("is_command_pane", &self.is_command_pane)
+            .field("exited", &self.exited)
+            .field("exit_code", &self.exit_code)
+            .field("exit_signal", &self.exit_signal)
             .finish()
     }
 }
@@ -334,6 +347,12 @@ pub enum AppSignal {
     FileNamePickerQueryChanged,
     ThemePickerQueryChanged,
     FilesChanged(Arc<BatchedWatchEvent>),
+    /// Open a terminal pane. `cmd = None` means an interactive shell; `cmd = Some(s)` runs
+    /// `/bin/sh -c s`. `cwd` is the working directory for the child process.
+    OpenTerminal {
+        cmd: Option<String>,
+        cwd: Utf8PathBuf,
+    },
     #[default]
     Noop,
 }

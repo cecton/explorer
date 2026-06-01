@@ -1,10 +1,12 @@
 use super::fuzzy_picker::FuzzyPicker;
 use super::input_line::InputLine;
 use super::state::{AppSignal, State, Window};
+use super::theme::HelixTheme;
 use r3bl_tui::{
     CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData, HasFocus,
-    InputEvent, RenderPipeline, SurfaceBounds, TerminalWindowMainThreadSignal, ZOrder, height,
-    render_pipeline, throws_with_return,
+    InputEvent, Pos, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SurfaceBounds,
+    TerminalWindowMainThreadSignal, ZOrder, col, new_style, render_pipeline, row,
+    throws_with_return, tui_color,
 };
 
 pub struct FileNamePickerComponent {
@@ -22,12 +24,42 @@ impl FileNamePickerComponent {
         }
     }
 
-    pub fn title_text(&self, state: &State) -> String {
-        state
-            .root
-            .file_name()
-            .unwrap_or(state.root.as_str())
-            .to_string()
+    pub fn render_title_row(
+        &self,
+        mut ops: &mut RenderOpIRVec,
+        origin: Pos,
+        width: u16,
+        focused: bool,
+        theme: &HelixTheme,
+        query: &str,
+    ) {
+        let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
+        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
+        let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+        let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+
+        ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+        ops += RenderOpCommon::SetBgColor(color_bg);
+        ops += RenderOpIR::PaintTextWithAttributes(
+            " ".repeat(width as usize).as_str().into(),
+            Some(bg_style),
+        );
+        self.input_line
+            .render(ops, query, origin, width, focused, bg_rgb, fg_rgb);
+    }
+}
+
+fn title_bar_colors(focused: bool, theme: &HelixTheme) -> ([u8; 3], [u8; 3]) {
+    if focused {
+        (
+            theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]),
+            theme.ui_fg("ui.text").unwrap_or([220, 220, 255]),
+        )
+    } else {
+        (
+            theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]),
+            theme.ui_fg("ui.statusline").unwrap_or([180, 180, 220]),
+        )
     }
 }
 
@@ -72,7 +104,7 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
         global_data: &mut GlobalData<State, AppSignal>,
         current_box: FlexBox,
         _surface_bounds: SurfaceBounds,
-        has_focus: &mut HasFocus,
+        _has_focus: &mut HasFocus,
     ) -> CommonResult<RenderPipeline> {
         throws_with_return!({
             let origin = current_box.style_adjusted_origin_pos;
@@ -80,32 +112,18 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
             let total_rows = bounds.row_height.as_usize();
             let pane_width = bounds.col_width.as_usize();
 
-            let focused = has_focus.get_id() == Some(self.id);
-            let query = global_data.state.file_name_picker_query.clone();
-
             let mut pipeline = render_pipeline!();
-            let editor_ops = self.input_line.render(
-                &query,
-                &global_data.state,
-                origin,
-                bounds.col_width.as_u16(),
-                focused,
-            );
-            pipeline.push(ZOrder::Normal, editor_ops);
 
-            if total_rows < 2 {
+            if total_rows == 0 {
                 return Ok(pipeline);
             }
-
-            let results_origin = origin + height(1);
-            let result_rows = total_rows - 1;
 
             let results = &global_data.state.file_name_picker_results;
             let selected = &global_data.state.file_name_picker_selected;
             let result_ops = self.picker.render_results(
                 &global_data.state,
-                results_origin,
-                result_rows,
+                origin,
+                total_rows,
                 pane_width,
                 results,
                 selected,
@@ -126,7 +144,7 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                 .set_window_scroll_max(&Window::FileNamePicker, result_count);
             global_data
                 .state
-                .set_window_page_size(&Window::FileNamePicker, result_rows);
+                .set_window_page_size(&Window::FileNamePicker, total_rows);
 
             pipeline.push(ZOrder::Normal, result_ops);
             pipeline

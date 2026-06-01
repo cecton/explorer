@@ -1,4 +1,3 @@
-use super::state::State;
 use r3bl_tui::{
     InputEvent, Key, KeyPress, KeyState, Pos, RenderOpCommon, RenderOpIR, RenderOpIRVec,
     SpecialKey, col, new_style, row, tui_color,
@@ -296,19 +295,18 @@ impl InputLine {
 
     pub fn render(
         &self,
+        mut ops: &mut RenderOpIRVec,
         query: &str,
-        state: &State,
         origin: Pos,
         width: u16,
         focused: bool,
-    ) -> RenderOpIRVec {
+        bg_rgb: [u8; 3],
+        fg_rgb: [u8; 3],
+    ) {
         let width = width as usize;
-        let mut ops = RenderOpIRVec::new();
 
-        let bg_rgb = state.theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
-        let text_rgb = state.theme.ui_fg("ui.text").unwrap_or([220, 220, 255]);
         let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
-        let color_text = tui_color!(text_rgb[0], text_rgb[1], text_rgb[2]);
+        let color_text = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
         let cursor_style = new_style!(reverse);
 
         let bg_style = new_style!(color_bg: {color_bg});
@@ -345,8 +343,6 @@ impl InputLine {
         if cursor >= count && focused && count.saturating_sub(scroll) < width {
             ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(cursor_style));
         }
-
-        ops
     }
 }
 

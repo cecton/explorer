@@ -130,6 +130,19 @@ impl FuzzyPicker {
             );
 
             if result_idx >= result_count {
+                if result_count == 0 && row_offset == 0 {
+                    render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                        results_origin,
+                        col(0) + row(row_offset),
+                    );
+                    let msg = "No results";
+                    let pad = (pane_width.saturating_sub(msg.len())) / 2;
+                    let text = format!("{:pad$}{}", "", msg, pad = pad);
+                    render_ops += RenderOpIR::PaintTextWithAttributes(
+                        text.into(),
+                        Some(new_style!(color_fg: {color_normal_fg} color_bg: {color_bg})),
+                    );
+                }
                 continue;
             }
 
