@@ -30,6 +30,7 @@ use r3bl_tui::{
     row, send_signal, surface, throws, throws_with_return, tui_color, tui_styled_text,
     tui_styled_texts, tui_stylesheet, width,
 };
+use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
@@ -512,6 +513,7 @@ impl AppMain {
     fn trigger_match(
         &self,
         query: String,
+        window_stack: Vec<Window>,
         main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
     ) {
         let generation = self.picker_generation.fetch_add(1, Ordering::Relaxed) + 1;
@@ -520,7 +522,7 @@ impl AppMain {
         let tx = self.picker_results_tx.clone();
         let gen_counter = Arc::clone(&self.picker_generation);
         tokio::task::spawn_blocking(move || {
-            let results = run_file_name_match(&query, &snapshot, &root);
+            let results = run_file_name_match(&query, &snapshot, &root, &window_stack);
             if gen_counter.load(Ordering::Relaxed) == generation {
                 let _ = tx.try_send((generation, results));
                 send_signal!(
@@ -531,13 +533,21 @@ impl AppMain {
         });
     }
 
-    fn all_files_results(files: &[LoadedFile]) -> Vec<(FileKey, Vec<u32>)> {
-        files
-            .iter()
-            .enumerate()
-            .filter(|(_, f)| !f.removed.load(Ordering::Relaxed))
-            .map(|(i, _)| (FileKey(i), vec![]))
-            .collect()
+    fn all_files_results(
+        files: &[LoadedFile],
+        window_stack: &[Window],
+    ) -> Vec<(FileKey, Vec<u32>)> {
+        let mut seen: HashSet<usize> = HashSet::new();
+        let mut results = Vec::new();
+        for window in window_stack {
+            if let Window::FilePreview(key) = window
+                && !files[key.0].removed.load(Ordering::Relaxed)
+                && seen.insert(key.0)
+            {
+                results.push((*key, vec![]));
+            }
+        }
+        results
     }
 
     fn open_terminal(
@@ -705,11 +715,12 @@ fn run_file_name_match(
     query: &str,
     files: &[LoadedFile],
     root: &Utf8PathBuf,
+    window_stack: &[Window],
 ) -> Vec<(FileKey, Vec<u32>)> {
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
     if pattern.atoms.is_empty() {
-        return AppMain::all_files_results(files);
+        return AppMain::all_files_results(files, window_stack);
     }
 
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
@@ -895,7 +906,8 @@ impl App for AppMain {
                         state.file_name_picker_open = true;
                         state.file_name_picker_selected = None;
                         let snapshot = state.files.load();
-                        state.file_name_picker_results = AppMain::all_files_results(&snapshot);
+                        state.file_name_picker_results =
+                            AppMain::all_files_results(&snapshot, &state.window_stack);
                         state.file_name_picker_query = String::new();
                         has_focus.set_id(focused_pane_id(state));
                         return Ok(EventPropagation::ConsumedRender);
@@ -1198,9 +1210,14 @@ impl App for AppMain {
                     let query = state.file_name_picker_query.clone();
                     if query.is_empty() {
                         let snapshot = state.files.load();
-                        state.file_name_picker_results = AppMain::all_files_results(&snapshot);
+                        state.file_name_picker_results =
+                            AppMain::all_files_results(&snapshot, &state.window_stack);
                     } else {
-                        self.trigger_match(query, global_data.main_thread_channel_sender.clone());
+                        self.trigger_match(
+                            query,
+                            state.window_stack.clone(),
+                            global_data.main_thread_channel_sender.clone(),
+                        );
                     }
                 }
                 AppSignal::ThemePickerQueryChanged => {
@@ -1275,10 +1292,12 @@ impl App for AppMain {
                     if state.file_name_picker_open {
                         let query = state.file_name_picker_query.clone();
                         if query.is_empty() {
-                            state.file_name_picker_results = AppMain::all_files_results(&snapshot);
+                            state.file_name_picker_results =
+                                AppMain::all_files_results(&snapshot, &state.window_stack);
                         } else {
                             self.trigger_match(
                                 query,
+                                state.window_stack.clone(),
                                 global_data.main_thread_channel_sender.clone(),
                             );
                         }

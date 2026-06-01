@@ -7,7 +7,7 @@ use r3bl_tui::core::pty::{
     ControlledChildTerminationHandle, CursorKeyMode, MouseTrackingMode, PtyInputEvent,
 };
 use r3bl_tui::{FlexBox, OffscreenBuffer, Size};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -217,7 +217,6 @@ impl State {
 impl State {
     pub fn new(files: Arc<ArcSwap<Vec<LoadedFile>>>, root: Utf8PathBuf, theme: HelixTheme) -> Self {
         let snapshot = files.load();
-        let file_name_picker_results = (0..snapshot.len()).map(|i| (FileKey(i), vec![])).collect();
         let saved_theme = theme.clone();
         let mut state = Self {
             files,
@@ -230,7 +229,7 @@ impl State {
             leader_active: false,
             command_mode_active: false,
             file_name_picker_open: true,
-            file_name_picker_results,
+            file_name_picker_results: Vec::new(),
             file_name_picker_selected: None,
             theme_picker_open: false,
             theme_picker_results: Vec::new(),
@@ -242,6 +241,19 @@ impl State {
             pane_boxes: [FlexBox::default(); MAX_PANES],
             terminal_panes: HashMap::new(),
             next_terminal_id: 0,
+        };
+        state.file_name_picker_results = {
+            let mut seen: HashSet<usize> = HashSet::new();
+            let mut results = Vec::new();
+            for window in &state.window_stack {
+                if let Window::FilePreview(key) = window
+                    && !snapshot[key.0].removed.load(Ordering::Relaxed)
+                    && seen.insert(key.0)
+                {
+                    results.push((*key, vec![]));
+                }
+            }
+            results
         };
         state
             .window_states
