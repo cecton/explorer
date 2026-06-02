@@ -293,6 +293,35 @@ impl Component<AppState, AppSignal> for PaneComponent {
             }
         }
 
+        // Check for title bar range click.
+        if let InputEvent::Mouse(mouse) = input_event {
+            if let Some(window) = self.active_window(&global_data.state).cloned() {
+                if let Window::FilePreview(key) = window {
+                    let title_bar_row = self.content_origin_row.saturating_sub(1) as usize;
+                    let origin_col = self.content_origin_col as usize;
+                    let pane_width = self.content_col_count as usize;
+                    let col = mouse.pos.col_index.as_usize();
+                    let row = mouse.pos.row_index.as_usize();
+
+                    if row == title_bar_row
+                        && col >= origin_col
+                        && col < origin_col + pane_width
+                        && matches!(mouse.kind, MouseInputKind::MouseDown(Button::Left))
+                    {
+                        if let Some((lo, hi)) = self.preview.range_at_title_col(
+                            &global_data.state,
+                            col - origin_col,
+                            pane_width,
+                        ) {
+                            self.preview
+                                .scroll_to_range(&mut global_data.state, key, lo, hi);
+                            return Ok(EventPropagation::ConsumedRender);
+                        }
+                    }
+                }
+            }
+        }
+
         match self.active_window(&global_data.state).cloned() {
             Some(Window::FileNamePicker) => {
                 self.picker

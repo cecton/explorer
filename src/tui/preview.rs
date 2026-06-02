@@ -39,11 +39,91 @@ impl FilePreviewComponent {
         let snapshot = state.files.load();
         let file = &snapshot[key.0];
         let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
-        if file.removed.load(std::sync::atomic::Ordering::Relaxed) {
+        let base = if file.removed.load(std::sync::atomic::Ordering::Relaxed) {
             format!("[deleted] {rel}")
         } else {
             rel.as_str().to_string()
+        };
+        if let Some(ranges) = state.highlight_ranges.get(&key) {
+            let groups: Vec<String> = ranges
+                .iter()
+                .map(|&(lo, hi)| {
+                    if lo == hi {
+                        lo.to_string()
+                    } else {
+                        format!("{lo}-{hi}")
+                    }
+                })
+                .collect();
+            format!("{}  [{}]", base, groups.join(", "))
+        } else {
+            base
         }
+    }
+
+    /// Returns the highlight range (lo, hi) at the given column within the title bar,
+    /// or None if no range is at that column or the title is truncated.
+    pub fn range_at_title_col(
+        &self,
+        state: &AppState,
+        col: usize,
+        pane_width: usize,
+    ) -> Option<(usize, usize)> {
+        let key = self.file_key(state)?;
+        let ranges = state.highlight_ranges.get(&key)?;
+        if ranges.is_empty() {
+            return None;
+        }
+
+        let snapshot = state.files.load();
+        let file = &snapshot[key.0];
+        let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
+        let base = if file.removed.load(std::sync::atomic::Ordering::Relaxed) {
+            format!("[deleted] {rel}")
+        } else {
+            rel.as_str().to_string()
+        };
+
+        let groups: Vec<String> = ranges
+            .iter()
+            .map(|&(lo, hi)| {
+                if lo == hi {
+                    lo.to_string()
+                } else {
+                    format!("{lo}-{hi}")
+                }
+            })
+            .collect();
+        let title = format!("{}  [{}]", base, groups.join(", "));
+        let padded = format!(" {title} ");
+        if padded.len() > pane_width {
+            return None;
+        }
+
+        let bracket_pos = padded.find('[')?;
+        let mut current_col = bracket_pos + 1;
+        for &(lo, hi) in ranges.iter() {
+            let text = if lo == hi {
+                lo.to_string()
+            } else {
+                format!("{lo}-{hi}")
+            };
+            let start = current_col;
+            let end = current_col + text.len();
+            if col >= start && col < end {
+                return Some((lo, hi));
+            }
+            current_col = end + 2; // ", "
+        }
+        None
+    }
+
+    pub fn scroll_to_range(&self, state: &mut AppState, key: FileKey, lo: usize, hi: usize) {
+        let window = Window::FilePreview(key);
+        let page_size = state.window_page_size(&window);
+        let target = compute_single_block_scroll(lo, hi - lo + 1, page_size);
+        state.set_window_scroll(&window, target);
+        state.clamp_scroll(&window);
     }
 
     pub fn render_title_row(
