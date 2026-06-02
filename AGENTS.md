@@ -30,11 +30,12 @@ Source is organized as:
 - `src/tui/state.rs` — `State`, `AppSignal`, and `TerminalPane` types
 - `src/tui/app.rs` — `App` trait impl, layout, `run()` entry point
 - `src/tui/file_list.rs` — `FileListComponent` (left pane)
-- `src/tui/file_name_picker.rs` — fuzzy file-name picker overlay
-- `src/tui/fuzzy_picker.rs` — shared fuzzy list picker component
-- `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview
+- `src/tui/file_name_picker.rs` — fuzzy file-name picker overlay (exceptions → input → navigation)
+- `src/tui/fuzzy_picker.rs` — shared fuzzy list picker component; navigation via flat `match` on `InputEvent`
+- `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview (exceptions → input → navigation)
 - `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane)
 - `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation
+- `src/tui/input_line.rs` — query input with Emacs-style key bindings; single flat `match` on `InputEvent`
 
 ---
 
@@ -177,6 +178,13 @@ Planned feature areas and their likely dependencies:
 - Add a comment only when the *why* is non-obvious: a hidden constraint, a subtle invariant, a workaround for a specific external bug.
 - Never describe *what* the code does — well-named identifiers already do that.
 - No multi-line comment blocks. One short line maximum.
+
+### Pattern Matching
+
+- Prefer a single flat `match` on the original value (e.g. `&InputEvent`) over a chain of `if let` blocks that unpack intermediates.
+- Embed the full path in each arm: `InputEvent::Keyboard(KeyPress::Plain { key: Key::SpecialKey(SpecialKey::Esc) })` instead of `if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event { match key { Key::SpecialKey(SpecialKey::Esc) => ... } }`.
+- Use `|` to share an arm body when two patterns are semantically equivalent (e.g. Down arrow and scroll-down).
+- Destructure modifier masks directly in the pattern (`ModifierKeysMask { ctrl_key_state: KeyState::Pressed, .. }`) rather than match guards like `if mask == ModifierKeysMask::new().with_ctrl()`.
 
 ### General
 

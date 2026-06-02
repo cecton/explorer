@@ -1,5 +1,4 @@
 use super::file_name_picker::FileNamePickerComponent;
-use super::fuzzy_picker::resolve_selected_index;
 use super::preview::FilePreviewComponent;
 use super::state::{AppSignal, MAX_PANES, State, TerminalPane, Window};
 use super::terminal_pane::TerminalPaneComponent;
@@ -216,8 +215,8 @@ impl PaneComponent {
                     return EventPropagation::ConsumedRender;
                 }
                 let idx = target.min(scroll_max.saturating_sub(1));
-                if let Some((key, _)) = state.file_name_picker_results.get(idx) {
-                    state.file_name_picker_selected = Some(*key);
+                if let Some((key, _)) = state.file_name_picker.results.get(idx) {
+                    state.file_name_picker.selected = Some(*key);
                 }
                 EventPropagation::ConsumedRender
             }
@@ -227,8 +226,8 @@ impl PaneComponent {
                     return EventPropagation::ConsumedRender;
                 }
                 let idx = target.min(scroll_max.saturating_sub(1));
-                if let Some((name, _)) = state.theme_picker_results.get(idx) {
-                    state.theme_picker_selected = Some(name.clone());
+                if let Some((name, _)) = state.theme_picker.results.get(idx) {
+                    state.theme_picker.selected = Some(name.clone());
                     if let Some(theme) = HelixTheme::from_name(name) {
                         state.theme = theme;
                     }
@@ -355,7 +354,7 @@ impl Component<State, AppSignal> for PaneComponent {
 
                 match active_window.as_ref().unwrap() {
                     Window::FileNamePicker => {
-                        let query = global_data.state.file_name_picker_query.clone();
+                        let query = global_data.state.file_name_picker.query.clone();
                         self.picker.render_title_row(
                             &mut title_ops,
                             title_origin,
@@ -366,7 +365,7 @@ impl Component<State, AppSignal> for PaneComponent {
                         );
                     }
                     Window::ThemePicker => {
-                        let query = global_data.state.theme_picker_query.clone();
+                        let query = global_data.state.theme_picker.query.clone();
                         self.theme_picker.render_title_row(
                             &mut title_ops,
                             title_origin,
@@ -609,7 +608,6 @@ impl AppMain {
     fn open_terminal(
         &mut self,
         global_data: &mut GlobalData<State, AppSignal>,
-        has_focus: &mut HasFocus,
         cmd: Option<String>,
         cwd: Option<Utf8PathBuf>,
     ) -> CommonResult<EventPropagation> {
@@ -763,7 +761,6 @@ impl AppMain {
             let window = Window::Terminal(id);
             state.push_window(window.clone());
             state.focused_window = Some(window);
-            has_focus.set_id(focused_pane_id(state));
 
             EventPropagation::ConsumedRender
         });
@@ -844,37 +841,6 @@ fn run_file_name_match(
         .collect();
     scored.sort_by_key(|&(_, score, _)| std::cmp::Reverse(score));
     scored.into_iter().map(|(key, _, idx)| (key, idx)).collect()
-}
-
-fn run_theme_name_match(query: &str) -> Vec<(String, Vec<u32>)> {
-    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
-
-    if pattern.atoms.is_empty() {
-        return HelixTheme::theme_names()
-            .map(|n| (n.to_string(), vec![]))
-            .collect();
-    }
-
-    let mut matcher = Matcher::new(Config::DEFAULT);
-    let mut buf = Vec::new();
-    let mut scored: Vec<(String, u32, Vec<u32>)> = HelixTheme::theme_names()
-        .filter_map(|name| {
-            let haystack = Utf32Str::new(name, &mut buf);
-            let mut indices = Vec::new();
-            pattern
-                .indices(haystack, &mut matcher, &mut indices)
-                .map(|score| {
-                    indices.sort_unstable();
-                    indices.dedup();
-                    (name.to_string(), score, indices)
-                })
-        })
-        .collect();
-    scored.sort_by_key(|&(_, score, _)| std::cmp::Reverse(score));
-    scored
-        .into_iter()
-        .map(|(name, _, idx)| (name, idx))
-        .collect()
 }
 
 impl App for AppMain {
@@ -981,6 +947,8 @@ impl App for AppMain {
         component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        sync_has_focus(&global_data.state, has_focus);
+
         // Leader key activation.
         if let InputEvent::Keyboard(KeyPress::WithModifiers { key, mask }) = input_event
             && key == Key::Character('`')
@@ -993,279 +961,144 @@ impl App for AppMain {
         // Leader key dispatch.
         if global_data.state.leader_active {
             global_data.state.leader_active = false;
-            if let InputEvent::Keyboard(keypress) = input_event {
-                let key = match keypress {
-                    KeyPress::Plain { key } => key,
-                    KeyPress::WithModifiers { key, .. } => key,
-                };
-                match key {
-                    Key::Character('f') => {
-                        let state = &mut global_data.state;
-                        state.push_window(Window::FileNamePicker);
-                        state.focused_window = Some(Window::FileNamePicker);
-                        state.file_name_picker_open = true;
-                        state.file_name_picker_selected = None;
-                        let snapshot = state.files.load();
-                        state.file_name_picker_results =
-                            AppMain::all_files_results(&snapshot, &state.window_stack);
-                        state.file_name_picker_query = String::new();
-                        has_focus.set_id(focused_pane_id(state));
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                    Key::Character('t') => {
-                        return self.open_terminal(global_data, has_focus, None, None);
-                    }
-                    Key::Character('T') => {
-                        let state = &mut global_data.state;
-                        if !state.theme_picker_open {
-                            state.saved_theme = state.theme.clone();
-                        }
-                        state.push_window(Window::ThemePicker);
-                        state.focused_window = Some(Window::ThemePicker);
-                        state.theme_picker_open = true;
-                        let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
-                            .map(|n| (n.to_string(), vec![]))
-                            .collect();
-                        state.theme_picker_selected = all_themes
-                            .iter()
-                            .position(|(n, _)| n == state.theme.name())
-                            .and_then(|i| all_themes.get(i).map(|(n, _)| n.clone()));
-                        state.theme_picker_results = all_themes;
-                        state.theme_picker_query = String::new();
-                        has_focus.set_id(focused_pane_id(state));
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                    Key::Character('q') => {
-                        return Ok(EventPropagation::ExitMainEventLoop);
-                    }
-                    Key::SpecialKey(SpecialKey::Tab) => {
-                        let state = &mut global_data.state;
-                        let visible =
-                            state.visible_windows(global_data.window_size.col_width.as_u16());
-                        cycle_focus(state, has_focus, &visible, 1);
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                    Key::SpecialKey(SpecialKey::BackTab) => {
-                        let state = &mut global_data.state;
-                        let visible =
-                            state.visible_windows(global_data.window_size.col_width.as_u16());
-                        cycle_focus(state, has_focus, &visible, -1);
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                    Key::Character('x') => {
-                        let state = &mut global_data.state;
-                        let tid = match state.focused_window.clone() {
-                            Some(Window::Terminal(tid)) => tid,
-                            _ => return Ok(EventPropagation::ConsumedRender),
-                        };
-                        if let Some(pane) = state.terminal_panes.remove(&tid)
-                            && let Ok(mut p) = pane.lock()
-                            && let Some(mut killer) = p.child_killer.take()
-                        {
-                            let _ = killer.kill();
-                        }
-                        state.remove_window(&Window::Terminal(tid));
-                        has_focus.set_id(focused_pane_id(state));
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                    Key::SpecialKey(SpecialKey::Esc) => {
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                    _ => {}
+            match &input_event {
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::Character('f'),
+                })
+                | InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::Character('f'),
+                    ..
+                }) => {
+                    let state = &mut global_data.state;
+                    state.push_window(Window::FileNamePicker);
+                    state.focused_window = Some(Window::FileNamePicker);
+                    state.file_name_picker.selected = None;
+                    let snapshot = state.files.load();
+                    state.file_name_picker.results =
+                        AppMain::all_files_results(&snapshot, &state.window_stack);
+                    state.file_name_picker.query = String::new();
+                    return Ok(EventPropagation::ConsumedRender);
                 }
-            }
-        }
-
-        if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
-            && !matches!(global_data.state.focused_window, Some(Window::Terminal(_)))
-        {
-            match key {
-                Key::SpecialKey(SpecialKey::Tab) => {
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::Character('t'),
+                })
+                | InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::Character('t'),
+                    ..
+                }) => {
+                    return self.open_terminal(global_data, None, None);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::Character('T'),
+                })
+                | InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::Character('T'),
+                    ..
+                }) => {
+                    let state = &mut global_data.state;
+                    if !state.window_stack.contains(&Window::ThemePicker) {
+                        state.saved_theme = state.theme.clone();
+                    }
+                    let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
+                        .map(|n| (n.to_string(), Vec::new()))
+                        .collect();
+                    state.push_window(Window::ThemePicker);
+                    state.focused_window = Some(Window::ThemePicker);
+                    state.theme_picker.selected = all_themes
+                        .iter()
+                        .position(|(n, _)| n == state.theme.name())
+                        .and_then(|i| all_themes.get(i).map(|(n, _)| n.clone()));
+                    state.theme_picker.results = all_themes;
+                    state.theme_picker.query = String::new();
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::Character('q'),
+                })
+                | InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::Character('q'),
+                    ..
+                }) => {
+                    return Ok(EventPropagation::ExitMainEventLoop);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Tab),
+                })
+                | InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::SpecialKey(SpecialKey::Tab),
+                    ..
+                }) => {
                     let state = &mut global_data.state;
                     let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
-                    cycle_focus(state, has_focus, &visible, 1);
+                    cycle_focus(state, &visible, 1);
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                Key::SpecialKey(SpecialKey::BackTab) => {
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::BackTab),
+                })
+                | InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::SpecialKey(SpecialKey::BackTab),
+                    ..
+                }) => {
                     let state = &mut global_data.state;
                     let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
-                    cycle_focus(state, has_focus, &visible, -1);
+                    cycle_focus(state, &visible, -1);
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                _ => {}
-            }
-        }
-
-        if global_data.state.file_name_picker_open
-            && global_data.state.focused_window == Some(Window::FileNamePicker)
-            && let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
-        {
-            let state = &mut global_data.state;
-            match key {
-                Key::SpecialKey(SpecialKey::Esc) => {
-                    state.remove_window(&Window::FileNamePicker);
-                    state.file_name_picker_open = false;
-                    state.file_name_picker_results.clear();
-                    state.file_name_picker_selected = None;
-                    state.file_name_picker_query = String::new();
-                    has_focus.set_id(focused_pane_id(state));
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                Key::SpecialKey(SpecialKey::Enter) => {
-                    if state.file_name_picker_results.is_empty() {
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                    let selected = resolve_selected_index(
-                        &state.file_name_picker_selected,
-                        &state.file_name_picker_results,
-                    );
-                    if let Some(&(key, _)) = state.file_name_picker_results.get(selected) {
-                        if !state.window_states.contains_key(&Window::FilePreview(key)) {
-                            state.set_window_scroll(&Window::FilePreview(key), 0);
-                        }
-                        state.push_window(Window::FilePreview(key));
-                        state.focused_window = Some(Window::FilePreview(key));
-                        lsp::send_file_request(key.0);
-                    }
-                    state.remove_window(&Window::FileNamePicker);
-                    state.file_name_picker_open = false;
-                    state.file_name_picker_results.clear();
-                    state.file_name_picker_selected = None;
-                    state.file_name_picker_query = String::new();
-                    has_focus.set_id(focused_pane_id(state));
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                Key::SpecialKey(SpecialKey::Up) => {
-                    let current = resolve_selected_index(
-                        &state.file_name_picker_selected,
-                        &state.file_name_picker_results,
-                    );
-                    let prev = current.saturating_sub(1);
-                    if let Some((key, _)) = state.file_name_picker_results.get(prev) {
-                        state.file_name_picker_selected = Some(*key);
-                    }
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                Key::SpecialKey(SpecialKey::Down) => {
-                    let count = state.file_name_picker_results.len();
-                    if count > 0 {
-                        let current = resolve_selected_index(
-                            &state.file_name_picker_selected,
-                            &state.file_name_picker_results,
-                        );
-                        let next = (current + 1).min(count - 1);
-                        let (key, _) = &state.file_name_picker_results[next];
-                        state.file_name_picker_selected = Some(*key);
-                    }
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                _ => {}
-            }
-        }
-
-        if global_data.state.file_name_picker_open
-            && global_data.state.focused_window == Some(Window::FileNamePicker)
-            && let InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('c' | 'd'),
-                mask,
-            }) = input_event
-            && mask == ModifierKeysMask::new().with_ctrl()
-        {
-            let state = &mut global_data.state;
-            state.remove_window(&Window::FileNamePicker);
-            state.file_name_picker_open = false;
-            state.file_name_picker_results.clear();
-            state.file_name_picker_selected = None;
-            state.file_name_picker_query = String::new();
-            has_focus.set_id(focused_pane_id(state));
-            return Ok(EventPropagation::ConsumedRender);
-        }
-
-        if global_data.state.theme_picker_open
-            && global_data.state.focused_window == Some(Window::ThemePicker)
-            && let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
-        {
-            let state = &mut global_data.state;
-            match key {
-                Key::SpecialKey(SpecialKey::Esc) => {
-                    state.theme = state.saved_theme.clone();
-                    state.remove_window(&Window::ThemePicker);
-                    state.theme_picker_open = false;
-                    state.theme_picker_results.clear();
-                    state.theme_picker_selected = None;
-                    state.theme_picker_query = String::new();
-                    has_focus.set_id(focused_pane_id(state));
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                Key::SpecialKey(SpecialKey::Enter) => {
-                    let selected = resolve_selected_index(
-                        &state.theme_picker_selected,
-                        &state.theme_picker_results,
-                    );
-                    if let Some((name, _)) = state.theme_picker_results.get(selected)
-                        && let Err(e) = crate::config::save_theme(name)
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::Character('x'),
+                })
+                | InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::Character('x'),
+                    ..
+                }) => {
+                    let state = &mut global_data.state;
+                    let tid = match state.focused_window.clone() {
+                        Some(Window::Terminal(tid)) => tid,
+                        _ => return Ok(EventPropagation::ConsumedRender),
+                    };
+                    if let Some(pane) = state.terminal_panes.remove(&tid)
+                        && let Ok(mut p) = pane.lock()
+                        && let Some(mut killer) = p.child_killer.take()
                     {
-                        tracing::error!("Failed to save theme to config: {e}");
+                        let _ = killer.kill();
                     }
-                    state.remove_window(&Window::ThemePicker);
-                    state.theme_picker_open = false;
-                    state.theme_picker_results.clear();
-                    state.theme_picker_selected = None;
-                    state.theme_picker_query = String::new();
-                    has_focus.set_id(focused_pane_id(state));
+                    state.remove_window(&Window::Terminal(tid));
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                Key::SpecialKey(SpecialKey::Up) => {
-                    let current = resolve_selected_index(
-                        &state.theme_picker_selected,
-                        &state.theme_picker_results,
-                    );
-                    let prev = current.saturating_sub(1);
-                    if let Some((name, _)) = state.theme_picker_results.get(prev) {
-                        state.theme_picker_selected = Some(name.clone());
-                        if let Some(theme) = HelixTheme::from_name(name) {
-                            state.theme = theme;
-                        }
-                    }
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                Key::SpecialKey(SpecialKey::Down) => {
-                    let count = state.theme_picker_results.len();
-                    if count > 0 {
-                        let current = resolve_selected_index(
-                            &state.theme_picker_selected,
-                            &state.theme_picker_results,
-                        );
-                        let next = (current + 1).min(count - 1);
-                        let (name, _) = &state.theme_picker_results[next];
-                        state.theme_picker_selected = Some(name.clone());
-                        if let Some(theme) = HelixTheme::from_name(name) {
-                            state.theme = theme;
-                        }
-                    }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Esc),
+                })
+                | InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::SpecialKey(SpecialKey::Esc),
+                    ..
+                }) => {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 _ => {}
             }
         }
 
-        if global_data.state.theme_picker_open
-            && global_data.state.focused_window == Some(Window::ThemePicker)
-            && let InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('c' | 'd'),
-                mask,
-            }) = input_event
-            && mask == ModifierKeysMask::new().with_ctrl()
-        {
-            let state = &mut global_data.state;
-            state.theme = state.saved_theme.clone();
-            state.remove_window(&Window::ThemePicker);
-            state.theme_picker_open = false;
-            state.theme_picker_results.clear();
-            state.theme_picker_selected = None;
-            state.theme_picker_query = String::new();
-            has_focus.set_id(focused_pane_id(state));
-            return Ok(EventPropagation::ConsumedRender);
+        if !matches!(global_data.state.focused_window, Some(Window::Terminal(_))) {
+            match &input_event {
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Tab),
+                }) => {
+                    let state = &mut global_data.state;
+                    let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
+                    cycle_focus(state, &visible, 1);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::BackTab),
+                }) => {
+                    let state = &mut global_data.state;
+                    let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
+                    cycle_focus(state, &visible, -1);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                _ => {}
+            }
         }
 
         if matches!(
@@ -1279,7 +1112,6 @@ impl App for AppMain {
             let state = &mut global_data.state;
             if let Some(window) = state.focused_window.clone() {
                 state.send_to_back(&window);
-                has_focus.set_id(focused_pane_id(state));
             }
             return Ok(EventPropagation::ConsumedRender);
         }
@@ -1307,7 +1139,6 @@ impl App for AppMain {
                     let _ = killer.kill();
                 }
                 global_data.state.remove_window(&Window::Terminal(tid));
-                has_focus.set_id(focused_pane_id(&global_data.state));
                 return Ok(EventPropagation::ConsumedRender);
             }
         }
@@ -1327,7 +1158,6 @@ impl App for AppMain {
                         && global_data.state.focused_window.as_ref() != Some(window)
                     {
                         global_data.state.focused_window = Some(window.clone());
-                        has_focus.set_id(FlexBoxId::from(Id::pane(slot)));
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     break;
@@ -1350,19 +1180,21 @@ impl App for AppMain {
         _component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        sync_has_focus(&global_data.state, _has_focus);
+
         if let AppSignal::OpenTerminal { cmd, cwd } = action {
             let cmd = cmd.clone();
             let cwd = cwd.clone();
-            return self.open_terminal(global_data, _has_focus, cmd, Some(cwd));
+            return self.open_terminal(global_data, cmd, Some(cwd));
         }
         throws_with_return!({
             let state = &mut global_data.state;
             match action {
                 AppSignal::FileNamePickerQueryChanged => {
-                    let query = state.file_name_picker_query.clone();
+                    let query = state.file_name_picker.query.clone();
                     if query.is_empty() {
                         let snapshot = state.files.load();
-                        state.file_name_picker_results =
+                        state.file_name_picker.results =
                             AppMain::all_files_results(&snapshot, &state.window_stack);
                     } else {
                         self.trigger_match(
@@ -1370,16 +1202,6 @@ impl App for AppMain {
                             state.window_stack.clone(),
                             global_data.main_thread_channel_sender.clone(),
                         );
-                    }
-                }
-                AppSignal::ThemePickerQueryChanged => {
-                    let query = state.theme_picker_query.clone();
-                    state.theme_picker_results = run_theme_name_match(&query);
-                    if let Some((name, _)) = state.theme_picker_results.first() {
-                        state.theme_picker_selected = Some(name.clone());
-                        if let Some(theme) = HelixTheme::from_name(name) {
-                            state.theme = theme;
-                        }
                     }
                 }
                 AppSignal::FilesChanged(batch) => {
@@ -1441,10 +1263,10 @@ impl App for AppMain {
                     }
 
                     let snapshot = self.files.load();
-                    if state.file_name_picker_open {
-                        let query = state.file_name_picker_query.clone();
+                    if state.window_stack.contains(&Window::FileNamePicker) {
+                        let query = state.file_name_picker.query.clone();
                         if query.is_empty() {
-                            state.file_name_picker_results =
+                            state.file_name_picker.results =
                                 AppMain::all_files_results(&snapshot, &state.window_stack);
                         } else {
                             self.trigger_match(
@@ -1470,10 +1292,12 @@ impl App for AppMain {
         component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
         has_focus: &mut HasFocus,
     ) -> CommonResult<RenderPipeline> {
+        sync_has_focus(&global_data.state, has_focus);
+
         let current_generation = self.picker_generation.load(Ordering::Relaxed);
         while let Ok((arrived_generation, results)) = self.picker_results_rx.try_recv() {
             if arrived_generation == current_generation {
-                global_data.state.file_name_picker_results = results;
+                global_data.state.file_name_picker.results = results;
             }
         }
 
@@ -1494,7 +1318,6 @@ impl App for AppMain {
                 .unwrap_or(false);
             if !focused_is_visible && let Some((front, _)) = visible.first() {
                 global_data.state.focused_window = Some(front.clone());
-                has_focus.set_id(FlexBoxId::from(Id::pane(0)));
             }
 
             let surface = {
@@ -1562,7 +1385,7 @@ impl App for AppMain {
 }
 
 /// Returns the `FlexBoxId` for the pane slot that corresponds to the focused window.
-fn focused_pane_id(state: &State) -> FlexBoxId {
+pub(super) fn focused_pane_id(state: &State) -> FlexBoxId {
     let Some(focused) = &state.focused_window else {
         return FlexBoxId::from(Id::Pane0);
     };
@@ -1574,12 +1397,11 @@ fn focused_pane_id(state: &State) -> FlexBoxId {
     FlexBoxId::from(Id::pane(slot))
 }
 
-fn cycle_focus(
-    state: &mut State,
-    has_focus: &mut HasFocus,
-    visible: &[(Window, u16)],
-    direction: i32,
-) {
+fn sync_has_focus(state: &State, has_focus: &mut HasFocus) {
+    has_focus.set_id(focused_pane_id(state));
+}
+
+fn cycle_focus(state: &mut State, visible: &[(Window, u16)], direction: i32) {
     if visible.is_empty() {
         return;
     }
@@ -1592,7 +1414,6 @@ fn cycle_focus(
     let next_pos = ((current_pos as i32 + direction).rem_euclid(len)) as usize;
     let next_window = visible[next_pos].0.clone();
     state.focused_window = Some(next_window);
-    has_focus.set_id(FlexBoxId::from(Id::pane(next_pos)));
 }
 
 struct PanesRenderer<'a> {

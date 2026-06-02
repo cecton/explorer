@@ -4662,9 +4662,9 @@ dependencies = [
 
 [[package]]
 name = "xtask-watch"
-version = "0.3.4"
+version = "0.3.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "38b70bfbb6cfee549e599b692eb379c5307c16f9616d717adff1a26d73f8b9ce"
+checksum = "c55864bfd18fe7a280c87f10a10ad3efa515b2977342e8b2e3d9c97ff881ef2b"
 dependencies = [
  "anyhow",
  "cargo_metadata",

@@ -1,6 +1,6 @@
 use r3bl_tui::{
-    InputEvent, Key, KeyPress, KeyState, Pos, RenderOpCommon, RenderOpIR, RenderOpIRVec,
-    SpecialKey, col, new_style, row, tui_color,
+    InputEvent, Key, KeyPress, KeyState, ModifierKeysMask, Pos, RenderOpCommon, RenderOpIR,
+    RenderOpIRVec, SpecialKey, col, new_style, row, tui_color,
 };
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -18,64 +18,141 @@ impl InputLine {
         self.cursor = self.cursor.min(grapheme_count);
 
         match input_event {
-            InputEvent::Keyboard(KeyPress::WithModifiers { key, mask })
-                if mask.ctrl_key_state == KeyState::Pressed =>
-            {
-                self.handle_ctrl_key(key, query, grapheme_count)
-            }
-            InputEvent::Keyboard(KeyPress::WithModifiers { key, mask })
-                if mask.alt_key_state == KeyState::Pressed =>
-            {
-                self.handle_alt_key(key, query)
-            }
-            InputEvent::Keyboard(KeyPress::Plain { key }) => {
-                self.handle_plain_key(key, query, grapheme_count)
-            }
-            _ => false,
-        }
-    }
-
-    fn handle_ctrl_key(&mut self, key: &Key, query: &mut String, grapheme_count: usize) -> bool {
-        match key {
-            Key::Character('a') => {
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('a'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => {
                 self.cursor = 0;
                 true
             }
-            Key::Character('e') => {
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('e'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => {
                 self.cursor = grapheme_count;
                 true
             }
-            Key::Character('d') => self.delete_grapheme(query),
-            Key::Character('b') if self.cursor > 0 => {
-                self.cursor -= 1;
-                true
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('d'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => self.delete_grapheme(query),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('b'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => {
+                if self.cursor == 0 {
+                    false
+                } else {
+                    self.cursor -= 1;
+                    true
+                }
             }
-            Key::Character('f') if self.cursor < grapheme_count => {
-                self.cursor += 1;
-                true
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('f'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => {
+                if self.cursor >= grapheme_count {
+                    false
+                } else {
+                    self.cursor += 1;
+                    true
+                }
             }
-            Key::Character('k') => self.kill_to_end(query),
-            Key::Character('u') => self.kill_to_start(query),
-            Key::Character('w') => self.kill_word_backward(query),
-            Key::SpecialKey(SpecialKey::Left) => self.cursor_prev_word(query),
-            Key::SpecialKey(SpecialKey::Right) => self.cursor_next_word(query),
-            _ => false,
-        }
-    }
-
-    fn handle_alt_key(&mut self, key: &Key, query: &mut String) -> bool {
-        match key {
-            Key::Character('b') => self.cursor_prev_word(query),
-            Key::Character('f') => self.cursor_next_word(query),
-            Key::Character('d') => self.kill_word_forward(query),
-            Key::SpecialKey(SpecialKey::Backspace) => self.kill_word_backward(query),
-            _ => false,
-        }
-    }
-
-    fn handle_plain_key(&mut self, key: &Key, query: &mut String, grapheme_count: usize) -> bool {
-        match key {
-            Key::Character(ch) => {
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('k'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => self.kill_to_end(query),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('u'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => self.kill_to_start(query),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('w'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => self.kill_word_backward(query),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(SpecialKey::Left),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => self.cursor_prev_word(query),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(SpecialKey::Right),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => self.cursor_next_word(query),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('b'),
+                mask:
+                    ModifierKeysMask {
+                        alt_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => self.cursor_prev_word(query),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('f'),
+                mask:
+                    ModifierKeysMask {
+                        alt_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => self.cursor_next_word(query),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('d'),
+                mask:
+                    ModifierKeysMask {
+                        alt_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => self.kill_word_forward(query),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(SpecialKey::Backspace),
+                mask:
+                    ModifierKeysMask {
+                        alt_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => self.kill_word_backward(query),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character(ch),
+            }) => {
                 if ch.is_control() {
                     return false;
                 }
@@ -84,9 +161,15 @@ impl InputLine {
                 self.cursor += 1;
                 true
             }
-            Key::SpecialKey(SpecialKey::Backspace) => self.backspace_grapheme(query),
-            Key::SpecialKey(SpecialKey::Delete) => self.delete_grapheme(query),
-            Key::SpecialKey(SpecialKey::Home) => {
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Backspace),
+            }) => self.backspace_grapheme(query),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Delete),
+            }) => self.delete_grapheme(query),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Home),
+            }) => {
                 if self.cursor == 0 {
                     false
                 } else {
@@ -94,7 +177,9 @@ impl InputLine {
                     true
                 }
             }
-            Key::SpecialKey(SpecialKey::End) => {
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::End),
+            }) => {
                 if self.cursor == grapheme_count {
                     false
                 } else {
@@ -102,13 +187,25 @@ impl InputLine {
                     true
                 }
             }
-            Key::SpecialKey(SpecialKey::Left) if self.cursor > 0 => {
-                self.cursor -= 1;
-                true
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Left),
+            }) => {
+                if self.cursor == 0 {
+                    false
+                } else {
+                    self.cursor -= 1;
+                    true
+                }
             }
-            Key::SpecialKey(SpecialKey::Right) if self.cursor < grapheme_count => {
-                self.cursor += 1;
-                true
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Right),
+            }) => {
+                if self.cursor >= grapheme_count {
+                    false
+                } else {
+                    self.cursor += 1;
+                    true
+                }
             }
             _ => false,
         }

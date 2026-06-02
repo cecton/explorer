@@ -1,7 +1,7 @@
-use super::state::State;
+use super::state::{FuzzyPickerState, State};
 use r3bl_tui::{
-    EventPropagation, InputEvent, Key, KeyPress, MouseInputKind, RenderOpCommon, RenderOpIR,
-    RenderOpIRVec, SpecialKey, col, new_style, row, tui_color,
+    EventPropagation, InputEvent, Key, KeyPress, MouseInput, MouseInputKind, RenderOpCommon,
+    RenderOpIR, RenderOpIRVec, SpecialKey, col, new_style, row, tui_color,
 };
 use std::collections::HashSet;
 
@@ -18,72 +18,59 @@ impl FuzzyPicker {
         &mut self,
         input_event: &InputEvent,
         page_size: usize,
-        results: &[(K, Vec<u32>)],
-        selected: &mut Option<K>,
+        picker_state: &mut FuzzyPickerState<K>,
     ) -> Option<EventPropagation> {
-        if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event
-            && matches!(
-                *key,
-                Key::SpecialKey(SpecialKey::PageUp | SpecialKey::PageDown)
-            )
-        {
-            let count = results.len();
-            if count > 0 {
-                let current = resolve_selected_index(selected, results);
+        let count = picker_state.results.len();
+        if count == 0 {
+            return None;
+        }
+
+        let current = Self::resolve_selected_index(&picker_state.selected, &picker_state.results);
+
+        let new = match input_event {
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Down),
+            })
+            | InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::ScrollDown,
+                ..
+            }) => (current + 1).min(count - 1),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Up),
+            })
+            | InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::ScrollUp,
+                ..
+            }) => current.saturating_sub(1),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::PageDown),
+            }) => {
                 let page = page_size.saturating_sub(1).max(1);
-                if *key == Key::SpecialKey(SpecialKey::PageDown) {
-                    let next = (current + page).min(count - 1);
-                    let (k, _) = results[next].clone();
-                    *selected = Some(k);
-                } else {
-                    let prev = current.saturating_sub(page);
-                    if let Some((k, _)) = results.get(prev) {
-                        *selected = Some(k.clone());
-                    }
-                }
+                (current + page).min(count - 1)
             }
-            return Some(EventPropagation::ConsumedRender);
-        }
-
-        if let InputEvent::Mouse(mouse_input) = input_event {
-            match mouse_input.kind {
-                MouseInputKind::ScrollUp => {
-                    let count = results.len();
-                    if count > 0 {
-                        let current = resolve_selected_index(selected, results);
-                        let prev = current.saturating_sub(1);
-                        if let Some((key, _)) = results.get(prev) {
-                            *selected = Some(key.clone());
-                        }
-                    }
-                    return Some(EventPropagation::ConsumedRender);
-                }
-                MouseInputKind::ScrollDown => {
-                    let count = results.len();
-                    if count > 0 {
-                        let current = resolve_selected_index(selected, results);
-                        let next = (current + 1).min(count - 1);
-                        let (key, _) = &results[next];
-                        *selected = Some(key.clone());
-                    }
-                    return Some(EventPropagation::ConsumedRender);
-                }
-                _ => {}
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::PageUp),
+            }) => {
+                let page = page_size.saturating_sub(1).max(1);
+                current.saturating_sub(page)
             }
-        }
+            _ => {
+                return None;
+            }
+        };
 
-        None
+        let (key, _) = &picker_state.results[new];
+        picker_state.selected = Some(key.clone());
+        Some(EventPropagation::ConsumedRender)
     }
 
-    #[allow(clippy::too_many_arguments)]
     pub fn render_results<K: Clone + PartialEq>(
         &mut self,
         state: &State,
         results_origin: r3bl_tui::Pos,
         result_rows: usize,
         pane_width: usize,
-        results: &[(K, Vec<u32>)],
-        selected: &Option<K>,
+        picker_state: &FuzzyPickerState<K>,
         display: impl Fn(&K, &State) -> String,
     ) -> RenderOpIRVec {
         let bg_rgb = state.theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
@@ -101,8 +88,9 @@ impl FuzzyPicker {
 
         let mut render_ops = RenderOpIRVec::new();
 
-        let selected_idx = resolve_selected_index(selected, results);
-        let result_count = results.len();
+        let selected_idx =
+            Self::resolve_selected_index(&picker_state.selected, &picker_state.results);
+        let result_count = picker_state.results.len();
 
         if selected_idx < self.scroll_offset {
             self.scroll_offset = selected_idx;
@@ -150,7 +138,7 @@ impl FuzzyPicker {
                 RenderOpCommon::MoveCursorPositionRelTo(results_origin, col(0) + row(row_offset));
 
             let (key, matched_positions) = {
-                let (k, pos) = &results[result_idx];
+                let (k, pos) = &picker_state.results[result_idx];
                 (k.clone(), pos.clone())
             };
             let display_str = display(&key, state);
@@ -182,18 +170,18 @@ impl FuzzyPicker {
 
         render_ops
     }
-}
 
-pub fn resolve_selected_index<K: PartialEq>(
-    selected: &Option<K>,
-    results: &[(K, Vec<u32>)],
-) -> usize {
-    let key = match selected {
-        None => return 0,
-        Some(k) => k,
-    };
-    results
-        .iter()
-        .position(|(result_key, _)| result_key == key)
-        .unwrap_or(0)
+    fn resolve_selected_index<K: PartialEq>(
+        selected: &Option<K>,
+        results: &[(K, Vec<u32>)],
+    ) -> usize {
+        let key = match selected {
+            None => return 0,
+            Some(k) => k,
+        };
+        results
+            .iter()
+            .position(|(result_key, _)| result_key == key)
+            .unwrap_or(0)
+    }
 }

@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 include!("../../themes/themes.rs");
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug, Default)]
 pub struct HelixTheme {
     name: String,
     styles: HashMap<String, Style>,

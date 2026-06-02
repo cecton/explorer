@@ -37,6 +37,32 @@ pub struct WindowState {
     pub scroll_max: usize,
 }
 
+#[derive(Clone, Debug, Default)]
+pub struct FuzzyPickerState<T> {
+    pub query: String,
+    pub results: Vec<(T, Vec<u32>)>,
+    pub selected: Option<T>,
+}
+
+impl<T: Clone + PartialEq> FuzzyPickerState<T> {
+    pub fn reset(&mut self) {
+        self.results.clear();
+        self.selected = None;
+        self.query.clear();
+    }
+
+    pub fn resolve_selected_index(&self) -> usize {
+        let key = match &self.selected {
+            None => return 0,
+            Some(k) => k,
+        };
+        self.results
+            .iter()
+            .position(|(result_key, _)| result_key == key)
+            .unwrap_or(0)
+    }
+}
+
 pub struct TerminalPane {
     pub ofs_buf: OffscreenBuffer,
     pub cursor_key_mode: CursorKeyMode,
@@ -77,10 +103,9 @@ impl Debug for TerminalPane {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct State {
     pub files: Arc<ArcSwap<Vec<LoadedFile>>>,
-    /// Incremented whenever file contents change so PartialEq detects mutations.
     pub files_version: u64,
     pub root: Utf8PathBuf,
     /// Stack of open windows, most-recently-opened first (index 0 = leftmost pane).
@@ -93,18 +118,9 @@ pub struct State {
     pub highlight_ranges: HashMap<FileKey, Vec<(usize, usize)>>,
     pub leader_active: bool,
     pub command_mode_active: bool,
-    pub file_name_picker_open: bool,
-    /// Each entry: (FileKey into files vec, sorted+deduped matched char positions).
-    pub file_name_picker_results: Vec<(FileKey, Vec<u32>)>,
-    pub file_name_picker_selected: Option<FileKey>,
-    pub theme_picker_open: bool,
-    /// Each entry: (theme name, sorted+deduped matched char positions).
-    pub theme_picker_results: Vec<(String, Vec<u32>)>,
-    pub theme_picker_selected: Option<String>,
-    pub file_name_picker_query: String,
-    pub theme_picker_query: String,
+    pub file_name_picker: FuzzyPickerState<FileKey>,
+    pub theme_picker: FuzzyPickerState<String>,
     pub theme: HelixTheme,
-    /// Theme to restore if the user cancels the picker.
     pub saved_theme: HelixTheme,
     /// Current `FlexBox` for each pane slot (index 0..MAX_PANES).
     pub pane_boxes: [FlexBox; MAX_PANES],
@@ -241,21 +257,15 @@ impl State {
             highlight_ranges: HashMap::new(),
             leader_active: false,
             command_mode_active: false,
-            file_name_picker_open: true,
-            file_name_picker_results: Vec::new(),
-            file_name_picker_selected: None,
-            theme_picker_open: false,
-            theme_picker_results: Vec::new(),
-            theme_picker_selected: None,
-            file_name_picker_query: String::new(),
-            theme_picker_query: String::new(),
+            file_name_picker: FuzzyPickerState::default(),
+            theme_picker: FuzzyPickerState::default(),
             theme,
             saved_theme,
             pane_boxes: [FlexBox::default(); MAX_PANES],
             terminal_panes: HashMap::new(),
             next_terminal_id: 0,
         };
-        state.file_name_picker_results = {
+        state.file_name_picker.results = {
             let mut seen: HashSet<usize> = HashSet::new();
             let mut results = Vec::new();
             for window in &state.window_stack {
@@ -274,55 +284,6 @@ impl State {
         state
     }
 }
-
-impl Default for State {
-    fn default() -> Self {
-        Self {
-            files: Arc::new(ArcSwap::from_pointee(Vec::new())),
-            files_version: 0,
-            root: Utf8PathBuf::new(),
-            window_stack: Vec::new(),
-            focused_window: None,
-            window_states: HashMap::new(),
-            highlight_ranges: HashMap::new(),
-            leader_active: false,
-            command_mode_active: false,
-            file_name_picker_open: false,
-            file_name_picker_results: Vec::new(),
-            file_name_picker_selected: None,
-            theme_picker_open: false,
-            theme_picker_results: Vec::new(),
-            theme_picker_selected: None,
-            file_name_picker_query: String::new(),
-            theme_picker_query: String::new(),
-            theme: HelixTheme::default(),
-            saved_theme: HelixTheme::default(),
-            pane_boxes: [FlexBox::default(); MAX_PANES],
-            terminal_panes: HashMap::new(),
-            next_terminal_id: 0,
-        }
-    }
-}
-
-impl PartialEq for State {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.files, &other.files)
-            && self.files_version == other.files_version
-            && self.window_stack == other.window_stack
-            && self.focused_window == other.focused_window
-            && self.leader_active == other.leader_active
-            && self.file_name_picker_open == other.file_name_picker_open
-            && self.file_name_picker_selected == other.file_name_picker_selected
-            && self.file_name_picker_results.len() == other.file_name_picker_results.len()
-            && self.theme_picker_open == other.theme_picker_open
-            && self.theme_picker_selected == other.theme_picker_selected
-            && self.theme_picker_results.len() == other.theme_picker_results.len()
-            && self.theme == other.theme
-            && self.terminal_panes.len() == other.terminal_panes.len()
-    }
-}
-
-impl Eq for State {}
 
 impl Debug for State {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
@@ -345,7 +306,6 @@ impl Display for State {
 #[non_exhaustive]
 pub enum AppSignal {
     FileNamePickerQueryChanged,
-    ThemePickerQueryChanged,
     FilesChanged(Arc<BatchedWatchEvent>),
     /// Open a terminal pane. `cmd = None` means an interactive shell; `cmd = Some(s)` runs
     /// `/bin/sh -c s`. `cwd` is the working directory for the child process.

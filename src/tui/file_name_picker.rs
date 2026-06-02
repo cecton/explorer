@@ -4,9 +4,9 @@ use super::state::{AppSignal, State, Window};
 use super::theme::HelixTheme;
 use r3bl_tui::{
     CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData, HasFocus,
-    InputEvent, Pos, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SurfaceBounds,
-    TerminalWindowMainThreadSignal, ZOrder, col, new_style, render_pipeline, row,
-    throws_with_return, tui_color,
+    InputEvent, Key, KeyPress, KeyState, ModifierKeysMask, Pos, RenderOpCommon, RenderOpIR,
+    RenderOpIRVec, RenderPipeline, SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal,
+    ZOrder, col, new_style, render_pipeline, row, throws_with_return, tui_color,
 };
 
 pub struct FileNamePickerComponent {
@@ -76,18 +76,54 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
-        let page_size = global_data.state.window_page_size(&Window::FileNamePicker);
-        let results = &global_data.state.file_name_picker_results;
-        let selected = &mut global_data.state.file_name_picker_selected;
-        if let Some(result) =
-            self.picker
-                .handle_navigation(&input_event, page_size, results, selected)
-        {
-            return Ok(result);
+        match &input_event {
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Esc),
+            }) => {
+                let state = &mut global_data.state;
+                state.remove_window(&Window::FileNamePicker);
+                state.file_name_picker.reset();
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Enter),
+            }) => {
+                let state = &mut global_data.state;
+                if state.file_name_picker.results.is_empty() {
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                let selected = state.file_name_picker.resolve_selected_index();
+                if let Some(&(key, _)) = state.file_name_picker.results.get(selected) {
+                    if !state.window_states.contains_key(&Window::FilePreview(key)) {
+                        state.set_window_scroll(&Window::FilePreview(key), 0);
+                    }
+                    state.push_window(Window::FilePreview(key));
+                    state.focused_window = Some(Window::FilePreview(key));
+                    crate::lsp::send_file_request(key.0);
+                }
+                state.remove_window(&Window::FileNamePicker);
+                state.file_name_picker.reset();
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('c'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => {
+                let state = &mut global_data.state;
+                state.remove_window(&Window::FileNamePicker);
+                state.file_name_picker.reset();
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            _ => {}
         }
+
         if self
             .input_line
-            .handle_key(&input_event, &mut global_data.state.file_name_picker_query)
+            .handle_key(&input_event, &mut global_data.state.file_name_picker.query)
         {
             let _ = global_data.main_thread_channel_sender.try_send(
                 TerminalWindowMainThreadSignal::ApplyAppSignal(
@@ -96,6 +132,16 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
             );
             return Ok(EventPropagation::ConsumedRender);
         }
+
+        let page_size = global_data.state.window_page_size(&Window::FileNamePicker);
+        if let Some(result) = self.picker.handle_navigation(
+            &input_event,
+            page_size,
+            &mut global_data.state.file_name_picker,
+        ) {
+            return Ok(result);
+        }
+
         Ok(EventPropagation::Propagate)
     }
 
@@ -118,15 +164,12 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                 return Ok(pipeline);
             }
 
-            let results = &global_data.state.file_name_picker_results;
-            let selected = &global_data.state.file_name_picker_selected;
             let result_ops = self.picker.render_results(
                 &global_data.state,
                 origin,
                 total_rows,
                 pane_width,
-                results,
-                selected,
+                &global_data.state.file_name_picker,
                 |key, state| {
                     let snapshot = state.files.load_full();
                     let file = &snapshot[key.0];
@@ -134,7 +177,7 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
                     rel.to_string()
                 },
             );
-            let result_count = results.len();
+            let result_count = global_data.state.file_name_picker.results.len();
 
             global_data
                 .state
