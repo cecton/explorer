@@ -9,11 +9,20 @@ use std::time::{Duration, Instant};
 
 const GUTTER_GAP: &str = "   ";
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DragModifier {
+    Shift,
+    Ctrl,
+}
+
 pub struct FilePreviewComponent {
     id: FlexBoxId,
     command_mode: Option<String>,
     command_input: InputLine,
     error: Option<(String, Instant)>,
+    drag_snapshot: Option<Vec<(usize, usize)>>,
+    drag_start_line: Option<usize>,
+    drag_modifier: Option<DragModifier>,
 }
 
 impl FilePreviewComponent {
@@ -23,6 +32,9 @@ impl FilePreviewComponent {
             command_mode: None,
             command_input: InputLine::new(),
             error: None,
+            drag_snapshot: None,
+            drag_start_line: None,
+            drag_modifier: None,
         }
     }
 
@@ -268,6 +280,45 @@ impl FilePreviewComponent {
         };
         Some(*key)
     }
+
+    pub fn start_drag(
+        &mut self,
+        state: &AppState,
+        key: FileKey,
+        line: usize,
+        modifier: DragModifier,
+    ) {
+        self.drag_snapshot = state.highlight_ranges.get(&key).cloned();
+        self.drag_start_line = Some(line);
+        self.drag_modifier = Some(modifier);
+    }
+
+    pub fn update_drag(&mut self, state: &mut AppState, key: FileKey, current_line: usize) {
+        let Some(start) = self.drag_start_line else {
+            return;
+        };
+        let Some(modifier) = self.drag_modifier else {
+            return;
+        };
+        let snapshot: &[(usize, usize)] = self.drag_snapshot.as_deref().unwrap_or(&[]);
+        let lo = start.min(current_line);
+        let hi = start.max(current_line);
+        let new_ranges = match modifier {
+            DragModifier::Shift => union_ranges(snapshot, lo, hi),
+            DragModifier::Ctrl => subtract_ranges(snapshot, lo, hi),
+        };
+        if new_ranges.is_empty() {
+            state.highlight_ranges.remove(&key);
+        } else {
+            state.highlight_ranges.insert(key, new_ranges);
+        }
+    }
+
+    pub fn end_drag(&mut self) {
+        self.drag_snapshot = None;
+        self.drag_start_line = None;
+        self.drag_modifier = None;
+    }
 }
 
 /// Maps a pane `FlexBoxId` back to its zero-based slot index.
@@ -285,6 +336,9 @@ fn pane_slot(id: FlexBoxId) -> Option<usize> {
 impl Component<AppState, AppSignal> for FilePreviewComponent {
     fn reset(&mut self) {
         self.command_mode = None;
+        self.drag_snapshot = None;
+        self.drag_start_line = None;
+        self.drag_modifier = None;
     }
 
     fn get_id(&self) -> FlexBoxId {
@@ -588,6 +642,47 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             pipeline
         });
     }
+}
+
+/// Merge `lo..=hi` with `snapshot`, combining overlapping or adjacent ranges.
+fn union_ranges(snapshot: &[(usize, usize)], lo: usize, hi: usize) -> Vec<(usize, usize)> {
+    debug_assert!(lo <= hi, "range must be well-formed (lo <= hi)");
+    let mut ranges = snapshot.to_vec();
+    ranges.push((lo, hi));
+    ranges.sort_by_key(|&(s, _)| s);
+    let mut merged: Vec<(usize, usize)> = Vec::new();
+    for &(s, e) in &ranges {
+        if let Some(last) = merged.last_mut()
+            && s <= last.1.saturating_add(1)
+        {
+            last.1 = last.1.max(e);
+            continue;
+        }
+        merged.push((s, e));
+    }
+    merged
+}
+
+/// Remove `lo..=hi` from `snapshot`, splitting partially overlapped ranges.
+fn subtract_ranges(snapshot: &[(usize, usize)], lo: usize, hi: usize) -> Vec<(usize, usize)> {
+    debug_assert!(lo <= hi, "range must be well-formed (lo <= hi)");
+    let mut result = Vec::new();
+    for &(r_lo, r_hi) in snapshot {
+        if r_hi < lo || r_lo > hi {
+            result.push((r_lo, r_hi));
+        } else if lo <= r_lo && hi >= r_hi {
+            // fully covered, drop
+        } else if lo <= r_lo && hi < r_hi {
+            result.push((hi + 1, r_hi));
+        } else if lo > r_lo && hi >= r_hi {
+            result.push((r_lo, lo - 1));
+        } else {
+            // splits
+            result.push((r_lo, lo - 1));
+            result.push((hi + 1, r_hi));
+        }
+    }
+    result
 }
 
 fn title_bar_colors(focused: bool, theme: &HelixTheme) -> ([u8; 3], [u8; 3]) {

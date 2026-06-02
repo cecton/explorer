@@ -129,6 +129,7 @@ pub struct AppState {
     pub terminal_panes: HashMap<usize, Arc<Mutex<TerminalPane>>>,
     /// Next available terminal pane ID.
     pub next_terminal_id: usize,
+    pub mouse_drag_active: bool,
 }
 
 impl AppState {
@@ -264,6 +265,7 @@ impl AppState {
             pane_boxes: [FlexBox::default(); MAX_PANES],
             terminal_panes: HashMap::new(),
             next_terminal_id: 0,
+            mouse_drag_active: false,
         };
         state.file_name_picker.results =
             crate::tui::file_name_picker::FileNamePickerComponent::all_files_results(

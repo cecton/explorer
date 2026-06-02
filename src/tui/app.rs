@@ -1,5 +1,6 @@
 use crate::loader::LoadedFile;
 use crate::lsp::{self, LSP_RRT};
+use crate::tui::preview::DragModifier;
 use crate::tui::*;
 use crate::watcher::{WATCHER_RRT, set_watcher_root};
 use arc_swap::ArcSwap;
@@ -72,6 +73,7 @@ struct PaneComponent {
     scrollbar_dragging: bool,
     /// (scroll, rel_y) at thumb grab time (None if drag started on track).
     scrollbar_grab_state: Option<(usize, usize)>,
+    preview_drag_active: bool,
 }
 
 impl PaneComponent {
@@ -94,6 +96,7 @@ impl PaneComponent {
             content_origin_col: 0,
             scrollbar_dragging: false,
             scrollbar_grab_state: None,
+            preview_drag_active: false,
         })
     }
 
@@ -251,12 +254,28 @@ fn scroll_from_y(
     (rel_y * (scroll_max - page_size)) / (scrollbar_height.saturating_sub(1).max(1))
 }
 
+fn drag_modifier_from_mouse(mouse: &MouseInput) -> Option<DragModifier> {
+    let mask = mouse.maybe_modifier_keys?;
+    let shift = mask.shift_key_state == KeyState::Pressed;
+    let ctrl = mask.ctrl_key_state == KeyState::Pressed;
+    let alt = mask.alt_key_state == KeyState::Pressed;
+    if alt {
+        return None;
+    }
+    match (shift, ctrl) {
+        (true, false) => Some(DragModifier::Shift),
+        (false, true) => Some(DragModifier::Ctrl),
+        _ => None,
+    }
+}
+
 impl Component<AppState, AppSignal> for PaneComponent {
     fn reset(&mut self) {
         self.picker.reset();
         self.theme_picker.reset();
         self.preview.reset();
         self.terminal.reset();
+        self.preview_drag_active = false;
     }
 
     fn get_id(&self) -> FlexBoxId {
@@ -269,13 +288,28 @@ impl Component<AppState, AppSignal> for PaneComponent {
         input_event: InputEvent,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        // If a preview drag was active but the window changed, clean up.
+        if self.preview_drag_active
+            && !matches!(
+                self.active_window(&global_data.state),
+                Some(Window::FilePreview(_))
+            )
+        {
+            self.preview_drag_active = false;
+            self.preview.end_drag();
+            global_data.state.mouse_drag_active = false;
+        }
+
         let active_is_terminal = matches!(
             self.active_window(&global_data.state),
             Some(Window::Terminal(_))
         );
 
         // Check for scrollbar mouse interaction first.
-        if !active_is_terminal && let InputEvent::Mouse(mouse) = input_event {
+        if !active_is_terminal
+            && !self.preview_drag_active
+            && let InputEvent::Mouse(mouse) = input_event
+        {
             let col = mouse.pos.col_index.as_usize();
             let row = mouse.pos.row_index.as_usize();
             let origin_col = self.content_origin_col as usize;
@@ -294,31 +328,82 @@ impl Component<AppState, AppSignal> for PaneComponent {
         }
 
         // Check for title bar range click.
-        if let InputEvent::Mouse(mouse) = input_event {
-            if let Some(window) = self.active_window(&global_data.state).cloned() {
-                if let Window::FilePreview(key) = window {
-                    let title_bar_row = self.content_origin_row.saturating_sub(1) as usize;
-                    let origin_col = self.content_origin_col as usize;
-                    let pane_width = self.content_col_count as usize;
-                    let col = mouse.pos.col_index.as_usize();
-                    let row = mouse.pos.row_index.as_usize();
+        if let InputEvent::Mouse(mouse) = input_event
+            && let Some(window) = self.active_window(&global_data.state).cloned()
+            && let Window::FilePreview(key) = window
+        {
+            let title_bar_row = self.content_origin_row.saturating_sub(1) as usize;
+            let origin_col = self.content_origin_col as usize;
+            let pane_width = self.content_col_count as usize;
+            let col = mouse.pos.col_index.as_usize();
+            let row = mouse.pos.row_index.as_usize();
 
-                    if row == title_bar_row
-                        && col >= origin_col
-                        && col < origin_col + pane_width
-                        && matches!(mouse.kind, MouseInputKind::MouseDown(Button::Left))
-                    {
-                        if let Some((lo, hi)) = self.preview.range_at_title_col(
-                            &global_data.state,
-                            col - origin_col,
-                            pane_width,
-                        ) {
-                            self.preview
-                                .scroll_to_range(&mut global_data.state, key, lo, hi);
-                            return Ok(EventPropagation::ConsumedRender);
-                        }
+            if row == title_bar_row
+                && col >= origin_col
+                && col < origin_col + pane_width
+                && matches!(mouse.kind, MouseInputKind::MouseDown(Button::Left))
+                && let Some((lo, hi)) = self.preview.range_at_title_col(
+                    &global_data.state,
+                    col - origin_col,
+                    pane_width,
+                )
+            {
+                self.preview
+                    .scroll_to_range(&mut global_data.state, key, lo, hi);
+                return Ok(EventPropagation::ConsumedRender);
+            }
+        }
+
+        // Preview content drag.
+        if let InputEvent::Mouse(mouse) = input_event
+            && let Some(window) = self.active_window(&global_data.state).cloned()
+            && let Window::FilePreview(key) = window
+        {
+            let col = mouse.pos.col_index.as_usize();
+            let row = mouse.pos.row_index.as_usize();
+            let origin_row = self.content_origin_row as usize;
+            let origin_col = self.content_origin_col as usize;
+            let col_count = self.content_col_count as usize;
+            let row_count = self.content_row_count as usize;
+
+            let in_content_rows = row >= origin_row && row < origin_row + row_count;
+            let in_content_cols =
+                col >= origin_col && col < origin_col + col_count.saturating_sub(1);
+
+            match mouse.kind {
+                MouseInputKind::MouseDown(Button::Left) if in_content_rows && in_content_cols => {
+                    if let Some(modifier) = drag_modifier_from_mouse(&mouse) {
+                        let state = &mut global_data.state;
+                        let window = Window::FilePreview(key);
+                        let scroll = state.window_scroll(&window);
+                        let scroll_max = state.window_scroll_max(&window);
+                        let rel_y = row.saturating_sub(origin_row);
+                        let line = (scroll + rel_y + 1).clamp(1, scroll_max.max(1));
+
+                        self.preview_drag_active = true;
+                        self.preview.start_drag(state, key, line, modifier);
+                        state.mouse_drag_active = true;
+                        return Ok(EventPropagation::ConsumedRender);
                     }
                 }
+                MouseInputKind::MouseDrag(Button::Left) if self.preview_drag_active => {
+                    let state = &mut global_data.state;
+                    let window = Window::FilePreview(key);
+                    let scroll = state.window_scroll(&window);
+                    let scroll_max = state.window_scroll_max(&window);
+                    let rel_y = row.saturating_sub(origin_row);
+                    let line = (scroll + rel_y + 1).clamp(1, scroll_max.max(1));
+
+                    self.preview.update_drag(state, key, line);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                MouseInputKind::MouseUp(Button::Left) if self.preview_drag_active => {
+                    self.preview_drag_active = false;
+                    self.preview.end_drag();
+                    global_data.state.mouse_drag_active = false;
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                _ => {}
             }
         }
 
@@ -894,13 +979,14 @@ impl App for AppMain {
         if let InputEvent::Keyboard(KeyPress::WithModifiers { key, mask }) = input_event
             && key == Key::Character('`')
             && mask == ModifierKeysMask::new().with_alt()
+            && !global_data.state.mouse_drag_active
         {
             global_data.state.leader_active = true;
             return Ok(EventPropagation::ConsumedRender);
         }
 
         // Leader key dispatch.
-        if global_data.state.leader_active {
+        if global_data.state.leader_active && !global_data.state.mouse_drag_active {
             global_data.state.leader_active = false;
             match &input_event {
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -1020,7 +1106,9 @@ impl App for AppMain {
             }
         }
 
-        if !matches!(global_data.state.focused_window, Some(Window::Terminal(_))) {
+        if !matches!(global_data.state.focused_window, Some(Window::Terminal(_)))
+            && !global_data.state.mouse_drag_active
+        {
             match &input_event {
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Tab),
@@ -1042,12 +1130,14 @@ impl App for AppMain {
             }
         }
 
-        if matches!(
-            global_data.state.focused_window,
-            Some(Window::FilePreview(_))
-        ) && let InputEvent::Keyboard(KeyPress::Plain {
-            key: Key::SpecialKey(SpecialKey::Esc),
-        }) = input_event
+        if !global_data.state.mouse_drag_active
+            && matches!(
+                global_data.state.focused_window,
+                Some(Window::FilePreview(_))
+            )
+            && let InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Esc),
+            }) = input_event
             && !global_data.state.command_mode_active
         {
             let state = &mut global_data.state;
@@ -1057,7 +1147,9 @@ impl App for AppMain {
             return Ok(EventPropagation::ConsumedRender);
         }
 
-        if let Some(Window::Terminal(tid)) = global_data.state.focused_window.clone() {
+        if !global_data.state.mouse_drag_active
+            && let Some(Window::Terminal(tid)) = global_data.state.focused_window.clone()
+        {
             let should_dismiss = global_data
                 .state
                 .terminal_panes
@@ -1086,6 +1178,7 @@ impl App for AppMain {
 
         if let InputEvent::Mouse(mouse) = &input_event
             && mouse.kind == MouseInputKind::MouseMove
+            && !global_data.state.mouse_drag_active
         {
             let px = mouse.pos.col_index;
             let py = mouse.pos.row_index;
@@ -1251,7 +1344,10 @@ impl App for AppMain {
                 .as_ref()
                 .map(|f| visible.iter().any(|(w, _)| w == f))
                 .unwrap_or(false);
-            if !focused_is_visible && let Some((front, _)) = visible.first() {
+            if !global_data.state.mouse_drag_active
+                && !focused_is_visible
+                && let Some((front, _)) = visible.first()
+            {
                 global_data.state.focused_window = Some(front.clone());
             }
 
