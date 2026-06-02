@@ -1,17 +1,14 @@
-use super::file_name_picker::FileNamePickerComponent;
+use super::file_name_picker::{FileNamePickerComponent, PickerResultMsg};
 use super::preview::FilePreviewComponent;
 use super::state::{AppSignal, MAX_PANES, State, TerminalPane, Window};
 use super::terminal_pane::TerminalPaneComponent;
 use super::theme::HelixTheme;
 use super::theme_picker::ThemePickerComponent;
-use crate::loader::{FileKey, LoadedFile};
+use crate::loader::LoadedFile;
 use crate::lsp::{self, LSP_RRT};
 use crate::watcher::{WATCHER_RRT, set_watcher_root};
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
-use nucleo::Matcher;
-use nucleo::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo::{Config, Utf32Str};
 use r3bl_tui::core::osc::OscEvent;
 use r3bl_tui::core::pty::{
     CursorKeyMode, DefaultPtySessionConfig, MouseTrackingMode, PtyInputEvent, PtyOutputEvent,
@@ -26,16 +23,13 @@ use r3bl_tui::{
     SpecialKey, Surface, SurfaceBounds, SurfaceProps, SurfaceRender, TerminalWindow,
     TerminalWindowMainThreadSignal, TuiAvailability, TuiStylesheet, ZOrder, box_end, box_start,
     col, height, new_style, ok, render_component_in_current_box, render_pipeline,
-    render_tui_styled_texts_into, req_size_pc, row, send_signal, surface, throws,
-    throws_with_return, tui_color, tui_styled_text, tui_styled_texts, tui_stylesheet, width,
+    render_tui_styled_texts_into, req_size_pc, row, surface, throws, throws_with_return, tui_color,
+    tui_styled_text, tui_styled_texts, tui_stylesheet, width,
 };
-use std::collections::HashSet;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
-
-type PickerResultMsg = (u64, Vec<(FileKey, Vec<u32>)>);
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -98,11 +92,16 @@ struct PaneComponent {
 }
 
 impl PaneComponent {
-    fn new_boxed(slot: usize, id: FlexBoxId) -> BoxedSafeComponent<State, AppSignal> {
+    fn new_boxed(
+        slot: usize,
+        id: FlexBoxId,
+        picker_results_tx: mpsc::Sender<PickerResultMsg>,
+        picker_generation: Arc<AtomicU64>,
+    ) -> BoxedSafeComponent<State, AppSignal> {
         Box::new(Self {
             id,
             slot,
-            picker: FileNamePickerComponent::new(id),
+            picker: FileNamePickerComponent::new(id, picker_results_tx, picker_generation),
             theme_picker: ThemePickerComponent::new(id),
             preview: FilePreviewComponent::new(id),
             terminal: TerminalPaneComponent::new(id),
@@ -565,46 +564,6 @@ impl AppMain {
         })
     }
 
-    fn trigger_match(
-        &self,
-        query: String,
-        window_stack: Vec<Window>,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-    ) {
-        let generation = self.picker_generation.fetch_add(1, Ordering::Relaxed) + 1;
-        let snapshot = self.files.load_full();
-        let root = self.root.clone();
-        let tx = self.picker_results_tx.clone();
-        let gen_counter = Arc::clone(&self.picker_generation);
-        tokio::task::spawn_blocking(move || {
-            let results = run_file_name_match(&query, &snapshot, &root, &window_stack);
-            if gen_counter.load(Ordering::Relaxed) == generation {
-                let _ = tx.try_send((generation, results));
-                send_signal!(
-                    main_tx,
-                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::Noop)
-                );
-            }
-        });
-    }
-
-    fn all_files_results(
-        files: &[LoadedFile],
-        window_stack: &[Window],
-    ) -> Vec<(FileKey, Vec<u32>)> {
-        let mut seen: HashSet<usize> = HashSet::new();
-        let mut results = Vec::new();
-        for window in window_stack {
-            if let Window::FilePreview(key) = window
-                && !files[key.0].removed.load(Ordering::Relaxed)
-                && seen.insert(key.0)
-            {
-                results.push((*key, vec![]));
-            }
-        }
-        results
-    }
-
     fn open_terminal(
         &mut self,
         global_data: &mut GlobalData<State, AppSignal>,
@@ -808,41 +767,6 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut State) {
     }
 }
 
-fn run_file_name_match(
-    query: &str,
-    files: &[LoadedFile],
-    root: &Utf8PathBuf,
-    window_stack: &[Window],
-) -> Vec<(FileKey, Vec<u32>)> {
-    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
-
-    if pattern.atoms.is_empty() {
-        return AppMain::all_files_results(files, window_stack);
-    }
-
-    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
-    let mut buf = Vec::new();
-    let mut scored: Vec<(FileKey, u32, Vec<u32>)> = files
-        .iter()
-        .enumerate()
-        .filter(|(_, f)| !f.removed.load(Ordering::Relaxed))
-        .filter_map(|(i, file)| {
-            let rel = file.path.strip_prefix(root).unwrap_or(&file.path);
-            let haystack = Utf32Str::new(rel.as_str(), &mut buf);
-            let mut indices = Vec::new();
-            pattern
-                .indices(haystack, &mut matcher, &mut indices)
-                .map(|score| {
-                    indices.sort_unstable();
-                    indices.dedup();
-                    (FileKey(i), score, indices)
-                })
-        })
-        .collect();
-    scored.sort_by_key(|&(_, score, _)| std::cmp::Reverse(score));
-    scored.into_iter().map(|(key, _, idx)| (key, idx)).collect()
-}
-
 impl App for AppMain {
     type S = State;
     type AS = AppSignal;
@@ -860,7 +784,12 @@ impl App for AppMain {
                 ComponentRegistry::put(
                     component_registry_map,
                     pane_id,
-                    PaneComponent::new_boxed(slot, pane_id),
+                    PaneComponent::new_boxed(
+                        slot,
+                        pane_id,
+                        self.picker_results_tx.clone(),
+                        Arc::clone(&self.picker_generation),
+                    ),
                 );
             }
         }
@@ -975,7 +904,7 @@ impl App for AppMain {
                     state.file_name_picker.selected = None;
                     let snapshot = state.files.load();
                     state.file_name_picker.results =
-                        AppMain::all_files_results(&snapshot, &state.window_stack);
+                        FileNamePickerComponent::all_files_results(&snapshot, &state.window_stack);
                     state.file_name_picker.query = String::new();
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -1190,20 +1119,6 @@ impl App for AppMain {
         throws_with_return!({
             let state = &mut global_data.state;
             match action {
-                AppSignal::FileNamePickerQueryChanged => {
-                    let query = state.file_name_picker.query.clone();
-                    if query.is_empty() {
-                        let snapshot = state.files.load();
-                        state.file_name_picker.results =
-                            AppMain::all_files_results(&snapshot, &state.window_stack);
-                    } else {
-                        self.trigger_match(
-                            query,
-                            state.window_stack.clone(),
-                            global_data.main_thread_channel_sender.clone(),
-                        );
-                    }
-                }
                 AppSignal::FilesChanged(batch) => {
                     let snapshot = self.files.load_full();
 
@@ -1264,14 +1179,17 @@ impl App for AppMain {
 
                     let snapshot = self.files.load();
                     if state.window_stack.contains(&Window::FileNamePicker) {
-                        let query = state.file_name_picker.query.clone();
-                        if query.is_empty() {
+                        if state.file_name_picker.query.is_empty() {
                             state.file_name_picker.results =
-                                AppMain::all_files_results(&snapshot, &state.window_stack);
+                                FileNamePickerComponent::all_files_results(
+                                    &snapshot,
+                                    &state.window_stack,
+                                );
                         } else {
-                            self.trigger_match(
-                                query,
-                                state.window_stack.clone(),
+                            FileNamePickerComponent::spawn_match(
+                                &*state,
+                                Arc::clone(&self.picker_generation),
+                                self.picker_results_tx.clone(),
                                 global_data.main_thread_channel_sender.clone(),
                             );
                         }
@@ -1294,11 +1212,16 @@ impl App for AppMain {
     ) -> CommonResult<RenderPipeline> {
         sync_has_focus(&global_data.state, has_focus);
 
-        let current_generation = self.picker_generation.load(Ordering::Relaxed);
+        let mut best_generation = 0u64;
+        let mut best_results = None;
         while let Ok((arrived_generation, results)) = self.picker_results_rx.try_recv() {
-            if arrived_generation == current_generation {
-                global_data.state.file_name_picker.results = results;
+            if arrived_generation > best_generation {
+                best_generation = arrived_generation;
+                best_results = Some(results);
             }
+        }
+        if let Some(results) = best_results {
+            global_data.state.file_name_picker.results = results;
         }
 
         poll_terminal_output(self, &mut global_data.state);

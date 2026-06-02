@@ -7,7 +7,7 @@ use r3bl_tui::core::pty::{
     ControlledChildTerminationHandle, CursorKeyMode, MouseTrackingMode, PtyInputEvent,
 };
 use r3bl_tui::{FlexBox, OffscreenBuffer, Size};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -265,19 +265,11 @@ impl State {
             terminal_panes: HashMap::new(),
             next_terminal_id: 0,
         };
-        state.file_name_picker.results = {
-            let mut seen: HashSet<usize> = HashSet::new();
-            let mut results = Vec::new();
-            for window in &state.window_stack {
-                if let Window::FilePreview(key) = window
-                    && !snapshot[key.0].removed.load(Ordering::Relaxed)
-                    && seen.insert(key.0)
-                {
-                    results.push((*key, vec![]));
-                }
-            }
-            results
-        };
+        state.file_name_picker.results =
+            crate::tui::file_name_picker::FileNamePickerComponent::all_files_results(
+                &snapshot,
+                &state.window_stack,
+            );
         state
             .window_states
             .insert(Window::FileNamePicker, WindowState::default());
@@ -305,7 +297,6 @@ impl Display for State {
 #[derive(Default, Clone, Debug)]
 #[non_exhaustive]
 pub enum AppSignal {
-    FileNamePickerQueryChanged,
     FilesChanged(Arc<BatchedWatchEvent>),
     /// Open a terminal pane. `cmd = None` means an interactive shell; `cmd = Some(s)` runs
     /// `/bin/sh -c s`. `cwd` is the working directory for the child process.
