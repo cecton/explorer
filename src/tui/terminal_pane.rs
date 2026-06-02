@@ -72,7 +72,7 @@ impl Component<State, AppSignal> for TerminalPaneComponent {
                 }
                 InputEvent::Mouse(mouse) => {
                     if !should_forward_mouse(&mouse.kind, mouse_tracking_mode) {
-                        return Ok(EventPropagation::ConsumedRender);
+                        return Ok(EventPropagation::Consumed);
                     }
                     let Some(slot) = pane_slot(self.id) else {
                         return Ok(EventPropagation::Propagate);
