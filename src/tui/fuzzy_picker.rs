@@ -1,8 +1,4 @@
-use super::state::{FuzzyPickerState, State};
-use r3bl_tui::{
-    EventPropagation, InputEvent, Key, KeyPress, MouseInput, MouseInputKind, RenderOpCommon,
-    RenderOpIR, RenderOpIRVec, SpecialKey, col, new_style, row, tui_color,
-};
+use crate::tui::*;
 use std::collections::HashSet;
 
 pub struct FuzzyPicker {
@@ -66,12 +62,12 @@ impl FuzzyPicker {
 
     pub fn render_results<K: Clone + PartialEq>(
         &mut self,
-        state: &State,
-        results_origin: r3bl_tui::Pos,
+        state: &AppState,
+        picker_state: &FuzzyPickerState<K>,
+        results_origin: Pos,
         result_rows: usize,
         pane_width: usize,
-        picker_state: &FuzzyPickerState<K>,
-        display: impl Fn(&K, &State) -> String,
+        display: impl Fn(&K, &AppState) -> String,
     ) -> RenderOpIRVec {
         let bg_rgb = state.theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
         let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);

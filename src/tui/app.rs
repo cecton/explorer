@@ -1,11 +1,6 @@
-use super::file_name_picker::{FileNamePickerComponent, PickerResultMsg};
-use super::preview::FilePreviewComponent;
-use super::state::{AppSignal, MAX_PANES, State, TerminalPane, Window};
-use super::terminal_pane::TerminalPaneComponent;
-use super::theme::HelixTheme;
-use super::theme_picker::ThemePickerComponent;
 use crate::loader::LoadedFile;
 use crate::lsp::{self, LSP_RRT};
+use crate::tui::*;
 use crate::watcher::{WATCHER_RRT, set_watcher_root};
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
@@ -13,18 +8,6 @@ use r3bl_tui::core::osc::OscEvent;
 use r3bl_tui::core::pty::{
     CursorKeyMode, DefaultPtySessionConfig, MouseTrackingMode, PtyInputEvent, PtyOutputEvent,
     PtySessionBuilder, PtySessionConfigOption,
-};
-use r3bl_tui::{
-    App, BoxedSafeApp, BoxedSafeComponent, Button, CommonResult, Component, ComponentRegistry,
-    ComponentRegistryMap, ContainsResult, EventPropagation, FlexBox, FlexBoxId, GlobalData,
-    HasFocus, InputEvent, IntoErr, Key, KeyPress, LayoutDirection, LayoutManagement, LengthOps,
-    ModifierKeysMask, MouseInput, MouseInputKind, OffscreenBuffer, PerformPositioningAndSizing,
-    PixelChar, RenderOpCommon, RenderOpIR, RenderOpIRVec, RenderPipeline, SPACER_GLYPH, Size,
-    SpecialKey, Surface, SurfaceBounds, SurfaceProps, SurfaceRender, TerminalWindow,
-    TerminalWindowMainThreadSignal, TuiAvailability, TuiStylesheet, ZOrder, box_end, box_start,
-    col, height, new_style, ok, render_component_in_current_box, render_pipeline,
-    render_tui_styled_texts_into, req_size_pc, row, surface, throws, throws_with_return, tui_color,
-    tui_styled_text, tui_styled_texts, tui_stylesheet, width,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -97,7 +80,7 @@ impl PaneComponent {
         id: FlexBoxId,
         picker_results_tx: mpsc::Sender<PickerResultMsg>,
         picker_generation: Arc<AtomicU64>,
-    ) -> BoxedSafeComponent<State, AppSignal> {
+    ) -> BoxedSafeComponent<AppState, AppSignal> {
         Box::new(Self {
             id,
             slot,
@@ -114,14 +97,14 @@ impl PaneComponent {
         })
     }
 
-    fn active_window<'s>(&self, state: &'s State) -> Option<&'s Window> {
+    fn active_window<'s>(&self, state: &'s AppState) -> Option<&'s Window> {
         state.window_stack.get(self.slot)
     }
 
     fn handle_scrollbar(
         &mut self,
         mouse: MouseInput,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
     ) -> EventPropagation {
         let Some(window) = self.active_window(&global_data.state).cloned() else {
             return EventPropagation::Propagate;
@@ -198,7 +181,7 @@ impl PaneComponent {
 
     fn apply_scroll(
         &mut self,
-        state: &mut State,
+        state: &mut AppState,
         window: &Window,
         target: usize,
     ) -> EventPropagation {
@@ -268,7 +251,7 @@ fn scroll_from_y(
     (rel_y * (scroll_max - page_size)) / (scrollbar_height.saturating_sub(1).max(1))
 }
 
-impl Component<State, AppSignal> for PaneComponent {
+impl Component<AppState, AppSignal> for PaneComponent {
     fn reset(&mut self) {
         self.picker.reset();
         self.theme_picker.reset();
@@ -282,7 +265,7 @@ impl Component<State, AppSignal> for PaneComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
         input_event: InputEvent,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -333,7 +316,7 @@ impl Component<State, AppSignal> for PaneComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
         surface_bounds: SurfaceBounds,
         has_focus: &mut HasFocus,
@@ -549,7 +532,7 @@ impl AppMain {
         files: Arc<ArcSwap<Vec<LoadedFile>>>,
         root: Utf8PathBuf,
         exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
-    ) -> BoxedSafeApp<State, AppSignal> {
+    ) -> BoxedSafeApp<AppState, AppSignal> {
         let (picker_results_tx, picker_results_rx) = mpsc::channel(32);
         let (terminal_event_tx, terminal_event_rx) = mpsc::unbounded_channel();
         Box::new(Self {
@@ -566,7 +549,7 @@ impl AppMain {
 
     fn open_terminal(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
         cmd: Option<String>,
         cwd: Option<Utf8PathBuf>,
     ) -> CommonResult<EventPropagation> {
@@ -737,7 +720,7 @@ fn is_buffer_empty(ofs_buf: &OffscreenBuffer) -> bool {
     })
 }
 
-fn poll_terminal_output(app: &mut AppMain, state: &mut State) {
+fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
     while let Ok((id, event)) = app.terminal_event_rx.try_recv() {
         if let PtyOutputEvent::Exit(status) = event {
             let exit_code = Some(status.exit_code());
@@ -768,7 +751,7 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut State) {
 }
 
 impl App for AppMain {
-    type S = State;
+    type S = AppState;
     type AS = AppSignal;
 
     fn app_init(
@@ -801,8 +784,8 @@ impl App for AppMain {
 
     fn app_start(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
-        _component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
+        _component_registry_map: &mut ComponentRegistryMap<AppState, AppSignal>,
         _has_focus: &mut HasFocus,
     ) {
         let notify_tx = global_data.main_thread_channel_sender.clone();
@@ -872,8 +855,8 @@ impl App for AppMain {
     fn app_handle_input_event(
         &mut self,
         input_event: InputEvent,
-        global_data: &mut GlobalData<State, AppSignal>,
-        component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
+        component_registry_map: &mut ComponentRegistryMap<AppState, AppSignal>,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
         sync_has_focus(&global_data.state, has_focus);
@@ -1105,8 +1088,8 @@ impl App for AppMain {
     fn app_handle_signal(
         &mut self,
         action: &AppSignal,
-        global_data: &mut GlobalData<State, AppSignal>,
-        _component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
+        _component_registry_map: &mut ComponentRegistryMap<AppState, AppSignal>,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
         sync_has_focus(&global_data.state, _has_focus);
@@ -1206,8 +1189,8 @@ impl App for AppMain {
 
     fn app_render(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
-        component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
+        component_registry_map: &mut ComponentRegistryMap<AppState, AppSignal>,
         has_focus: &mut HasFocus,
     ) -> CommonResult<RenderPipeline> {
         sync_has_focus(&global_data.state, has_focus);
@@ -1308,7 +1291,7 @@ impl App for AppMain {
 }
 
 /// Returns the `FlexBoxId` for the pane slot that corresponds to the focused window.
-pub(super) fn focused_pane_id(state: &State) -> FlexBoxId {
+pub(super) fn focused_pane_id(state: &AppState) -> FlexBoxId {
     let Some(focused) = &state.focused_window else {
         return FlexBoxId::from(Id::Pane0);
     };
@@ -1320,11 +1303,11 @@ pub(super) fn focused_pane_id(state: &State) -> FlexBoxId {
     FlexBoxId::from(Id::pane(slot))
 }
 
-fn sync_has_focus(state: &State, has_focus: &mut HasFocus) {
+fn sync_has_focus(state: &AppState, has_focus: &mut HasFocus) {
     has_focus.set_id(focused_pane_id(state));
 }
 
-fn cycle_focus(state: &mut State, visible: &[(Window, u16)], direction: i32) {
+fn cycle_focus(state: &mut AppState, visible: &[(Window, u16)], direction: i32) {
     if visible.is_empty() {
         return;
     }
@@ -1343,12 +1326,12 @@ struct PanesRenderer<'a> {
     visible: &'a [(Window, u16)],
 }
 
-impl SurfaceRender<State, AppSignal> for PanesRenderer<'_> {
+impl SurfaceRender<AppState, AppSignal> for PanesRenderer<'_> {
     fn render_in_surface(
         &mut self,
         surface: &mut Surface,
-        global_data: &mut GlobalData<State, AppSignal>,
-        component_registry_map: &mut ComponentRegistryMap<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
+        component_registry_map: &mut ComponentRegistryMap<AppState, AppSignal>,
         has_focus: &mut HasFocus,
     ) -> CommonResult<()> {
         throws!({
@@ -1646,12 +1629,12 @@ pub fn build_state(
     files: Arc<ArcSwap<Vec<LoadedFile>>>,
     root: Utf8PathBuf,
     theme: crate::tui::theme::HelixTheme,
-) -> State {
-    State::new(files, root, theme)
+) -> AppState {
+    AppState::new(files, root, theme)
 }
 
 pub async fn run(
-    initial_state: State,
+    initial_state: AppState,
     files: Arc<ArcSwap<Vec<LoadedFile>>>,
     root: Utf8PathBuf,
 ) -> CommonResult<()> {

@@ -104,7 +104,7 @@ impl Debug for TerminalPane {
 }
 
 #[derive(Clone, Default)]
-pub struct State {
+pub struct AppState {
     pub files: Arc<ArcSwap<Vec<LoadedFile>>>,
     pub files_version: u64,
     pub root: Utf8PathBuf,
@@ -131,7 +131,7 @@ pub struct State {
     pub next_terminal_id: usize,
 }
 
-impl State {
+impl AppState {
     pub fn bump_files_version(&mut self) {
         self.files_version = FILES_VERSION.fetch_add(1, Ordering::Relaxed) + 1;
     }
@@ -243,7 +243,7 @@ impl State {
     }
 }
 
-impl State {
+impl AppState {
     pub fn new(files: Arc<ArcSwap<Vec<LoadedFile>>>, root: Utf8PathBuf, theme: HelixTheme) -> Self {
         let snapshot = files.load();
         let saved_theme = theme.clone();
@@ -277,20 +277,20 @@ impl State {
     }
 }
 
-impl Debug for State {
+impl Debug for AppState {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let count = self.files.load().len();
         write!(
             f,
-            "State {{ files: {}, stack: {:?}, focused: {:?} }}",
+            "AppState {{ files: {}, stack: {:?}, focused: {:?} }}",
             count, self.window_stack, self.focused_window
         )
     }
 }
 
-impl Display for State {
+impl Display for AppState {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "State[files={}]", self.files.load().len())
+        write!(f, "AppState[files={}]", self.files.load().len())
     }
 }
 

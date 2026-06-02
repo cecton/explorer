@@ -1,4 +1,4 @@
-use crate::tui::state::AppSignal;
+use crate::tui::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use r3bl_tui::{Continuation, RRT, RRTEvent, RRTSoftwareInterrupt, RRTWorker, RestartPolicy};

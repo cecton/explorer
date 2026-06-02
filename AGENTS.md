@@ -128,7 +128,7 @@ Planned feature areas and their likely dependencies:
 
 - Group `use` statements: standard library first, then external crates, then local modules.
 - Prefer importing the type directly over aliasing (`use camino::Utf8PathBuf` not `use camino::Utf8PathBuf as UtfBuf`).
-- Avoid glob imports (`use std::io::*`) except in test modules where `use super::*` is conventional.
+- Glob imports are fine when they reduce boilerplate for large, stable external APIs (e.g. `use r3bl_tui::*;` in a module that re-exports to its children).
 
 ### Paths
 

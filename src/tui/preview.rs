@@ -1,16 +1,10 @@
 use super::app::Id;
 use super::input_line::InputLine;
-use super::state::{AppSignal, State, Window};
+use super::state::{AppSignal, AppState, Window};
 use super::theme::HelixTheme;
 use crate::loader::FileKey;
+use crate::tui::*;
 use camino::{Utf8Path, Utf8PathBuf};
-use r3bl_tui::{
-    CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData, HasFocus,
-    InputEvent, Key, KeyPress, ModifierKeysMask, MouseInputKind, Pos, RenderOpCommon, RenderOpIR,
-    RenderOpIRVec, RenderPipeline, SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal,
-    ZOrder, col, new_style, render_pipeline, row, send_signal, throws_with_return, tui_color,
-    width,
-};
 use std::time::{Duration, Instant};
 
 const GUTTER_GAP: &str = "   ";
@@ -32,7 +26,7 @@ impl FilePreviewComponent {
         }
     }
 
-    pub fn title_text(&mut self, state: &State) -> String {
+    pub fn title_text(&mut self, state: &AppState) -> String {
         if let Some((msg, set_at)) = &self.error {
             if set_at.elapsed() < Duration::from_secs(3) {
                 return msg.clone();
@@ -88,7 +82,11 @@ impl FilePreviewComponent {
         true
     }
 
-    fn execute_command(&mut self, global_data: &mut GlobalData<State, AppSignal>, window: &Window) {
+    fn execute_command(
+        &mut self,
+        global_data: &mut GlobalData<AppState, AppSignal>,
+        window: &Window,
+    ) {
         let Window::FilePreview(file_key) = window else {
             return;
         };
@@ -169,7 +167,7 @@ impl FilePreviewComponent {
         }
     }
 
-    fn is_line_highlighted(state: &State, file_key: FileKey, line_1_indexed: usize) -> bool {
+    fn is_line_highlighted(state: &AppState, file_key: FileKey, line_1_indexed: usize) -> bool {
         state
             .highlight_ranges
             .get(&file_key)
@@ -183,7 +181,7 @@ impl FilePreviewComponent {
 
     /// Returns the `FileKey` this pane slot should render, or `None` if the slot holds a
     /// non-preview window or the stack has no entry for this slot.
-    pub(super) fn file_key(&self, state: &State) -> Option<FileKey> {
+    pub(super) fn file_key(&self, state: &AppState) -> Option<FileKey> {
         let slot = pane_slot(self.id)?;
         let Window::FilePreview(key) = state.window_stack.get(slot)? else {
             return None;
@@ -204,7 +202,7 @@ fn pane_slot(id: FlexBoxId) -> Option<usize> {
     }
 }
 
-impl Component<State, AppSignal> for FilePreviewComponent {
+impl Component<AppState, AppSignal> for FilePreviewComponent {
     fn reset(&mut self) {
         self.command_mode = None;
     }
@@ -215,7 +213,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -367,7 +365,7 @@ impl Component<State, AppSignal> for FilePreviewComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
         _surface_bounds: SurfaceBounds,
         _has_focus: &mut HasFocus,

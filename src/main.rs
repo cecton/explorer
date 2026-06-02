@@ -67,17 +67,17 @@ async fn main() {
         .theme
         .or(config.and_then(|c| c.theme))
         .unwrap_or_else(|| {
-            tui::theme::HelixTheme::theme_names()
+            tui::HelixTheme::theme_names()
                 .next()
                 .unwrap_or("catppuccin_mocha")
                 .to_string()
         });
 
-    let theme = if let Some(t) = tui::theme::HelixTheme::from_name(&theme_name) {
+    let theme = if let Some(t) = tui::HelixTheme::from_name(&theme_name) {
         t
     } else {
         eprintln!("unknown theme '{theme_name}', using default");
-        tui::theme::HelixTheme::default()
+        tui::HelixTheme::default()
     };
 
     let initial_state = tui::build_state(Arc::clone(&files), root.clone(), theme);

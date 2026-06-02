@@ -1,11 +1,4 @@
-use super::state::{AppSignal, State, Window};
-use r3bl_tui::core::pty::{MouseTrackingMode, PtyInputEvent};
-use r3bl_tui::{
-    self, Button, CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData,
-    HasFocus, InputEvent, MouseInputKind, PixelChar, RenderOpCommon, RenderOpIR, RenderOpIRVec,
-    RenderPipeline, Size, SurfaceBounds, TuiStyle, ZOrder, col, height, render_pipeline, row,
-    throws_with_return, width,
-};
+use crate::tui::*;
 
 pub struct TerminalPaneComponent {
     id: FlexBoxId,
@@ -16,7 +9,7 @@ impl TerminalPaneComponent {
         Self { id }
     }
 
-    fn terminal_id(&self, state: &State) -> Option<usize> {
+    fn terminal_id(&self, state: &AppState) -> Option<usize> {
         let slot = pane_slot(self.id)?;
         let Window::Terminal(id) = state.window_stack.get(slot)? else {
             return None;
@@ -37,7 +30,7 @@ fn pane_slot(id: FlexBoxId) -> Option<usize> {
     }
 }
 
-impl Component<State, AppSignal> for TerminalPaneComponent {
+impl Component<AppState, AppSignal> for TerminalPaneComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -46,7 +39,7 @@ impl Component<State, AppSignal> for TerminalPaneComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -95,7 +88,7 @@ impl Component<State, AppSignal> for TerminalPaneComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
         _surface_bounds: SurfaceBounds,
         _has_focus: &mut HasFocus,

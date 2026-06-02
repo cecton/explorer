@@ -1,16 +1,7 @@
-use super::fuzzy_picker::FuzzyPicker;
-use super::input_line::InputLine;
-use super::state::{AppSignal, State, Window};
-use super::theme::HelixTheme;
+use crate::tui::*;
 use nucleo::Matcher;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
 use nucleo::{Config, Utf32Str};
-use r3bl_tui::{
-    CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData, HasFocus,
-    InputEvent, Key, KeyPress, KeyState, ModifierKeysMask, Pos, RenderOpCommon, RenderOpIR,
-    RenderOpIRVec, RenderPipeline, SpecialKey, SurfaceBounds, ZOrder, col, new_style,
-    render_pipeline, row, throws_with_return, tui_color,
-};
 
 pub struct ThemePickerComponent {
     id: FlexBoxId,
@@ -97,7 +88,7 @@ fn run_theme_name_match(query: &str) -> Vec<(String, Vec<u32>)> {
         .collect()
 }
 
-impl Component<State, AppSignal> for ThemePickerComponent {
+impl Component<AppState, AppSignal> for ThemePickerComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -106,7 +97,7 @@ impl Component<State, AppSignal> for ThemePickerComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -180,7 +171,7 @@ impl Component<State, AppSignal> for ThemePickerComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
         _surface_bounds: SurfaceBounds,
         _has_focus: &mut HasFocus,
@@ -199,10 +190,10 @@ impl Component<State, AppSignal> for ThemePickerComponent {
 
             let result_ops = self.picker.render_results(
                 &global_data.state,
+                &global_data.state.theme_picker,
                 origin,
                 total_rows,
                 pane_width,
-                &global_data.state.theme_picker,
                 |name, _state| name.clone(),
             );
             let result_count = global_data.state.theme_picker.results.len();

@@ -1,18 +1,8 @@
-use super::fuzzy_picker::FuzzyPicker;
-use super::input_line::InputLine;
-use super::state::{AppSignal, State, Window};
-use super::theme::HelixTheme;
 use crate::loader::{FileKey, LoadedFile};
+use crate::tui::*;
 use camino::Utf8PathBuf;
-use nucleo::Matcher;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo::{Config, Utf32Str};
-use r3bl_tui::{
-    CommonResult, Component, EventPropagation, FlexBox, FlexBoxId, GlobalData, HasFocus,
-    InputEvent, Key, KeyPress, KeyState, ModifierKeysMask, Pos, RenderOpCommon, RenderOpIR,
-    RenderOpIRVec, RenderPipeline, SpecialKey, SurfaceBounds, TerminalWindowMainThreadSignal,
-    ZOrder, col, new_style, render_pipeline, row, send_signal, throws_with_return, tui_color,
-};
+use nucleo::{Config, Matcher, Utf32Str};
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -69,7 +59,7 @@ impl FileNamePickerComponent {
 
     fn on_query_changed(
         &self,
-        state: &State,
+        state: &AppState,
         main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
     ) {
         Self::spawn_match(
@@ -81,7 +71,7 @@ impl FileNamePickerComponent {
     }
 
     pub(crate) fn spawn_match(
-        state: &State,
+        state: &AppState,
         generation: Arc<AtomicU64>,
         results_tx: mpsc::Sender<PickerResultMsg>,
         main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
@@ -172,7 +162,7 @@ fn run_file_name_match(
     scored.into_iter().map(|(key, _, idx)| (key, idx)).collect()
 }
 
-impl Component<State, AppSignal> for FileNamePickerComponent {
+impl Component<AppState, AppSignal> for FileNamePickerComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -181,7 +171,7 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -260,7 +250,7 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<State, AppSignal>,
+        global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
         _surface_bounds: SurfaceBounds,
         _has_focus: &mut HasFocus,
@@ -279,10 +269,10 @@ impl Component<State, AppSignal> for FileNamePickerComponent {
 
             let result_ops = self.picker.render_results(
                 &global_data.state,
+                &global_data.state.file_name_picker,
                 origin,
                 total_rows,
                 pane_width,
-                &global_data.state.file_name_picker,
                 |key, state| {
                     let snapshot = state.files.load_full();
                     let file = &snapshot[key.0];

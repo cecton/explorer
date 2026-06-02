@@ -1,7 +1,4 @@
-use r3bl_tui::{
-    InputEvent, Key, KeyPress, KeyState, ModifierKeysMask, Pos, RenderOpCommon, RenderOpIR,
-    RenderOpIRVec, SpecialKey, col, new_style, row, tui_color,
-};
+use crate::tui::*;
 use unicode_segmentation::UnicodeSegmentation;
 
 pub struct InputLine {
