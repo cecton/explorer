@@ -158,6 +158,15 @@ impl InputLine {
                 self.cursor += 1;
                 true
             }
+            InputEvent::BracketedPaste(text) => {
+                if text.is_empty() {
+                    return false;
+                }
+                let byte_pos = grapheme_byte_offset(query, self.cursor);
+                query.insert_str(byte_pos, text);
+                self.cursor += text.graphemes(true).count();
+                true
+            }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Backspace),
             }) => self.backspace_grapheme(query),
