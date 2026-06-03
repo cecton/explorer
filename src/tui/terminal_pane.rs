@@ -19,7 +19,6 @@ impl TerminalPaneComponent {
 }
 
 fn pane_slot(id: FlexBoxId) -> Option<usize> {
-    use super::app::Id;
     match id.inner {
         x if x == Id::Pane0 as u8 => Some(0),
         x if x == Id::Pane1 as u8 => Some(1),

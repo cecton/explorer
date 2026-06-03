@@ -5,6 +5,7 @@ use crate::tui::*;
 use crate::watcher::{WATCHER_RRT, set_watcher_root};
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
+use r3bl_tui::ClipboardService;
 use r3bl_tui::core::osc::OscEvent;
 use r3bl_tui::core::pty::{
     CursorKeyMode, DefaultPtySessionConfig, MouseTrackingMode, PtyInputEvent, PtyOutputEvent,
@@ -74,6 +75,9 @@ struct PaneComponent {
     /// (scroll, rel_y) at thumb grab time (None if drag started on track).
     scrollbar_grab_state: Option<(usize, usize)>,
     preview_drag_active: bool,
+    text_drag_active: bool,
+    last_click: Option<(Instant, Pos)>,
+    consecutive_clicks: u8,
 }
 
 impl PaneComponent {
@@ -97,6 +101,9 @@ impl PaneComponent {
             scrollbar_dragging: false,
             scrollbar_grab_state: None,
             preview_drag_active: false,
+            text_drag_active: false,
+            last_click: None,
+            consecutive_clicks: 0,
         })
     }
 
@@ -276,6 +283,9 @@ impl Component<AppState, AppSignal> for PaneComponent {
         self.preview.reset();
         self.terminal.reset();
         self.preview_drag_active = false;
+        self.text_drag_active = false;
+        self.last_click = None;
+        self.consecutive_clicks = 0;
     }
 
     fn get_id(&self) -> FlexBoxId {
@@ -300,6 +310,19 @@ impl Component<AppState, AppSignal> for PaneComponent {
             global_data.state.mouse_drag_active = false;
         }
 
+        if self.text_drag_active
+            && !matches!(
+                self.active_window(&global_data.state),
+                Some(Window::FilePreview(_))
+            )
+        {
+            self.text_drag_active = false;
+            self.preview.end_text_drag();
+            global_data.state.mouse_drag_active = false;
+            self.last_click = None;
+            self.consecutive_clicks = 0;
+        }
+
         let active_is_terminal = matches!(
             self.active_window(&global_data.state),
             Some(Window::Terminal(_))
@@ -308,6 +331,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
         // Check for scrollbar mouse interaction first.
         if !active_is_terminal
             && !self.preview_drag_active
+            && !self.text_drag_active
             && let InputEvent::Mouse(mouse) = input_event
         {
             let col = mouse.pos.col_index.as_usize();
@@ -384,7 +408,35 @@ impl Component<AppState, AppSignal> for PaneComponent {
                         self.preview.start_drag(state, key, line, modifier);
                         state.mouse_drag_active = true;
                         return Ok(EventPropagation::ConsumedRender);
+                    } else {
+                        let state = &mut global_data.state;
+                        let now = Instant::now();
+                        let is_same_pos = self.last_click.is_some_and(|(_, p)| p == mouse.pos);
+                        let is_quick = self
+                            .last_click
+                            .is_some_and(|(t, _)| now.duration_since(t).as_millis() < 300);
+                        if is_same_pos && is_quick {
+                            self.consecutive_clicks = self.consecutive_clicks.saturating_add(1);
+                        } else {
+                            self.consecutive_clicks = 1;
+                        }
+                        self.last_click = Some((now, mouse.pos));
+
+                        self.text_drag_active = true;
+                        state.mouse_drag_active = true;
+                        self.preview.start_text_drag_from_pos(
+                            state,
+                            row,
+                            col,
+                            self.consecutive_clicks,
+                        );
+                        return Ok(EventPropagation::ConsumedRender);
                     }
+                }
+                MouseInputKind::MouseDrag(Button::Left) if self.text_drag_active => {
+                    let state = &mut global_data.state;
+                    self.preview.update_text_drag_from_pos(state, row, col);
+                    return Ok(EventPropagation::ConsumedRender);
                 }
                 MouseInputKind::MouseDrag(Button::Left) if self.preview_drag_active => {
                     let state = &mut global_data.state;
@@ -395,6 +447,16 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     let line = (scroll + rel_y + 1).clamp(1, scroll_max.max(1));
 
                     self.preview.update_drag(state, key, line);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                MouseInputKind::MouseUp(Button::Left) if self.text_drag_active => {
+                    let state = &mut global_data.state;
+                    if let Some(text) = self.preview.end_text_drag_with_text(state) {
+                        let mut cb = r3bl_tui::SystemClipboard;
+                        let _ = cb.try_to_put_content_into_clipboard(text);
+                    }
+                    self.text_drag_active = false;
+                    state.mouse_drag_active = false;
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 MouseInputKind::MouseUp(Button::Left) if self.preview_drag_active => {

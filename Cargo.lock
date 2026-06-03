@@ -927,6 +927,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "unicode-segmentation",
+ "url",
 ]
 
 [[package]]

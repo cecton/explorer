@@ -101,6 +101,7 @@ cargo test <module>::<test_name>
 | `tokio`       | 1.x     | Async runtime required by `r3bl_tui`              |
 | `tracing`     | 0.1.x   | Structured logging macros (`debug!`, `info!`, etc.) |
 | `tracing-core` | 0.1.x  | `LevelFilter` type used to configure `r3bl_tui` logger |
+| `url`          | 2.x     | URL parsing in `word_bounds` for cursor-based URL selection |
 
 Add a dependency when it provides substantial value that would take significant effort to replicate correctly — covering performance, correctness, or capability. Prefer `std` for trivial things. Each dep must have a concrete, stated purpose in this table.
 

@@ -1,8 +1,4 @@
-use super::app::Id;
-use super::input_line::InputLine;
-use super::state::{AppSignal, AppState, Window};
-use super::theme::HelixTheme;
-use crate::loader::FileKey;
+use crate::loader::{FileData, FileKey};
 use crate::tui::*;
 use camino::{Utf8Path, Utf8PathBuf};
 use std::time::{Duration, Instant};
@@ -23,6 +19,14 @@ pub struct FilePreviewComponent {
     drag_snapshot: Option<Vec<(usize, usize)>>,
     drag_start_line: Option<usize>,
     drag_modifier: Option<DragModifier>,
+    text_drag_active: bool,
+    text_drag_start: Option<(usize, usize)>,
+    text_drag_end: Option<(usize, usize)>,
+    /// Cached geometry of the content area at last render, used for mouse event handling.
+    content_origin_row: usize,
+    content_origin_col: usize,
+    content_col_count: usize,
+    content_row_count: usize,
 }
 
 impl FilePreviewComponent {
@@ -35,6 +39,13 @@ impl FilePreviewComponent {
             drag_snapshot: None,
             drag_start_line: None,
             drag_modifier: None,
+            text_drag_active: false,
+            text_drag_start: None,
+            text_drag_end: None,
+            content_origin_row: 0,
+            content_origin_col: 0,
+            content_col_count: 0,
+            content_row_count: 0,
         }
     }
 
@@ -168,8 +179,7 @@ impl FilePreviewComponent {
             origin + width(1),
             width_u16.saturating_sub(1),
             focused,
-            bg_rgb,
-            fg_rgb,
+            (color_bg, color_fg),
         );
         true
     }
@@ -319,6 +329,135 @@ impl FilePreviewComponent {
         self.drag_start_line = None;
         self.drag_modifier = None;
     }
+
+    pub fn start_text_drag(&mut self, line: usize, byte_offset: usize) {
+        self.text_drag_active = true;
+        self.text_drag_start = Some((line, byte_offset));
+        self.text_drag_end = Some((line, byte_offset));
+    }
+
+    pub fn update_text_drag(&mut self, line: usize, byte_offset: usize) {
+        self.text_drag_end = Some((line, byte_offset));
+    }
+
+    pub fn end_text_drag(&mut self) -> Option<((usize, usize), (usize, usize))> {
+        self.text_drag_active = false;
+        let result = self.text_drag_start.zip(self.text_drag_end);
+        self.text_drag_start = None;
+        self.text_drag_end = None;
+        result
+    }
+
+    /// Start a text drag from an absolute mouse position in the pane.
+    /// `click_count` is used for double/triple-click word/line selection.
+    /// Returns true if a drag was started.
+    pub fn start_text_drag_from_pos(
+        &mut self,
+        state: &AppState,
+        row: usize,
+        col: usize,
+        click_count: u8,
+    ) -> bool {
+        let key = match self.file_key(state) {
+            Some(k) => k,
+            None => return false,
+        };
+
+        let snapshot = state.files.load();
+        let file = &snapshot[key.0];
+        let data = file.data.lock().unwrap();
+
+        let (line_idx, _char_idx, cursor_byte) =
+            self.screen_pos_to_line_char(state, row, col, key, &data);
+
+        let (sel_start, sel_end) = match click_count {
+            2 => data.word_bounds(cursor_byte),
+            3.. => data.line_bounds(line_idx),
+            _ => (cursor_byte, cursor_byte),
+        };
+
+        self.start_text_drag(line_idx, sel_start);
+        self.update_text_drag(line_idx, sel_end);
+        true
+    }
+
+    pub fn update_text_drag_from_pos(&mut self, state: &AppState, row: usize, col: usize) {
+        let key = match self.file_key(state) {
+            Some(k) => k,
+            None => return,
+        };
+
+        let snapshot = state.files.load();
+        let file = &snapshot[key.0];
+        let data = file.data.lock().unwrap();
+
+        let (line_idx, _char_idx, cursor_byte) =
+            self.screen_pos_to_line_char(state, row, col, key, &data);
+
+        self.update_text_drag(line_idx, cursor_byte);
+    }
+
+    /// Maps a screen position relative to the preview content origin to a
+    /// `(line_idx_0_based, char_idx, cursor_byte)` tuple. `cursor_byte` is the
+    /// absolute byte offset within `FileData.content`. Accounts for line wrapping.
+    fn screen_pos_to_line_char(
+        &self,
+        state: &AppState,
+        row: usize,
+        col: usize,
+        key: FileKey,
+        data: &std::sync::MutexGuard<'_, crate::loader::FileData>,
+    ) -> (usize, usize, usize) {
+        let window = Window::FilePreview(key);
+        let scroll = state.window_scroll(&window);
+
+        let total_lines = data.line_starts.len();
+        let line_num_width = total_lines.max(1).to_string().len();
+        let content_start_col = line_num_width + GUTTER_GAP.len();
+
+        let content_width = self
+            .content_col_count
+            .saturating_sub(content_start_col)
+            .max(1);
+        let rel_y = row.saturating_sub(self.content_origin_row);
+        let rel_x = col.saturating_sub(self.content_origin_col + content_start_col);
+
+        let mut rendered = 0usize;
+        for line_idx in scroll..total_lines {
+            let line = data.line(line_idx);
+            let char_len = line.chars().count();
+            let row_count_for_line = if char_len == 0 {
+                1
+            } else {
+                char_len.div_ceil(content_width)
+            };
+            if rel_y < rendered + row_count_for_line {
+                let sub_row = rel_y - rendered;
+                let seg_start_char = sub_row * content_width;
+                let char_idx = (seg_start_char + rel_x).min(char_len);
+                let cursor_byte =
+                    data.line_starts[line_idx] + data.char_to_byte(line_idx, char_idx);
+                return (line_idx, char_idx, cursor_byte);
+            }
+            rendered += row_count_for_line;
+            if rendered >= self.content_row_count {
+                break;
+            }
+        }
+        let last_line = total_lines.saturating_sub(1);
+        let line = data.line(last_line);
+        let cursor_byte = data.line_starts[last_line] + line.len();
+        (last_line, line.chars().count(), cursor_byte)
+    }
+
+    pub fn end_text_drag_with_text(&mut self, state: &AppState) -> Option<String> {
+        let key = self.file_key(state)?;
+        let ((_, start_byte), (_, end_byte)) = self.end_text_drag()?;
+        let snapshot = state.files.load();
+        let file = &snapshot[key.0];
+        let data = file.data.lock().unwrap();
+        data.extract_text(start_byte, end_byte)
+    }
 }
 
 /// Maps a pane `FlexBoxId` back to its zero-based slot index.
@@ -339,6 +478,9 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
         self.drag_snapshot = None;
         self.drag_start_line = None;
         self.drag_modifier = None;
+        self.text_drag_active = false;
+        self.text_drag_start = None;
+        self.text_drag_end = None;
     }
 
     fn get_id(&self) -> FlexBoxId {
@@ -509,6 +651,11 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             let bounds = current_box.style_adjusted_bounds_size;
             let visible_rows = bounds.row_height.as_usize();
 
+            self.content_origin_row = origin.row_index.as_usize();
+            self.content_origin_col = origin.col_index.as_usize();
+            self.content_col_count = bounds.col_width.as_usize();
+            self.content_row_count = visible_rows;
+
             let Some(file_key) = self.file_key(&global_data.state) else {
                 let mut pipeline = render_pipeline!();
                 pipeline.push(ZOrder::Normal, RenderOpIRVec::new());
@@ -564,19 +711,54 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             let hl_line_num_style =
                 new_style!(color_fg: {hl_line_num_fg} color_bg: {line_num_bg_rgb});
 
+            let text_drag_lo;
+            let text_drag_hi;
+            let text_drag_single;
+            let text_drag_single_lo;
+            let text_drag_single_hi;
+            if self.text_drag_active {
+                let (s, e) = (self.text_drag_start.unwrap(), self.text_drag_end.unwrap());
+                text_drag_lo = s.0.min(e.0);
+                text_drag_hi = s.0.max(e.0);
+                text_drag_single = s.0 == e.0;
+                text_drag_single_lo = if text_drag_single { s.1.min(e.1) } else { 0 };
+                text_drag_single_hi = if text_drag_single { s.1.max(e.1) } else { 0 };
+            } else {
+                text_drag_lo = 0;
+                text_drag_hi = 0;
+                text_drag_single = false;
+                text_drag_single_lo = 0;
+                text_drag_single_hi = 0;
+            }
+
             let mut rendered = 0usize;
             'rendered: for line_idx in scroll..total_lines {
-                let line = file_line(&data.content, &data.line_starts, line_idx);
+                let line = data.line(line_idx);
                 let char_len = line.chars().count();
                 let mut seg_start_char = 0_usize;
-                let is_hl = Self::is_line_highlighted(state, file_key, line_idx + 1);
-                let row_bg_style = if is_hl { hl_bg_style } else { bg_style };
-                let row_ln_style = if is_hl {
+                let is_text_drag_multi = self.text_drag_active
+                    && !text_drag_single
+                    && line_idx >= text_drag_lo
+                    && line_idx <= text_drag_hi;
+                let is_text_drag_single =
+                    self.text_drag_active && text_drag_single && line_idx == text_drag_lo;
+                let is_hl = !self.text_drag_active
+                    && Self::is_line_highlighted(state, file_key, line_idx + 1);
+                let row_bg_style = if is_text_drag_multi || is_hl {
+                    hl_bg_style
+                } else {
+                    bg_style
+                };
+                let row_ln_style = if is_text_drag_multi || is_hl {
                     hl_line_num_style
                 } else {
                     line_num_style
                 };
-                let content_bg = if is_hl { hl_rgb } else { pane_bg };
+                let content_bg = if is_text_drag_multi || is_hl {
+                    hl_rgb
+                } else {
+                    pane_bg
+                };
                 loop {
                     let seg_end_char = (seg_start_char + content_width).min(char_len);
                     let is_first_sub = seg_start_char == 0;
@@ -616,15 +798,66 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                         origin,
                         col(content_start_col) + row(rendered),
                     );
-                    paint_line_segment(
-                        &mut render_ops,
-                        (&data.content, &data.line_starts),
-                        &colored_guard,
-                        line_idx,
-                        (seg_start_char, seg_end_char),
-                        &state.theme,
-                        content_bg,
-                    );
+                    if is_text_drag_single {
+                        let line_byte_start = data.line_starts[line_idx];
+                        let sel_lo = byte_to_char(line, text_drag_single_lo - line_byte_start);
+                        let sel_hi = byte_to_char(line, text_drag_single_hi - line_byte_start);
+                        if seg_end_char <= sel_lo || seg_start_char >= sel_hi {
+                            paint_line_segment(
+                                &mut render_ops,
+                                &data,
+                                &colored_guard,
+                                line_idx,
+                                (seg_start_char, seg_end_char),
+                                &state.theme,
+                                content_bg,
+                            );
+                        } else {
+                            if seg_start_char < sel_lo {
+                                paint_line_segment(
+                                    &mut render_ops,
+                                    &data,
+                                    &colored_guard,
+                                    line_idx,
+                                    (seg_start_char, sel_lo),
+                                    &state.theme,
+                                    content_bg,
+                                );
+                            }
+                            let o_lo = seg_start_char.max(sel_lo);
+                            let o_hi = seg_end_char.min(sel_hi);
+                            paint_line_segment(
+                                &mut render_ops,
+                                &data,
+                                &colored_guard,
+                                line_idx,
+                                (o_lo, o_hi),
+                                &state.theme,
+                                hl_rgb,
+                            );
+                            if seg_end_char > sel_hi {
+                                paint_line_segment(
+                                    &mut render_ops,
+                                    &data,
+                                    &colored_guard,
+                                    line_idx,
+                                    (sel_hi, seg_end_char),
+                                    &state.theme,
+                                    content_bg,
+                                );
+                            }
+                        }
+                    } else {
+                        paint_line_segment(
+                            &mut render_ops,
+                            &data,
+                            &colored_guard,
+                            line_idx,
+                            (seg_start_char, seg_end_char),
+                            &state.theme,
+                            content_bg,
+                        );
+                    }
 
                     rendered += 1;
                     seg_start_char += content_width;
@@ -701,7 +934,7 @@ fn title_bar_colors(focused: bool, theme: &HelixTheme) -> ([u8; 3], [u8; 3]) {
 
 fn paint_line_segment(
     render_ops: &mut RenderOpIRVec,
-    (content, line_starts): (&str, &[usize]),
+    data: &FileData,
     colored_guard: &[crate::lsp::ColoredLine],
     line_idx: usize,
     (seg_start_char, seg_end_char): (usize, usize),
@@ -713,9 +946,9 @@ fn paint_line_segment(
     }
     let default_fg = theme.ui_fg("ui.text").unwrap_or([212, 212, 212]);
     let bg = tui_color!(pane_bg[0], pane_bg[1], pane_bg[2]);
-    let line_content = file_line(content, line_starts, line_idx);
-    let (seg_byte_start, seg_byte_end) =
-        char_offsets_to_bytes(line_content, seg_start_char, seg_end_char);
+    let line_content = data.line(line_idx);
+    let seg_byte_start = data.char_to_byte(line_idx, seg_start_char);
+    let seg_byte_end = data.char_to_byte(line_idx, seg_end_char);
 
     if let Some(spans) = colored_guard.get(line_idx) {
         for &(span_start, span_end, token_type) in spans {
@@ -741,33 +974,9 @@ fn paint_line_segment(
     *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
 }
 
-fn char_offsets_to_bytes(s: &str, start_char: usize, end_char: usize) -> (usize, usize) {
-    let mut char_count = 0usize;
-    let mut byte_start = s.len();
-    let mut byte_end = s.len();
-    for (byte_idx, _ch) in s.char_indices() {
-        if char_count == start_char {
-            byte_start = byte_idx;
-        }
-        if char_count == end_char {
-            byte_end = byte_idx;
-            break;
-        }
-        char_count += 1;
-    }
-    if start_char >= char_count {
-        byte_start = s.len();
-    }
-    (byte_start, byte_end)
-}
-
-fn file_line<'a>(content: &'a str, line_starts: &[usize], idx: usize) -> &'a str {
-    let start = line_starts[idx];
-    let end = line_starts
-        .get(idx + 1)
-        .map(|&e| e - 1)
-        .unwrap_or(content.len());
-    &content[start..end]
+/// Converts a byte offset within `s` to a character count.
+fn byte_to_char(s: &str, byte_offset: usize) -> usize {
+    s[..byte_offset.min(s.len())].chars().count()
 }
 
 fn compute_scroll_target(ranges: &[(usize, usize)], page_size: usize, _max: usize) -> usize {

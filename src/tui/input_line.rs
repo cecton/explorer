@@ -403,13 +403,11 @@ impl InputLine {
         origin: Pos,
         width: u16,
         focused: bool,
-        bg_rgb: [u8; 3],
-        fg_rgb: [u8; 3],
+        colors: (TuiColor, TuiColor),
     ) {
         let width = width as usize;
 
-        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
-        let color_text = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+        let (color_bg, color_text) = colors;
         let cursor_style = new_style!(reverse);
 
         let bg_style = new_style!(color_bg: {color_bg});

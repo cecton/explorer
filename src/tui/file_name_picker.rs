@@ -54,7 +54,7 @@ impl FileNamePickerComponent {
             Some(bg_style),
         );
         self.input_line
-            .render(ops, query, origin, width, focused, bg_rgb, fg_rgb);
+            .render(ops, query, origin, width, focused, (color_bg, color_fg));
     }
 
     fn on_query_changed(
