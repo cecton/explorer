@@ -27,6 +27,7 @@ Source is organized as:
 - `src/loader.rs` — parallel file walking and `LoadedFile` construction
 - `src/lsp.rs` — LSP client (JSON-RPC over stdio)
 - `src/tui/mod.rs` — module declarations
+- `src/tui/title_row.rs` — `TitleRow` trait, `render_pane_title` utility, `title_bar_colors`
 - `src/tui/state.rs` — `State`, `AppSignal`, and `TerminalPane` types
 - `src/tui/app.rs` — `App` trait impl, layout, `run()` entry point
 - `src/tui/file_list.rs` — `FileListComponent` (left pane)

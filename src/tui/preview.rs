@@ -49,25 +49,23 @@ impl FilePreviewComponent {
         }
     }
 
-    pub fn title_text(&mut self, state: &AppState) -> String {
-        if let Some((msg, set_at)) = &self.error {
-            if set_at.elapsed() < Duration::from_secs(3) {
-                return msg.clone();
-            }
-            self.error = None;
+    fn title_text_render(&self, state: &AppState) -> Option<(String, bool)> {
+        if let Some((msg, set_at)) = &self.error
+            && set_at.elapsed() < Duration::from_secs(3)
+        {
+            return Some((msg.clone(), false));
         }
-        let Some(key) = self.file_key(state) else {
-            return String::new();
-        };
+        let key = self.file_key(state)?;
         let snapshot = state.files.load();
         let file = &snapshot[key.0];
+        let removed = file.removed.load(std::sync::atomic::Ordering::Relaxed);
         let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
-        let base = if file.removed.load(std::sync::atomic::Ordering::Relaxed) {
+        let base = if removed {
             format!("[deleted] {rel}")
         } else {
             rel.as_str().to_string()
         };
-        if let Some(ranges) = state.highlight_ranges.get(&key) {
+        let title = if let Some(ranges) = state.highlight_ranges.get(&key) {
             let groups: Vec<String> = ranges
                 .iter()
                 .map(|&(lo, hi)| {
@@ -81,7 +79,8 @@ impl FilePreviewComponent {
             format!("{}  [{}]", base, groups.join(", "))
         } else {
             base
-        }
+        };
+        Some((title, removed))
     }
 
     /// Returns the highlight range (lo, hi) at the given column within the title bar,
@@ -149,39 +148,33 @@ impl FilePreviewComponent {
         state.clamp_scroll(&window);
     }
 
-    pub fn render_title_row(
+    fn render_command_title(
         &self,
         mut ops: &mut RenderOpIRVec,
         origin: Pos,
-        width_u16: u16,
+        width: u16,
+        height: usize,
         focused: bool,
         theme: &HelixTheme,
-    ) -> bool {
+    ) {
         let Some(cmd) = self.command_mode.as_deref() else {
-            return false;
+            return;
         };
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
         let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
         let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
         let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
-        ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
-        ops += RenderOpCommon::SetBgColor(color_bg);
-        ops += RenderOpIR::PaintTextWithAttributes(
-            " ".repeat(width_u16 as usize).as_str().into(),
-            Some(label_style),
-        );
-        ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
-        ops += RenderOpIR::PaintTextWithAttributes(":".into(), Some(label_style));
-        self.command_input.render(
-            ops,
-            cmd,
-            origin + width(1),
-            width_u16.saturating_sub(1),
-            focused,
-            (color_bg, color_fg),
-        );
-        true
+        for row_offset in 0..height {
+            ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset as u16));
+            ops += RenderOpCommon::SetBgColor(color_bg);
+            ops += RenderOpIR::PaintTextWithAttributes(
+                " ".repeat(width as usize).as_str().into(),
+                Some(label_style),
+            );
+        }
+        self.command_input
+            .render(ops, cmd, ":", origin, width, focused, (color_bg, color_fg));
     }
 
     fn execute_command(
@@ -548,6 +541,14 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             {
                 self.command_mode = Some(String::new());
                 global_data.state.command_mode_active = true;
+                return Ok(EventPropagation::ConsumedRender);
+            }
+
+            if let InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Esc),
+            }) = input_event
+            {
+                global_data.state.send_to_back(&window);
                 return Ok(EventPropagation::ConsumedRender);
             }
 
@@ -918,17 +919,28 @@ fn subtract_ranges(snapshot: &[(usize, usize)], lo: usize, hi: usize) -> Vec<(us
     result
 }
 
-fn title_bar_colors(focused: bool, theme: &HelixTheme) -> ([u8; 3], [u8; 3]) {
-    if focused {
-        (
-            theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]),
-            theme.ui_fg("ui.text").unwrap_or([220, 220, 255]),
-        )
-    } else {
-        (
-            theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]),
-            theme.ui_fg("ui.statusline").unwrap_or([180, 180, 220]),
-        )
+impl TitleRow for FilePreviewComponent {
+    fn render_title_row(
+        &self,
+        ops: &mut RenderOpIRVec,
+        pane_box: &FlexBox,
+        focused: bool,
+        theme: &HelixTheme,
+        state: &AppState,
+    ) -> usize {
+        if let Some(cmd) = &self.command_mode {
+            let origin = pane_box.style_adjusted_origin_pos;
+            let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
+            let height = InputLine::line_count(cmd);
+            self.render_command_title(ops, origin, width, height, focused, theme);
+            height
+        } else {
+            let (title, removed) = self
+                .title_text_render(state)
+                .unwrap_or_else(|| (String::new(), false));
+            render_pane_title(ops, pane_box, &title, removed, theme, focused);
+            1
+        }
     }
 }
 

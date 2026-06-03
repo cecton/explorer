@@ -231,6 +231,35 @@ impl PaneComponent {
     }
 }
 
+impl TitleRow for PaneComponent {
+    fn render_title_row(
+        &self,
+        ops: &mut RenderOpIRVec,
+        pane_box: &FlexBox,
+        focused: bool,
+        theme: &HelixTheme,
+        state: &AppState,
+    ) -> usize {
+        let Some(window) = self.active_window(state) else {
+            return 0;
+        };
+        match window {
+            Window::FileNamePicker => self
+                .picker
+                .render_title_row(ops, pane_box, focused, theme, state),
+            Window::ThemePicker => self
+                .theme_picker
+                .render_title_row(ops, pane_box, focused, theme, state),
+            Window::FilePreview(_) => self
+                .preview
+                .render_title_row(ops, pane_box, focused, theme, state),
+            Window::Terminal(_) => self
+                .terminal
+                .render_title_row(ops, pane_box, focused, theme, state),
+        }
+    }
+}
+
 fn thumb_size(scrollbar_height: usize, page_size: usize, scroll_max: usize) -> usize {
     std::cmp::max(1, (scrollbar_height * page_size) / scroll_max.max(1))
 }
@@ -500,104 +529,21 @@ impl Component<AppState, AppSignal> for PaneComponent {
         throws_with_return!({
             global_data.state.pane_boxes[self.slot] = current_box;
 
-            let active_window = self.active_window(&global_data.state).cloned();
-            let add_title = active_window.is_some();
-
             let mut title_ops = RenderOpIRVec::new();
-            if add_title {
-                let focused = has_focus.get_id() == Some(self.id);
-                let title_origin = current_box.style_adjusted_origin_pos;
-                let title_width = current_box.style_adjusted_bounds_size.col_width.as_u16();
-                let theme = &global_data.state.theme;
+            let focused = has_focus.get_id() == Some(self.id);
+            let title_height = self.render_title_row(
+                &mut title_ops,
+                &current_box,
+                focused,
+                &global_data.state.theme,
+                &global_data.state,
+            );
 
-                match active_window.as_ref().unwrap() {
-                    Window::FileNamePicker => {
-                        let query = global_data.state.file_name_picker.query.clone();
-                        self.picker.render_title_row(
-                            &mut title_ops,
-                            title_origin,
-                            title_width,
-                            focused,
-                            theme,
-                            &query,
-                        );
-                    }
-                    Window::ThemePicker => {
-                        let query = global_data.state.theme_picker.query.clone();
-                        self.theme_picker.render_title_row(
-                            &mut title_ops,
-                            title_origin,
-                            title_width,
-                            focused,
-                            theme,
-                            &query,
-                        );
-                    }
-                    Window::FilePreview(key) => {
-                        if !self.preview.render_title_row(
-                            &mut title_ops,
-                            title_origin,
-                            title_width,
-                            focused,
-                            theme,
-                        ) {
-                            let snapshot = global_data.state.files.load();
-                            let removed = snapshot[key.0]
-                                .removed
-                                .load(std::sync::atomic::Ordering::Relaxed);
-                            let title = self.preview.title_text(&global_data.state);
-                            render_pane_title(
-                                &mut title_ops,
-                                &current_box,
-                                &title,
-                                removed,
-                                theme,
-                                focused,
-                            );
-                        }
-                    }
-                    Window::Terminal(id) => {
-                        let (base, exited, exit_code, exit_signal) = global_data
-                            .state
-                            .terminal_panes
-                            .get(id)
-                            .and_then(|p| p.lock().ok())
-                            .map(|g| {
-                                (
-                                    g.title
-                                        .clone()
-                                        .unwrap_or_else(|| format!("Terminal {}", id)),
-                                    g.exited,
-                                    g.exit_code,
-                                    g.exit_signal.clone(),
-                                )
-                            })
-                            .unwrap_or_else(|| (format!("Terminal {}", id), false, None, None));
-                        let title = if let Some(ref sig) = exit_signal {
-                            format!("{} [{}]", base, sig)
-                        } else if let Some(code) = exit_code {
-                            format!("{} [exit {}]", base, code)
-                        } else if exited {
-                            format!("{} [done]", base)
-                        } else {
-                            base
-                        };
-                        render_pane_title(
-                            &mut title_ops,
-                            &current_box,
-                            &title,
-                            false,
-                            theme,
-                            focused,
-                        );
-                    }
-                }
-            }
-
-            let (content_box, inner_bounds) = if add_title {
-                let origin = current_box.style_adjusted_origin_pos + height(1);
+            let (content_box, inner_bounds) = if title_height > 0 {
+                let origin = current_box.style_adjusted_origin_pos + height(title_height as u16);
                 let bounds = current_box.style_adjusted_bounds_size.col_width
-                    + (current_box.style_adjusted_bounds_size.row_height - height(1));
+                    + (current_box.style_adjusted_bounds_size.row_height
+                        - height(title_height as u16));
                 let scrollbar_col = bounds.col_width - width(1);
                 let inner_bounds = scrollbar_col + bounds.row_height;
                 let boxed = FlexBox {
@@ -636,7 +582,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
             self.content_col_count = content_box.style_adjusted_bounds_size.col_width.as_u16();
             self.content_row_count = content_box.style_adjusted_bounds_size.row_height.as_u16();
 
-            let inner_pipeline = match active_window {
+            let inner_pipeline = match self.active_window(&global_data.state) {
                 Some(Window::FileNamePicker) => {
                     self.picker
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
@@ -658,7 +604,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 None => r3bl_tui::render_pipeline!(),
             };
 
-            let mut pipeline = if add_title {
+            let mut pipeline = if title_height > 0 {
                 let mut p = r3bl_tui::render_pipeline!();
                 p.push(ZOrder::Normal, title_ops);
                 p.join_into(inner_pipeline);
@@ -1053,10 +999,6 @@ impl App for AppMain {
             match &input_event {
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('f'),
-                })
-                | InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::Character('f'),
-                    ..
                 }) => {
                     let state = &mut global_data.state;
                     state.push_window(Window::FileNamePicker);
@@ -1070,19 +1012,11 @@ impl App for AppMain {
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('t'),
-                })
-                | InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::Character('t'),
-                    ..
                 }) => {
                     return self.open_terminal(global_data, None, None);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('T'),
-                })
-                | InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::Character('T'),
-                    ..
                 }) => {
                     let state = &mut global_data.state;
                     if !state.window_stack.contains(&Window::ThemePicker) {
@@ -1103,19 +1037,11 @@ impl App for AppMain {
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('q'),
-                })
-                | InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::Character('q'),
-                    ..
                 }) => {
                     return Ok(EventPropagation::ExitMainEventLoop);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Tab),
-                })
-                | InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::SpecialKey(SpecialKey::Tab),
-                    ..
                 }) => {
                     let state = &mut global_data.state;
                     let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
@@ -1124,10 +1050,6 @@ impl App for AppMain {
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::BackTab),
-                })
-                | InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::SpecialKey(SpecialKey::BackTab),
-                    ..
                 }) => {
                     let state = &mut global_data.state;
                     let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
@@ -1136,10 +1058,6 @@ impl App for AppMain {
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('x'),
-                })
-                | InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::Character('x'),
-                    ..
                 }) => {
                     let state = &mut global_data.state;
                     let tid = match state.focused_window.clone() {
@@ -1157,10 +1075,6 @@ impl App for AppMain {
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Esc),
-                })
-                | InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::SpecialKey(SpecialKey::Esc),
-                    ..
                 }) => {
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -1168,6 +1082,8 @@ impl App for AppMain {
             }
         }
 
+        // Global shortcut — Tab/BackTab cycles focus between panes.
+        // Skipped for Terminal panes so Tab reaches the PTY (e.g. shell completion).
         if !matches!(global_data.state.focused_window, Some(Window::Terminal(_)))
             && !global_data.state.mouse_drag_active
         {
@@ -1192,52 +1108,7 @@ impl App for AppMain {
             }
         }
 
-        if !global_data.state.mouse_drag_active
-            && matches!(
-                global_data.state.focused_window,
-                Some(Window::FilePreview(_))
-            )
-            && let InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Esc),
-            }) = input_event
-            && !global_data.state.command_mode_active
-        {
-            let state = &mut global_data.state;
-            if let Some(window) = state.focused_window.clone() {
-                state.send_to_back(&window);
-            }
-            return Ok(EventPropagation::ConsumedRender);
-        }
-
-        if !global_data.state.mouse_drag_active
-            && let Some(Window::Terminal(tid)) = global_data.state.focused_window.clone()
-        {
-            let should_dismiss = global_data
-                .state
-                .terminal_panes
-                .get(&tid)
-                .and_then(|p| p.lock().ok())
-                .map(|p| p.exited)
-                .unwrap_or(false);
-            if should_dismiss
-                && matches!(
-                    input_event,
-                    InputEvent::Keyboard(KeyPress::Plain {
-                        key: Key::SpecialKey(SpecialKey::Esc) | Key::SpecialKey(SpecialKey::Enter)
-                    })
-                )
-            {
-                if let Some(pane) = global_data.state.terminal_panes.remove(&tid)
-                    && let Ok(mut p) = pane.lock()
-                    && let Some(mut killer) = p.child_killer.take()
-                {
-                    let _ = killer.kill();
-                }
-                global_data.state.remove_window(&Window::Terminal(tid));
-                return Ok(EventPropagation::ConsumedRender);
-            }
-        }
-
+        // Focus follows mouse: hovering over a pane makes it the focused window.
         if let InputEvent::Mouse(mouse) = &input_event
             && mouse.kind == MouseInputKind::MouseMove
             && !global_data.state.mouse_drag_active
@@ -1670,67 +1541,6 @@ fn render_status_bar(
     render_ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row_idx);
     render_tui_styled_texts_into(&styled_texts, &mut render_ops);
     pipeline.push(ZOrder::Normal, render_ops);
-}
-
-fn render_pane_title(
-    mut render_ops: &mut RenderOpIRVec,
-    pane_box: &FlexBox,
-    title: &str,
-    is_deleted: bool,
-    theme: &HelixTheme,
-    focused: bool,
-) {
-    let origin = pane_box.style_adjusted_origin_pos;
-    let width = pane_box.style_adjusted_bounds_size.col_width.as_usize();
-
-    let (bg_active_rgb, fg_active_rgb) = (
-        theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]),
-        theme.ui_fg("ui.text").unwrap_or([220, 220, 255]),
-    );
-    let bg_inactive_rgb = theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]);
-    let fg_inactive_rgb = theme.ui_fg("ui.statusline").unwrap_or([180, 180, 220]);
-    let fg_deleted_rgb = theme.ui_fg("error").unwrap_or([220, 80, 80]);
-
-    let color_bg_active = tui_color!(bg_active_rgb[0], bg_active_rgb[1], bg_active_rgb[2]);
-    let color_fg_active = tui_color!(fg_active_rgb[0], fg_active_rgb[1], fg_active_rgb[2]);
-    let color_bg_inactive = tui_color!(bg_inactive_rgb[0], bg_inactive_rgb[1], bg_inactive_rgb[2]);
-    let color_fg_inactive = tui_color!(fg_inactive_rgb[0], fg_inactive_rgb[1], fg_inactive_rgb[2]);
-    let color_fg_deleted = tui_color!(fg_deleted_rgb[0], fg_deleted_rgb[1], fg_deleted_rgb[2]);
-
-    let color_bg = if focused {
-        color_bg_active
-    } else {
-        color_bg_inactive
-    };
-    let color_fg = if is_deleted {
-        color_fg_deleted
-    } else if focused {
-        color_fg_active
-    } else {
-        color_fg_inactive
-    };
-
-    let padded = format!(" {title} ");
-    let display = if padded.len() > width {
-        let truncated = &padded[..width.saturating_sub(1)];
-        format!("{truncated}…")
-    } else {
-        padded
-    };
-
-    render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
-    render_ops += RenderOpCommon::ResetColor;
-    render_ops += RenderOpCommon::SetBgColor(color_bg);
-    render_ops += RenderOpIR::PaintTextWithAttributes(SPACER_GLYPH.repeat(width).into(), None);
-    render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
-    render_ops += RenderOpIR::PaintTextWithAttributes(
-        display.into(),
-        Some(if focused {
-            new_style!(bold color_fg: {color_fg} color_bg: {color_bg})
-        } else {
-            new_style!(color_fg: {color_fg} color_bg: {color_bg})
-        }),
-    );
 }
 
 fn render_scrollbar(

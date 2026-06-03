@@ -18,6 +18,43 @@ impl TerminalPaneComponent {
     }
 }
 
+impl TitleRow for TerminalPaneComponent {
+    fn render_title_row(
+        &self,
+        ops: &mut RenderOpIRVec,
+        pane_box: &FlexBox,
+        focused: bool,
+        theme: &HelixTheme,
+        state: &AppState,
+    ) -> usize {
+        let id = self.terminal_id(state).unwrap_or(0);
+        let (base, exited, exit_code, exit_signal) = state
+            .terminal_panes
+            .get(&id)
+            .and_then(|p| p.lock().ok())
+            .map(|g| {
+                (
+                    g.title.clone().unwrap_or_else(|| format!("Terminal {id}")),
+                    g.exited,
+                    g.exit_code,
+                    g.exit_signal.clone(),
+                )
+            })
+            .unwrap_or_else(|| (format!("Terminal {id}"), false, None, None));
+        let title = if let Some(ref sig) = exit_signal {
+            format!("{} [{}]", base, sig)
+        } else if let Some(code) = exit_code {
+            format!("{} [exit {}]", base, code)
+        } else if exited {
+            format!("{} [done]", base)
+        } else {
+            base
+        };
+        render_pane_title(ops, pane_box, &title, false, theme, focused);
+        1
+    }
+}
+
 fn pane_slot(id: FlexBoxId) -> Option<usize> {
     match id.inner {
         x if x == Id::Pane0 as u8 => Some(0),
@@ -46,6 +83,29 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
             let Some(id) = self.terminal_id(&global_data.state) else {
                 return Ok(EventPropagation::Propagate);
             };
+
+            if matches!(
+                &input_event,
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Esc) | Key::SpecialKey(SpecialKey::Enter)
+                })
+            ) && global_data
+                .state
+                .terminal_panes
+                .get(&id)
+                .and_then(|p| p.lock().ok())
+                .is_some_and(|p| p.exited)
+            {
+                if let Some(pane) = global_data.state.terminal_panes.remove(&id)
+                    && let Ok(mut p) = pane.lock()
+                    && let Some(mut killer) = p.child_killer.take()
+                {
+                    let _ = killer.kill();
+                }
+                global_data.state.remove_window(&Window::Terminal(id));
+                return Ok(EventPropagation::ConsumedRender);
+            }
+
             let Some(pane) = global_data.state.terminal_panes.get(&id) else {
                 return Ok(EventPropagation::Propagate);
             };

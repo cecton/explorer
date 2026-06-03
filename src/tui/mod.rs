@@ -7,6 +7,7 @@ mod state;
 mod terminal_pane;
 mod theme;
 mod theme_picker;
+mod title_row;
 
 pub use app::{build_state, run};
 pub use state::{AppSignal, AppState};
@@ -20,4 +21,5 @@ use self::preview::*;
 use self::state::*;
 use self::terminal_pane::*;
 use self::theme_picker::*;
+use self::title_row::*;
 use r3bl_tui::*;

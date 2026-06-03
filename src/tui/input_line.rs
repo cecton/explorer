@@ -147,6 +147,19 @@ impl InputLine {
                         ..
                     },
             }) => self.kill_word_backward(query),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(SpecialKey::Enter),
+                mask:
+                    ModifierKeysMask {
+                        shift_key_state: KeyState::Pressed,
+                        ..
+                    },
+            }) => {
+                let byte_pos = grapheme_byte_offset(query, self.cursor);
+                query.insert(byte_pos, '\n');
+                self.cursor += 1;
+                true
+            }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character(ch),
             }) => {
@@ -396,53 +409,94 @@ impl InputLine {
         true
     }
 
+    pub fn line_count(query: &str) -> usize {
+        query.matches('\n').count() + 1
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         mut ops: &mut RenderOpIRVec,
         query: &str,
+        prompt: &str,
         origin: Pos,
         width: u16,
         focused: bool,
         colors: (TuiColor, TuiColor),
     ) {
         let width = width as usize;
-
+        let prompt_width = prompt.graphemes(true).count();
         let (color_bg, color_text) = colors;
         let cursor_style = new_style!(reverse);
-
-        let bg_style = new_style!(color_bg: {color_bg});
         let text_style = new_style!(color_fg: {color_text} color_bg: {color_bg});
 
-        ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
-        ops += RenderOpCommon::ApplyColors(Some(bg_style));
-        ops +=
-            RenderOpIR::PaintTextWithAttributes(" ".repeat(width).as_str().into(), Some(bg_style));
+        let lines: Vec<&str> = query.split('\n').collect();
+        let line_grapheme_counts: Vec<usize> =
+            lines.iter().map(|l| l.graphemes(true).count()).collect();
+        let total_graphemes: usize =
+            line_grapheme_counts.iter().sum::<usize>() + lines.len().saturating_sub(1);
+        let cursor = self.cursor.min(total_graphemes);
 
-        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
-        let count = graphemes.len();
-        let cursor = self.cursor.min(count);
-
-        let scroll = if count >= width && cursor >= width {
-            cursor - width + 1
-        } else {
-            0
-        };
-
-        ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
-
-        for (char_col, (i, &(_, gr))) in graphemes.iter().enumerate().skip(scroll).enumerate() {
-            if char_col >= width {
+        let mut cursor_line = 0usize;
+        let mut cursor_col = 0usize;
+        let mut remaining = cursor;
+        for (i, &count) in line_grapheme_counts.iter().enumerate() {
+            if remaining <= count {
+                cursor_line = i;
+                cursor_col = remaining;
                 break;
             }
-            if i == cursor && focused {
-                ops += RenderOpIR::PaintTextWithAttributes(gr.into(), Some(cursor_style));
-            } else {
-                ops += RenderOpIR::PaintTextWithAttributes(gr.into(), Some(text_style));
-            }
+            remaining = remaining.saturating_sub(count + 1);
         }
 
-        if cursor >= count && focused && count.saturating_sub(scroll) < width {
-            ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(cursor_style));
+        for (line_idx, line_text) in lines.iter().enumerate() {
+            let line_graphemes: Vec<(usize, &str)> = line_text.grapheme_indices(true).collect();
+            let line_gr_count = line_graphemes.len();
+            let col_offset = if line_idx == 0 { prompt_width } else { 0 };
+            let line_width = width.saturating_sub(col_offset);
+
+            if line_idx == 0 && prompt_width > 0 {
+                ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+                ops += RenderOpIR::PaintTextWithAttributes(prompt.into(), Some(text_style));
+            }
+
+            let scroll = if line_idx == cursor_line
+                && line_gr_count >= line_width
+                && cursor_col >= line_width
+            {
+                cursor_col - line_width + 1
+            } else {
+                0
+            };
+
+            ops += RenderOpCommon::MoveCursorPositionRelTo(
+                origin,
+                col(col_offset as u16) + row(line_idx as u16),
+            );
+
+            for (vis_col, (gi, &(_, gr))) in
+                line_graphemes.iter().enumerate().skip(scroll).enumerate()
+            {
+                if vis_col >= line_width {
+                    break;
+                }
+                if line_idx == cursor_line && gi == cursor_col && focused {
+                    ops += RenderOpIR::PaintTextWithAttributes(gr.into(), Some(cursor_style));
+                } else {
+                    ops += RenderOpIR::PaintTextWithAttributes(gr.into(), Some(text_style));
+                }
+            }
+
+            if focused && line_idx == cursor_line && cursor_col >= line_gr_count {
+                let vis_cursor_col = col_offset + cursor_col.saturating_sub(scroll);
+                if vis_cursor_col < width {
+                    ops += RenderOpCommon::MoveCursorPositionRelTo(
+                        origin,
+                        col(vis_cursor_col as u16) + row(line_idx as u16),
+                    );
+                    ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(cursor_style));
+                }
+            }
         }
     }
 }

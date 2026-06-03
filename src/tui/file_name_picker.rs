@@ -33,30 +33,6 @@ impl FileNamePickerComponent {
         }
     }
 
-    pub(crate) fn render_title_row(
-        &self,
-        mut ops: &mut RenderOpIRVec,
-        origin: Pos,
-        width: u16,
-        focused: bool,
-        theme: &HelixTheme,
-        query: &str,
-    ) {
-        let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
-        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
-        let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
-        let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
-
-        ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
-        ops += RenderOpCommon::SetBgColor(color_bg);
-        ops += RenderOpIR::PaintTextWithAttributes(
-            " ".repeat(width as usize).as_str().into(),
-            Some(bg_style),
-        );
-        self.input_line
-            .render(ops, query, origin, width, focused, (color_bg, color_fg));
-    }
-
     fn on_query_changed(
         &self,
         state: &AppState,
@@ -113,17 +89,37 @@ impl FileNamePickerComponent {
     }
 }
 
-fn title_bar_colors(focused: bool, theme: &HelixTheme) -> ([u8; 3], [u8; 3]) {
-    if focused {
-        (
-            theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]),
-            theme.ui_fg("ui.text").unwrap_or([220, 220, 255]),
-        )
-    } else {
-        (
-            theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]),
-            theme.ui_fg("ui.statusline").unwrap_or([180, 180, 220]),
-        )
+impl TitleRow for FileNamePickerComponent {
+    fn render_title_row(
+        &self,
+        mut ops: &mut RenderOpIRVec,
+        pane_box: &FlexBox,
+        focused: bool,
+        theme: &HelixTheme,
+        state: &AppState,
+    ) -> usize {
+        let origin = pane_box.style_adjusted_origin_pos;
+        let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
+        let query = &state.file_name_picker.query;
+        let height = InputLine::line_count(query);
+
+        let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
+        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
+        let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+        let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+
+        for row_offset in 0..height {
+            ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset as u16));
+            ops += RenderOpCommon::SetBgColor(color_bg);
+            ops += RenderOpIR::PaintTextWithAttributes(
+                " ".repeat(width as usize).as_str().into(),
+                Some(bg_style),
+            );
+        }
+        self.input_line
+            .render(ops, query, "", origin, width, focused, (color_bg, color_fg));
+
+        height
     }
 }
 
