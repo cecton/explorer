@@ -123,7 +123,7 @@ impl FileData {
             let end = scan_forward!(_i, c => !is_url_boundary(c));
             let mut url = None;
             let _start = scan_backward!(i, c => {
-                if url::Url::parse(&content[i..end]).is_ok() {
+                if content[i..end].contains("://") && url::Url::parse(&content[i..end]).is_ok() {
                     url = Some((i, end));
                 }
                 !is_url_boundary(c)
@@ -322,6 +322,10 @@ mod tests {
         let data = fd("123abc");
         let (start, end) = data.word_bounds(3);
         assert_eq!(data.extract_text(start, end).as_deref(), Some("123abc"));
+
+        let data = fd("use serde_json::Value;");
+        let (start, end) = data.word_bounds(12);
+        assert_eq!(data.extract_text(start, end).as_deref(), Some("serde_json"));
     }
 
     #[test]
