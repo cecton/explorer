@@ -135,9 +135,6 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     let encoded = encode_mouse_event(mouse, origin_row, origin_col);
                     let _ = tx.try_send(PtyInputEvent::Write(encoded));
                 }
-                InputEvent::Resize(new_size) => {
-                    let _ = tx.try_send(PtyInputEvent::Resize(new_size));
-                }
                 _ => {}
             }
 
