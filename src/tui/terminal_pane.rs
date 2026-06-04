@@ -346,7 +346,11 @@ fn render_ofs_buf_to_ir(
                     origin,
                     col(run_start as u16) + row(row_index as u16),
                 );
-                ops += RenderOpCommon::ApplyColors(run_style);
+                if run_style.is_some() {
+                    ops += RenderOpCommon::ApplyColors(run_style);
+                } else {
+                    ops += RenderOpCommon::ResetColor;
+                }
                 ops += RenderOpIR::PaintTextWithAttributes(text.into(), run_style);
             }
         }

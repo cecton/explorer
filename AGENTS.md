@@ -35,7 +35,7 @@ Source is organized as:
 - `src/tui/fuzzy_picker.rs` — shared fuzzy list picker component; navigation via flat `match` on `InputEvent`
 - `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview (exceptions → input → navigation)
 - `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane)
-- `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation
+- `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation; `render_ofs_buf_to_ir()` emits `ResetColor` for `Spacer` runs to prevent stale SGR inheritance
 - `src/tui/input_line.rs` — query input with Emacs-style key bindings; single flat `match` on `InputEvent`
 
 ---
