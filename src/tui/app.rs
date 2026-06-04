@@ -695,7 +695,6 @@ impl AppMain {
             } else {
                 PtySessionBuilder::new(shell_command())
             };
-            builder = builder.env_var("TERM", "xterm-256color");
             if let Some(ref cwd_path) = cwd {
                 builder = builder.cwd(cwd_path.as_std_path());
             }
