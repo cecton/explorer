@@ -20,7 +20,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         ctrl_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
                     },
             }) => {
                 self.cursor = 0;
@@ -31,7 +32,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         ctrl_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
                     },
             }) => {
                 self.cursor = grapheme_count;
@@ -42,7 +44,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         ctrl_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
                     },
             }) => self.delete_grapheme(query),
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -50,7 +53,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         ctrl_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
                     },
             }) => {
                 if self.cursor == 0 {
@@ -65,7 +69,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         ctrl_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
                     },
             }) => {
                 if self.cursor >= grapheme_count {
@@ -80,7 +85,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         ctrl_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
                     },
             }) => self.kill_to_end(query),
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -88,7 +94,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         ctrl_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
                     },
             }) => self.kill_to_start(query),
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -96,7 +103,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         ctrl_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
                     },
             }) => self.kill_word_backward(query),
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -104,7 +112,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         ctrl_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
                     },
             }) => self.cursor_prev_word(query),
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -112,7 +121,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         ctrl_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
                     },
             }) => self.cursor_next_word(query),
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -120,7 +130,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         alt_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        ctrl_key_state: KeyState::NotPressed,
                     },
             }) => self.cursor_prev_word(query),
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -128,7 +139,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         alt_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        ctrl_key_state: KeyState::NotPressed,
                     },
             }) => self.cursor_next_word(query),
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -136,7 +148,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         alt_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        ctrl_key_state: KeyState::NotPressed,
                     },
             }) => self.kill_word_forward(query),
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -144,7 +157,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         alt_key_state: KeyState::Pressed,
-                        ..
+                        shift_key_state: KeyState::NotPressed,
+                        ctrl_key_state: KeyState::NotPressed,
                     },
             }) => self.kill_word_backward(query),
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -152,7 +166,8 @@ impl InputLine {
                 mask:
                     ModifierKeysMask {
                         shift_key_state: KeyState::Pressed,
-                        ..
+                        alt_key_state: KeyState::NotPressed,
+                        ctrl_key_state: KeyState::NotPressed,
                     },
             }) => {
                 let byte_pos = grapheme_byte_offset(query, self.cursor);
@@ -162,6 +177,15 @@ impl InputLine {
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character(ch),
+            })
+            | InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character(ch),
+                mask:
+                    ModifierKeysMask {
+                        shift_key_state: KeyState::Pressed,
+                        alt_key_state: KeyState::NotPressed,
+                        ctrl_key_state: KeyState::NotPressed,
+                    },
             }) => {
                 if ch.is_control() {
                     return false;
