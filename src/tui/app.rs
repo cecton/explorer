@@ -451,14 +451,15 @@ impl Component<AppState, AppSignal> for PaneComponent {
                         }
                         self.last_click = Some((now, mouse.pos));
 
-                        self.text_drag_active = true;
-                        state.mouse_drag_active = true;
-                        self.preview.start_text_drag_from_pos(
+                        if self.preview.start_text_drag_from_pos(
                             state,
                             row,
                             col,
                             self.consecutive_clicks,
-                        );
+                        ) {
+                            self.text_drag_active = true;
+                            state.mouse_drag_active = true;
+                        }
                         return Ok(EventPropagation::ConsumedRender);
                     }
                 }

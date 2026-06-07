@@ -22,6 +22,8 @@ pub struct FilePreviewComponent {
     text_drag_active: bool,
     text_drag_start: Option<(usize, usize)>,
     text_drag_end: Option<(usize, usize)>,
+    text_drag_click_byte: Option<usize>,
+    text_drag_click_word: Option<(usize, usize)>,
     /// Cached geometry of the content area at last render, used for mouse event handling.
     content_origin_row: usize,
     content_origin_col: usize,
@@ -42,6 +44,8 @@ impl FilePreviewComponent {
             text_drag_active: false,
             text_drag_start: None,
             text_drag_end: None,
+            text_drag_click_byte: None,
+            text_drag_click_word: None,
             content_origin_row: 0,
             content_origin_col: 0,
             content_col_count: 0,
@@ -364,9 +368,14 @@ impl FilePreviewComponent {
             self.screen_pos_to_line_char(state, row, col, key, &data);
 
         let (sel_start, sel_end) = match click_count {
-            2 => data.word_bounds(cursor_byte),
-            3.. => data.line_bounds(line_idx),
-            _ => (cursor_byte, cursor_byte),
+            1 => {
+                self.text_drag_click_byte = Some(cursor_byte);
+                let bounds = data.word_bounds(cursor_byte);
+                self.text_drag_click_word = Some(bounds);
+                (bounds.0, bounds.0)
+            }
+            3 => data.line_bounds(line_idx),
+            _ => return false,
         };
 
         self.start_text_drag(line_idx, sel_start);
@@ -386,6 +395,23 @@ impl FilePreviewComponent {
 
         let (line_idx, _char_idx, cursor_byte) =
             self.screen_pos_to_line_char(state, row, col, key, &data);
+
+        if let Some((click_word_start, click_word_end)) = self.text_drag_click_word
+            && let Some(click_byte) = self.text_drag_click_byte
+            && let Some(start) = self.text_drag_start
+            && start.0 == line_idx
+        {
+            if cursor_byte >= click_byte {
+                self.text_drag_start = Some((line_idx, click_word_start));
+                let cur = data.word_bounds(cursor_byte);
+                self.text_drag_end = Some((line_idx, cur.1));
+            } else {
+                let cur = data.word_bounds(cursor_byte);
+                self.text_drag_start = Some((line_idx, cur.0));
+                self.text_drag_end = Some((line_idx, click_word_end));
+            }
+            return;
+        }
 
         self.update_text_drag(line_idx, cursor_byte);
     }
@@ -474,6 +500,8 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
         self.text_drag_active = false;
         self.text_drag_start = None;
         self.text_drag_end = None;
+        self.text_drag_click_byte = None;
+        self.text_drag_click_word = None;
     }
 
     fn get_id(&self) -> FlexBoxId {
