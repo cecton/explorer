@@ -876,7 +876,7 @@ impl App for AppMain {
     type S = AppState;
     type AS = AppSignal;
 
-    fn app_init(
+    fn app_init_components(
         &mut self,
         component_registry_map: &mut ComponentRegistryMap<Self::S, Self::AS>,
         has_focus: &mut HasFocus,
@@ -904,12 +904,7 @@ impl App for AppMain {
         }
     }
 
-    fn app_start(
-        &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
-        _component_registry_map: &mut ComponentRegistryMap<AppState, AppSignal>,
-        _has_focus: &mut HasFocus,
-    ) {
+    fn app_start_background_services(&mut self, global_data: &mut GlobalData<AppState, AppSignal>) {
         let notify_tx = global_data.main_thread_channel_sender.clone();
 
         // Publish the channel sender so the SIGTERM handler can request a clean exit.
