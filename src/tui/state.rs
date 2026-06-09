@@ -80,6 +80,9 @@ pub struct TerminalPane {
     pub exit_code: Option<u32>,
     /// Signal name (e.g. "SIGSEGV") if the process was terminated by a signal.
     pub exit_signal: Option<String>,
+    /// How many lines back from the bottom of the terminal the viewport is scrolled.
+    /// 0 means showing the current buffer (bottom); >0 shows scrollback history.
+    pub scroll_offset: usize,
 }
 
 impl Debug for TerminalPane {
@@ -99,6 +102,7 @@ impl Debug for TerminalPane {
             .field("exited", &self.exited)
             .field("exit_code", &self.exit_code)
             .field("exit_signal", &self.exit_signal)
+            .field("scroll_offset", &self.scroll_offset)
             .finish()
     }
 }
@@ -130,6 +134,10 @@ pub struct AppState {
     /// Next available terminal pane ID.
     pub next_terminal_id: usize,
     pub mouse_drag_active: bool,
+    /// When true, the focused terminal forwards keyboard input to the PTY.
+    /// When false, keyboard events propagate to the app (global shortcuts).
+    /// Scrolling ungrabs; mouse focus change or Enter/Esc re-grabs.
+    pub terminal_grabbed: bool,
 }
 
 impl AppState {
@@ -149,6 +157,9 @@ impl AppState {
     pub fn remove_window(&mut self, window: &Window) {
         self.window_stack.retain(|w| w != window);
         self.window_states.remove(window);
+        if matches!(window, Window::Terminal(_)) {
+            self.terminal_grabbed = false;
+        }
         if self.focused_window.as_ref() == Some(window) {
             self.focused_window = self.window_stack.first().cloned();
         }
@@ -266,6 +277,7 @@ impl AppState {
             terminal_panes: HashMap::new(),
             next_terminal_id: 0,
             mouse_drag_active: false,
+            terminal_grabbed: false,
         };
         state.file_name_picker.results =
             crate::tui::file_name_picker::FileNamePickerComponent::all_files_results(

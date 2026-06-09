@@ -26,13 +26,14 @@ Source is organized as:
 - `src/config.rs` — KDL configuration file parsing (theme, future fields)
 - `src/loader.rs` — parallel file walking and `LoadedFile` construction
 - `src/lsp.rs` — LSP client (JSON-RPC over stdio)
+- `src/watcher.rs` — filesystem watcher via `notify`; debounces events into `BatchedWatchEvent` and broadcasts via `WATCHER_RRT`
 - `src/tui/mod.rs` — module declarations
 - `src/tui/title_row.rs` — `TitleRow` trait, `render_pane_title` utility, `title_bar_colors`
-- `src/tui/state.rs` — `State`, `AppSignal`, and `TerminalPane` types
+- `src/tui/state.rs` — `AppState`, `AppSignal`, `TerminalPane`, `Window`, `WindowState`, and `FuzzyPickerState` types
 - `src/tui/app.rs` — `App` trait impl, layout, `run()` entry point
-- `src/tui/file_list.rs` — `FileListComponent` (left pane)
 - `src/tui/file_name_picker.rs` — fuzzy file-name picker overlay (exceptions → input → navigation)
 - `src/tui/fuzzy_picker.rs` — shared fuzzy list picker component; navigation via flat `match` on `InputEvent`
+- `src/tui/theme.rs` — `HelixTheme` type; loads bundled TOML files via `include!("../../themes/themes.rs")`
 - `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview (exceptions → input → navigation)
 - `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane)
 - `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation; `render_ofs_buf_to_ir()` emits `ResetColor` for `Spacer` runs to prevent stale SGR inheritance
@@ -62,6 +63,21 @@ cargo clippy --no-deps
 cargo check
 ```
 
+### xtask
+
+The workspace includes an `xtask` crate aliased via `.cargo/config.toml`:
+
+```bash
+# Run with file-watching (auto-restart on change), using release-with-debug profile
+cargo xtask start
+
+# Watch source and run `cargo check` on change
+cargo xtask watch
+
+# Regenerate themes/themes.rs from themes/*.toml (run after adding/changing theme files)
+cargo xtask update-themes
+```
+
 ### Tests
 
 There are no tests yet. When adding tests:
@@ -89,25 +105,31 @@ cargo test <module>::<test_name>
 
 ## Dependencies
 
-| Crate         | Version | Purpose                                           |
-|---------------|---------|---------------------------------------------------|
-| `camino`      | 1.x     | UTF-8–typed path types (`Utf8PathBuf`, etc.)      |
-| `jwalk`       | 0.8.x   | Parallel directory traversal (uses rayon)         |
-| `lsp-types`   | 0.97.x  | Typed LSP protocol structs (with `proposed` feature) |
-| `nucleo`      | 0.5.x   | Fuzzy matching for paths and file content         |
-| `pico-args`   | 0.5.x   | Lightweight CLI argument parsing (no proc macros) |
-| `r3bl_tui`    | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
-| `serde`       | 1.x     | Derive macros for serialization (`derive` feature) |
-| `serde_json`  | 1.x     | JSON-RPC message serialization for LSP protocol   |
-| `tokio`       | 1.x     | Async runtime required by `r3bl_tui`              |
-| `tracing`     | 0.1.x   | Structured logging macros (`debug!`, `info!`, etc.) |
-| `tracing-core` | 0.1.x  | `LevelFilter` type used to configure `r3bl_tui` logger |
-| `url`          | 2.x     | URL parsing in `word_bounds` for cursor-based URL selection |
+| Crate                  | Version | Purpose                                                        |
+|------------------------|---------|----------------------------------------------------------------|
+| `arc-swap`             | 1.x     | Lock-free atomic swap for the shared file list (`Arc<ArcSwap<Vec<LoadedFile>>>`) |
+| `camino`               | 1.x     | UTF-8–typed path types (`Utf8PathBuf`, etc.)                   |
+| `jwalk`                | 0.8.x   | Parallel directory traversal (uses rayon)                      |
+| `kdl`                  | 6.x     | KDL config file parsing                                        |
+| `libc`                 | 0.2.x   | PTY/OS-level syscalls used by terminal emulation               |
+| `lsp-types`            | 0.97.x  | Typed LSP protocol structs (with `proposed` feature)           |
+| `miette`               | 7.x     | Error reporting                                                |
+| `notify`               | 8.x     | Filesystem event watching (used in `watcher.rs`)               |
+| `nucleo`               | 0.5.x   | Fuzzy matching for paths and file content                      |
+| `pico-args`            | 0.5.x   | Lightweight CLI argument parsing (no proc macros)              |
+| `r3bl_tui`             | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
+| `serde`                | 1.x     | Derive macros for serialization (`derive` feature)             |
+| `serde_json`           | 1.x     | JSON-RPC message serialization for LSP protocol                |
+| `toml`                 | 0.8.x   | Theme file parsing (`themes/*.toml`)                           |
+| `tokio`                | 1.x     | Async runtime required by `r3bl_tui`                           |
+| `tracing`              | 0.1.x   | Structured logging macros (`debug!`, `info!`, etc.)            |
+| `tracing-core`         | 0.1.x   | `LevelFilter` type used to configure `r3bl_tui` logger         |
+| `unicode-segmentation` | 1.x     | Word boundary detection in `input_line`                        |
+| `url`                  | 2.x     | URL parsing in `word_bounds` for cursor-based URL selection    |
 
 Add a dependency when it provides substantial value that would take significant effort to replicate correctly — covering performance, correctness, or capability. Prefer `std` for trivial things. Each dep must have a concrete, stated purpose in this table.
 
 Planned feature areas and their likely dependencies:
-- **File watching**: `notify-rust` (already a transitive dep of `r3bl_tui`)
 - **Git information** (blame, diff, status): `git2`
 
 ---
@@ -174,6 +196,12 @@ Planned feature areas and their likely dependencies:
   An optional `--log-level <level>` controls verbosity (error/warn/info/debug/trace);
   default is `debug`.
 
+### Terminal Pane Grab/Ungrab
+
+- `AppState::terminal_grabbed` is a single global flag: when `true`, keyboard events go to the focused PTY; when `false`, they propagate to app-level shortcuts.
+- Scrolling a terminal pane ungrabs it. Clicking the pane or pressing Enter/Esc re-grabs.
+- When removing a terminal window via `remove_window`, only reset `terminal_grabbed` if the window being removed is the currently focused one — otherwise a background pane exit silently ungrabs an active terminal.
+
 ### Comments
 
 - Write no comments by default.
@@ -187,6 +215,7 @@ Planned feature areas and their likely dependencies:
 - Embed the full path in each arm: `InputEvent::Keyboard(KeyPress::Plain { key: Key::SpecialKey(SpecialKey::Esc) })` instead of `if let InputEvent::Keyboard(KeyPress::Plain { key }) = input_event { match key { Key::SpecialKey(SpecialKey::Esc) => ... } }`.
 - Use `|` to share an arm body when two patterns are semantically equivalent (e.g. Down arrow and scroll-down).
 - Destructure modifier masks directly in the pattern (`ModifierKeysMask { ctrl_key_state: KeyState::Pressed, .. }`) rather than match guards like `if mask == ModifierKeysMask::new().with_ctrl()`.
+- **Never match on an outer enum to extract an inner value only to match on it again.** A two-level `match input_event { InputEvent::Keyboard(keypress) => { match keypress { ... } } }` is the same anti-pattern as `if let` + `match`. Every keyboard arm must be a top-level arm with the full path: `InputEvent::Keyboard(KeyPress::Plain { key: Key::SpecialKey(SpecialKey::Esc) })`.
 
 ### General
 
@@ -195,3 +224,10 @@ Planned feature areas and their likely dependencies:
 - Three similar lines is better than a premature abstraction.
 - No half-finished implementations.
 - Do not add `#[allow(dead_code)]` or similar suppression attributes to ship around incomplete work.
+- **No magic sentinel values** — never encode "invalid" or "absent" state by
+  stuffing a sentinel number (e.g. `-1`) into a field that normally holds
+  real data. This is a common slope AI pattern and it is broken by design:
+  sentinels are invisible to downstream code — clamps, casts, arithmetic,
+  and comparisons all treat them as ordinary values, creating hidden coupling
+  between producer and every consumer. Use `Option<T>` or a dedicated `enum`
+  variant instead.

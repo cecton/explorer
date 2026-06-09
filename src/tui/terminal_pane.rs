@@ -96,32 +96,79 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 .and_then(|p| p.lock().ok())
                 .is_some_and(|p| p.exited)
             {
-                if let Some(pane) = global_data.state.terminal_panes.remove(&id)
-                    && let Ok(mut p) = pane.lock()
-                    && let Some(mut killer) = p.child_killer.take()
-                {
-                    let _ = killer.kill();
+                if let Some(pane) = global_data.state.terminal_panes.remove(&id) {
+                    let mut p = match pane.lock() {
+                        Ok(guard) => guard,
+                        Err(poison) => {
+                            tracing::error!("pane lock poisoned: {poison}");
+                            poison.into_inner()
+                        }
+                    };
+                    if let Some(mut killer) = p.child_killer.take() {
+                        let _ = killer.kill();
+                    }
                 }
                 global_data.state.remove_window(&Window::Terminal(id));
                 return Ok(EventPropagation::ConsumedRender);
             }
 
-            let Some(pane) = global_data.state.terminal_panes.get(&id) else {
+            let Some(pane_arc) = global_data.state.terminal_panes.get(&id).cloned() else {
                 return Ok(EventPropagation::Propagate);
             };
-            let Ok(pane) = pane.lock() else {
-                return Ok(EventPropagation::Propagate);
+
+            let mut pane = match pane_arc.lock() {
+                Ok(guard) => guard,
+                Err(poison) => {
+                    tracing::error!("pane lock poisoned: {poison}");
+                    poison.into_inner()
+                }
             };
             let tx = pane.pty_input_tx.clone();
             let mouse_tracking_mode = pane.mouse_tracking_mode;
-            drop(pane);
+            let alternate_screen_active =
+                pane.ofs_buf.terminal_mode.alternate_screen == AlternateScreenState::Active;
+            let scrollback_len = pane.ofs_buf.scrollback_len();
+
+            if global_data.state.terminal_grabbed
+                && let InputEvent::Keyboard(keypress) = &input_event
+            {
+                if let Some(pty_event) = Option::<PtyInputEvent>::from(*keypress) {
+                    let _ = tx.try_send(pty_event);
+                }
+                return Ok(EventPropagation::ConsumedRender);
+            }
 
             match input_event {
-                InputEvent::Keyboard(keypress) => {
-                    if let Some(pty_event) = Option::<PtyInputEvent>::from(keypress) {
-                        let _ = tx.try_send(pty_event);
+                InputEvent::Mouse(MouseInput {
+                    kind: MouseInputKind::ScrollUp,
+                    maybe_modifier_keys: None,
+                    ..
+                }) if !alternate_screen_active && scrollback_len > 0 => {
+                    global_data.state.terminal_grabbed = false;
+                    let old_offset = pane.scroll_offset;
+                    pane.scroll_offset = pane.scroll_offset.saturating_add(3).min(scrollback_len);
+                    if pane.scroll_offset != old_offset {
+                        EventPropagation::ConsumedRender
+                    } else {
+                        EventPropagation::Consumed
                     }
                 }
+
+                InputEvent::Mouse(MouseInput {
+                    kind: MouseInputKind::ScrollDown,
+                    maybe_modifier_keys: None,
+                    ..
+                }) if !alternate_screen_active && scrollback_len > 0 => {
+                    global_data.state.terminal_grabbed = false;
+                    let old_offset = pane.scroll_offset;
+                    pane.scroll_offset = pane.scroll_offset.saturating_sub(3);
+                    if pane.scroll_offset != old_offset {
+                        EventPropagation::ConsumedRender
+                    } else {
+                        EventPropagation::Consumed
+                    }
+                }
+
                 InputEvent::Mouse(mouse) => {
                     if !should_forward_mouse(&mouse.kind, mouse_tracking_mode) {
                         return Ok(EventPropagation::Consumed);
@@ -134,11 +181,66 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     let origin_col = box_.style_adjusted_origin_pos.col_index.as_u16();
                     let encoded = encode_mouse_event(mouse, origin_row, origin_col);
                     let _ = tx.try_send(PtyInputEvent::Write(encoded));
+                    EventPropagation::ConsumedRender
                 }
-                _ => {}
-            }
 
-            EventPropagation::ConsumedRender
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Esc),
+                })
+                | InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Enter),
+                }) => {
+                    global_data.state.terminal_grabbed = true;
+                    pane.scroll_offset = 0;
+                    EventPropagation::ConsumedRender
+                }
+
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::PageUp),
+                }) => {
+                    let slot = pane_slot(self.id).unwrap_or(0);
+                    let pane_height = global_data.state.pane_boxes[slot]
+                        .style_adjusted_bounds_size
+                        .row_height
+                        .as_usize();
+                    pane.scroll_offset = pane
+                        .scroll_offset
+                        .saturating_add(pane_height)
+                        .min(pane.ofs_buf.scrollback_len());
+                    EventPropagation::ConsumedRender
+                }
+
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::PageDown),
+                }) => {
+                    let slot = pane_slot(self.id).unwrap_or(0);
+                    let pane_height = global_data.state.pane_boxes[slot]
+                        .style_adjusted_bounds_size
+                        .row_height
+                        .as_usize();
+                    pane.scroll_offset = pane.scroll_offset.saturating_sub(pane_height);
+                    EventPropagation::ConsumedRender
+                }
+
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Up),
+                }) => {
+                    pane.scroll_offset = pane
+                        .scroll_offset
+                        .saturating_add(1)
+                        .min(pane.ofs_buf.scrollback_len());
+                    EventPropagation::ConsumedRender
+                }
+
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Down),
+                }) => {
+                    pane.scroll_offset = pane.scroll_offset.saturating_sub(1);
+                    EventPropagation::ConsumedRender
+                }
+
+                _ => EventPropagation::Propagate,
+            }
         });
     }
 
@@ -156,8 +258,12 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
             let Some(pane) = global_data.state.terminal_panes.get(&id) else {
                 return Ok(render_pipeline!());
             };
-            let Ok(mut pane) = pane.lock() else {
-                return Ok(render_pipeline!());
+            let mut pane = match pane.lock() {
+                Ok(guard) => guard,
+                Err(poison) => {
+                    tracing::error!("pane lock poisoned: {poison}");
+                    poison.into_inner()
+                }
             };
             let origin = current_box.style_adjusted_origin_pos;
 
@@ -175,28 +281,66 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 pane.last_size = new_size;
             }
 
-            let visible_rows = pane_height.min(pane.ofs_buf.buffer.len());
-            let cursor_visible = pane.ofs_buf.ansi_parser_support.cursor_visible;
-            let cursor_pos = if cursor_visible {
-                Some(pane.ofs_buf.cursor_pos)
-            } else {
-                None
-            };
-            let mut render_ops =
-                render_ofs_buf_to_ir(&pane.ofs_buf, origin, visible_rows, cursor_pos);
+            let scrollback_len = pane.ofs_buf.scrollback_len();
+            let scroll_offset = pane.scroll_offset.min(scrollback_len);
+            let buffer_height = pane.ofs_buf.buffer.len();
 
-            let ofs_height = visible_rows;
-
-            if ofs_height < pane_height {
-                for row_idx in ofs_height..pane_height {
-                    render_ops += RenderOpCommon::MoveCursorPositionRelTo(
-                        origin,
-                        col(0) + row(row_idx as u16),
-                    );
-                    render_ops +=
-                        RenderOpIR::PaintTextWithAttributes(" ".repeat(pane_width).into(), None);
+            let render_ops = if scroll_offset == 0 {
+                let visible_rows = pane_height.min(buffer_height);
+                let is_grabbed = global_data.state.terminal_grabbed;
+                let cursor_visible = pane.ofs_buf.ansi_parser_support.cursor_visible && is_grabbed;
+                let cursor_pos = if cursor_visible {
+                    Some(pane.ofs_buf.cursor_pos)
+                } else {
+                    None
+                };
+                let mut ops = render_ofs_buf_to_ir(&pane.ofs_buf, origin, visible_rows, cursor_pos);
+                if visible_rows < pane_height {
+                    for row_idx in visible_rows..pane_height {
+                        ops += RenderOpCommon::MoveCursorPositionRelTo(
+                            origin,
+                            col(0) + row(row_idx as u16),
+                        );
+                        ops += RenderOpIR::PaintTextWithAttributes(
+                            " ".repeat(pane_width).into(),
+                            None,
+                        );
+                    }
                 }
-            }
+                ops
+            } else {
+                let combined_bottom = scrollback_len + buffer_height;
+                let viewport_bottom = combined_bottom.saturating_sub(scroll_offset);
+                let viewport_top = viewport_bottom.saturating_sub(pane_height);
+
+                let mut lines: Vec<&PixelCharLine> = Vec::with_capacity(pane_height);
+                for combined_idx in viewport_top..viewport_bottom {
+                    if let Some(line) = pane.ofs_buf.scrollback_get(combined_idx) {
+                        lines.push(line);
+                    } else if let Some(line) =
+                        pane.ofs_buf.buffer.get(combined_idx - scrollback_len)
+                    {
+                        lines.push(line);
+                    } else {
+                        break;
+                    }
+                }
+
+                let mut ops = render_lines_to_ir(&lines, origin, None);
+                if lines.len() < pane_height {
+                    for row_idx in lines.len()..pane_height {
+                        ops += RenderOpCommon::MoveCursorPositionRelTo(
+                            origin,
+                            col(0) + row(row_idx as u16),
+                        );
+                        ops += RenderOpIR::PaintTextWithAttributes(
+                            " ".repeat(pane_width).into(),
+                            None,
+                        );
+                    }
+                }
+                ops
+            };
 
             let mut pipeline = render_pipeline!();
             pipeline.push(ZOrder::Normal, render_ops);
@@ -281,8 +425,17 @@ fn render_ofs_buf_to_ir(
     max_rows: usize,
     cursor_pos: Option<r3bl_tui::Pos>,
 ) -> RenderOpIRVec {
+    let lines: Vec<&PixelCharLine> = ofs_buf.buffer.iter().take(max_rows).collect();
+    render_lines_to_ir(&lines, origin, cursor_pos)
+}
+
+fn render_lines_to_ir(
+    lines: &[&PixelCharLine],
+    origin: r3bl_tui::Pos,
+    cursor_pos: Option<r3bl_tui::Pos>,
+) -> RenderOpIRVec {
     let mut ops = RenderOpIRVec::new();
-    for (row_index, line) in ofs_buf.buffer.iter().enumerate().take(max_rows) {
+    for (row_index, line) in lines.iter().enumerate() {
         let mut col_index = 0usize;
         while col_index < line.len() {
             if line[col_index] == PixelChar::Void {

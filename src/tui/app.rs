@@ -124,9 +124,32 @@ impl PaneComponent {
         let rel_y = row.saturating_sub(self.content_origin_row as usize);
 
         let state = &mut global_data.state;
-        let scroll = state.window_scroll(&window);
-        let scroll_max = state.window_scroll_max(&window);
-        let page_size = state.window_page_size(&window);
+        let (scroll, scroll_max, page_size) = match &window {
+            Window::Terminal(id) => {
+                let Some(pane) = state.terminal_panes.get(id) else {
+                    return EventPropagation::Propagate;
+                };
+                let Ok(pane) = pane.lock() else {
+                    return EventPropagation::Propagate;
+                };
+                if pane.ofs_buf.terminal_mode.alternate_screen == AlternateScreenState::Active {
+                    return EventPropagation::Propagate;
+                }
+                let scrollback_len = pane.ofs_buf.scrollback_len();
+                let buffer_height = pane.ofs_buf.buffer.len();
+                if scrollback_len == 0 {
+                    return EventPropagation::Propagate;
+                }
+                let scroll = scrollback_len.saturating_sub(pane.scroll_offset.min(scrollback_len));
+                (scroll, scrollback_len + buffer_height, buffer_height)
+            }
+            _ => {
+                let scroll = state.window_scroll(&window);
+                let scroll_max = state.window_scroll_max(&window);
+                let page_size = state.window_page_size(&window);
+                (scroll, scroll_max, page_size)
+            }
+        };
         let scrollbar_height = self.content_row_count as usize;
 
         match mouse.kind {
@@ -226,7 +249,18 @@ impl PaneComponent {
                 }
                 EventPropagation::ConsumedRender
             }
-            Window::Terminal(_) => EventPropagation::ConsumedRender,
+            Window::Terminal(id) => {
+                let Some(pane) = state.terminal_panes.get(id) else {
+                    return EventPropagation::ConsumedRender;
+                };
+                if let Ok(mut pane) = pane.lock() {
+                    let scrollback_len = pane.ofs_buf.scrollback_len();
+                    let clamped = target.min(scrollback_len);
+                    pane.scroll_offset = scrollback_len.saturating_sub(clamped);
+                }
+                state.terminal_grabbed = false;
+                EventPropagation::ConsumedRender
+            }
         }
     }
 }
@@ -352,14 +386,8 @@ impl Component<AppState, AppSignal> for PaneComponent {
             self.consecutive_clicks = 0;
         }
 
-        let active_is_terminal = matches!(
-            self.active_window(&global_data.state),
-            Some(Window::Terminal(_))
-        );
-
         // Check for scrollbar mouse interaction first.
-        if !active_is_terminal
-            && !self.preview_drag_active
+        if !self.preview_drag_active
             && !self.text_drag_active
             && let InputEvent::Mouse(mouse) = input_event
         {
@@ -615,13 +643,35 @@ impl Component<AppState, AppSignal> for PaneComponent {
             };
 
             // Render scrollbar on the rightmost column if there's an active window.
-            if let Some(ref window) = self.active_window(&global_data.state).cloned()
-                && !matches!(window, Window::Terminal(_))
-            {
-                let state = &global_data.state;
-                let scroll = state.window_scroll(window);
-                let scroll_max = state.window_scroll_max(window);
-                let page_size = state.window_page_size(window);
+            if let Some(ref window) = self.active_window(&global_data.state).cloned() {
+                let (scroll, scroll_max, page_size) = match window {
+                    Window::Terminal(id) => {
+                        let Some(pane) = global_data.state.terminal_panes.get(id) else {
+                            return Ok(pipeline);
+                        };
+                        let Ok(pane) = pane.lock() else {
+                            return Ok(pipeline);
+                        };
+                        if pane.ofs_buf.terminal_mode.alternate_screen
+                            == AlternateScreenState::Active
+                        {
+                            return Ok(pipeline);
+                        }
+                        let scrollback_len = pane.ofs_buf.scrollback_len();
+                        let buffer_height = pane.ofs_buf.buffer.len();
+                        let scroll =
+                            scrollback_len.saturating_sub(pane.scroll_offset.min(scrollback_len));
+                        (scroll, scrollback_len + buffer_height, buffer_height)
+                    }
+                    _ => {
+                        let state = &global_data.state;
+                        (
+                            state.window_scroll(window),
+                            state.window_scroll_max(window),
+                            state.window_page_size(window),
+                        )
+                    }
+                };
                 let mut scrollbar_ops = RenderOpIRVec::new();
                 render_scrollbar(
                     &mut scrollbar_ops,
@@ -629,7 +679,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     scroll,
                     scroll_max,
                     page_size,
-                    &state.theme,
+                    &global_data.state.theme,
                 );
                 pipeline.push(ZOrder::Normal, scrollbar_ops);
             }
@@ -726,6 +776,7 @@ impl AppMain {
                 exited: false,
                 exit_code: None,
                 exit_signal: None,
+                scroll_offset: 0,
             }));
 
             state.terminal_panes.insert(id, Arc::clone(&pane));
@@ -741,6 +792,7 @@ impl AppMain {
                     match event {
                         PtyOutputEvent::Output(bytes) => {
                             if let Ok(mut pane) = pane.lock() {
+                                pane.scroll_offset = 0;
                                 let (osc_events, _, da_responses) =
                                     pane.ofs_buf.apply_ansi_bytes(&bytes);
                                 for osc_event in osc_events {
@@ -825,6 +877,7 @@ impl AppMain {
             let window = Window::Terminal(id);
             state.push_window(window.clone());
             state.focused_window = Some(window);
+            state.terminal_grabbed = true;
 
             EventPropagation::ConsumedRender
         });
@@ -979,12 +1032,20 @@ impl App for AppMain {
         sync_has_focus(&global_data.state, has_focus);
 
         // Leader key activation.
-        if let InputEvent::Keyboard(KeyPress::WithModifiers { key, mask }) = input_event
-            && key == Key::Character('`')
-            && mask == ModifierKeysMask::new().with_alt()
+        if let InputEvent::Keyboard(KeyPress::WithModifiers {
+            key: Key::Character('`'),
+            mask:
+                ModifierKeysMask {
+                    alt_key_state: KeyState::Pressed,
+                    shift_key_state: KeyState::NotPressed,
+                    ctrl_key_state: KeyState::NotPressed,
+                },
+        }) = input_event
             && !global_data.state.mouse_drag_active
+            && !global_data.state.leader_active
         {
             global_data.state.leader_active = true;
+            global_data.state.terminal_grabbed = false;
             return Ok(EventPropagation::ConsumedRender);
         }
 
@@ -992,6 +1053,17 @@ impl App for AppMain {
         if global_data.state.leader_active && !global_data.state.mouse_drag_active {
             global_data.state.leader_active = false;
             match &input_event {
+                InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::Character('`'),
+                    mask:
+                        ModifierKeysMask {
+                            alt_key_state: KeyState::Pressed,
+                            shift_key_state: KeyState::NotPressed,
+                            ctrl_key_state: KeyState::NotPressed,
+                        },
+                }) if matches!(global_data.state.focused_window, Some(Window::Terminal(_))) => {
+                    global_data.state.terminal_grabbed = true;
+                }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('f'),
                 }) => {
@@ -1073,13 +1145,18 @@ impl App for AppMain {
                 }) => {
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                _ => {}
+                _ => {
+                    global_data.state.leader_active = true;
+                    return Ok(EventPropagation::Consumed);
+                }
             }
         }
 
         // Global shortcut — Tab/BackTab cycles focus between panes.
         // Skipped for Terminal panes so Tab reaches the PTY (e.g. shell completion).
-        if !matches!(global_data.state.focused_window, Some(Window::Terminal(_)))
+        // When a terminal is ungrabbed Tab cycles focus.
+        if (!matches!(global_data.state.focused_window, Some(Window::Terminal(_)))
+            || !global_data.state.terminal_grabbed)
             && !global_data.state.mouse_drag_active
         {
             match &input_event {
@@ -1104,12 +1181,15 @@ impl App for AppMain {
         }
 
         // Focus follows mouse: hovering over a pane makes it the focused window.
-        if let InputEvent::Mouse(mouse) = &input_event
-            && mouse.kind == MouseInputKind::MouseMove
+        if let InputEvent::Mouse(MouseInput {
+            kind: MouseInputKind::MouseMove,
+            maybe_modifier_keys: None,
+            pos,
+        }) = &input_event
             && !global_data.state.mouse_drag_active
         {
-            let px = mouse.pos.col_index;
-            let py = mouse.pos.row_index;
+            let px = pos.col_index;
+            let py = pos.row_index;
             for (slot, box_) in global_data.state.pane_boxes.iter().enumerate() {
                 let ox = box_.style_adjusted_origin_pos.col_index;
                 let oy = box_.style_adjusted_origin_pos.row_index;
@@ -1329,12 +1409,10 @@ impl App for AppMain {
             fill_pipeline.join_into(pipeline);
             pipeline = fill_pipeline;
 
-            let focused_window = global_data.state.focused_window.clone();
             render_status_bar(
                 &mut pipeline,
                 window_size,
-                focused_window.as_ref(),
-                global_data.state.leader_active,
+                &global_data.state,
                 &global_data.state.theme,
             );
 
@@ -1482,8 +1560,7 @@ impl WindowHints for Window {
 fn render_status_bar(
     pipeline: &mut RenderPipeline,
     size: Size,
-    focused_window: Option<&Window>,
-    leader_active: bool,
+    state: &AppState,
     theme: &HelixTheme,
 ) {
     let bg_rgb = theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]);
@@ -1494,15 +1571,22 @@ fn render_status_bar(
     let leader_style = new_style!(bold color_fg: {color_fg} color_bg: {color_bg});
     let normal_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
-    let (leader_text, rest_text) = if leader_active {
+    let (leader_text, rest_text) = if state.leader_active {
         (
             " Leader ".to_string(),
             "f:Picker  t:Term  T:Theme  x:Close  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel"
                 .to_string(),
         )
     } else {
-        let pane = match focused_window {
-            Some(w) => w.pane_key_hints(),
+        let pane = match state.focused_window.as_ref() {
+            Some(w) => {
+                let base = w.pane_key_hints();
+                if matches!(w, Window::Terminal(_)) && !state.terminal_grabbed {
+                    "Enter:grab  ↑↓PgUp/PgDn:scroll"
+                } else {
+                    base
+                }
+            }
             None => "",
         };
         let mut rest = String::new();
