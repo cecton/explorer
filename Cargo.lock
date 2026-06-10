@@ -926,6 +926,7 @@ dependencies = [
  "toml 0.8.23",
  "tracing",
  "tracing-core",
+ "tracing-subscriber",
  "unicode-segmentation",
  "url",
 ]

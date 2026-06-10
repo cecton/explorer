@@ -29,6 +29,22 @@ pub enum Window {
     Terminal(usize),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SelPoint {
+    Preview { line_idx: usize, byte_offset: usize },
+    Terminal { viewport_row: usize, col: usize },
+}
+
+#[derive(Clone, Debug)]
+pub struct TextSelection {
+    pub window: Window,
+    pub start: SelPoint,
+    pub end: SelPoint,
+    pub click_anchor: Option<SelPoint>,
+    pub click_word: Option<(SelPoint, SelPoint)>,
+    pub active: bool,
+}
+
 /// Scroll and page-size state for a single window pane.
 #[derive(Clone, Debug, Default)]
 pub struct WindowState {
@@ -138,6 +154,7 @@ pub struct AppState {
     /// When false, keyboard events propagate to the app (global shortcuts).
     /// Scrolling ungrabs; mouse focus change or Enter/Esc re-grabs.
     pub terminal_grabbed: bool,
+    pub text_selection: Option<TextSelection>,
 }
 
 impl AppState {
@@ -278,6 +295,7 @@ impl AppState {
             next_terminal_id: 0,
             mouse_drag_active: false,
             terminal_grabbed: false,
+            text_selection: None,
         };
         state.file_name_picker.results =
             crate::tui::file_name_picker::FileNamePickerComponent::all_files_results(

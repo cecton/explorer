@@ -2,11 +2,21 @@ use crate::tui::*;
 
 pub struct TerminalPaneComponent {
     id: FlexBoxId,
+    content_origin_row: usize,
+    content_origin_col: usize,
+    content_col_count: usize,
+    content_row_count: usize,
 }
 
 impl TerminalPaneComponent {
     pub fn new(id: FlexBoxId) -> Self {
-        Self { id }
+        Self {
+            id,
+            content_origin_row: 0,
+            content_origin_col: 0,
+            content_col_count: 0,
+            content_row_count: 0,
+        }
     }
 
     fn terminal_id(&self, state: &AppState) -> Option<usize> {
@@ -269,6 +279,10 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
 
             let pane_width = current_box.style_adjusted_bounds_size.col_width.as_usize();
             let pane_height = current_box.style_adjusted_bounds_size.row_height.as_usize();
+            self.content_origin_row = origin.row_index.as_usize();
+            self.content_origin_col = origin.col_index.as_usize();
+            self.content_col_count = pane_width;
+            self.content_row_count = pane_height;
 
             // Resize the offscreen buffer if the pane dimensions changed.
             let new_size = Size {
@@ -284,6 +298,35 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
             let scrollback_len = pane.ofs_buf.scrollback_len();
             let scroll_offset = pane.scroll_offset.min(scrollback_len);
             let buffer_height = pane.ofs_buf.buffer.len();
+
+            let hl_rgb = global_data
+                .state
+                .theme
+                .ui_bg("ui.selection")
+                .unwrap_or([50, 50, 90]);
+            let selection_rect = global_data.state.text_selection.as_ref().and_then(|sel| {
+                if sel.window != Window::Terminal(id) || !sel.active {
+                    return None;
+                }
+                match (sel.start, sel.end) {
+                    (
+                        SelPoint::Terminal {
+                            viewport_row: sr,
+                            col: sc,
+                        },
+                        SelPoint::Terminal {
+                            viewport_row: er,
+                            col: ec,
+                        },
+                    ) => Some(SelectionRect {
+                        start_row: sr,
+                        start_col: sc,
+                        end_row: er,
+                        end_col: ec,
+                    }),
+                    _ => None,
+                }
+            });
 
             let render_ops = if scroll_offset == 0 {
                 let visible_rows = pane_height.min(buffer_height);
@@ -306,6 +349,11 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                             None,
                         );
                     }
+                }
+                if let Some(rect) = selection_rect {
+                    let lines: Vec<&PixelCharLine> =
+                        pane.ofs_buf.buffer.iter().take(visible_rows).collect();
+                    overlay_selection(&mut ops, &lines, origin, rect, hl_rgb);
                 }
                 ops
             } else {
@@ -339,6 +387,9 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                         );
                     }
                 }
+                if let Some(rect) = selection_rect {
+                    overlay_selection(&mut ops, &lines, origin, rect, hl_rgb);
+                }
                 ops
             };
 
@@ -347,6 +398,14 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
             pipeline
         });
     }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct SelectionRect {
+    start_row: usize,
+    start_col: usize,
+    end_row: usize,
+    end_col: usize,
 }
 
 fn should_forward_mouse(kind: &MouseInputKind, mode: MouseTrackingMode) -> bool {
@@ -510,4 +569,379 @@ fn render_lines_to_ir(
     }
 
     ops
+}
+
+/// Compute half-open column ranges for each row in a terminal text selection.
+/// `sr`/`er` and `sc`/`ec` are raw coordinates (may be in any order).
+/// `line_lengths` gives the length of each visible row, starting at `line_offset`.
+/// Returns `(row_idx, col_start, col_end)` tuples where `col_start < col_end`.
+fn compute_terminal_selection_ranges(
+    sr: usize,
+    sc: usize,
+    er: usize,
+    ec: usize,
+    line_lengths: &[usize],
+    line_offset: usize,
+) -> Vec<(usize, usize, usize)> {
+    let (sr, er) = (sr.min(er), sr.max(er));
+    let (sc, ec) = (sc.min(ec), sc.max(ec));
+
+    let mut ranges = Vec::with_capacity(er - sr + 1);
+    for row_idx in sr..=er {
+        let line_len = line_lengths
+            .get(row_idx - line_offset)
+            .copied()
+            .unwrap_or(0);
+        let row_start = if row_idx == sr { sc.min(line_len) } else { 0 };
+        let row_end = if row_idx == er {
+            ec.min(line_len)
+        } else {
+            line_len
+        };
+        if row_start < row_end {
+            ranges.push((row_idx, row_start, row_end));
+        }
+    }
+    ranges
+}
+
+fn overlay_selection(
+    ops: &mut RenderOpIRVec,
+    lines: &[&PixelCharLine],
+    origin: r3bl_tui::Pos,
+    selection: SelectionRect,
+    hl_bg: [u8; 3],
+) {
+    let line_lengths: Vec<usize> = lines
+        .iter()
+        .map(|l| {
+            l.iter()
+                .rposition(|pc| !matches!(pc, PixelChar::Spacer | PixelChar::Void))
+                .map(|i| i + 1)
+                .unwrap_or(0)
+        })
+        .collect();
+    let ranges = compute_terminal_selection_ranges(
+        selection.start_row,
+        selection.start_col,
+        selection.end_row,
+        selection.end_col,
+        &line_lengths,
+        0,
+    );
+
+    let sel_bg = tui_color!(hl_bg[0], hl_bg[1], hl_bg[2]);
+    let default_fg = tui_color!(255, 255, 255);
+
+    for (row_idx, col_start, col_end) in ranges {
+        let line = lines[row_idx];
+        for col_idx in col_start..col_end {
+            let ch = match &line[col_idx] {
+                PixelChar::PlainText { display_char, .. } => *display_char,
+                PixelChar::Spacer => ' ',
+                PixelChar::Void => continue,
+            };
+            let style = match &line[col_idx] {
+                PixelChar::PlainText { style, .. } => Some(*style),
+                _ => None,
+            };
+            let fg = style.and_then(|s| s.color_fg).unwrap_or(default_fg);
+            let sel_style = new_style!(color_fg: {fg} color_bg: {sel_bg});
+            *ops += RenderOpCommon::MoveCursorPositionRelTo(
+                origin,
+                col(col_idx as u16) + row(row_idx as u16),
+            );
+            *ops += RenderOpCommon::ApplyColors(Some(sel_style));
+            *ops += RenderOpIR::PaintTextWithAttributes(ch.to_string().into(), Some(sel_style));
+        }
+    }
+}
+
+pub fn terminal_word_bounds(line: &str, cursor_col: usize) -> (usize, usize) {
+    let chars: Vec<char> = line.chars().collect();
+    if chars.is_empty() {
+        return (0, 0);
+    }
+    let cursor_col = cursor_col.min(chars.len().saturating_sub(1));
+    let c = chars[cursor_col];
+
+    let scan_backward = |take_while: &dyn Fn(char) -> bool| -> usize {
+        chars[..=cursor_col]
+            .iter()
+            .enumerate()
+            .rev()
+            .take_while(|&(_, ch)| take_while(*ch))
+            .last()
+            .map(|(i, _)| i)
+            .unwrap_or(cursor_col)
+    };
+
+    let scan_forward = |take_while: &dyn Fn(char) -> bool| -> usize {
+        chars[cursor_col..]
+            .iter()
+            .enumerate()
+            .take_while(|&(_, ch)| take_while(*ch))
+            .last()
+            .map(|(i, _)| cursor_col + i + 1)
+            .unwrap_or(cursor_col + 1)
+    };
+
+    if c.is_whitespace() {
+        let start = scan_backward(&|ch: char| ch.is_whitespace());
+        let end = scan_forward(&|ch: char| ch.is_whitespace());
+        (start, end)
+    } else {
+        let is_url_boundary = |ch: char| ch.is_whitespace() || matches!(ch, '"' | ')' | ']' | '}');
+        let end = scan_forward(&|ch: char| !is_url_boundary(ch));
+        let mut url = None;
+        for (i, _) in chars[..=cursor_col].iter().enumerate().rev() {
+            let slice: String = chars[i..end].iter().collect();
+            if slice.contains("://") && url::Url::parse(&slice).is_ok() {
+                url = Some((i, end));
+                break;
+            }
+            if is_url_boundary(chars[i]) {
+                break;
+            }
+        }
+        if let Some((start, end)) = url {
+            (start, end)
+        } else {
+            let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
+            let start = scan_backward(&|ch: char| is_word(ch));
+            let end = scan_forward(&|ch: char| is_word(ch));
+            (start, end)
+        }
+    }
+}
+
+/// Convert a PixelCharLine to a string, trimming trailing Spacer/Void cells.
+/// Returns `(trimmed_string, trimmed_len_in_chars)`.
+fn trimmed_pixel_char_line(line: &PixelCharLine) -> (String, usize) {
+    let trimmed_len = line
+        .iter()
+        .rposition(|pc| !matches!(pc, PixelChar::Spacer | PixelChar::Void))
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let s = line[..trimmed_len]
+        .iter()
+        .map(|pc| match pc {
+            PixelChar::PlainText { display_char, .. } => *display_char,
+            PixelChar::Spacer => ' ',
+            PixelChar::Void => ' ',
+        })
+        .collect();
+    (s, trimmed_len)
+}
+
+pub fn terminal_line_at_viewport_row(
+    pane: &TerminalPane,
+    viewport_row: usize,
+    pane_height: usize,
+) -> String {
+    let scrollback_len = pane.ofs_buf.scrollback_len();
+    let buffer_height = pane.ofs_buf.buffer.len();
+    let scroll_offset = pane.scroll_offset.min(scrollback_len);
+
+    if scroll_offset == 0 {
+        if let Some(line) = pane.ofs_buf.buffer.get(viewport_row) {
+            let (s, _) = trimmed_pixel_char_line(line);
+            return s;
+        }
+    } else {
+        let combined_bottom = scrollback_len + buffer_height;
+        let viewport_bottom = combined_bottom.saturating_sub(scroll_offset);
+        let viewport_top = viewport_bottom.saturating_sub(pane_height);
+        let combined_idx = viewport_top + viewport_row;
+        let line = if combined_idx < scrollback_len {
+            pane.ofs_buf.scrollback_get(combined_idx)
+        } else {
+            pane.ofs_buf.buffer.get(combined_idx - scrollback_len)
+        };
+        if let Some(line) = line {
+            let (s, _) = trimmed_pixel_char_line(line);
+            return s;
+        }
+    }
+    String::new()
+}
+
+pub fn extract_terminal_text(
+    pane: &TerminalPane,
+    start: SelPoint,
+    end: SelPoint,
+    pane_height: usize,
+) -> Option<String> {
+    let (
+        SelPoint::Terminal {
+            viewport_row: sr,
+            col: sc,
+        },
+        SelPoint::Terminal {
+            viewport_row: er,
+            col: ec,
+        },
+    ) = (start, end)
+    else {
+        return None;
+    };
+    let (sr, er) = (sr.min(er), sr.max(er));
+    let (raw_sc, raw_ec) = (sc, ec);
+    let mut sc = raw_sc.min(raw_ec);
+    let mut ec = raw_sc.max(raw_ec);
+
+    let scrollback_len = pane.ofs_buf.scrollback_len();
+    let buffer_height = pane.ofs_buf.buffer.len();
+    let scroll_offset = pane.scroll_offset.min(scrollback_len);
+
+    let mut lines: Vec<String> = Vec::with_capacity(er - sr + 1);
+    let mut line_lengths: Vec<usize> = Vec::with_capacity(er - sr + 1);
+
+    if scroll_offset == 0 {
+        for i in sr..=er.min(buffer_height.saturating_sub(1)) {
+            if let Some(line) = pane.ofs_buf.buffer.get(i) {
+                let (s, trimmed_len) = trimmed_pixel_char_line(line);
+                line_lengths.push(trimmed_len);
+                lines.push(s);
+            }
+        }
+    } else {
+        let combined_bottom = scrollback_len + buffer_height;
+        let viewport_bottom = combined_bottom.saturating_sub(scroll_offset);
+        let viewport_top = viewport_bottom.saturating_sub(pane_height);
+        for viewport_row in sr..=er {
+            let combined_idx = viewport_top + viewport_row;
+            let line = if combined_idx < scrollback_len {
+                pane.ofs_buf.scrollback_get(combined_idx)
+            } else {
+                pane.ofs_buf.buffer.get(combined_idx - scrollback_len)
+            };
+            if let Some(line) = line {
+                let (s, trimmed_len) = trimmed_pixel_char_line(line);
+                line_lengths.push(trimmed_len);
+                lines.push(s);
+            }
+        }
+    }
+
+    if lines.is_empty() {
+        return None;
+    }
+
+    // Expand to word/line bounds.
+    if sr == er {
+        let line = &lines[0];
+        let (ws, _) = terminal_word_bounds(line, sc);
+        let (_, we) = terminal_word_bounds(line, ec);
+        sc = ws;
+        ec = we;
+    } else {
+        sc = 0;
+        ec = line_lengths.last().copied().unwrap_or(0);
+    }
+
+    let ranges = compute_terminal_selection_ranges(sr, sc, er, ec, &line_lengths, sr);
+
+    let mut result = String::new();
+    for (i, (row_idx, col_start, col_end)) in ranges.iter().enumerate() {
+        if i > 0 {
+            result.push('\n');
+        }
+        let line = &lines[row_idx - sr];
+        let byte_start = line
+            .char_indices()
+            .nth(*col_start)
+            .map(|(i, _)| i)
+            .unwrap_or(line.len());
+        let byte_end = line
+            .char_indices()
+            .nth(*col_end)
+            .map(|(i, _)| i)
+            .unwrap_or(line.len());
+        result.push_str(&line[byte_start..byte_end]);
+    }
+
+    Some(result)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::terminal_word_bounds;
+
+    #[test]
+    fn empty_line() {
+        assert_eq!(terminal_word_bounds("", 0), (0, 0));
+    }
+
+    #[test]
+    fn ascii_word_at_start() {
+        let line = "hello world";
+        let (start, end) = terminal_word_bounds(line, 0);
+        assert_eq!(&line[start..end], "hello");
+    }
+
+    #[test]
+    fn ascii_word_in_middle() {
+        let line = "hello world";
+        let (start, end) = terminal_word_bounds(line, 6);
+        assert_eq!(&line[start..end], "world");
+    }
+
+    #[test]
+    fn ascii_word_at_end() {
+        let line = "hello world";
+        let (start, end) = terminal_word_bounds(line, 10);
+        assert_eq!(&line[start..end], "world");
+    }
+
+    #[test]
+    fn whitespace_run() {
+        let line = "hello   world";
+        let (start, end) = terminal_word_bounds(line, 5);
+        assert_eq!(&line[start..end], "   ");
+    }
+
+    #[test]
+    fn multibyte_box_drawing_chars() {
+        let line = " ╭──╮";
+        // column 2 -> first ─
+        let (start, end) = terminal_word_bounds(line, 2);
+        assert_eq!(&line[start..end], "─");
+    }
+
+    #[test]
+    fn multibyte_long_box_drawing_line() {
+        let line = " ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ ";
+        // column 39 -> a ─ in the middle of the run
+        let (start, end) = terminal_word_bounds(line, 39);
+        assert_eq!(&line[start..end], "─");
+    }
+
+    #[test]
+    fn multibyte_click_on_first_multibyte_char() {
+        let line = "╭─";
+        let (start, end) = terminal_word_bounds(line, 0);
+        assert_eq!(&line[start..end], "╭");
+    }
+
+    #[test]
+    fn multibyte_click_on_last_char() {
+        let line = "╭─";
+        let (start, end) = terminal_word_bounds(line, 1);
+        assert_eq!(&line[start..end], "─");
+    }
+
+    #[test]
+    fn url_detection() {
+        let line = "see https://example.com for more";
+        let (start, end) = terminal_word_bounds(line, 5);
+        assert_eq!(&line[start..end], "https://example.com");
+    }
+
+    #[test]
+    fn cursor_beyond_line_length() {
+        let line = "hi";
+        let (start, end) = terminal_word_bounds(line, 100);
+        assert_eq!(&line[start..end], "hi");
+    }
 }

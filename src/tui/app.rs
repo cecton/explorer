@@ -376,11 +376,11 @@ impl Component<AppState, AppSignal> for PaneComponent {
         if self.text_drag_active
             && !matches!(
                 self.active_window(&global_data.state),
-                Some(Window::FilePreview(_))
+                Some(Window::FilePreview(_)) | Some(Window::Terminal(_))
             )
         {
             self.text_drag_active = false;
-            self.preview.end_text_drag();
+            global_data.state.text_selection = None;
             global_data.state.mouse_drag_active = false;
             self.last_click = None;
             self.consecutive_clicks = 0;
@@ -479,21 +479,133 @@ impl Component<AppState, AppSignal> for PaneComponent {
                         }
                         self.last_click = Some((now, mouse.pos));
 
-                        if self.preview.start_text_drag_from_pos(
-                            state,
-                            row,
-                            col,
-                            self.consecutive_clicks,
-                        ) {
-                            self.text_drag_active = true;
-                            state.mouse_drag_active = true;
+                        let files = Arc::clone(&state.files);
+                        let snapshot = files.load();
+                        let file = &snapshot[key.0];
+                        let data = file.data.lock().unwrap();
+                        let (line_idx, _char_idx, cursor_byte) = self
+                            .preview
+                            .screen_pos_to_line_char(state, row, col, key, &data);
+
+                        match self.consecutive_clicks {
+                            1 => {
+                                let bounds = data.word_bounds(cursor_byte);
+                                state.text_selection = Some(TextSelection {
+                                    window: Window::FilePreview(key),
+                                    start: SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: bounds.0,
+                                    },
+                                    end: SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: bounds.0,
+                                    },
+                                    click_anchor: Some(SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: cursor_byte,
+                                    }),
+                                    click_word: Some((
+                                        SelPoint::Preview {
+                                            line_idx,
+                                            byte_offset: bounds.0,
+                                        },
+                                        SelPoint::Preview {
+                                            line_idx,
+                                            byte_offset: bounds.1,
+                                        },
+                                    )),
+                                    active: true,
+                                });
+                                self.text_drag_active = true;
+                                state.mouse_drag_active = true;
+                            }
+                            3 => {
+                                let bounds = data.line_bounds(line_idx);
+                                state.text_selection = Some(TextSelection {
+                                    window: Window::FilePreview(key),
+                                    start: SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: bounds.0,
+                                    },
+                                    end: SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: bounds.1,
+                                    },
+                                    click_anchor: None,
+                                    click_word: None,
+                                    active: true,
+                                });
+                                self.text_drag_active = true;
+                                state.mouse_drag_active = true;
+                            }
+                            _ => {}
                         }
                         return Ok(EventPropagation::ConsumedRender);
                     }
                 }
                 MouseInputKind::MouseDrag(Button::Left) if self.text_drag_active => {
                     let state = &mut global_data.state;
-                    self.preview.update_text_drag_from_pos(state, row, col);
+                    let files = Arc::clone(&state.files);
+                    let snapshot = files.load();
+                    let file = &snapshot[key.0];
+                    let data = file.data.lock().unwrap();
+                    let (line_idx, _char_idx, cursor_byte) = self
+                        .preview
+                        .screen_pos_to_line_char(state, row, col, key, &data);
+
+                    let Some(ref mut sel) = state.text_selection else {
+                        return Ok(EventPropagation::ConsumedRender);
+                    };
+                    if sel.window != Window::FilePreview(key) {
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+
+                    if let (
+                        Some(SelPoint::Preview {
+                            line_idx: anchor_line,
+                            byte_offset: anchor_byte,
+                        }),
+                        Some((
+                            SelPoint::Preview {
+                                byte_offset: word_start,
+                                ..
+                            },
+                            SelPoint::Preview {
+                                byte_offset: word_end,
+                                ..
+                            },
+                        )),
+                    ) = (sel.click_anchor, sel.click_word)
+                        && anchor_line == line_idx
+                    {
+                        if cursor_byte >= anchor_byte {
+                            sel.start = SelPoint::Preview {
+                                line_idx,
+                                byte_offset: word_start,
+                            };
+                            let cur = data.word_bounds(cursor_byte);
+                            sel.end = SelPoint::Preview {
+                                line_idx,
+                                byte_offset: cur.1,
+                            };
+                        } else {
+                            let cur = data.word_bounds(cursor_byte);
+                            sel.start = SelPoint::Preview {
+                                line_idx,
+                                byte_offset: cur.0,
+                            };
+                            sel.end = SelPoint::Preview {
+                                line_idx,
+                                byte_offset: word_end,
+                            };
+                        }
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+
+                    sel.end = SelPoint::Preview {
+                        line_idx,
+                        byte_offset: cursor_byte,
+                    };
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 MouseInputKind::MouseDrag(Button::Left) if self.preview_drag_active => {
@@ -509,10 +621,40 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 }
                 MouseInputKind::MouseUp(Button::Left) if self.text_drag_active => {
                     let state = &mut global_data.state;
-                    if let Some(text) = self.preview.end_text_drag_with_text(state) {
-                        let mut cb = r3bl_tui::SystemClipboard;
-                        let _ = cb.try_to_put_content_into_clipboard(text);
+                    if let Some(ref sel) = state.text_selection
+                        && sel.window == Window::FilePreview(key)
+                    {
+                        let snapshot = state.files.load();
+                        let file = &snapshot[key.0];
+                        let data = file.data.lock().unwrap();
+                        let (start_byte, end_byte) = match (sel.start, sel.end) {
+                            (
+                                SelPoint::Preview {
+                                    line_idx: s_line,
+                                    byte_offset: s_byte,
+                                },
+                                SelPoint::Preview {
+                                    line_idx: e_line,
+                                    byte_offset: e_byte,
+                                },
+                            ) => {
+                                if s_line == e_line {
+                                    let (lo, hi) = (s_byte.min(e_byte), s_byte.max(e_byte));
+                                    (lo, hi)
+                                } else {
+                                    let s_bounds = data.line_bounds(s_line.min(e_line));
+                                    let e_bounds = data.line_bounds(s_line.max(e_line));
+                                    (s_bounds.0, e_bounds.1)
+                                }
+                            }
+                            _ => (0, 0),
+                        };
+                        if let Some(text) = data.extract_text(start_byte, end_byte) {
+                            let mut cb = r3bl_tui::SystemClipboard;
+                            let _ = cb.try_to_put_content_into_clipboard(text);
+                        }
                     }
+                    state.text_selection = None;
                     self.text_drag_active = false;
                     state.mouse_drag_active = false;
                     return Ok(EventPropagation::ConsumedRender);
@@ -521,6 +663,236 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     self.preview_drag_active = false;
                     self.preview.end_drag();
                     global_data.state.mouse_drag_active = false;
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                _ => {}
+            }
+        }
+
+        // Terminal content selection.
+        if let InputEvent::Mouse(mouse) = input_event
+            && let Some(window) = self.active_window(&global_data.state).cloned()
+            && let Window::Terminal(term_id) = window
+        {
+            let col = mouse.pos.col_index.as_usize();
+            let row = mouse.pos.row_index.as_usize();
+            let origin_row = self.content_origin_row as usize;
+            let origin_col = self.content_origin_col as usize;
+            let col_count = self.content_col_count as usize;
+            let row_count = self.content_row_count as usize;
+
+            let in_content_rows = row >= origin_row && row < origin_row + row_count;
+            let in_content_cols = col >= origin_col && col < origin_col + col_count;
+
+            let is_alternate = global_data
+                .state
+                .terminal_panes
+                .get(&term_id)
+                .and_then(|p| p.lock().ok())
+                .map(|p| p.ofs_buf.terminal_mode.alternate_screen == AlternateScreenState::Active)
+                .unwrap_or(false);
+
+            match mouse.kind {
+                MouseInputKind::MouseDown(Button::Left)
+                    if in_content_rows && in_content_cols && !is_alternate =>
+                {
+                    let rel_row = row - origin_row;
+                    let rel_col = col - origin_col;
+
+                    let word_bounds = global_data
+                        .state
+                        .terminal_panes
+                        .get(&term_id)
+                        .and_then(|p| p.lock().ok())
+                        .map(|pane| {
+                            let line = terminal_line_at_viewport_row(&pane, rel_row, row_count);
+                            let (ws, we) = terminal_word_bounds(&line, rel_col);
+                            (ws, we)
+                        });
+
+                    let state = &mut global_data.state;
+                    if let Some((ws, we)) = word_bounds {
+                        state.text_selection = Some(TextSelection {
+                            window: Window::Terminal(term_id),
+                            start: SelPoint::Terminal {
+                                viewport_row: rel_row,
+                                col: ws,
+                            },
+                            end: SelPoint::Terminal {
+                                viewport_row: rel_row,
+                                col: we,
+                            },
+                            click_anchor: Some(SelPoint::Terminal {
+                                viewport_row: rel_row,
+                                col: rel_col,
+                            }),
+                            click_word: Some((
+                                SelPoint::Terminal {
+                                    viewport_row: rel_row,
+                                    col: ws,
+                                },
+                                SelPoint::Terminal {
+                                    viewport_row: rel_row,
+                                    col: we,
+                                },
+                            )),
+                            active: true,
+                        });
+                    } else {
+                        state.text_selection = Some(TextSelection {
+                            window: Window::Terminal(term_id),
+                            start: SelPoint::Terminal {
+                                viewport_row: rel_row,
+                                col: rel_col,
+                            },
+                            end: SelPoint::Terminal {
+                                viewport_row: rel_row,
+                                col: rel_col,
+                            },
+                            click_anchor: None,
+                            click_word: None,
+                            active: true,
+                        });
+                    }
+                    self.text_drag_active = true;
+                    state.mouse_drag_active = true;
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                MouseInputKind::MouseDrag(Button::Left)
+                    if self.text_drag_active && !is_alternate =>
+                {
+                    let rel_row = row
+                        .saturating_sub(origin_row)
+                        .min(row_count.saturating_sub(1));
+                    let rel_col = col
+                        .saturating_sub(origin_col)
+                        .min(col_count.saturating_sub(1));
+
+                    let click_anchor_row =
+                        global_data.state.text_selection.as_ref().and_then(|sel| {
+                            match sel.click_anchor {
+                                Some(SelPoint::Terminal { viewport_row, .. }) => Some(viewport_row),
+                                _ => None,
+                            }
+                        });
+
+                    let word_bounds = global_data
+                        .state
+                        .terminal_panes
+                        .get(&term_id)
+                        .and_then(|p| p.lock().ok())
+                        .map(|pane| {
+                            let line = terminal_line_at_viewport_row(&pane, rel_row, row_count);
+                            let (ws, we) = terminal_word_bounds(&line, rel_col);
+                            (ws, we)
+                        });
+
+                    let cur_line_len = if click_anchor_row.map(|ar| ar != rel_row).unwrap_or(false)
+                    {
+                        global_data
+                            .state
+                            .terminal_panes
+                            .get(&term_id)
+                            .and_then(|p| p.lock().ok())
+                            .map(|pane| {
+                                terminal_line_at_viewport_row(&pane, rel_row, row_count).len()
+                            })
+                    } else {
+                        None
+                    };
+
+                    let state = &mut global_data.state;
+                    let Some(ref mut sel) = state.text_selection else {
+                        return Ok(EventPropagation::ConsumedRender);
+                    };
+                    if sel.window != Window::Terminal(term_id) {
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+
+                    if let (
+                        Some(SelPoint::Terminal {
+                            viewport_row: anchor_row,
+                            col: anchor_col,
+                        }),
+                        Some((
+                            SelPoint::Terminal {
+                                col: word_start, ..
+                            },
+                            SelPoint::Terminal { col: word_end, .. },
+                        )),
+                    ) = (sel.click_anchor, sel.click_word)
+                        && anchor_row == rel_row
+                        && let Some((cur_start, cur_end)) = word_bounds
+                    {
+                        if rel_col >= anchor_col {
+                            sel.start = SelPoint::Terminal {
+                                viewport_row: rel_row,
+                                col: word_start,
+                            };
+                            sel.end = SelPoint::Terminal {
+                                viewport_row: rel_row,
+                                col: cur_end,
+                            };
+                        } else {
+                            sel.start = SelPoint::Terminal {
+                                viewport_row: rel_row,
+                                col: cur_start,
+                            };
+                            sel.end = SelPoint::Terminal {
+                                viewport_row: rel_row,
+                                col: word_end,
+                            };
+                        }
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+
+                    if let Some(anchor_row) = click_anchor_row
+                        && anchor_row != rel_row
+                        && let Some(cur_len) = cur_line_len
+                    {
+                        sel.start = SelPoint::Terminal {
+                            viewport_row: anchor_row,
+                            col: 0,
+                        };
+                        sel.end = SelPoint::Terminal {
+                            viewport_row: rel_row,
+                            col: cur_len,
+                        };
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+
+                    sel.end = SelPoint::Terminal {
+                        viewport_row: rel_row,
+                        col: rel_col,
+                    };
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                MouseInputKind::MouseUp(Button::Left) if self.text_drag_active && !is_alternate => {
+                    let maybe_text = if let Some(ref sel) = global_data.state.text_selection {
+                        if sel.window == Window::Terminal(term_id) {
+                            global_data
+                                .state
+                                .terminal_panes
+                                .get(&term_id)
+                                .and_then(|p| p.lock().ok())
+                                .and_then(|pane| {
+                                    extract_terminal_text(&pane, sel.start, sel.end, row_count)
+                                        .filter(|t| !t.is_empty())
+                                })
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+                    if let Some(text) = maybe_text {
+                        let mut cb = r3bl_tui::SystemClipboard;
+                        let _ = cb.try_to_put_content_into_clipboard(text);
+                    }
+                    let state = &mut global_data.state;
+                    state.text_selection = None;
+                    self.text_drag_active = false;
+                    state.mouse_drag_active = false;
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 _ => {}

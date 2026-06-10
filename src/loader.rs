@@ -93,7 +93,7 @@ impl FileData {
 
         macro_rules! scan_backward {
             ($i:ident, $char:ident => $take_while:expr) => {{
-                content[..=cursor_byte]
+                content[..(cursor_byte + c.len_utf8())]
                     .char_indices()
                     .rev()
                     .take_while(|&($i, $char)| $take_while)
@@ -123,10 +123,11 @@ impl FileData {
             let end = scan_forward!(_i, c => !is_url_boundary(c));
             let mut url = None;
             let _start = scan_backward!(i, c => {
-                if content[i..end].contains("://") && url::Url::parse(&content[i..end]).is_ok() {
+                let res = !is_url_boundary(c);
+                if res && content[i..end].contains("://") && url::Url::parse(&content[i..end]).is_ok() {
                     url = Some((i, end));
                 }
-                !is_url_boundary(c)
+                res
             });
             if let Some((start, end)) = url {
                 (start, end)
@@ -291,8 +292,8 @@ mod tests {
             Some("file://root")
         );
 
-        let data = fd("https://example.com/path?q=1");
-        let (start, end) = data.word_bounds(8);
+        let data = fd("see also https://example.com/path?q=1");
+        let (start, end) = data.word_bounds(10);
         assert_eq!(
             data.extract_text(start, end).as_deref(),
             Some("https://example.com/path?q=1")

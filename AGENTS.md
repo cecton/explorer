@@ -29,14 +29,14 @@ Source is organized as:
 - `src/watcher.rs` — filesystem watcher via `notify`; debounces events into `BatchedWatchEvent` and broadcasts via `WATCHER_RRT`
 - `src/tui/mod.rs` — module declarations
 - `src/tui/title_row.rs` — `TitleRow` trait, `render_pane_title` utility, `title_bar_colors`
-- `src/tui/state.rs` — `AppState`, `AppSignal`, `TerminalPane`, `Window`, `WindowState`, and `FuzzyPickerState` types
-- `src/tui/app.rs` — `App` trait impl, layout, `run()` entry point
+- `src/tui/state.rs` — `AppState` (with global `TextSelection`, `SelPoint`, `terminal_grabbed`), `AppSignal`, `TerminalPane`, `Window`, `WindowState`, and `FuzzyPickerState` types
+- `src/tui/app.rs` — `App` trait impl, layout, `run()` entry point; handles global text selection, terminal grab/ungrab, and mouse event routing
 - `src/tui/file_name_picker.rs` — fuzzy file-name picker overlay (exceptions → input → navigation)
 - `src/tui/fuzzy_picker.rs` — shared fuzzy list picker component; navigation via flat `match` on `InputEvent`
 - `src/tui/theme.rs` — `HelixTheme` type; loads bundled TOML files via `include!("../../themes/themes.rs")`
 - `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview (exceptions → input → navigation)
-- `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane)
-- `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation; `render_ofs_buf_to_ir()` emits `ResetColor` for `Spacer` runs to prevent stale SGR inheritance
+- `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane); text selection uses global `AppState`
+- `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation; `render_ofs_buf_to_ir()` emits `ResetColor` for `Spacer` runs to prevent stale SGR inheritance; supports mouse selection, word/line text extraction, and clipboard copy
 - `src/tui/input_line.rs` — query input with Emacs-style key bindings; single flat `match` on `InputEvent`
 
 ---

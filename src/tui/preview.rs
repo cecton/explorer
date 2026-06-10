@@ -19,11 +19,6 @@ pub struct FilePreviewComponent {
     drag_snapshot: Option<Vec<(usize, usize)>>,
     drag_start_line: Option<usize>,
     drag_modifier: Option<DragModifier>,
-    text_drag_active: bool,
-    text_drag_start: Option<(usize, usize)>,
-    text_drag_end: Option<(usize, usize)>,
-    text_drag_click_byte: Option<usize>,
-    text_drag_click_word: Option<(usize, usize)>,
     /// Cached geometry of the content area at last render, used for mouse event handling.
     content_origin_row: usize,
     content_origin_col: usize,
@@ -41,11 +36,6 @@ impl FilePreviewComponent {
             drag_snapshot: None,
             drag_start_line: None,
             drag_modifier: None,
-            text_drag_active: false,
-            text_drag_start: None,
-            text_drag_end: None,
-            text_drag_click_byte: None,
-            text_drag_click_word: None,
             content_origin_row: 0,
             content_origin_col: 0,
             content_col_count: 0,
@@ -327,99 +317,10 @@ impl FilePreviewComponent {
         self.drag_modifier = None;
     }
 
-    pub fn start_text_drag(&mut self, line: usize, byte_offset: usize) {
-        self.text_drag_active = true;
-        self.text_drag_start = Some((line, byte_offset));
-        self.text_drag_end = Some((line, byte_offset));
-    }
-
-    pub fn update_text_drag(&mut self, line: usize, byte_offset: usize) {
-        self.text_drag_end = Some((line, byte_offset));
-    }
-
-    pub fn end_text_drag(&mut self) -> Option<((usize, usize), (usize, usize))> {
-        self.text_drag_active = false;
-        let result = self.text_drag_start.zip(self.text_drag_end);
-        self.text_drag_start = None;
-        self.text_drag_end = None;
-        result
-    }
-
-    /// Start a text drag from an absolute mouse position in the pane.
-    /// `click_count` is used for double/triple-click word/line selection.
-    /// Returns true if a drag was started.
-    pub fn start_text_drag_from_pos(
-        &mut self,
-        state: &AppState,
-        row: usize,
-        col: usize,
-        click_count: u8,
-    ) -> bool {
-        let key = match self.file_key(state) {
-            Some(k) => k,
-            None => return false,
-        };
-
-        let snapshot = state.files.load();
-        let file = &snapshot[key.0];
-        let data = file.data.lock().unwrap();
-
-        let (line_idx, _char_idx, cursor_byte) =
-            self.screen_pos_to_line_char(state, row, col, key, &data);
-
-        let (sel_start, sel_end) = match click_count {
-            1 => {
-                self.text_drag_click_byte = Some(cursor_byte);
-                let bounds = data.word_bounds(cursor_byte);
-                self.text_drag_click_word = Some(bounds);
-                (bounds.0, bounds.0)
-            }
-            3 => data.line_bounds(line_idx),
-            _ => return false,
-        };
-
-        self.start_text_drag(line_idx, sel_start);
-        self.update_text_drag(line_idx, sel_end);
-        true
-    }
-
-    pub fn update_text_drag_from_pos(&mut self, state: &AppState, row: usize, col: usize) {
-        let key = match self.file_key(state) {
-            Some(k) => k,
-            None => return,
-        };
-
-        let snapshot = state.files.load();
-        let file = &snapshot[key.0];
-        let data = file.data.lock().unwrap();
-
-        let (line_idx, _char_idx, cursor_byte) =
-            self.screen_pos_to_line_char(state, row, col, key, &data);
-
-        if let Some((click_word_start, click_word_end)) = self.text_drag_click_word
-            && let Some(click_byte) = self.text_drag_click_byte
-            && let Some(start) = self.text_drag_start
-            && start.0 == line_idx
-        {
-            if cursor_byte >= click_byte {
-                self.text_drag_start = Some((line_idx, click_word_start));
-                let cur = data.word_bounds(cursor_byte);
-                self.text_drag_end = Some((line_idx, cur.1));
-            } else {
-                let cur = data.word_bounds(cursor_byte);
-                self.text_drag_start = Some((line_idx, cur.0));
-                self.text_drag_end = Some((line_idx, click_word_end));
-            }
-            return;
-        }
-
-        self.update_text_drag(line_idx, cursor_byte);
-    }
-
     /// Maps a screen position relative to the preview content origin to a
     /// `(line_idx_0_based, char_idx, cursor_byte)` tuple. `cursor_byte` is the
     /// absolute byte offset within `FileData.content`. Accounts for line wrapping.
-    fn screen_pos_to_line_char(
+    pub fn screen_pos_to_line_char(
         &self,
         state: &AppState,
         row: usize,
@@ -468,15 +369,6 @@ impl FilePreviewComponent {
         let cursor_byte = data.line_starts[last_line] + line.len();
         (last_line, line.chars().count(), cursor_byte)
     }
-
-    pub fn end_text_drag_with_text(&mut self, state: &AppState) -> Option<String> {
-        let key = self.file_key(state)?;
-        let ((_, start_byte), (_, end_byte)) = self.end_text_drag()?;
-        let snapshot = state.files.load();
-        let file = &snapshot[key.0];
-        let data = file.data.lock().unwrap();
-        data.extract_text(start_byte, end_byte)
-    }
 }
 
 /// Maps a pane `FlexBoxId` back to its zero-based slot index.
@@ -497,11 +389,6 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
         self.drag_snapshot = None;
         self.drag_start_line = None;
         self.drag_modifier = None;
-        self.text_drag_active = false;
-        self.text_drag_start = None;
-        self.text_drag_end = None;
-        self.text_drag_click_byte = None;
-        self.text_drag_click_word = None;
     }
 
     fn get_id(&self) -> FlexBoxId {
@@ -745,8 +632,28 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             let text_drag_single;
             let text_drag_single_lo;
             let text_drag_single_hi;
-            if self.text_drag_active {
-                let (s, e) = (self.text_drag_start.unwrap(), self.text_drag_end.unwrap());
+            let has_text_selection = global_data
+                .state
+                .text_selection
+                .as_ref()
+                .is_some_and(|sel| sel.window == window && sel.active);
+            if has_text_selection {
+                let (s, e) = match (
+                    global_data.state.text_selection.as_ref().unwrap().start,
+                    global_data.state.text_selection.as_ref().unwrap().end,
+                ) {
+                    (
+                        SelPoint::Preview {
+                            line_idx: s_line,
+                            byte_offset: s_byte,
+                        },
+                        SelPoint::Preview {
+                            line_idx: e_line,
+                            byte_offset: e_byte,
+                        },
+                    ) => ((s_line, s_byte), (e_line, e_byte)),
+                    _ => ((0, 0), (0, 0)),
+                };
                 text_drag_lo = s.0.min(e.0);
                 text_drag_hi = s.0.max(e.0);
                 text_drag_single = s.0 == e.0;
@@ -765,14 +672,14 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 let line = data.line(line_idx);
                 let char_len = line.chars().count();
                 let mut seg_start_char = 0_usize;
-                let is_text_drag_multi = self.text_drag_active
+                let is_text_drag_multi = has_text_selection
                     && !text_drag_single
                     && line_idx >= text_drag_lo
                     && line_idx <= text_drag_hi;
                 let is_text_drag_single =
-                    self.text_drag_active && text_drag_single && line_idx == text_drag_lo;
-                let is_hl = !self.text_drag_active
-                    && Self::is_line_highlighted(state, file_key, line_idx + 1);
+                    has_text_selection && text_drag_single && line_idx == text_drag_lo;
+                let is_hl =
+                    !has_text_selection && Self::is_line_highlighted(state, file_key, line_idx + 1);
                 let row_bg_style = if is_text_drag_multi || is_hl {
                     hl_bg_style
                 } else {

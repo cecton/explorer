@@ -1,9 +1,6 @@
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use jwalk::WalkDir;
-use r3bl_tui::log::{
-    GlobalLogFileGuard, TracingConfig, WriterConfig, try_initialize_logging_global,
-};
 use std::ffi::OsString;
 use std::sync::Arc;
 
@@ -20,13 +17,20 @@ use loader::{LoadedFile, find_git_root};
 async fn main() {
     let args = cli::parse_args();
 
-    let _log_guard: Option<GlobalLogFileGuard> = args.log_file.as_ref().map(|path| {
-        let config = TracingConfig {
-            level_filter: args.log_level,
-            writer_config: WriterConfig::File(path.clone()),
-        };
-        try_initialize_logging_global(config).expect("failed to initialize logging")
-    });
+    if let Some(path) = &args.log_file {
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .expect("failed to open log file");
+
+        tracing_subscriber::fmt()
+            .with_max_level(args.log_level)
+            .with_writer(file)
+            .with_ansi(false)
+            .compact()
+            .init();
+    }
 
     let root = Utf8PathBuf::from_path_buf(find_git_root())
         .expect("repository root path is not valid UTF-8");
