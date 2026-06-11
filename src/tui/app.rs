@@ -8,8 +8,8 @@ use camino::Utf8PathBuf;
 use r3bl_tui::ClipboardService;
 use r3bl_tui::core::osc::OscEvent;
 use r3bl_tui::core::pty::{
-    CursorKeyMode, DefaultPtySessionConfig, MouseTrackingMode, PtyInputEvent, PtyOutputEvent,
-    PtySessionBuilder, PtySessionConfigOption,
+    CursorKeyMode, DefaultPtySessionConfig, PtyInputEvent, PtyOutputEvent, PtySessionBuilder,
+    PtySessionConfigOption,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, OnceLock};
@@ -1139,7 +1139,6 @@ impl AppMain {
             let pane = Arc::new(Mutex::new(TerminalPane {
                 ofs_buf,
                 cursor_key_mode: CursorKeyMode::Normal,
-                mouse_tracking_mode: MouseTrackingMode::None,
                 title: initial_title,
                 pty_input_tx,
                 child_killer: Some(child_killer),
@@ -1186,7 +1185,7 @@ impl AppMain {
                         }
                         PtyOutputEvent::MouseModeChange(mode) => {
                             if let Ok(mut pane) = pane.lock() {
-                                pane.mouse_tracking_mode = mode;
+                                pane.ofs_buf.terminal_mode.mouse_tracking_mode = mode;
                             }
                         }
                         PtyOutputEvent::Exit(status) => {

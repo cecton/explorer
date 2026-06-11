@@ -134,18 +134,21 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 }
             };
             let tx = pane.pty_input_tx.clone();
-            let mouse_tracking_mode = pane.mouse_tracking_mode;
             let alternate_screen_active =
                 pane.ofs_buf.terminal_mode.alternate_screen == AlternateScreenState::Active;
             let scrollback_len = pane.ofs_buf.scrollback_len();
 
-            if global_data.state.terminal_grabbed
-                && let InputEvent::Keyboard(keypress) = &input_event
-            {
-                if let Some(pty_event) = Option::<PtyInputEvent>::from(*keypress) {
+            if global_data.state.terminal_grabbed {
+                let origin =
+                    col(self.content_origin_col as u16) + row(self.content_origin_row as u16);
+                if let Some(pty_event) = PtyInputEvent::from_input_event(
+                    &input_event,
+                    &pane.ofs_buf.terminal_mode,
+                    origin,
+                ) {
                     let _ = tx.try_send(pty_event);
+                    return Ok(EventPropagation::ConsumedRender);
                 }
-                return Ok(EventPropagation::ConsumedRender);
             }
 
             match input_event {
@@ -177,21 +180,6 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     } else {
                         EventPropagation::Consumed
                     }
-                }
-
-                InputEvent::Mouse(mouse) => {
-                    if !should_forward_mouse(&mouse.kind, mouse_tracking_mode) {
-                        return Ok(EventPropagation::Consumed);
-                    }
-                    let Some(slot) = pane_slot(self.id) else {
-                        return Ok(EventPropagation::Propagate);
-                    };
-                    let box_ = &global_data.state.pane_boxes[slot];
-                    let origin_row = box_.style_adjusted_origin_pos.row_index.as_u16() + 1;
-                    let origin_col = box_.style_adjusted_origin_pos.col_index.as_u16();
-                    let encoded = encode_mouse_event(mouse, origin_row, origin_col);
-                    let _ = tx.try_send(PtyInputEvent::Write(encoded));
-                    EventPropagation::ConsumedRender
                 }
 
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -406,72 +394,6 @@ struct SelectionRect {
     start_col: usize,
     end_row: usize,
     end_col: usize,
-}
-
-fn should_forward_mouse(kind: &MouseInputKind, mode: MouseTrackingMode) -> bool {
-    match mode {
-        MouseTrackingMode::None => false,
-        MouseTrackingMode::Basic => matches!(
-            kind,
-            MouseInputKind::MouseDown(_) | MouseInputKind::MouseUp(_)
-        ),
-        MouseTrackingMode::ButtonDrag => matches!(
-            kind,
-            MouseInputKind::MouseDown(_)
-                | MouseInputKind::MouseUp(_)
-                | MouseInputKind::MouseDrag(_)
-        ),
-        MouseTrackingMode::AnyEvent => true,
-    }
-}
-
-fn encode_mouse_event(mouse: r3bl_tui::MouseInput, origin_row: u16, origin_col: u16) -> Vec<u8> {
-    let x = mouse
-        .pos
-        .col_index
-        .as_u16()
-        .saturating_sub(origin_col)
-        .saturating_add(1) as usize;
-    let y = mouse
-        .pos
-        .row_index
-        .as_u16()
-        .saturating_sub(origin_row)
-        .saturating_add(1) as usize;
-
-    let (code, suffix) = match mouse.kind {
-        MouseInputKind::MouseDown(button) => {
-            let b = match button {
-                Button::Left => 0,
-                Button::Middle => 1,
-                Button::Right => 2,
-            };
-            (b, b'M')
-        }
-        MouseInputKind::MouseUp(button) => {
-            let b = match button {
-                Button::Left => 0,
-                Button::Middle => 1,
-                Button::Right => 2,
-            };
-            (b, b'm')
-        }
-        MouseInputKind::MouseDrag(button) => {
-            let b = match button {
-                Button::Left => 32,
-                Button::Middle => 33,
-                Button::Right => 34,
-            };
-            (b, b'M')
-        }
-        MouseInputKind::MouseMove => (35, b'M'),
-        MouseInputKind::ScrollUp => (64, b'M'),
-        MouseInputKind::ScrollDown => (65, b'M'),
-        MouseInputKind::ScrollLeft => (66, b'M'),
-        MouseInputKind::ScrollRight => (67, b'M'),
-    };
-
-    format!("\x1b[<{};{};{}{}", code, x, y, suffix as char).into_bytes()
 }
 
 fn cursor_at(row_idx: usize, col_idx: usize, cursor: Option<r3bl_tui::Pos>) -> bool {

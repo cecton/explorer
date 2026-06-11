@@ -3,9 +3,7 @@ use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
-use r3bl_tui::core::pty::{
-    ControlledChildTerminationHandle, CursorKeyMode, MouseTrackingMode, PtyInputEvent,
-};
+use r3bl_tui::core::pty::{ControlledChildTerminationHandle, CursorKeyMode, PtyInputEvent};
 use r3bl_tui::{FlexBox, OffscreenBuffer, Size};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
@@ -82,7 +80,6 @@ impl<T: Clone + PartialEq> FuzzyPickerState<T> {
 pub struct TerminalPane {
     pub ofs_buf: OffscreenBuffer,
     pub cursor_key_mode: CursorKeyMode,
-    pub mouse_tracking_mode: MouseTrackingMode,
     pub title: Option<String>,
     pub pty_input_tx: Arc<mpsc::Sender<PtyInputEvent>>,
     pub child_killer: Option<ControlledChildTerminationHandle>,
@@ -106,7 +103,6 @@ impl Debug for TerminalPane {
         f.debug_struct("TerminalPane")
             .field("ofs_buf", &self.ofs_buf)
             .field("cursor_key_mode", &self.cursor_key_mode)
-            .field("mouse_tracking_mode", &self.mouse_tracking_mode)
             .field("title", &self.title)
             .field("pty_input_tx", &"Sender<..>")
             .field(
