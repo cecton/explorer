@@ -1,55 +1,18 @@
 use crate::loader::{FileKey, LoadedFile};
+use crate::tui::pane_manager::{PaneManager, TextSelection, Window, WindowState};
 use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use r3bl_tui::core::pty::{ControlledChildTerminationHandle, CursorKeyMode, PtyInputEvent};
-use r3bl_tui::{FlexBox, OffscreenBuffer, Size};
+use r3bl_tui::{OffscreenBuffer, Size};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-pub const MAX_PANES: usize = 5;
-
 static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
-
-/// A pane that can appear in the window stack.
-///
-/// Each variant is unique: there is at most one `FileNamePicker` and at most one
-/// `FilePreview` per `FileKey` in the stack at any time.
-#[derive(Clone, PartialEq, Eq, Hash, Debug)]
-pub enum Window {
-    FilePreview(FileKey),
-    FileNamePicker,
-    ThemePicker,
-    Terminal(usize),
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SelPoint {
-    Preview { line_idx: usize, byte_offset: usize },
-    Terminal { viewport_row: usize, col: usize },
-}
-
-#[derive(Clone, Debug)]
-pub struct TextSelection {
-    pub window: Window,
-    pub start: SelPoint,
-    pub end: SelPoint,
-    pub click_anchor: Option<SelPoint>,
-    pub click_word: Option<(SelPoint, SelPoint)>,
-    pub active: bool,
-}
-
-/// Scroll and page-size state for a single window pane.
-#[derive(Clone, Debug, Default)]
-pub struct WindowState {
-    pub scroll: usize,
-    pub page_size: usize,
-    pub scroll_max: usize,
-}
 
 #[derive(Clone, Debug, Default)]
 pub struct FuzzyPickerState<T> {
@@ -124,12 +87,10 @@ pub struct AppState {
     pub files: Arc<ArcSwap<Vec<LoadedFile>>>,
     pub files_version: u64,
     pub root: Utf8PathBuf,
-    /// Stack of open windows, most-recently-opened first (index 0 = leftmost pane).
-    pub window_stack: Vec<Window>,
-    /// The window that currently receives keyboard input.
-    pub focused_window: Option<Window>,
-    /// Per-window scroll and page-size state.
-    pub window_states: HashMap<Window, WindowState>,
+    /// Pane stack, sizes, layout, and focus state.
+    pub pane_manager: PaneManager,
+    /// Last known surface size used for on-demand layout recomputation.
+    pub last_surface_size: Size,
     /// Per-file highlight ranges (1-indexed, inclusive).
     pub highlight_ranges: HashMap<FileKey, Vec<(usize, usize)>>,
     pub leader_active: bool,
@@ -138,17 +99,11 @@ pub struct AppState {
     pub theme_picker: FuzzyPickerState<String>,
     pub theme: HelixTheme,
     pub saved_theme: HelixTheme,
-    /// Current `FlexBox` for each pane slot (index 0..MAX_PANES).
-    pub pane_boxes: [FlexBox; MAX_PANES],
-    /// Terminal panes keyed by their unique ID. Behind `Arc<Mutex<>>` so the
-    /// background task can call `apply_ansi_bytes` off the main thread.
+    /// Terminal panes keyed by their unique ID.
     pub terminal_panes: HashMap<usize, Arc<Mutex<TerminalPane>>>,
     /// Next available terminal pane ID.
     pub next_terminal_id: usize,
     pub mouse_drag_active: bool,
-    /// When true, the focused terminal forwards keyboard input to the PTY.
-    /// When false, keyboard events propagate to the app (global shortcuts).
-    /// Scrolling ungrabs; mouse focus change or Enter/Esc re-grabs.
     pub terminal_grabbed: bool,
     pub text_selection: Option<TextSelection>,
 }
@@ -157,128 +112,25 @@ impl AppState {
     pub fn bump_files_version(&mut self) {
         self.files_version = FILES_VERSION.fetch_add(1, Ordering::Relaxed) + 1;
     }
-
-    /// Moves `window` to the front of the stack (index 0). If it is not present, inserts it.
-    pub fn push_window(&mut self, window: Window) {
-        if let Some(pos) = self.window_stack.iter().position(|w| w == &window) {
-            self.window_stack.remove(pos);
-        }
-        self.window_stack.insert(0, window);
-    }
-
-    /// Removes `window` from the stack entirely.
-    pub fn remove_window(&mut self, window: &Window) {
-        self.window_stack.retain(|w| w != window);
-        self.window_states.remove(window);
-        if matches!(window, Window::Terminal(_)) {
-            self.terminal_grabbed = false;
-        }
-        if self.focused_window.as_ref() == Some(window) {
-            self.focused_window = self.window_stack.first().cloned();
-        }
-    }
-
-    /// Moves `window` to the back of the stack (last position).
-    pub fn send_to_back(&mut self, window: &Window) {
-        if let Some(pos) = self.window_stack.iter().position(|w| w == window) {
-            let w = self.window_stack.remove(pos);
-            self.window_stack.push(w);
-        }
-        if self.focused_window.as_ref() == Some(window) {
-            self.focused_window = self.window_stack.first().cloned();
-        }
-    }
-
-    /// Returns the windows that fit in `surface_cols`, along with their assigned column
-    /// widths. Each pane requires at least `MIN_PANE_WIDTH` columns; extra space is
-    /// distributed equally among all visible panes.
-    pub fn visible_windows(&self, surface_cols: u16) -> Vec<(Window, u16)> {
-        const MIN_PANE_WIDTH: u16 = 100;
-        let count = (surface_cols / MIN_PANE_WIDTH).max(1) as usize;
-        let n = self.window_stack.len().min(count) as u16;
-        if n == 0 {
-            return vec![];
-        }
-        let base_width = surface_cols / n;
-        let remainder = surface_cols % n;
-        self.window_stack
-            .iter()
-            .take(n as usize)
-            .enumerate()
-            .map(|(i, w)| {
-                let width = if (i as u16) < remainder {
-                    base_width + 1
-                } else {
-                    base_width
-                };
-                (w.clone(), width)
-            })
-            .collect()
-    }
-
-    pub fn window_scroll(&self, window: &Window) -> usize {
-        self.window_states
-            .get(window)
-            .map(|s| s.scroll)
-            .unwrap_or(0)
-    }
-
-    pub fn window_page_size(&self, window: &Window) -> usize {
-        self.window_states
-            .get(window)
-            .map(|s| s.page_size)
-            .unwrap_or(0)
-    }
-
-    pub fn set_window_scroll(&mut self, window: &Window, scroll: usize) {
-        self.window_states.entry(window.clone()).or_default().scroll = scroll;
-    }
-
-    pub fn set_window_page_size(&mut self, window: &Window, page_size: usize) {
-        self.window_states
-            .entry(window.clone())
-            .or_default()
-            .page_size = page_size;
-    }
-
-    pub fn window_scroll_max(&self, window: &Window) -> usize {
-        self.window_states
-            .get(window)
-            .map(|s| s.scroll_max)
-            .unwrap_or(0)
-    }
-
-    pub fn set_window_scroll_max(&mut self, window: &Window, scroll_max: usize) {
-        self.window_states
-            .entry(window.clone())
-            .or_default()
-            .scroll_max = scroll_max;
-    }
-
-    pub fn clamp_scroll(&mut self, window: &Window) {
-        let state = self.window_states.get(window);
-        let (scroll, page_size, scroll_max) = match state {
-            Some(s) => (s.scroll, s.page_size, s.scroll_max),
-            None => return,
-        };
-        if scroll_max > page_size {
-            let clamped = scroll.min(scroll_max - page_size);
-            self.window_states.get_mut(window).unwrap().scroll = clamped;
-        }
-    }
 }
 
 impl AppState {
     pub fn new(files: Arc<ArcSwap<Vec<LoadedFile>>>, root: Utf8PathBuf, theme: HelixTheme) -> Self {
         let snapshot = files.load();
         let saved_theme = theme.clone();
+        let mut pane_manager = PaneManager::new();
+        pane_manager.push_window(Window::FileNamePicker);
+        pane_manager.focused_window = Some(Window::FileNamePicker);
+        pane_manager
+            .window_states
+            .insert(Window::FileNamePicker, WindowState::default());
+
         let mut state = Self {
             files,
             files_version: 0,
             root,
-            window_stack: vec![Window::FileNamePicker],
-            focused_window: Some(Window::FileNamePicker),
-            window_states: HashMap::new(),
+            pane_manager,
+            last_surface_size: Size::default(),
             highlight_ranges: HashMap::new(),
             leader_active: false,
             command_mode_active: false,
@@ -286,7 +138,6 @@ impl AppState {
             theme_picker: FuzzyPickerState::default(),
             theme,
             saved_theme,
-            pane_boxes: [FlexBox::default(); MAX_PANES],
             terminal_panes: HashMap::new(),
             next_terminal_id: 0,
             mouse_drag_active: false,
@@ -294,13 +145,10 @@ impl AppState {
             text_selection: None,
         };
         state.file_name_picker.results =
-            crate::tui::file_name_picker::FileNamePickerComponent::all_files_results(
+            crate::tui::file_name_picker::FileNamePickerComponent::open_previews_results(
                 &snapshot,
-                &state.window_stack,
+                &state.pane_manager.window_stack,
             );
-        state
-            .window_states
-            .insert(Window::FileNamePicker, WindowState::default());
         state
     }
 }
@@ -311,7 +159,7 @@ impl Debug for AppState {
         write!(
             f,
             "AppState {{ files: {}, stack: {:?}, focused: {:?} }}",
-            count, self.window_stack, self.focused_window
+            count, self.pane_manager.window_stack, self.pane_manager.focused_window
         )
     }
 }

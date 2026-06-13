@@ -55,7 +55,7 @@ impl FileNamePickerComponent {
         let query = state.file_name_picker.query.clone();
         let files = Arc::clone(&state.files);
         let root = state.root.clone();
-        let window_stack = state.window_stack.clone();
+        let window_stack = state.pane_manager.window_stack.clone();
         let current_generation = generation.fetch_add(1, Ordering::Relaxed) + 1;
         let gen_counter = Arc::clone(&generation);
         tokio::task::spawn_blocking(move || {
@@ -71,7 +71,7 @@ impl FileNamePickerComponent {
         });
     }
 
-    pub(crate) fn all_files_results(
+    pub(crate) fn open_previews_results(
         files: &[LoadedFile],
         window_stack: &[Window],
     ) -> Vec<(FileKey, Vec<u32>)> {
@@ -92,7 +92,7 @@ impl FileNamePickerComponent {
 impl TitleRow for FileNamePickerComponent {
     fn render_title_row(
         &self,
-        mut ops: &mut RenderOpIRVec,
+        ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
         theme: &HelixTheme,
@@ -109,9 +109,10 @@ impl TitleRow for FileNamePickerComponent {
         let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
         for row_offset in 0..height {
-            ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset as u16));
-            ops += RenderOpCommon::SetBgColor(color_bg);
-            ops += RenderOpIR::PaintTextWithAttributes(
+            *ops +=
+                RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset as u16));
+            *ops += RenderOpCommon::SetBgColor(color_bg);
+            *ops += RenderOpIR::PaintTextWithAttributes(
                 " ".repeat(width as usize).as_str().into(),
                 Some(bg_style),
             );
@@ -132,7 +133,7 @@ fn run_file_name_match(
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
     if pattern.atoms.is_empty() {
-        return FileNamePickerComponent::all_files_results(files, window_stack);
+        return FileNamePickerComponent::open_previews_results(files, window_stack);
     }
 
     let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
@@ -176,7 +177,7 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                 key: Key::SpecialKey(SpecialKey::Esc),
             }) => {
                 let state = &mut global_data.state;
-                state.remove_window(&Window::FileNamePicker);
+                state.pane_manager.remove_window(&Window::FileNamePicker);
                 state.file_name_picker.reset();
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -189,14 +190,20 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                 }
                 let selected = state.file_name_picker.resolve_selected_index();
                 if let Some(&(key, _)) = state.file_name_picker.results.get(selected) {
-                    if !state.window_states.contains_key(&Window::FilePreview(key)) {
-                        state.set_window_scroll(&Window::FilePreview(key), 0);
+                    if !state
+                        .pane_manager
+                        .window_states
+                        .contains_key(&Window::FilePreview(key))
+                    {
+                        state
+                            .pane_manager
+                            .set_window_scroll(&Window::FilePreview(key), 0);
                     }
-                    state.push_window(Window::FilePreview(key));
-                    state.focused_window = Some(Window::FilePreview(key));
+                    state.pane_manager.push_window(Window::FilePreview(key));
+                    state.pane_manager.focused_window = Some(Window::FilePreview(key));
                     crate::lsp::send_file_request(key.0);
                 }
-                state.remove_window(&Window::FileNamePicker);
+                state.pane_manager.remove_window(&Window::FileNamePicker);
                 state.file_name_picker.reset();
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -209,7 +216,7 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                     },
             }) => {
                 let state = &mut global_data.state;
-                state.remove_window(&Window::FileNamePicker);
+                state.pane_manager.remove_window(&Window::FileNamePicker);
                 state.file_name_picker.reset();
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -223,8 +230,10 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
             let state = &mut global_data.state;
             if state.file_name_picker.query.is_empty() {
                 let snapshot = state.files.load();
-                state.file_name_picker.results =
-                    FileNamePickerComponent::all_files_results(&snapshot, &state.window_stack);
+                state.file_name_picker.results = FileNamePickerComponent::open_previews_results(
+                    &snapshot,
+                    &state.pane_manager.window_stack,
+                );
             } else {
                 let main_tx = global_data.main_thread_channel_sender.clone();
                 self.on_query_changed(&*state, main_tx);
@@ -232,7 +241,10 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
             return Ok(EventPropagation::ConsumedRender);
         }
 
-        let page_size = global_data.state.window_page_size(&Window::FileNamePicker);
+        let page_size = global_data
+            .state
+            .pane_manager
+            .window_page_size(&Window::FileNamePicker);
         if let Some(result) = self.picker.handle_navigation(
             &input_event,
             page_size,
@@ -280,12 +292,15 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
 
             global_data
                 .state
+                .pane_manager
                 .set_window_scroll(&Window::FileNamePicker, self.picker.scroll_offset);
             global_data
                 .state
+                .pane_manager
                 .set_window_scroll_max(&Window::FileNamePicker, result_count);
             global_data
                 .state
+                .pane_manager
                 .set_window_page_size(&Window::FileNamePicker, total_rows);
 
             pipeline.push(ZOrder::Normal, result_ops);

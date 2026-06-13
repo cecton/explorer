@@ -1,7 +1,9 @@
+use crate::tui::pane_component::pane_slot;
 use crate::tui::*;
 
 pub struct TerminalPaneComponent {
     id: FlexBoxId,
+    slot: usize,
     content_origin_row: usize,
     content_origin_col: usize,
     content_col_count: usize,
@@ -9,9 +11,10 @@ pub struct TerminalPaneComponent {
 }
 
 impl TerminalPaneComponent {
-    pub fn new(id: FlexBoxId) -> Self {
+    pub fn new(id: FlexBoxId, slot: usize) -> Self {
         Self {
             id,
+            slot,
             content_origin_row: 0,
             content_origin_col: 0,
             content_col_count: 0,
@@ -21,10 +24,22 @@ impl TerminalPaneComponent {
 
     fn terminal_id(&self, state: &AppState) -> Option<usize> {
         let slot = pane_slot(self.id)?;
-        let Window::Terminal(id) = state.window_stack.get(slot)? else {
+        let Window::Terminal(id) = state.pane_manager.window_stack.get(slot)? else {
             return None;
         };
         Some(*id)
+    }
+
+    fn pane_height(&self, global_data: &GlobalData<AppState, AppSignal>) -> usize {
+        let slot = self.slot;
+        let state = &global_data.state;
+        state
+            .pane_manager
+            .layout(state.last_surface_size)
+            .iter()
+            .find(|s| s.slot == slot)
+            .map(|s| s.box_.style_adjusted_bounds_size.row_height.as_usize())
+            .unwrap_or(0)
     }
 }
 
@@ -65,17 +80,6 @@ impl TitleRow for TerminalPaneComponent {
     }
 }
 
-fn pane_slot(id: FlexBoxId) -> Option<usize> {
-    match id.inner {
-        x if x == Id::Pane0 as u8 => Some(0),
-        x if x == Id::Pane1 as u8 => Some(1),
-        x if x == Id::Pane2 as u8 => Some(2),
-        x if x == Id::Pane3 as u8 => Some(3),
-        x if x == Id::Pane4 as u8 => Some(4),
-        _ => None,
-    }
-}
-
 impl Component<AppState, AppSignal> for TerminalPaneComponent {
     fn reset(&mut self) {}
 
@@ -106,6 +110,9 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 .and_then(|p| p.lock().ok())
                 .is_some_and(|p| p.exited)
             {
+                let window = Window::Terminal(id);
+                let was_focused =
+                    global_data.state.pane_manager.focused_window.as_ref() == Some(&window);
                 if let Some(pane) = global_data.state.terminal_panes.remove(&id) {
                     let mut p = match pane.lock() {
                         Ok(guard) => guard,
@@ -118,7 +125,10 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                         let _ = killer.kill();
                     }
                 }
-                global_data.state.remove_window(&Window::Terminal(id));
+                global_data.state.pane_manager.remove_window(&window);
+                if was_focused {
+                    global_data.state.terminal_grabbed = false;
+                }
                 return Ok(EventPropagation::ConsumedRender);
             }
 
@@ -196,11 +206,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::PageUp),
                 }) => {
-                    let slot = pane_slot(self.id).unwrap_or(0);
-                    let pane_height = global_data.state.pane_boxes[slot]
-                        .style_adjusted_bounds_size
-                        .row_height
-                        .as_usize();
+                    let pane_height = self.pane_height(global_data);
                     pane.scroll_offset = pane
                         .scroll_offset
                         .saturating_add(pane_height)
@@ -211,11 +217,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::PageDown),
                 }) => {
-                    let slot = pane_slot(self.id).unwrap_or(0);
-                    let pane_height = global_data.state.pane_boxes[slot]
-                        .style_adjusted_bounds_size
-                        .row_height
-                        .as_usize();
+                    let pane_height = self.pane_height(global_data);
                     pane.scroll_offset = pane.scroll_offset.saturating_sub(pane_height);
                     EventPropagation::ConsumedRender
                 }
@@ -617,13 +619,12 @@ pub fn terminal_word_bounds(line: &str, cursor_col: usize) -> (usize, usize) {
         let end = scan_forward(&|ch: char| !is_url_boundary(ch));
         let mut url = None;
         for (i, _) in chars[..=cursor_col].iter().enumerate().rev() {
+            if is_url_boundary(chars[i]) {
+                break;
+            }
             let slice: String = chars[i..end].iter().collect();
             if slice.contains("://") && url::Url::parse(&slice).is_ok() {
                 url = Some((i, end));
-                break;
-            }
-            if is_url_boundary(chars[i]) {
-                break;
             }
         }
         if let Some((start, end)) = url {
@@ -828,7 +829,18 @@ mod tests {
         let line = " ╭──╮";
         // column 2 -> first ─
         let (start, end) = terminal_word_bounds(line, 2);
-        assert_eq!(&line[start..end], "─");
+        let byte_start = line
+            .char_indices()
+            .nth(start)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
+        let byte_end = line
+            .char_indices()
+            .nth(end)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
+        let selected = &line[byte_start..byte_end];
+        assert_eq!(selected, "─");
     }
 
     #[test]
@@ -836,21 +848,54 @@ mod tests {
         let line = " ╭────────────────────────────────────────────────────────────────────────────────────────────────────────────────────╮ ";
         // column 39 -> a ─ in the middle of the run
         let (start, end) = terminal_word_bounds(line, 39);
-        assert_eq!(&line[start..end], "─");
+        let byte_start = line
+            .char_indices()
+            .nth(start)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
+        let byte_end = line
+            .char_indices()
+            .nth(end)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
+        let selected = &line[byte_start..byte_end];
+        assert_eq!(selected, "─");
     }
 
     #[test]
     fn multibyte_click_on_first_multibyte_char() {
         let line = "╭─";
         let (start, end) = terminal_word_bounds(line, 0);
-        assert_eq!(&line[start..end], "╭");
+        let byte_start = line
+            .char_indices()
+            .nth(start)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
+        let byte_end = line
+            .char_indices()
+            .nth(end)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
+        let selected = &line[byte_start..byte_end];
+        assert_eq!(selected, "╭");
     }
 
     #[test]
     fn multibyte_click_on_last_char() {
         let line = "╭─";
         let (start, end) = terminal_word_bounds(line, 1);
-        assert_eq!(&line[start..end], "─");
+        let byte_start = line
+            .char_indices()
+            .nth(start)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
+        let byte_end = line
+            .char_indices()
+            .nth(end)
+            .map(|(b, _)| b)
+            .unwrap_or(line.len());
+        let selected = &line[byte_start..byte_end];
+        assert_eq!(selected, "─");
     }
 
     #[test]

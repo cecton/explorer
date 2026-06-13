@@ -29,8 +29,10 @@ Source is organized as:
 - `src/watcher.rs` — filesystem watcher via `notify`; debounces events into `BatchedWatchEvent` and broadcasts via `WATCHER_RRT`
 - `src/tui/mod.rs` — module declarations
 - `src/tui/title_row.rs` — `TitleRow` trait, `render_pane_title` utility, `title_bar_colors`
-- `src/tui/state.rs` — `AppState` (with global `TextSelection`, `SelPoint`, `terminal_grabbed`), `AppSignal`, `TerminalPane`, `Window`, `WindowState`, and `FuzzyPickerState` types
-- `src/tui/app.rs` — `App` trait impl, layout, `run()` entry point; handles global text selection, terminal grab/ungrab, and mouse event routing
+- `src/tui/state.rs` — `AppState` (with global `TextSelection`, `SelPoint`, `terminal_grabbed`, `PaneManager`), `AppSignal`, `TerminalPane`, `Window`, `WindowState`, and `FuzzyPickerState` types
+- `src/tui/app.rs` — `App` trait impl, layout, `run()` entry point; handles global text selection, terminal grab/ungrab, mouse event routing, and PaneManager-driven layout
+- `src/tui/pane_manager.rs` — `PaneManager` type: focus, resize, stacking, and layout of 16 pane slots; responds to `PaneCommand` enums for directional movement and resize operations
+- `src/tui/pane_component.rs` — `PaneComponent` implementation: renders a stack of overlapping windows within a pane slot with tab-style headers; manages per-pane state and command routing to child components
 - `src/tui/file_name_picker.rs` — fuzzy file-name picker overlay (exceptions → input → navigation)
 - `src/tui/fuzzy_picker.rs` — shared fuzzy list picker component; navigation via flat `match` on `InputEvent`
 - `src/tui/theme.rs` — `HelixTheme` type; loads bundled TOML files via `include!("../../themes/themes.rs")`
@@ -80,7 +82,7 @@ cargo xtask update-themes
 
 ### Tests
 
-There are no tests yet. When adding tests:
+Tests live in `src/tui/pane_manager.rs` (unit tests for focus, resize, stacking, and layout). When adding tests:
 
 ```bash
 # Run all tests

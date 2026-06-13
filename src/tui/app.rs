@@ -1,11 +1,10 @@
 use crate::loader::LoadedFile;
 use crate::lsp::{self, LSP_RRT};
-use crate::tui::preview::DragModifier;
+use crate::tui::pane_component::PaneComponent;
 use crate::tui::*;
 use crate::watcher::{WATCHER_RRT, set_watcher_root};
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
-use r3bl_tui::ClipboardService;
 use r3bl_tui::core::osc::OscEvent;
 use r3bl_tui::core::pty::{
     CursorKeyMode, DefaultPtySessionConfig, PtyInputEvent, PtyOutputEvent, PtySessionBuilder,
@@ -20,12 +19,22 @@ use tokio::sync::mpsc;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum Id {
     Container = 1,
-    /// Pane slots 0-4 (positional, not tied to a specific window).
     Pane0 = 2,
     Pane1 = 3,
     Pane2 = 4,
     Pane3 = 5,
     Pane4 = 6,
+    Pane5 = 7,
+    Pane6 = 8,
+    Pane7 = 9,
+    Pane8 = 10,
+    Pane9 = 11,
+    Pane10 = 12,
+    Pane11 = 13,
+    Pane12 = 14,
+    Pane13 = 15,
+    Pane14 = 16,
+    Pane15 = 17,
 }
 
 impl Id {
@@ -35,7 +44,18 @@ impl Id {
             1 => Id::Pane1,
             2 => Id::Pane2,
             3 => Id::Pane3,
-            _ => Id::Pane4,
+            4 => Id::Pane4,
+            5 => Id::Pane5,
+            6 => Id::Pane6,
+            7 => Id::Pane7,
+            8 => Id::Pane8,
+            9 => Id::Pane9,
+            10 => Id::Pane10,
+            11 => Id::Pane11,
+            12 => Id::Pane12,
+            13 => Id::Pane13,
+            14 => Id::Pane14,
+            _ => Id::Pane15,
         }
     }
 }
@@ -49,1015 +69,6 @@ impl From<Id> for u8 {
 impl From<Id> for FlexBoxId {
     fn from(id: Id) -> FlexBoxId {
         FlexBoxId::new(id)
-    }
-}
-
-/// Dispatcher component for a single pane slot. Holds both inner component types and
-/// delegates to the correct one based on which `Window` is currently assigned to this slot
-/// in `state.window_stack`.
-struct PaneComponent {
-    id: FlexBoxId,
-    slot: usize,
-    picker: FileNamePickerComponent,
-    theme_picker: ThemePickerComponent,
-    preview: FilePreviewComponent,
-    terminal: TerminalPaneComponent,
-    /// Origin row of the content area (below title bar), used for scrollbar mouse events.
-    content_origin_row: u16,
-    /// Total columns in the content area (full width including scrollbar column).
-    content_col_count: u16,
-    /// Total rows in the content area.
-    content_row_count: u16,
-    /// Origin column of the content area, used for absolute scrollbar column calculation.
-    content_origin_col: u16,
-    /// Whether the user is currently dragging the scrollbar thumb.
-    scrollbar_dragging: bool,
-    /// (scroll, rel_y) at thumb grab time (None if drag started on track).
-    scrollbar_grab_state: Option<(usize, usize)>,
-    preview_drag_active: bool,
-    text_drag_active: bool,
-    last_click: Option<(Instant, Pos)>,
-    consecutive_clicks: u8,
-}
-
-impl PaneComponent {
-    fn new_boxed(
-        slot: usize,
-        id: FlexBoxId,
-        picker_results_tx: mpsc::Sender<PickerResultMsg>,
-        picker_generation: Arc<AtomicU64>,
-    ) -> BoxedSafeComponent<AppState, AppSignal> {
-        Box::new(Self {
-            id,
-            slot,
-            picker: FileNamePickerComponent::new(id, picker_results_tx, picker_generation),
-            theme_picker: ThemePickerComponent::new(id),
-            preview: FilePreviewComponent::new(id),
-            terminal: TerminalPaneComponent::new(id),
-            content_origin_row: 0,
-            content_col_count: 0,
-            content_row_count: 0,
-            content_origin_col: 0,
-            scrollbar_dragging: false,
-            scrollbar_grab_state: None,
-            preview_drag_active: false,
-            text_drag_active: false,
-            last_click: None,
-            consecutive_clicks: 0,
-        })
-    }
-
-    fn active_window<'s>(&self, state: &'s AppState) -> Option<&'s Window> {
-        state.window_stack.get(self.slot)
-    }
-
-    fn handle_scrollbar(
-        &mut self,
-        mouse: MouseInput,
-        global_data: &mut GlobalData<AppState, AppSignal>,
-    ) -> EventPropagation {
-        let Some(window) = self.active_window(&global_data.state).cloned() else {
-            return EventPropagation::Propagate;
-        };
-
-        let row = mouse.pos.row_index.as_usize();
-        let rel_y = row.saturating_sub(self.content_origin_row as usize);
-
-        let state = &mut global_data.state;
-        let (scroll, scroll_max, page_size) = match &window {
-            Window::Terminal(id) => {
-                let Some(pane) = state.terminal_panes.get(id) else {
-                    return EventPropagation::Propagate;
-                };
-                let Ok(pane) = pane.lock() else {
-                    return EventPropagation::Propagate;
-                };
-                if pane.ofs_buf.terminal_mode.alternate_screen == AlternateScreenState::Active {
-                    return EventPropagation::Propagate;
-                }
-                let scrollback_len = pane.ofs_buf.scrollback_len();
-                let buffer_height = pane.ofs_buf.buffer.len();
-                if scrollback_len == 0 {
-                    return EventPropagation::Propagate;
-                }
-                let scroll = scrollback_len.saturating_sub(pane.scroll_offset.min(scrollback_len));
-                (scroll, scrollback_len + buffer_height, buffer_height)
-            }
-            _ => {
-                let scroll = state.window_scroll(&window);
-                let scroll_max = state.window_scroll_max(&window);
-                let page_size = state.window_page_size(&window);
-                (scroll, scroll_max, page_size)
-            }
-        };
-        let scrollbar_height = self.content_row_count as usize;
-
-        match mouse.kind {
-            MouseInputKind::MouseDown(Button::Left) => {
-                if scroll_max > page_size && scrollbar_height > 0 {
-                    let thumb_height = thumb_size(scrollbar_height, page_size, scroll_max);
-                    let thumb_pos = thumb_position(
-                        scroll,
-                        scrollbar_height,
-                        thumb_height,
-                        scroll_max,
-                        page_size,
-                    );
-                    if rel_y >= thumb_pos && rel_y < thumb_pos + thumb_height {
-                        // Grab the thumb: snapshot current state, no scroll jump.
-                        self.scrollbar_dragging = true;
-                        self.scrollbar_grab_state = Some((scroll, rel_y));
-                        return EventPropagation::ConsumedRender;
-                    } else {
-                        // Click on track: jump directly to clicked position.
-                        self.scrollbar_dragging = true;
-                        self.scrollbar_grab_state = None;
-                        let target = scroll_from_y(rel_y, scrollbar_height, scroll_max, page_size);
-                        return self.apply_scroll(state, &window, target);
-                    }
-                }
-                EventPropagation::ConsumedRender
-            }
-            MouseInputKind::MouseDrag(Button::Left) if self.scrollbar_dragging => {
-                if scroll_max > page_size && scrollbar_height > 0 {
-                    let target = if let Some((grab_scroll, grab_rel_y)) = self.scrollbar_grab_state
-                    {
-                        let thumb_height = thumb_size(scrollbar_height, page_size, scroll_max);
-                        let denom = (scrollbar_height - thumb_height).max(1);
-                        let range = scroll_max - page_size;
-                        let delta_y = (rel_y as isize) - (grab_rel_y as isize);
-                        let delta_scroll = delta_y * (range as isize) / (denom as isize);
-                        ((grab_scroll as isize) + delta_scroll).max(0) as usize
-                    } else {
-                        scroll_from_y(rel_y, scrollbar_height, scroll_max, page_size)
-                    };
-                    return self.apply_scroll(state, &window, target);
-                }
-                EventPropagation::ConsumedRender
-            }
-            MouseInputKind::MouseUp(Button::Left) => {
-                self.scrollbar_dragging = false;
-                self.scrollbar_grab_state = None;
-                EventPropagation::ConsumedRender
-            }
-            MouseInputKind::ScrollUp => {
-                let target = scroll.saturating_sub(3);
-                self.apply_scroll(state, &window, target)
-            }
-            MouseInputKind::ScrollDown => {
-                let target = scroll.saturating_add(3);
-                self.apply_scroll(state, &window, target)
-            }
-            _ => EventPropagation::ConsumedRender,
-        }
-    }
-
-    fn apply_scroll(
-        &mut self,
-        state: &mut AppState,
-        window: &Window,
-        target: usize,
-    ) -> EventPropagation {
-        match window {
-            Window::FilePreview(_) => {
-                state.set_window_scroll(window, target);
-                state.clamp_scroll(window);
-                EventPropagation::ConsumedRender
-            }
-            Window::FileNamePicker => {
-                let scroll_max = state.window_scroll_max(window);
-                if scroll_max == 0 {
-                    return EventPropagation::ConsumedRender;
-                }
-                let idx = target.min(scroll_max.saturating_sub(1));
-                if let Some((key, _)) = state.file_name_picker.results.get(idx) {
-                    state.file_name_picker.selected = Some(*key);
-                }
-                EventPropagation::ConsumedRender
-            }
-            Window::ThemePicker => {
-                let scroll_max = state.window_scroll_max(window);
-                if scroll_max == 0 {
-                    return EventPropagation::ConsumedRender;
-                }
-                let idx = target.min(scroll_max.saturating_sub(1));
-                if let Some((name, _)) = state.theme_picker.results.get(idx) {
-                    state.theme_picker.selected = Some(name.clone());
-                    if let Some(theme) = HelixTheme::from_name(name) {
-                        state.theme = theme;
-                    }
-                }
-                EventPropagation::ConsumedRender
-            }
-            Window::Terminal(id) => {
-                let Some(pane) = state.terminal_panes.get(id) else {
-                    return EventPropagation::ConsumedRender;
-                };
-                if let Ok(mut pane) = pane.lock() {
-                    let scrollback_len = pane.ofs_buf.scrollback_len();
-                    let clamped = target.min(scrollback_len);
-                    pane.scroll_offset = scrollback_len.saturating_sub(clamped);
-                }
-                state.terminal_grabbed = false;
-                EventPropagation::ConsumedRender
-            }
-        }
-    }
-}
-
-impl TitleRow for PaneComponent {
-    fn render_title_row(
-        &self,
-        ops: &mut RenderOpIRVec,
-        pane_box: &FlexBox,
-        focused: bool,
-        theme: &HelixTheme,
-        state: &AppState,
-    ) -> usize {
-        let Some(window) = self.active_window(state) else {
-            return 0;
-        };
-        match window {
-            Window::FileNamePicker => self
-                .picker
-                .render_title_row(ops, pane_box, focused, theme, state),
-            Window::ThemePicker => self
-                .theme_picker
-                .render_title_row(ops, pane_box, focused, theme, state),
-            Window::FilePreview(_) => self
-                .preview
-                .render_title_row(ops, pane_box, focused, theme, state),
-            Window::Terminal(_) => self
-                .terminal
-                .render_title_row(ops, pane_box, focused, theme, state),
-        }
-    }
-}
-
-fn thumb_size(scrollbar_height: usize, page_size: usize, scroll_max: usize) -> usize {
-    std::cmp::max(1, (scrollbar_height * page_size) / scroll_max.max(1))
-}
-
-fn thumb_position(
-    scroll: usize,
-    scrollbar_height: usize,
-    thumb_height: usize,
-    scroll_max: usize,
-    page_size: usize,
-) -> usize {
-    if scroll_max <= page_size {
-        0
-    } else {
-        (scroll * (scrollbar_height - thumb_height)) / (scroll_max - page_size)
-    }
-}
-
-fn scroll_from_y(
-    rel_y: usize,
-    scrollbar_height: usize,
-    scroll_max: usize,
-    page_size: usize,
-) -> usize {
-    if scroll_max <= page_size || scrollbar_height == 0 {
-        return 0;
-    }
-    (rel_y * (scroll_max - page_size)) / (scrollbar_height.saturating_sub(1).max(1))
-}
-
-fn drag_modifier_from_mouse(mouse: &MouseInput) -> Option<DragModifier> {
-    let mask = mouse.maybe_modifier_keys?;
-    let shift = mask.shift_key_state == KeyState::Pressed;
-    let ctrl = mask.ctrl_key_state == KeyState::Pressed;
-    let alt = mask.alt_key_state == KeyState::Pressed;
-    if alt {
-        return None;
-    }
-    match (shift, ctrl) {
-        (true, false) => Some(DragModifier::Shift),
-        (false, true) => Some(DragModifier::Ctrl),
-        _ => None,
-    }
-}
-
-impl Component<AppState, AppSignal> for PaneComponent {
-    fn reset(&mut self) {
-        self.picker.reset();
-        self.theme_picker.reset();
-        self.preview.reset();
-        self.terminal.reset();
-        self.preview_drag_active = false;
-        self.text_drag_active = false;
-        self.last_click = None;
-        self.consecutive_clicks = 0;
-    }
-
-    fn get_id(&self) -> FlexBoxId {
-        self.id
-    }
-
-    fn handle_event(
-        &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
-        input_event: InputEvent,
-        has_focus: &mut HasFocus,
-    ) -> CommonResult<EventPropagation> {
-        // If a preview drag was active but the window changed, clean up.
-        if self.preview_drag_active
-            && !matches!(
-                self.active_window(&global_data.state),
-                Some(Window::FilePreview(_))
-            )
-        {
-            self.preview_drag_active = false;
-            self.preview.end_drag();
-            global_data.state.mouse_drag_active = false;
-        }
-
-        if self.text_drag_active
-            && !matches!(
-                self.active_window(&global_data.state),
-                Some(Window::FilePreview(_)) | Some(Window::Terminal(_))
-            )
-        {
-            self.text_drag_active = false;
-            global_data.state.text_selection = None;
-            global_data.state.mouse_drag_active = false;
-            self.last_click = None;
-            self.consecutive_clicks = 0;
-        }
-
-        // Check for scrollbar mouse interaction first.
-        if !self.preview_drag_active
-            && !self.text_drag_active
-            && let InputEvent::Mouse(mouse) = input_event
-        {
-            let col = mouse.pos.col_index.as_usize();
-            let row = mouse.pos.row_index.as_usize();
-            let origin_col = self.content_origin_col as usize;
-            let origin_row = self.content_origin_row as usize;
-            let col_count = self.content_col_count as usize;
-            let scrollbar_col = origin_col + col_count.saturating_sub(1);
-            let bottom_row = origin_row + self.content_row_count as usize;
-
-            let in_vertical = self.scrollbar_dragging || (row >= origin_row && row < bottom_row);
-            let in_horizontal = col == scrollbar_col
-                || (self.scrollbar_dragging && col >= origin_col && col < origin_col + col_count);
-
-            if self.content_row_count > 0 && in_vertical && in_horizontal {
-                return Ok(self.handle_scrollbar(mouse, global_data));
-            }
-        }
-
-        // Check for title bar range click.
-        if let InputEvent::Mouse(mouse) = input_event
-            && let Some(window) = self.active_window(&global_data.state).cloned()
-            && let Window::FilePreview(key) = window
-        {
-            let title_bar_row = self.content_origin_row.saturating_sub(1) as usize;
-            let origin_col = self.content_origin_col as usize;
-            let pane_width = self.content_col_count as usize;
-            let col = mouse.pos.col_index.as_usize();
-            let row = mouse.pos.row_index.as_usize();
-
-            if row == title_bar_row
-                && col >= origin_col
-                && col < origin_col + pane_width
-                && matches!(mouse.kind, MouseInputKind::MouseDown(Button::Left))
-                && let Some((lo, hi)) = self.preview.range_at_title_col(
-                    &global_data.state,
-                    col - origin_col,
-                    pane_width,
-                )
-            {
-                self.preview
-                    .scroll_to_range(&mut global_data.state, key, lo, hi);
-                return Ok(EventPropagation::ConsumedRender);
-            }
-        }
-
-        // Preview content drag.
-        if let InputEvent::Mouse(mouse) = input_event
-            && let Some(window) = self.active_window(&global_data.state).cloned()
-            && let Window::FilePreview(key) = window
-        {
-            let col = mouse.pos.col_index.as_usize();
-            let row = mouse.pos.row_index.as_usize();
-            let origin_row = self.content_origin_row as usize;
-            let origin_col = self.content_origin_col as usize;
-            let col_count = self.content_col_count as usize;
-            let row_count = self.content_row_count as usize;
-
-            let in_content_rows = row >= origin_row && row < origin_row + row_count;
-            let in_content_cols =
-                col >= origin_col && col < origin_col + col_count.saturating_sub(1);
-
-            match mouse.kind {
-                MouseInputKind::MouseDown(Button::Left) if in_content_rows && in_content_cols => {
-                    if let Some(modifier) = drag_modifier_from_mouse(&mouse) {
-                        let state = &mut global_data.state;
-                        let window = Window::FilePreview(key);
-                        let scroll = state.window_scroll(&window);
-                        let scroll_max = state.window_scroll_max(&window);
-                        let rel_y = row.saturating_sub(origin_row);
-                        let line = (scroll + rel_y + 1).clamp(1, scroll_max.max(1));
-
-                        self.preview_drag_active = true;
-                        self.preview.start_drag(state, key, line, modifier);
-                        state.mouse_drag_active = true;
-                        return Ok(EventPropagation::ConsumedRender);
-                    } else {
-                        let state = &mut global_data.state;
-                        let now = Instant::now();
-                        let is_same_pos = self.last_click.is_some_and(|(_, p)| p == mouse.pos);
-                        let is_quick = self
-                            .last_click
-                            .is_some_and(|(t, _)| now.duration_since(t).as_millis() < 300);
-                        if is_same_pos && is_quick {
-                            self.consecutive_clicks = self.consecutive_clicks.saturating_add(1);
-                        } else {
-                            self.consecutive_clicks = 1;
-                        }
-                        self.last_click = Some((now, mouse.pos));
-
-                        let files = Arc::clone(&state.files);
-                        let snapshot = files.load();
-                        let file = &snapshot[key.0];
-                        let data = file.data.lock().unwrap();
-                        let (line_idx, _char_idx, cursor_byte) = self
-                            .preview
-                            .screen_pos_to_line_char(state, row, col, key, &data);
-
-                        match self.consecutive_clicks {
-                            1 => {
-                                let bounds = data.word_bounds(cursor_byte);
-                                state.text_selection = Some(TextSelection {
-                                    window: Window::FilePreview(key),
-                                    start: SelPoint::Preview {
-                                        line_idx,
-                                        byte_offset: bounds.0,
-                                    },
-                                    end: SelPoint::Preview {
-                                        line_idx,
-                                        byte_offset: bounds.0,
-                                    },
-                                    click_anchor: Some(SelPoint::Preview {
-                                        line_idx,
-                                        byte_offset: cursor_byte,
-                                    }),
-                                    click_word: Some((
-                                        SelPoint::Preview {
-                                            line_idx,
-                                            byte_offset: bounds.0,
-                                        },
-                                        SelPoint::Preview {
-                                            line_idx,
-                                            byte_offset: bounds.1,
-                                        },
-                                    )),
-                                    active: true,
-                                });
-                                self.text_drag_active = true;
-                                state.mouse_drag_active = true;
-                            }
-                            3 => {
-                                let bounds = data.line_bounds(line_idx);
-                                state.text_selection = Some(TextSelection {
-                                    window: Window::FilePreview(key),
-                                    start: SelPoint::Preview {
-                                        line_idx,
-                                        byte_offset: bounds.0,
-                                    },
-                                    end: SelPoint::Preview {
-                                        line_idx,
-                                        byte_offset: bounds.1,
-                                    },
-                                    click_anchor: None,
-                                    click_word: None,
-                                    active: true,
-                                });
-                                self.text_drag_active = true;
-                                state.mouse_drag_active = true;
-                            }
-                            _ => {}
-                        }
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                }
-                MouseInputKind::MouseDrag(Button::Left) if self.text_drag_active => {
-                    let state = &mut global_data.state;
-                    let files = Arc::clone(&state.files);
-                    let snapshot = files.load();
-                    let file = &snapshot[key.0];
-                    let data = file.data.lock().unwrap();
-                    let (line_idx, _char_idx, cursor_byte) = self
-                        .preview
-                        .screen_pos_to_line_char(state, row, col, key, &data);
-
-                    let Some(ref mut sel) = state.text_selection else {
-                        return Ok(EventPropagation::ConsumedRender);
-                    };
-                    if sel.window != Window::FilePreview(key) {
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-
-                    if let (
-                        Some(SelPoint::Preview {
-                            line_idx: anchor_line,
-                            byte_offset: anchor_byte,
-                        }),
-                        Some((
-                            SelPoint::Preview {
-                                byte_offset: word_start,
-                                ..
-                            },
-                            SelPoint::Preview {
-                                byte_offset: word_end,
-                                ..
-                            },
-                        )),
-                    ) = (sel.click_anchor, sel.click_word)
-                        && anchor_line == line_idx
-                    {
-                        if cursor_byte >= anchor_byte {
-                            sel.start = SelPoint::Preview {
-                                line_idx,
-                                byte_offset: word_start,
-                            };
-                            let cur = data.word_bounds(cursor_byte);
-                            sel.end = SelPoint::Preview {
-                                line_idx,
-                                byte_offset: cur.1,
-                            };
-                        } else {
-                            let cur = data.word_bounds(cursor_byte);
-                            sel.start = SelPoint::Preview {
-                                line_idx,
-                                byte_offset: cur.0,
-                            };
-                            sel.end = SelPoint::Preview {
-                                line_idx,
-                                byte_offset: word_end,
-                            };
-                        }
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-
-                    sel.end = SelPoint::Preview {
-                        line_idx,
-                        byte_offset: cursor_byte,
-                    };
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                MouseInputKind::MouseDrag(Button::Left) if self.preview_drag_active => {
-                    let state = &mut global_data.state;
-                    let window = Window::FilePreview(key);
-                    let scroll = state.window_scroll(&window);
-                    let scroll_max = state.window_scroll_max(&window);
-                    let rel_y = row.saturating_sub(origin_row);
-                    let line = (scroll + rel_y + 1).clamp(1, scroll_max.max(1));
-
-                    self.preview.update_drag(state, key, line);
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                MouseInputKind::MouseUp(Button::Left) if self.text_drag_active => {
-                    let state = &mut global_data.state;
-                    if let Some(ref sel) = state.text_selection
-                        && sel.window == Window::FilePreview(key)
-                    {
-                        let snapshot = state.files.load();
-                        let file = &snapshot[key.0];
-                        let data = file.data.lock().unwrap();
-                        let (start_byte, end_byte) = match (sel.start, sel.end) {
-                            (
-                                SelPoint::Preview {
-                                    line_idx: s_line,
-                                    byte_offset: s_byte,
-                                },
-                                SelPoint::Preview {
-                                    line_idx: e_line,
-                                    byte_offset: e_byte,
-                                },
-                            ) => {
-                                if s_line == e_line {
-                                    let (lo, hi) = (s_byte.min(e_byte), s_byte.max(e_byte));
-                                    (lo, hi)
-                                } else {
-                                    let s_bounds = data.line_bounds(s_line.min(e_line));
-                                    let e_bounds = data.line_bounds(s_line.max(e_line));
-                                    (s_bounds.0, e_bounds.1)
-                                }
-                            }
-                            _ => (0, 0),
-                        };
-                        if let Some(text) = data.extract_text(start_byte, end_byte) {
-                            let mut cb = r3bl_tui::SystemClipboard;
-                            let _ = cb.try_to_put_content_into_clipboard(text);
-                        }
-                    }
-                    state.text_selection = None;
-                    self.text_drag_active = false;
-                    state.mouse_drag_active = false;
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                MouseInputKind::MouseUp(Button::Left) if self.preview_drag_active => {
-                    self.preview_drag_active = false;
-                    self.preview.end_drag();
-                    global_data.state.mouse_drag_active = false;
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                _ => {}
-            }
-        }
-
-        // Terminal content selection.
-        if let InputEvent::Mouse(mouse) = input_event
-            && let Some(window) = self.active_window(&global_data.state).cloned()
-            && let Window::Terminal(term_id) = window
-        {
-            let col = mouse.pos.col_index.as_usize();
-            let row = mouse.pos.row_index.as_usize();
-            let origin_row = self.content_origin_row as usize;
-            let origin_col = self.content_origin_col as usize;
-            let col_count = self.content_col_count as usize;
-            let row_count = self.content_row_count as usize;
-
-            let in_content_rows = row >= origin_row && row < origin_row + row_count;
-            let in_content_cols = col >= origin_col && col < origin_col + col_count;
-
-            let is_alternate = global_data
-                .state
-                .terminal_panes
-                .get(&term_id)
-                .and_then(|p| p.lock().ok())
-                .map(|p| p.ofs_buf.terminal_mode.alternate_screen == AlternateScreenState::Active)
-                .unwrap_or(false);
-
-            match mouse.kind {
-                MouseInputKind::MouseDown(Button::Left)
-                    if in_content_rows && in_content_cols && !is_alternate =>
-                {
-                    let rel_row = row - origin_row;
-                    let rel_col = col - origin_col;
-
-                    let word_bounds = global_data
-                        .state
-                        .terminal_panes
-                        .get(&term_id)
-                        .and_then(|p| p.lock().ok())
-                        .map(|pane| {
-                            let line = terminal_line_at_viewport_row(&pane, rel_row, row_count);
-                            let (ws, we) = terminal_word_bounds(&line, rel_col);
-                            (ws, we)
-                        });
-
-                    let state = &mut global_data.state;
-                    if let Some((ws, we)) = word_bounds {
-                        state.text_selection = Some(TextSelection {
-                            window: Window::Terminal(term_id),
-                            start: SelPoint::Terminal {
-                                viewport_row: rel_row,
-                                col: ws,
-                            },
-                            end: SelPoint::Terminal {
-                                viewport_row: rel_row,
-                                col: we,
-                            },
-                            click_anchor: Some(SelPoint::Terminal {
-                                viewport_row: rel_row,
-                                col: rel_col,
-                            }),
-                            click_word: Some((
-                                SelPoint::Terminal {
-                                    viewport_row: rel_row,
-                                    col: ws,
-                                },
-                                SelPoint::Terminal {
-                                    viewport_row: rel_row,
-                                    col: we,
-                                },
-                            )),
-                            active: true,
-                        });
-                    } else {
-                        state.text_selection = Some(TextSelection {
-                            window: Window::Terminal(term_id),
-                            start: SelPoint::Terminal {
-                                viewport_row: rel_row,
-                                col: rel_col,
-                            },
-                            end: SelPoint::Terminal {
-                                viewport_row: rel_row,
-                                col: rel_col,
-                            },
-                            click_anchor: None,
-                            click_word: None,
-                            active: true,
-                        });
-                    }
-                    self.text_drag_active = true;
-                    state.mouse_drag_active = true;
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                MouseInputKind::MouseDrag(Button::Left)
-                    if self.text_drag_active && !is_alternate =>
-                {
-                    let rel_row = row
-                        .saturating_sub(origin_row)
-                        .min(row_count.saturating_sub(1));
-                    let rel_col = col
-                        .saturating_sub(origin_col)
-                        .min(col_count.saturating_sub(1));
-
-                    let click_anchor_row =
-                        global_data.state.text_selection.as_ref().and_then(|sel| {
-                            match sel.click_anchor {
-                                Some(SelPoint::Terminal { viewport_row, .. }) => Some(viewport_row),
-                                _ => None,
-                            }
-                        });
-
-                    let word_bounds = global_data
-                        .state
-                        .terminal_panes
-                        .get(&term_id)
-                        .and_then(|p| p.lock().ok())
-                        .map(|pane| {
-                            let line = terminal_line_at_viewport_row(&pane, rel_row, row_count);
-                            let (ws, we) = terminal_word_bounds(&line, rel_col);
-                            (ws, we)
-                        });
-
-                    let cur_line_len = if click_anchor_row.map(|ar| ar != rel_row).unwrap_or(false)
-                    {
-                        global_data
-                            .state
-                            .terminal_panes
-                            .get(&term_id)
-                            .and_then(|p| p.lock().ok())
-                            .map(|pane| {
-                                terminal_line_at_viewport_row(&pane, rel_row, row_count).len()
-                            })
-                    } else {
-                        None
-                    };
-
-                    let state = &mut global_data.state;
-                    let Some(ref mut sel) = state.text_selection else {
-                        return Ok(EventPropagation::ConsumedRender);
-                    };
-                    if sel.window != Window::Terminal(term_id) {
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-
-                    if let (
-                        Some(SelPoint::Terminal {
-                            viewport_row: anchor_row,
-                            col: anchor_col,
-                        }),
-                        Some((
-                            SelPoint::Terminal {
-                                col: word_start, ..
-                            },
-                            SelPoint::Terminal { col: word_end, .. },
-                        )),
-                    ) = (sel.click_anchor, sel.click_word)
-                        && anchor_row == rel_row
-                        && let Some((cur_start, cur_end)) = word_bounds
-                    {
-                        if rel_col >= anchor_col {
-                            sel.start = SelPoint::Terminal {
-                                viewport_row: rel_row,
-                                col: word_start,
-                            };
-                            sel.end = SelPoint::Terminal {
-                                viewport_row: rel_row,
-                                col: cur_end,
-                            };
-                        } else {
-                            sel.start = SelPoint::Terminal {
-                                viewport_row: rel_row,
-                                col: cur_start,
-                            };
-                            sel.end = SelPoint::Terminal {
-                                viewport_row: rel_row,
-                                col: word_end,
-                            };
-                        }
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-
-                    if let Some(anchor_row) = click_anchor_row
-                        && anchor_row != rel_row
-                        && let Some(cur_len) = cur_line_len
-                    {
-                        sel.start = SelPoint::Terminal {
-                            viewport_row: anchor_row,
-                            col: 0,
-                        };
-                        sel.end = SelPoint::Terminal {
-                            viewport_row: rel_row,
-                            col: cur_len,
-                        };
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-
-                    sel.end = SelPoint::Terminal {
-                        viewport_row: rel_row,
-                        col: rel_col,
-                    };
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                MouseInputKind::MouseUp(Button::Left) if self.text_drag_active && !is_alternate => {
-                    let maybe_text = if let Some(ref sel) = global_data.state.text_selection {
-                        if sel.window == Window::Terminal(term_id) {
-                            global_data
-                                .state
-                                .terminal_panes
-                                .get(&term_id)
-                                .and_then(|p| p.lock().ok())
-                                .and_then(|pane| {
-                                    extract_terminal_text(&pane, sel.start, sel.end, row_count)
-                                        .filter(|t| !t.is_empty())
-                                })
-                        } else {
-                            None
-                        }
-                    } else {
-                        None
-                    };
-                    if let Some(text) = maybe_text {
-                        let mut cb = r3bl_tui::SystemClipboard;
-                        let _ = cb.try_to_put_content_into_clipboard(text);
-                    }
-                    let state = &mut global_data.state;
-                    state.text_selection = None;
-                    self.text_drag_active = false;
-                    state.mouse_drag_active = false;
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                _ => {}
-            }
-        }
-
-        match self.active_window(&global_data.state).cloned() {
-            Some(Window::FileNamePicker) => {
-                self.picker
-                    .handle_event(global_data, input_event, has_focus)
-            }
-            Some(Window::ThemePicker) => {
-                self.theme_picker
-                    .handle_event(global_data, input_event, has_focus)
-            }
-            Some(Window::FilePreview(_)) => {
-                self.preview
-                    .handle_event(global_data, input_event, has_focus)
-            }
-            Some(Window::Terminal(_)) => {
-                self.terminal
-                    .handle_event(global_data, input_event, has_focus)
-            }
-            None => Ok(EventPropagation::Propagate),
-        }
-    }
-
-    fn render(
-        &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
-        current_box: FlexBox,
-        surface_bounds: SurfaceBounds,
-        has_focus: &mut HasFocus,
-    ) -> CommonResult<RenderPipeline> {
-        throws_with_return!({
-            global_data.state.pane_boxes[self.slot] = current_box;
-
-            let mut title_ops = RenderOpIRVec::new();
-            let focused = has_focus.get_id() == Some(self.id);
-            let title_height = self.render_title_row(
-                &mut title_ops,
-                &current_box,
-                focused,
-                &global_data.state.theme,
-                &global_data.state,
-            );
-
-            let (content_box, inner_bounds) = if title_height > 0 {
-                let origin = current_box.style_adjusted_origin_pos + height(title_height as u16);
-                let bounds = current_box.style_adjusted_bounds_size.col_width
-                    + (current_box.style_adjusted_bounds_size.row_height
-                        - height(title_height as u16));
-                let scrollbar_col = bounds.col_width - width(1);
-                let inner_bounds = scrollbar_col + bounds.row_height;
-                let boxed = FlexBox {
-                    style_adjusted_origin_pos: origin,
-                    style_adjusted_bounds_size: bounds,
-                    ..current_box
-                };
-                (
-                    boxed,
-                    FlexBox {
-                        style_adjusted_origin_pos: origin,
-                        style_adjusted_bounds_size: inner_bounds,
-                        ..current_box
-                    },
-                )
-            } else {
-                let bounds = current_box.style_adjusted_bounds_size;
-                let scrollbar_col = bounds.col_width - width(1);
-                let inner_bounds = scrollbar_col + bounds.row_height;
-                let boxed = FlexBox {
-                    style_adjusted_bounds_size: bounds,
-                    ..current_box
-                };
-                (
-                    boxed,
-                    FlexBox {
-                        style_adjusted_bounds_size: inner_bounds,
-                        ..current_box
-                    },
-                )
-            };
-
-            // Store content area geometry for scrollbar mouse event handling.
-            self.content_origin_row = content_box.style_adjusted_origin_pos.row_index.as_u16();
-            self.content_origin_col = content_box.style_adjusted_origin_pos.col_index.as_u16();
-            self.content_col_count = content_box.style_adjusted_bounds_size.col_width.as_u16();
-            self.content_row_count = content_box.style_adjusted_bounds_size.row_height.as_u16();
-
-            let inner_pipeline = match self.active_window(&global_data.state) {
-                Some(Window::FileNamePicker) => {
-                    self.picker
-                        .render(global_data, inner_bounds, surface_bounds, has_focus)?
-                }
-                Some(Window::ThemePicker) => self.theme_picker.render(
-                    global_data,
-                    inner_bounds,
-                    surface_bounds,
-                    has_focus,
-                )?,
-                Some(Window::FilePreview(_)) => {
-                    self.preview
-                        .render(global_data, inner_bounds, surface_bounds, has_focus)?
-                }
-                Some(Window::Terminal(_)) => {
-                    self.terminal
-                        .render(global_data, content_box, surface_bounds, has_focus)?
-                }
-                None => r3bl_tui::render_pipeline!(),
-            };
-
-            let mut pipeline = if title_height > 0 {
-                let mut p = r3bl_tui::render_pipeline!();
-                p.push(ZOrder::Normal, title_ops);
-                p.join_into(inner_pipeline);
-                p
-            } else {
-                inner_pipeline
-            };
-
-            // Render scrollbar on the rightmost column if there's an active window.
-            if let Some(ref window) = self.active_window(&global_data.state).cloned() {
-                let (scroll, scroll_max, page_size) = match window {
-                    Window::Terminal(id) => {
-                        let Some(pane) = global_data.state.terminal_panes.get(id) else {
-                            return Ok(pipeline);
-                        };
-                        let Ok(pane) = pane.lock() else {
-                            return Ok(pipeline);
-                        };
-                        if pane.ofs_buf.terminal_mode.alternate_screen
-                            == AlternateScreenState::Active
-                        {
-                            return Ok(pipeline);
-                        }
-                        let scrollback_len = pane.ofs_buf.scrollback_len();
-                        let buffer_height = pane.ofs_buf.buffer.len();
-                        let scroll =
-                            scrollback_len.saturating_sub(pane.scroll_offset.min(scrollback_len));
-                        (scroll, scrollback_len + buffer_height, buffer_height)
-                    }
-                    _ => {
-                        let state = &global_data.state;
-                        (
-                            state.window_scroll(window),
-                            state.window_scroll_max(window),
-                            state.window_page_size(window),
-                        )
-                    }
-                };
-                let mut scrollbar_ops = RenderOpIRVec::new();
-                render_scrollbar(
-                    &mut scrollbar_ops,
-                    &content_box,
-                    scroll,
-                    scroll_max,
-                    page_size,
-                    &global_data.state.theme,
-                );
-                pipeline.push(ZOrder::Normal, scrollbar_ops);
-            }
-
-            pipeline
-        });
     }
 }
 
@@ -1104,8 +115,9 @@ impl AppMain {
             state.next_terminal_id += 1;
 
             let window_size = global_data.window_size;
-            let visible_count = state.window_stack.len().max(1) as u16;
-            let pty_cols = (window_size.col_width.as_u16() / visible_count).max(80);
+            // Start with the full window width; the first render will resize to
+            // the actual pane slot assigned by the layout.
+            let pty_cols = window_size.col_width.as_u16().max(80);
             let pty_rows = window_size.row_height.as_u16().saturating_sub(2);
             let pty_size = Size {
                 col_width: width(pty_cols),
@@ -1246,8 +258,8 @@ impl AppMain {
             });
 
             let window = Window::Terminal(id);
-            state.push_window(window.clone());
-            state.focused_window = Some(window);
+            state.pane_manager.push_window(window);
+            state.pane_manager.focused_window = Some(window);
             state.terminal_grabbed = true;
 
             EventPropagation::ConsumedRender
@@ -1284,7 +296,8 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
                 {
                     let _ = killer.kill();
                 }
-                state.remove_window(&Window::Terminal(id));
+                state.pane_manager.remove_window(&Window::Terminal(id));
+                sync_terminal_grabbed(state);
             } else if let Some(pane) = state.terminal_panes.get(&id)
                 && let Ok(mut p) = pane.lock()
             {
@@ -1401,6 +414,8 @@ impl App for AppMain {
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
         sync_has_focus(&global_data.state, has_focus);
+        let surface_size = surface_size(global_data.window_size);
+        global_data.state.last_surface_size = surface_size;
 
         // Leader key activation.
         if let InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -1432,19 +447,26 @@ impl App for AppMain {
                             shift_key_state: KeyState::NotPressed,
                             ctrl_key_state: KeyState::NotPressed,
                         },
-                }) if matches!(global_data.state.focused_window, Some(Window::Terminal(_))) => {
+                }) if matches!(
+                    global_data.state.pane_manager.focused_window,
+                    Some(Window::Terminal(_))
+                ) =>
+                {
                     global_data.state.terminal_grabbed = true;
+                    return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('f'),
                 }) => {
                     let state = &mut global_data.state;
-                    state.push_window(Window::FileNamePicker);
-                    state.focused_window = Some(Window::FileNamePicker);
+                    state.pane_manager.push_window(Window::FileNamePicker);
+                    state.pane_manager.focused_window = Some(Window::FileNamePicker);
                     state.file_name_picker.selected = None;
                     let snapshot = state.files.load();
-                    state.file_name_picker.results =
-                        FileNamePickerComponent::all_files_results(&snapshot, &state.window_stack);
+                    state.file_name_picker.results = FileNamePickerComponent::open_previews_results(
+                        &snapshot,
+                        &state.pane_manager.window_stack,
+                    );
                     state.file_name_picker.query = String::new();
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -1457,14 +479,18 @@ impl App for AppMain {
                     key: Key::Character('T'),
                 }) => {
                     let state = &mut global_data.state;
-                    if !state.window_stack.contains(&Window::ThemePicker) {
+                    if !state
+                        .pane_manager
+                        .window_stack
+                        .contains(&Window::ThemePicker)
+                    {
                         state.saved_theme = state.theme.clone();
                     }
                     let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
                         .map(|n| (n.to_string(), Vec::new()))
                         .collect();
-                    state.push_window(Window::ThemePicker);
-                    state.focused_window = Some(Window::ThemePicker);
+                    state.pane_manager.push_window(Window::ThemePicker);
+                    state.pane_manager.focused_window = Some(Window::ThemePicker);
                     state.theme_picker.selected = all_themes
                         .iter()
                         .position(|(n, _)| n == state.theme.name())
@@ -1479,26 +505,62 @@ impl App for AppMain {
                     return Ok(EventPropagation::ExitMainEventLoop);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::Character('='),
+                }) => {
+                    global_data
+                        .state
+                        .pane_manager
+                        .resize_focused(ResizeDelta::Grow);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::Character('-'),
+                }) => {
+                    global_data
+                        .state
+                        .pane_manager
+                        .resize_focused(ResizeDelta::Shrink);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Up),
+                }) => {
+                    let Some(focused) = global_data.state.pane_manager.focused_window else {
+                        return Ok(EventPropagation::ConsumedRender);
+                    };
+                    global_data.state.pane_manager.move_forward(&focused);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Down),
+                }) => {
+                    let Some(focused) = global_data.state.pane_manager.focused_window else {
+                        return Ok(EventPropagation::ConsumedRender);
+                    };
+                    global_data.state.pane_manager.move_backward(&focused);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Tab),
                 }) => {
-                    let state = &mut global_data.state;
-                    let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
-                    cycle_focus(state, &visible, 1);
+                    let visible = global_data.state.pane_manager.layout(surface_size);
+                    global_data.state.pane_manager.cycle_focus(&visible, 1);
+                    sync_terminal_grabbed(&mut global_data.state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::BackTab),
                 }) => {
-                    let state = &mut global_data.state;
-                    let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
-                    cycle_focus(state, &visible, -1);
+                    let visible = global_data.state.pane_manager.layout(surface_size);
+                    global_data.state.pane_manager.cycle_focus(&visible, -1);
+                    sync_terminal_grabbed(&mut global_data.state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('x'),
                 }) => {
                     let state = &mut global_data.state;
-                    let tid = match state.focused_window.clone() {
+                    let tid = match state.pane_manager.focused_window {
                         Some(Window::Terminal(tid)) => tid,
                         _ => return Ok(EventPropagation::ConsumedRender),
                     };
@@ -1508,7 +570,8 @@ impl App for AppMain {
                     {
                         let _ = killer.kill();
                     }
-                    state.remove_window(&Window::Terminal(tid));
+                    state.pane_manager.remove_window(&Window::Terminal(tid));
+                    sync_terminal_grabbed(state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -1523,28 +586,86 @@ impl App for AppMain {
             }
         }
 
-        // Global shortcut — Tab/BackTab cycles focus between panes.
+        // Global shortcuts: Tab/BackTab cycles focus; Ctrl+=/- resize; Ctrl+Up/Down reorder.
         // Skipped for Terminal panes so Tab reaches the PTY (e.g. shell completion).
         // When a terminal is ungrabbed Tab cycles focus.
-        if (!matches!(global_data.state.focused_window, Some(Window::Terminal(_)))
-            || !global_data.state.terminal_grabbed)
+        if (!matches!(
+            global_data.state.pane_manager.focused_window,
+            Some(Window::Terminal(_))
+        ) || !global_data.state.terminal_grabbed)
             && !global_data.state.mouse_drag_active
         {
             match &input_event {
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Tab),
                 }) => {
-                    let state = &mut global_data.state;
-                    let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
-                    cycle_focus(state, &visible, 1);
+                    let visible = global_data.state.pane_manager.layout(surface_size);
+                    global_data.state.pane_manager.cycle_focus(&visible, 1);
+                    sync_terminal_grabbed(&mut global_data.state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::BackTab),
                 }) => {
-                    let state = &mut global_data.state;
-                    let visible = state.visible_windows(global_data.window_size.col_width.as_u16());
-                    cycle_focus(state, &visible, -1);
+                    let visible = global_data.state.pane_manager.layout(surface_size);
+                    global_data.state.pane_manager.cycle_focus(&visible, -1);
+                    sync_terminal_grabbed(&mut global_data.state);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::Character('='),
+                    mask:
+                        ModifierKeysMask {
+                            ctrl_key_state: KeyState::Pressed,
+                            ..
+                        },
+                }) => {
+                    global_data
+                        .state
+                        .pane_manager
+                        .resize_focused(ResizeDelta::Grow);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::Character('-'),
+                    mask:
+                        ModifierKeysMask {
+                            ctrl_key_state: KeyState::Pressed,
+                            ..
+                        },
+                }) => {
+                    global_data
+                        .state
+                        .pane_manager
+                        .resize_focused(ResizeDelta::Shrink);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::SpecialKey(SpecialKey::Up),
+                    mask:
+                        ModifierKeysMask {
+                            ctrl_key_state: KeyState::Pressed,
+                            ..
+                        },
+                }) => {
+                    let Some(focused) = global_data.state.pane_manager.focused_window else {
+                        return Ok(EventPropagation::ConsumedRender);
+                    };
+                    global_data.state.pane_manager.move_forward(&focused);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::SpecialKey(SpecialKey::Down),
+                    mask:
+                        ModifierKeysMask {
+                            ctrl_key_state: KeyState::Pressed,
+                            ..
+                        },
+                }) => {
+                    let Some(focused) = global_data.state.pane_manager.focused_window else {
+                        return Ok(EventPropagation::ConsumedRender);
+                    };
+                    global_data.state.pane_manager.move_backward(&focused);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 _ => {}
@@ -1559,18 +680,21 @@ impl App for AppMain {
         }) = &input_event
             && !global_data.state.mouse_drag_active
         {
-            let px = pos.col_index;
-            let py = pos.row_index;
-            for (slot, box_) in global_data.state.pane_boxes.iter().enumerate() {
-                let ox = box_.style_adjusted_origin_pos.col_index;
-                let oy = box_.style_adjusted_origin_pos.row_index;
-                let w = box_.style_adjusted_bounds_size.col_width;
-                let h = box_.style_adjusted_bounds_size.row_height;
-                if px >= ox && px < ox + w && py >= oy && py < oy + h {
-                    if let Some(window) = global_data.state.window_stack.get(slot)
-                        && global_data.state.focused_window.as_ref() != Some(window)
+            let layout = global_data.state.pane_manager.layout(surface_size);
+            for slot in &layout {
+                let ox = slot.box_.style_adjusted_origin_pos.col_index;
+                let oy = slot.box_.style_adjusted_origin_pos.row_index;
+                let w = slot.box_.style_adjusted_bounds_size.col_width;
+                let h = slot.box_.style_adjusted_bounds_size.row_height;
+                if pos.col_index >= ox
+                    && pos.col_index < ox + w
+                    && pos.row_index >= oy
+                    && pos.row_index < oy + h
+                {
+                    if global_data.state.pane_manager.focused_window.as_ref() != Some(&slot.window)
                     {
-                        global_data.state.focused_window = Some(window.clone());
+                        global_data.state.pane_manager.focused_window = Some(slot.window);
+                        sync_terminal_grabbed(&mut global_data.state);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     break;
@@ -1641,15 +765,23 @@ impl App for AppMain {
                             .iter()
                             .map(|f| LoadedFile {
                                 path: f.path.clone(),
-                                data: std::sync::Mutex::new({
-                                    let d = f.data.lock().unwrap();
+                                data: std::sync::Mutex::new(if let Ok(d) = f.data.lock() {
                                     crate::loader::FileData {
                                         content: d.content.clone(),
                                         line_starts: d.line_starts.clone(),
                                     }
+                                } else {
+                                    crate::loader::FileData {
+                                        content: String::new(),
+                                        line_starts: vec![],
+                                    }
                                 }),
                                 colored_lines: std::sync::Mutex::new(
-                                    f.colored_lines.lock().unwrap().clone(),
+                                    if let Ok(lines) = f.colored_lines.lock() {
+                                        lines.clone()
+                                    } else {
+                                        Vec::new()
+                                    },
                                 ),
                                 removed: std::sync::atomic::AtomicBool::new(
                                     f.removed.load(Ordering::Relaxed),
@@ -1662,12 +794,16 @@ impl App for AppMain {
                     }
 
                     let snapshot = self.files.load();
-                    if state.window_stack.contains(&Window::FileNamePicker) {
+                    if state
+                        .pane_manager
+                        .window_stack
+                        .contains(&Window::FileNamePicker)
+                    {
                         if state.file_name_picker.query.is_empty() {
                             state.file_name_picker.results =
-                                FileNamePickerComponent::all_files_results(
+                                FileNamePickerComponent::open_previews_results(
                                     &snapshot,
-                                    &state.window_stack,
+                                    &state.pane_manager.window_stack,
                                 );
                         } else {
                             FileNamePickerComponent::spawn_match(
@@ -1712,33 +848,31 @@ impl App for AppMain {
 
         throws_with_return!({
             let window_size = global_data.window_size;
-            let surface_cols = window_size.col_width.as_u16();
-
-            let visible = global_data.state.visible_windows(surface_cols);
+            let surface_size = surface_size(window_size);
+            global_data.state.last_surface_size = surface_size;
+            let visible = global_data.state.pane_manager.layout(surface_size);
 
             // Sync focused window with actual visible windows: if the currently focused
             // window is not visible, focus the frontmost visible one.
-            let focused = global_data.state.focused_window.clone();
+            let focused = global_data.state.pane_manager.focused_window;
             let focused_is_visible = focused
                 .as_ref()
-                .map(|f| visible.iter().any(|(w, _)| w == f))
+                .map(|f| visible.iter().any(|s| &s.window == f))
                 .unwrap_or(false);
             if !global_data.state.mouse_drag_active
                 && !focused_is_visible
-                && let Some((front, _)) = visible.first()
+                && let Some(first) = visible.first()
             {
-                global_data.state.focused_window = Some(front.clone());
+                global_data.state.pane_manager.focused_window = Some(first.window);
+                sync_terminal_grabbed(&mut global_data.state);
             }
+            sync_has_focus(&global_data.state, has_focus);
 
             let surface = {
                 let mut it = surface!(stylesheet: create_stylesheet(&global_data.state.theme)?);
                 it.surface_start(SurfaceProps {
                     pos: col(0) + row(0),
-                    size: {
-                        let col_count = window_size.col_width;
-                        let row_count = window_size.row_height - height(1);
-                        col_count + row_count
-                    },
+                    size: surface_size,
                 })?;
 
                 PanesRenderer { visible: &visible }.render_in_surface(
@@ -1764,10 +898,10 @@ impl App for AppMain {
             let bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
             let bg_style = new_style!(color_bg: {bg});
             let mut bg_ops = RenderOpIRVec::new();
-            let surface_rows = (window_size.row_height - height(2)).as_usize();
+            let surface_rows = surface_size.row_height.as_usize();
             let surface_col_count = window_size.col_width.as_usize();
             for row_idx in 0..surface_rows {
-                let abs_row: u16 = 1 + row_idx as u16;
+                let abs_row: u16 = row_idx as u16;
                 bg_ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row(abs_row));
                 bg_ops += RenderOpCommon::ApplyColors(Some(bg_style));
                 bg_ops += RenderOpIR::PaintTextWithAttributes(
@@ -1794,38 +928,30 @@ impl App for AppMain {
 
 /// Returns the `FlexBoxId` for the pane slot that corresponds to the focused window.
 pub(super) fn focused_pane_id(state: &AppState) -> FlexBoxId {
-    let Some(focused) = &state.focused_window else {
+    let Some(slot) = state.pane_manager.focused_slot() else {
         return FlexBoxId::from(Id::Pane0);
     };
-    let slot = state
-        .window_stack
-        .iter()
-        .position(|w| w == focused)
-        .unwrap_or(0);
     FlexBoxId::from(Id::pane(slot))
+}
+
+fn surface_size(window_size: Size) -> Size {
+    let col_count = window_size.col_width;
+    let row_count = window_size.row_height - height(1);
+    col_count + row_count
+}
+
+fn sync_terminal_grabbed(state: &mut AppState) {
+    if !matches!(state.pane_manager.focused_window, Some(Window::Terminal(_))) {
+        state.terminal_grabbed = false;
+    }
 }
 
 fn sync_has_focus(state: &AppState, has_focus: &mut HasFocus) {
     has_focus.set_id(focused_pane_id(state));
 }
 
-fn cycle_focus(state: &mut AppState, visible: &[(Window, u16)], direction: i32) {
-    if visible.is_empty() {
-        return;
-    }
-    let current_pos = state
-        .focused_window
-        .as_ref()
-        .and_then(|f| visible.iter().position(|(w, _)| w == f))
-        .unwrap_or(0);
-    let len = visible.len() as i32;
-    let next_pos = ((current_pos as i32 + direction).rem_euclid(len)) as usize;
-    let next_window = visible[next_pos].0.clone();
-    state.focused_window = Some(next_window);
-}
-
 struct PanesRenderer<'a> {
-    visible: &'a [(Window, u16)],
+    visible: &'a [PaneSlot],
 }
 
 impl SurfaceRender<AppState, AppSignal> for PanesRenderer<'_> {
@@ -1837,6 +963,7 @@ impl SurfaceRender<AppState, AppSignal> for PanesRenderer<'_> {
         has_focus: &mut HasFocus,
     ) -> CommonResult<()> {
         throws!({
+            const COLUMN_ID_BASE: u8 = 100;
             let container_id = FlexBoxId::from(Id::Container);
             box_start!(
                 in: surface,
@@ -1846,19 +973,44 @@ impl SurfaceRender<AppState, AppSignal> for PanesRenderer<'_> {
                 styles: [container_id],
             );
 
-            for (slot, (window, col_width)) in self.visible.iter().enumerate() {
-                let pane_id = FlexBoxId::from(Id::pane(slot));
+            let window_size = global_data.window_size;
+            let surface_rows = window_size.row_height.as_u16().saturating_sub(1);
+            let mut current_col_origin: Option<u16> = None;
+            let mut col_idx = 0usize;
+            let mut column_id;
 
-                // Store which window is in this slot so components can read it from state.
-                global_data.state.window_stack[slot] = window.clone();
+            for slot in self.visible {
+                let slot_origin_col = slot.box_.style_adjusted_origin_pos.col_index.as_u16();
+                let slot_width = slot.box_.style_adjusted_bounds_size.col_width.as_u16();
+                let slot_height = slot.box_.style_adjusted_bounds_size.row_height.as_u16();
 
-                let width_pc: i32 = (*col_width as i32) * 100
-                    / (global_data.window_size.col_width.as_u32().max(1) as i32);
+                if current_col_origin != Some(slot_origin_col) {
+                    if current_col_origin.is_some() {
+                        box_end!(in: surface);
+                    }
+                    current_col_origin = Some(slot_origin_col);
+                    column_id = FlexBoxId::new(COLUMN_ID_BASE + col_idx as u8);
+                    col_idx += 1;
+                    let width_pc =
+                        (slot_width as i32 * 100).div_euclid(window_size.col_width.as_u16() as i32);
+                    box_start!(
+                        in: surface,
+                        id: column_id,
+                        dir: LayoutDirection::Vertical,
+                        requested_size_percent: req_size_pc!(width: {width_pc}, height: 100),
+                        styles: [column_id],
+                    );
+                }
+
+                let pane_id = FlexBoxId::from(Id::pane(slot.slot));
+                let height_pc = ((slot_height as i32 * 100) + surface_rows as i32 - 1)
+                    .div_euclid(surface_rows as i32)
+                    .max(1);
                 box_start!(
                     in: surface,
                     id: pane_id,
                     dir: LayoutDirection::Vertical,
-                    requested_size_percent: req_size_pc!(width: {width_pc}, height: 100),
+                    requested_size_percent: req_size_pc!(width: 100, height: {height_pc}),
                     styles: [pane_id],
                 );
                 render_component_in_current_box!(
@@ -1871,6 +1023,9 @@ impl SurfaceRender<AppState, AppSignal> for PanesRenderer<'_> {
                 box_end!(in: surface);
             }
 
+            if current_col_origin.is_some() {
+                box_end!(in: surface);
+            }
             box_end!(in: surface);
         });
     }
@@ -1879,38 +1034,43 @@ impl SurfaceRender<AppState, AppSignal> for PanesRenderer<'_> {
 fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
     let bg = theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
     throws_with_return!({
-        tui_stylesheet! {
+        let mut styles = tui_stylesheet! {
             new_style!(
                 id: {Id::Container}
                 color_bg: {tui_color!(bg[0], bg[1], bg[2])}
-            ),
-            new_style!(
-                id: {Id::Pane0}
-                padding: {0}
-                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
-            ),
-            new_style!(
-                id: {Id::Pane1}
-                padding: {0}
-                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
-            ),
-            new_style!(
-                id: {Id::Pane2}
-                padding: {0}
-                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
-            ),
-            new_style!(
-                id: {Id::Pane3}
-                padding: {0}
-                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
-            ),
-            new_style!(
-                id: {Id::Pane4}
-                padding: {0}
-                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
             )
+        };
+        for col_idx in 0..MAX_PANES {
+            let id = FlexBoxId::new(100 + col_idx as u8);
+            styles.add_style(new_style!(
+                id: {id}
+                padding: {0}
+                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
+            ))?;
         }
+        for slot in 0..MAX_PANES {
+            let id = Id::pane(slot);
+            styles.add_style(new_style!(
+                id: {id}
+                padding: {0}
+                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
+            ))?;
+        }
+        styles
     })
+}
+
+fn pane_action_hints(prefix: &str, sep: &str) -> String {
+    [
+        ("=", "Grow"),
+        ("-", "Shrink"),
+        ("↑", "Forward"),
+        ("↓", "Backward"),
+    ]
+    .iter()
+    .map(|(key, label)| format!("{}{}:{}", prefix, key, label))
+    .collect::<Vec<_>>()
+    .join(sep)
 }
 
 pub trait WindowHints {
@@ -1945,11 +1105,13 @@ fn render_status_bar(
     let (leader_text, rest_text) = if state.leader_active {
         (
             " Leader ".to_string(),
-            "f:Picker  t:Term  T:Theme  x:Close  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel"
-                .to_string(),
+            format!(
+                "f:Picker  t:Term  T:Theme  x:Close  q:Quit  Tab:Next  Shift+Tab:Prev  {}  Esc:Cancel",
+                pane_action_hints("", "  ")
+            ),
         )
     } else {
-        let pane = match state.focused_window.as_ref() {
+        let pane = match state.pane_manager.focused_window.as_ref() {
             Some(w) => {
                 let base = w.pane_key_hints();
                 if matches!(w, Window::Terminal(_)) && !state.terminal_grabbed {
@@ -1960,7 +1122,7 @@ fn render_status_bar(
             }
             None => "",
         };
-        let mut rest = String::new();
+        let mut rest = pane_action_hints("Ctrl+", "  ");
         if !pane.is_empty() {
             rest.push_str("  ");
             rest.push_str(pane);
@@ -1991,85 +1153,6 @@ fn render_status_bar(
     render_ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row_idx);
     render_tui_styled_texts_into(&styled_texts, &mut render_ops);
     pipeline.push(ZOrder::Normal, render_ops);
-}
-
-fn render_scrollbar(
-    render_ops: &mut RenderOpIRVec,
-    content_box: &FlexBox,
-    scroll: usize,
-    scroll_max: usize,
-    page_size: usize,
-    theme: &HelixTheme,
-) {
-    let visible_rows = content_box.style_adjusted_bounds_size.row_height.as_usize();
-    if visible_rows == 0 {
-        return;
-    }
-
-    let origin = content_box.style_adjusted_origin_pos;
-    let scroll_col =
-        (content_box.style_adjusted_bounds_size.col_width.as_usize()).saturating_sub(1);
-
-    // Track: theme scrollbar bg -> virtual ruler -> default.
-    let track_rgb = theme
-        .ui_bg("ui.menu.scroll")
-        .or_else(|| theme.ui_bg("ui.virtual.ruler"))
-        .unwrap_or([30, 30, 50]);
-
-    // Thumb: theme scrollbar fg -> selection -> cursorline -> default.
-    let mut thumb_rgb = theme
-        .ui_fg("ui.menu.scroll")
-        .or_else(|| theme.ui_bg("ui.selection"))
-        .or_else(|| theme.ui_bg("ui.cursorline.primary"))
-        .or_else(|| theme.ui_bg("ui.cursorline"))
-        .unwrap_or([50, 50, 90]);
-
-    // If thumb and track are the same, force contrast using cursor/text accent.
-    if thumb_rgb == track_rgb {
-        thumb_rgb = theme
-            .ui_bg("ui.cursor")
-            .or_else(|| theme.ui_fg("ui.text.focus"))
-            .or_else(|| theme.ui_fg("ui.text"))
-            .unwrap_or([120, 120, 160]);
-    }
-    // Last resort: if every theme fallback still collides, hardcode contrast.
-    if thumb_rgb == track_rgb {
-        thumb_rgb = [120, 120, 160];
-    }
-    let track_bg = tui_color!(track_rgb[0], track_rgb[1], track_rgb[2]);
-    let thumb_bg = tui_color!(thumb_rgb[0], thumb_rgb[1], thumb_rgb[2]);
-
-    // Double the vertical resolution using half-block characters.
-    let sub_rows = visible_rows * 2;
-    let sub_thumb = std::cmp::max(1, (sub_rows * page_size) / scroll_max.max(1));
-    let sub_thumb_start = if scroll_max <= page_size {
-        0
-    } else {
-        (scroll * (sub_rows - sub_thumb)) / (scroll_max - page_size)
-    };
-
-    for row_offset in 0..visible_rows {
-        let sub_top = row_offset * 2;
-        let sub_bot = row_offset * 2 + 1;
-
-        let in_top = sub_top >= sub_thumb_start && sub_top < sub_thumb_start + sub_thumb;
-        let in_bot = sub_bot >= sub_thumb_start && sub_bot < sub_thumb_start + sub_thumb;
-
-        let (ch, bg) = match (in_top, in_bot) {
-            (true, true) => ('█', thumb_bg),
-            (true, false) => ('▀', thumb_bg),
-            (false, true) => ('▄', thumb_bg),
-            (false, false) => (' ', track_bg),
-        };
-
-        let style = new_style!(color_fg: {bg} color_bg: {track_bg});
-        *render_ops += RenderOpCommon::MoveCursorPositionRelTo(
-            origin,
-            col(scroll_col as u16) + row(row_offset),
-        );
-        *render_ops += RenderOpCommon::ApplyColors(Some(style));
-        *render_ops += RenderOpIR::PaintTextWithAttributes(ch.to_string().into(), Some(style));
-    }
 }
 
 pub fn build_state(
@@ -2127,11 +1210,12 @@ pub async fn run(
 
     // Kill all terminal children gracefully.
     for pane in global_data.state.terminal_panes.values() {
-        let mut pane = pane.lock().unwrap();
-        if let Some(mut killer) = pane.child_killer.take() {
-            let _ = killer.kill(); // Sends SIGHUP.
+        if let Ok(mut pane) = pane.lock() {
+            if let Some(mut killer) = pane.child_killer.take() {
+                let _ = killer.kill(); // Sends SIGHUP.
+            }
+            let _ = pane.pty_input_tx.try_send(PtyInputEvent::Close);
         }
-        let _ = pane.pty_input_tx.try_send(PtyInputEvent::Close);
     }
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 

@@ -1,4 +1,5 @@
 use crate::loader::{FileData, FileKey};
+use crate::tui::pane_component::pane_slot;
 use crate::tui::*;
 use camino::{Utf8Path, Utf8PathBuf};
 use std::time::{Duration, Instant};
@@ -136,15 +137,15 @@ impl FilePreviewComponent {
 
     pub fn scroll_to_range(&self, state: &mut AppState, key: FileKey, lo: usize, hi: usize) {
         let window = Window::FilePreview(key);
-        let page_size = state.window_page_size(&window);
+        let page_size = state.pane_manager.window_page_size(&window);
         let target = compute_single_block_scroll(lo, hi - lo + 1, page_size);
-        state.set_window_scroll(&window, target);
-        state.clamp_scroll(&window);
+        state.pane_manager.set_window_scroll(&window, target);
+        state.pane_manager.clamp_scroll(&window);
     }
 
     fn render_command_title(
         &self,
-        mut ops: &mut RenderOpIRVec,
+        ops: &mut RenderOpIRVec,
         origin: Pos,
         width: u16,
         height: usize,
@@ -160,9 +161,10 @@ impl FilePreviewComponent {
         let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
         for row_offset in 0..height {
-            ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset as u16));
-            ops += RenderOpCommon::SetBgColor(color_bg);
-            ops += RenderOpIR::PaintTextWithAttributes(
+            *ops +=
+                RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset as u16));
+            *ops += RenderOpCommon::SetBgColor(color_bg);
+            *ops += RenderOpIR::PaintTextWithAttributes(
                 " ".repeat(width as usize).as_str().into(),
                 Some(label_style),
             );
@@ -212,7 +214,7 @@ impl FilePreviewComponent {
         }
 
         let state = &mut global_data.state;
-        let max = state.window_scroll_max(window);
+        let max = state.pane_manager.window_scroll_max(window);
         if max == 0 {
             return;
         }
@@ -248,11 +250,11 @@ impl FilePreviewComponent {
 
         state.highlight_ranges.insert(*file_key, ranges);
 
-        let page_size = state.window_page_size(window);
+        let page_size = state.pane_manager.window_page_size(window);
         if let Some(ranges) = state.highlight_ranges.get(file_key) {
             let target = compute_scroll_target(ranges, page_size, max);
-            state.set_window_scroll(window, target);
-            state.clamp_scroll(window);
+            state.pane_manager.set_window_scroll(window, target);
+            state.pane_manager.clamp_scroll(window);
         }
     }
 
@@ -272,7 +274,7 @@ impl FilePreviewComponent {
     /// non-preview window or the stack has no entry for this slot.
     pub(super) fn file_key(&self, state: &AppState) -> Option<FileKey> {
         let slot = pane_slot(self.id)?;
-        let Window::FilePreview(key) = state.window_stack.get(slot)? else {
+        let Window::FilePreview(key) = state.pane_manager.window_stack.get(slot)? else {
             return None;
         };
         Some(*key)
@@ -329,7 +331,7 @@ impl FilePreviewComponent {
         data: &std::sync::MutexGuard<'_, crate::loader::FileData>,
     ) -> (usize, usize, usize) {
         let window = Window::FilePreview(key);
-        let scroll = state.window_scroll(&window);
+        let scroll = state.pane_manager.window_scroll(&window);
 
         let total_lines = data.line_starts.len();
         let line_num_width = total_lines.max(1).to_string().len();
@@ -368,18 +370,6 @@ impl FilePreviewComponent {
         let line = data.line(last_line);
         let cursor_byte = data.line_starts[last_line] + line.len();
         (last_line, line.chars().count(), cursor_byte)
-    }
-}
-
-/// Maps a pane `FlexBoxId` back to its zero-based slot index.
-fn pane_slot(id: FlexBoxId) -> Option<usize> {
-    match id.inner {
-        x if x == Id::Pane0 as u8 => Some(0),
-        x if x == Id::Pane1 as u8 => Some(1),
-        x if x == Id::Pane2 as u8 => Some(2),
-        x if x == Id::Pane3 as u8 => Some(3),
-        x if x == Id::Pane4 as u8 => Some(4),
-        _ => None,
     }
 }
 
@@ -463,7 +453,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 key: Key::SpecialKey(SpecialKey::Esc),
             }) = input_event
             {
-                global_data.state.send_to_back(&window);
+                global_data.state.pane_manager.send_to_back(&window);
                 return Ok(EventPropagation::ConsumedRender);
             }
 
@@ -473,39 +463,47 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 match kb_key {
                     Key::SpecialKey(SpecialKey::PageUp) => {
                         consumed = true;
-                        let page = state.window_page_size(&window);
-                        let current = state.window_scroll(&window);
-                        state.set_window_scroll(&window, current.saturating_sub(page));
-                        state.clamp_scroll(&window);
+                        let page = state.pane_manager.window_page_size(&window);
+                        let current = state.pane_manager.window_scroll(&window);
+                        state
+                            .pane_manager
+                            .set_window_scroll(&window, current.saturating_sub(page));
+                        state.pane_manager.clamp_scroll(&window);
                     }
                     Key::SpecialKey(SpecialKey::PageDown) => {
                         consumed = true;
-                        let page = state.window_page_size(&window);
-                        let current = state.window_scroll(&window);
-                        state.set_window_scroll(&window, current.saturating_add(page));
-                        state.clamp_scroll(&window);
+                        let page = state.pane_manager.window_page_size(&window);
+                        let current = state.pane_manager.window_scroll(&window);
+                        state
+                            .pane_manager
+                            .set_window_scroll(&window, current.saturating_add(page));
+                        state.pane_manager.clamp_scroll(&window);
                     }
                     Key::SpecialKey(SpecialKey::Up) => {
                         consumed = true;
-                        let current = state.window_scroll(&window);
-                        state.set_window_scroll(&window, current.saturating_sub(1));
-                        state.clamp_scroll(&window);
+                        let current = state.pane_manager.window_scroll(&window);
+                        state
+                            .pane_manager
+                            .set_window_scroll(&window, current.saturating_sub(1));
+                        state.pane_manager.clamp_scroll(&window);
                     }
                     Key::SpecialKey(SpecialKey::Down) => {
                         consumed = true;
-                        let current = state.window_scroll(&window);
-                        state.set_window_scroll(&window, current.saturating_add(1));
-                        state.clamp_scroll(&window);
+                        let current = state.pane_manager.window_scroll(&window);
+                        state
+                            .pane_manager
+                            .set_window_scroll(&window, current.saturating_add(1));
+                        state.pane_manager.clamp_scroll(&window);
                     }
                     Key::SpecialKey(SpecialKey::Home) => {
                         consumed = true;
-                        state.set_window_scroll(&window, 0);
+                        state.pane_manager.set_window_scroll(&window, 0);
                     }
                     Key::SpecialKey(SpecialKey::End) => {
                         consumed = true;
-                        let max = state.window_scroll_max(&window);
-                        state.set_window_scroll(&window, max);
-                        state.clamp_scroll(&window);
+                        let max = state.pane_manager.window_scroll_max(&window);
+                        state.pane_manager.set_window_scroll(&window, max);
+                        state.pane_manager.clamp_scroll(&window);
                     }
                     _ => {}
                 }
@@ -519,13 +517,13 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 match modifier_key {
                     Key::Character('a') => {
                         consumed = true;
-                        state.set_window_scroll(&window, 0);
+                        state.pane_manager.set_window_scroll(&window, 0);
                     }
                     Key::Character('e') => {
                         consumed = true;
-                        let max = state.window_scroll_max(&window);
-                        state.set_window_scroll(&window, max);
-                        state.clamp_scroll(&window);
+                        let max = state.pane_manager.window_scroll_max(&window);
+                        state.pane_manager.set_window_scroll(&window, max);
+                        state.pane_manager.clamp_scroll(&window);
                     }
                     _ => {}
                 }
@@ -534,15 +532,19 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 match mouse.kind {
                     MouseInputKind::ScrollUp => {
                         consumed = true;
-                        let current = state.window_scroll(&window);
-                        state.set_window_scroll(&window, current.saturating_sub(3));
-                        state.clamp_scroll(&window);
+                        let current = state.pane_manager.window_scroll(&window);
+                        state
+                            .pane_manager
+                            .set_window_scroll(&window, current.saturating_sub(3));
+                        state.pane_manager.clamp_scroll(&window);
                     }
                     MouseInputKind::ScrollDown => {
                         consumed = true;
-                        let current = state.window_scroll(&window);
-                        state.set_window_scroll(&window, current.saturating_add(3));
-                        state.clamp_scroll(&window);
+                        let current = state.pane_manager.window_scroll(&window);
+                        state
+                            .pane_manager
+                            .set_window_scroll(&window, current.saturating_add(3));
+                        state.pane_manager.clamp_scroll(&window);
                     }
                     _ => {}
                 }
@@ -581,6 +583,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             let window = Window::FilePreview(file_key);
             global_data
                 .state
+                .pane_manager
                 .set_window_page_size(&window, visible_rows);
 
             let total_lines = {
@@ -591,8 +594,9 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             };
             global_data
                 .state
+                .pane_manager
                 .set_window_scroll_max(&window, total_lines);
-            global_data.state.clamp_scroll(&window);
+            global_data.state.pane_manager.clamp_scroll(&window);
 
             let state = &global_data.state;
             let mut render_ops = RenderOpIRVec::new();
@@ -601,7 +605,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             let file = &snapshot[file_key.0];
 
             let data = file.data.lock().unwrap();
-            let scroll = state.window_scroll(&window);
+            let scroll = state.pane_manager.window_scroll(&window);
             let colored_guard = file.colored_lines.lock().unwrap();
 
             let pane_bg = state.theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
