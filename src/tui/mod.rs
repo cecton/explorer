@@ -4,6 +4,7 @@ mod fuzzy_picker;
 mod input_line;
 mod pane_component;
 mod pane_manager;
+mod panes_renderer;
 mod preview;
 mod state;
 mod terminal_pane;
