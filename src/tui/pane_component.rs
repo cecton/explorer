@@ -669,7 +669,8 @@ impl Component<AppState, AppSignal> for PaneComponent {
                         .get(&term_id)
                         .and_then(|p| p.lock().ok())
                         .map(|pane| {
-                            let line = terminal_line_at_viewport_row(&pane, rel_row, row_count);
+                            let (line, _) =
+                                terminal_line_at_viewport_row(&pane, rel_row, row_count);
                             let (ws, we) = terminal_word_bounds(&line, rel_col);
                             (ws, we)
                         });
@@ -740,30 +741,19 @@ impl Component<AppState, AppSignal> for PaneComponent {
                             }
                         });
 
-                    let word_bounds = global_data
+                    let (word_bounds, cur_line_len) = global_data
                         .state
                         .terminal_panes
                         .get(&term_id)
                         .and_then(|p| p.lock().ok())
                         .map(|pane| {
-                            let line = terminal_line_at_viewport_row(&pane, rel_row, row_count);
-                            let (ws, we) = terminal_word_bounds(&line, rel_col);
-                            (ws, we)
-                        });
-
-                    let cur_line_len = if click_anchor_row.map(|ar| ar != rel_row).unwrap_or(false)
-                    {
-                        global_data
-                            .state
-                            .terminal_panes
-                            .get(&term_id)
-                            .and_then(|p| p.lock().ok())
-                            .map(|pane| {
-                                terminal_line_at_viewport_row(&pane, rel_row, row_count).len()
-                            })
-                    } else {
-                        None
-                    };
+                            let (line, count) =
+                                terminal_line_at_viewport_row(&pane, rel_row, row_count);
+                            let wb = terminal_word_bounds(&line, rel_col);
+                            let cl = click_anchor_row.filter(|&ar| ar != rel_row).map(|_| count);
+                            (Some(wb), cl)
+                        })
+                        .unwrap_or((None, None));
 
                     let state = &mut global_data.state;
                     let Some(ref mut sel) = state.text_selection else {

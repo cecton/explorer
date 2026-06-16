@@ -661,15 +661,15 @@ pub fn terminal_line_at_viewport_row(
     pane: &TerminalPane,
     viewport_row: usize,
     pane_height: usize,
-) -> String {
+) -> (String, usize) {
     let scrollback_len = pane.ofs_buf.scrollback_len();
     let buffer_height = pane.ofs_buf.buffer.len();
     let scroll_offset = pane.scroll_offset.min(scrollback_len);
 
     if scroll_offset == 0 {
         if let Some(line) = pane.ofs_buf.buffer.get(viewport_row) {
-            let (s, _) = trimmed_pixel_char_line(line);
-            return s;
+            let (s, trimmed_len) = trimmed_pixel_char_line(line);
+            return (s, trimmed_len);
         }
     } else {
         let combined_bottom = scrollback_len + buffer_height;
@@ -682,11 +682,11 @@ pub fn terminal_line_at_viewport_row(
             pane.ofs_buf.buffer.get(combined_idx - scrollback_len)
         };
         if let Some(line) = line {
-            let (s, _) = trimmed_pixel_char_line(line);
-            return s;
+            let (s, trimmed_len) = trimmed_pixel_char_line(line);
+            return (s, trimmed_len);
         }
     }
-    String::new()
+    (String::new(), 0)
 }
 
 pub fn extract_terminal_text(
@@ -789,7 +789,8 @@ pub fn extract_terminal_text(
 
 #[cfg(test)]
 mod tests {
-    use super::terminal_word_bounds;
+    use super::{terminal_word_bounds, trimmed_pixel_char_line};
+    use r3bl_tui::{PixelChar, PixelCharLine, TuiStyle};
 
     #[test]
     fn empty_line() {
@@ -910,5 +911,53 @@ mod tests {
         let line = "hi";
         let (start, end) = terminal_word_bounds(line, 100);
         assert_eq!(&line[start..end], "hi");
+    }
+
+    #[test]
+    fn trimmed_line_multibyte_char_count() {
+        let line = PixelCharLine {
+            pixel_chars: vec![
+                PixelChar::PlainText {
+                    display_char: '╭',
+                    style: TuiStyle::default(),
+                },
+                PixelChar::PlainText {
+                    display_char: '─',
+                    style: TuiStyle::default(),
+                },
+                PixelChar::PlainText {
+                    display_char: '╮',
+                    style: TuiStyle::default(),
+                },
+            ],
+        };
+        let (s, count) = trimmed_pixel_char_line(&line);
+        assert_eq!(count, 3);
+        assert_eq!(s, "╭─╮");
+        // Each char is 3 bytes; byte len would be 9, not 3.
+        assert_eq!(s.len(), 9);
+    }
+
+    #[test]
+    fn trimmed_line_multibyte_with_trailing_spacers() {
+        let line = PixelCharLine {
+            pixel_chars: vec![
+                PixelChar::PlainText {
+                    display_char: '█',
+                    style: TuiStyle::default(),
+                },
+                PixelChar::PlainText {
+                    display_char: '▒',
+                    style: TuiStyle::default(),
+                },
+                PixelChar::Spacer,
+                PixelChar::Spacer,
+            ],
+        };
+        let (s, count) = trimmed_pixel_char_line(&line);
+        assert_eq!(count, 2);
+        assert_eq!(s, "█▒");
+        // Byte len: 6 (2 × 3-byte UTF-8 chars).
+        assert_eq!(s.len(), 6);
     }
 }
