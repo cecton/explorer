@@ -3,7 +3,7 @@ mod file_name_picker;
 mod fuzzy_picker;
 mod input_line;
 mod pane_component;
-mod pane_manager;
+pub(crate) mod pane_manager;
 mod panes_renderer;
 mod preview;
 mod state;
@@ -13,7 +13,7 @@ mod theme_picker;
 mod title_row;
 
 pub use app::{build_state, run};
-pub use state::{AppSignal, AppState};
+pub use state::{AppSignal, AppState, TerminalPane};
 pub use theme::HelixTheme;
 
 use self::app::*;

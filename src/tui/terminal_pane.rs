@@ -129,6 +129,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 if was_focused {
                     global_data.state.terminal_grabbed = false;
                 }
+                global_data.state.mark_session_dirty();
                 return Ok(EventPropagation::ConsumedRender);
             }
 

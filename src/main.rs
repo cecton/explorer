@@ -8,6 +8,7 @@ mod cli;
 mod config;
 mod loader;
 mod lsp;
+mod session;
 mod tui;
 mod watcher;
 
@@ -37,7 +38,7 @@ async fn main() {
 
     let skip: [OsString; 2] = [OsString::from("target"), OsString::from(".git")];
 
-    let files: Vec<LoadedFile> = WalkDir::new(&root)
+    let files: Vec<Arc<LoadedFile>> = WalkDir::new(&root)
         .process_read_dir(move |_, _, _, children| {
             children.retain(|entry| {
                 entry
@@ -55,8 +56,6 @@ async fn main() {
         })
         .collect();
 
-    let mut files = files;
-    files.sort_by(|a, b| a.path.cmp(&b.path));
     let files = Arc::new(ArcSwap::from_pointee(files));
 
     let config = match config::Config::load() {
@@ -84,7 +83,11 @@ async fn main() {
         tui::HelixTheme::default()
     };
 
-    let initial_state = tui::build_state(Arc::clone(&files), root.clone(), theme);
+    let mut initial_state = tui::build_state(Arc::clone(&files), root.clone(), theme.clone());
+
+    if let Some(session) = session::load_session(&root) {
+        session.apply(&mut initial_state);
+    }
 
     tui::run(initial_state, files, root)
         .await

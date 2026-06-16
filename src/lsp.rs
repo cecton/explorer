@@ -83,12 +83,12 @@ pub static LSP_RRT: RRT<LspWorker> = RRT::new();
 
 struct LspConfig {
     root: Utf8PathBuf,
-    files: Arc<ArcSwap<Vec<LoadedFile>>>,
+    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
 }
 
 static LSP_CONFIG: OnceLock<LspConfig> = OnceLock::new();
 
-pub fn set_lsp_config(root: Utf8PathBuf, files: Arc<ArcSwap<Vec<LoadedFile>>>) {
+pub fn set_lsp_config(root: Utf8PathBuf, files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>) {
     let _ = LSP_CONFIG.set(LspConfig { root, files });
 }
 
@@ -106,7 +106,7 @@ pub struct LspWorker {
     reader: BufReader<ChildStdout>,
     stdout_fd: std::os::unix::io::RawFd,
     request_rx: mpsc::Receiver<usize>,
-    files: Arc<ArcSwap<Vec<LoadedFile>>>,
+    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     req_state: TokenRequestState,
     warmup_queue: VecDeque<usize>,
     warmup_remaining: usize,
@@ -139,7 +139,11 @@ impl RRTWorker for LspWorker {
 
         let _ = REQUEST_SLOT.get_or_init(|| std::sync::Mutex::new(None));
         let (tx, request_rx) = mpsc::sync_channel(64);
-        *REQUEST_SLOT.get().unwrap().lock().unwrap() = Some(tx);
+        *REQUEST_SLOT
+            .get()
+            .unwrap()
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(tx);
 
         let mut child = Command::new("rust-analyzer")
             .stdin(Stdio::piped())
@@ -404,7 +408,10 @@ impl RRTWorker for LspWorker {
                 let snapshot = self.files.load();
                 let file = &snapshot[file_idx];
                 let (lines, total_lines) = {
-                    let d = file.data.lock().unwrap();
+                    let d = file
+                        .data
+                        .lock()
+                        .unwrap_or_else(|poison| poison.into_inner());
                     let total_lines = d.line_starts.len();
                     let mut lines = decode_tokens(&data, &d.content);
                     if is_range {
@@ -412,7 +419,10 @@ impl RRTWorker for LspWorker {
                     }
                     (lines, total_lines)
                 };
-                let mut guard = file.colored_lines.lock().unwrap();
+                let mut guard = file
+                    .colored_lines
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
                 let should_write = if lines.len() == total_lines {
                     guard.len() != total_lines
                 } else {
@@ -534,14 +544,28 @@ fn request_tokens(
         .parse()
         .expect("valid file URI");
 
-    let total_lines = file.data.lock().unwrap().line_starts.len();
-    let colored_len = file.colored_lines.lock().unwrap().len();
+    let total_lines = file
+        .data
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .line_starts
+        .len();
+    let colored_len = file
+        .colored_lines
+        .lock()
+        .unwrap_or_else(|poison| poison.into_inner())
+        .len();
     if colored_len == total_lines {
         return Ok(());
     }
 
     if !state.opened.contains(&file_idx) {
-        let content = file.data.lock().unwrap().content.clone();
+        let content = file
+            .data
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .content
+            .clone();
         let did_open = RpcNotification {
             jsonrpc: "2.0",
             method: DidOpenTextDocument::METHOD,

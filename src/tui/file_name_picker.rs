@@ -72,7 +72,7 @@ impl FileNamePickerComponent {
     }
 
     pub(crate) fn open_previews_results(
-        files: &[LoadedFile],
+        files: &[Arc<LoadedFile>],
         window_stack: &[Window],
     ) -> Vec<(FileKey, Vec<u32>)> {
         let mut seen: HashSet<FileKey> = HashSet::new();
@@ -86,6 +86,20 @@ impl FileNamePickerComponent {
             }
         }
         results
+    }
+
+    pub(crate) fn compute_results(state: &AppState) -> Vec<(FileKey, Vec<u32>)> {
+        let snapshot = state.files.load();
+        if state.file_name_picker.query.is_empty() {
+            Self::open_previews_results(&snapshot, &state.pane_manager.window_stack)
+        } else {
+            run_file_name_match(
+                &state.file_name_picker.query,
+                &snapshot,
+                &state.root,
+                &state.pane_manager.window_stack,
+            )
+        }
     }
 }
 
@@ -126,7 +140,7 @@ impl TitleRow for FileNamePickerComponent {
 
 fn run_file_name_match(
     query: &str,
-    files: &[LoadedFile],
+    files: &[Arc<LoadedFile>],
     root: &Utf8PathBuf,
     window_stack: &[Window],
 ) -> Vec<(FileKey, Vec<u32>)> {
@@ -205,6 +219,7 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                 }
                 state.pane_manager.remove_window(&Window::FileNamePicker);
                 state.file_name_picker.reset();
+                state.mark_session_dirty();
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::WithModifiers {

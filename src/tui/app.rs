@@ -1,11 +1,12 @@
 use crate::loader::LoadedFile;
 use crate::lsp::{self, LSP_RRT};
+use crate::session::save_session;
 use crate::tui::pane_component::PaneComponent;
 use crate::tui::panes_renderer::PanesRenderer;
 use crate::tui::*;
 use crate::watcher::{WATCHER_RRT, set_watcher_root};
 use arc_swap::ArcSwap;
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use r3bl_tui::core::osc::OscEvent;
 use r3bl_tui::core::pty::{
     CursorKeyMode, DefaultPtySessionConfig, PtyInputEvent, PtyOutputEvent, PtySessionBuilder,
@@ -74,7 +75,7 @@ impl From<Id> for FlexBoxId {
 }
 
 pub struct AppMain {
-    files: Arc<ArcSwap<Vec<LoadedFile>>>,
+    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     root: Utf8PathBuf,
     picker_results_tx: mpsc::Sender<PickerResultMsg>,
     picker_results_rx: mpsc::Receiver<PickerResultMsg>,
@@ -86,7 +87,7 @@ pub struct AppMain {
 
 impl AppMain {
     fn new_boxed(
-        files: Arc<ArcSwap<Vec<LoadedFile>>>,
+        files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
         root: Utf8PathBuf,
         exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
     ) -> BoxedSafeApp<AppState, AppSignal> {
@@ -109,11 +110,17 @@ impl AppMain {
         global_data: &mut GlobalData<AppState, AppSignal>,
         cmd: Option<String>,
         cwd: Option<Utf8PathBuf>,
+        pane_size: Option<PaneSize>,
+        id: Option<usize>,
     ) -> CommonResult<EventPropagation> {
         throws_with_return!({
             let state = &mut global_data.state;
-            let id = state.next_terminal_id;
-            state.next_terminal_id += 1;
+            let restore = id.is_some();
+            let id = id.unwrap_or_else(|| {
+                let id = state.next_terminal_id;
+                state.next_terminal_id += 1;
+                id
+            });
 
             let window_size = global_data.window_size;
             // Start with the full window width; the first render will resize to
@@ -148,7 +155,9 @@ impl AppMain {
             let ofs_buf = r3bl_tui::OffscreenBuffer::new_empty(pty_size);
             let pty_input_tx = Arc::new(session.tx_input_event.clone());
             let child_killer = session.child_process_termination_handle;
-            let initial_title = cmd.filter(|s| !s.is_empty());
+            let initial_title = cmd.as_ref().filter(|s| !s.is_empty()).cloned();
+            let pane_cwd = cwd.clone().unwrap_or_else(|| self.root.clone());
+            let pane_command = if is_command_pane { cmd.clone() } else { None };
             let pane = Arc::new(Mutex::new(TerminalPane {
                 ofs_buf,
                 cursor_key_mode: CursorKeyMode::Normal,
@@ -161,6 +170,8 @@ impl AppMain {
                 exit_code: None,
                 exit_signal: None,
                 scroll_offset: 0,
+                cwd: pane_cwd,
+                command: pane_command,
             }));
 
             state.terminal_panes.insert(id, Arc::clone(&pane));
@@ -259,9 +270,20 @@ impl AppMain {
             });
 
             let window = Window::Terminal(id);
-            state.pane_manager.push_window(window);
-            state.pane_manager.focused_window = Some(window);
-            state.terminal_grabbed = true;
+            if !restore {
+                state.pane_manager.push_window(window);
+                if let Some(size) = pane_size {
+                    state
+                        .pane_manager
+                        .window_states
+                        .entry(window)
+                        .or_default()
+                        .pane_size = size;
+                }
+                state.pane_manager.focused_window = Some(window);
+                state.terminal_grabbed = true;
+                state.mark_session_dirty();
+            }
 
             EventPropagation::ConsumedRender
         });
@@ -298,6 +320,7 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
                     let _ = killer.kill();
                 }
                 state.pane_manager.remove_window(&Window::Terminal(id));
+                state.mark_session_dirty();
                 sync_terminal_grabbed(state);
             } else if let Some(pane) = state.terminal_panes.get(&id)
                 && let Ok(mut p) = pane.lock()
@@ -307,6 +330,24 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
                 p.exit_signal = exit_signal;
             }
         }
+    }
+}
+
+const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+
+// save_session is intentionally a synchronous fast JSON write on the main thread.
+fn maybe_save_session(state: &mut AppState, root: &Utf8Path) {
+    let Some(dirty_at) = state.session_dirty_at else {
+        return;
+    };
+    if dirty_at.elapsed() < SESSION_SAVE_DEBOUNCE {
+        return;
+    }
+    match save_session(root, state) {
+        Ok(()) => {
+            state.session_dirty_at = None;
+        }
+        Err(e) => tracing::warn!("Failed to save session: {e}"),
     }
 }
 
@@ -405,6 +446,35 @@ impl App for AppMain {
                 ));
             }
         });
+
+        let stack = global_data.state.pane_manager.window_stack.clone();
+        for window in stack {
+            let Window::Terminal(id) = window else {
+                continue;
+            };
+            let Some(info) = global_data.state.pending_terminals.remove(&id) else {
+                continue;
+            };
+            let cwd = if info.cwd.exists() {
+                Some(info.cwd)
+            } else {
+                tracing::warn!(
+                    "Terminal cwd no longer exists, falling back to repo root: {}",
+                    info.cwd
+                );
+                Some(global_data.state.root.clone())
+            };
+            let cmd = if info.is_command_pane {
+                info.command
+            } else {
+                None
+            };
+            let _ = self.open_terminal(global_data, cmd, cwd, None, Some(id));
+            if !global_data.state.terminal_panes.contains_key(&id) {
+                global_data.state.pane_manager.remove_window(&window);
+                global_data.state.mark_session_dirty();
+            }
+        }
     }
 
     fn app_handle_input_event(
@@ -474,7 +544,7 @@ impl App for AppMain {
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('t'),
                 }) => {
-                    return self.open_terminal(global_data, None, None);
+                    return self.open_terminal(global_data, None, None, None, None);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('T'),
@@ -512,6 +582,7 @@ impl App for AppMain {
                         .state
                         .pane_manager
                         .resize_focused(ResizeDelta::Grow);
+                    global_data.state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -521,6 +592,7 @@ impl App for AppMain {
                         .state
                         .pane_manager
                         .resize_focused(ResizeDelta::Shrink);
+                    global_data.state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -530,6 +602,7 @@ impl App for AppMain {
                         return Ok(EventPropagation::ConsumedRender);
                     };
                     global_data.state.pane_manager.move_forward(&focused);
+                    global_data.state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -539,6 +612,7 @@ impl App for AppMain {
                         return Ok(EventPropagation::ConsumedRender);
                     };
                     global_data.state.pane_manager.move_backward(&focused);
+                    global_data.state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -573,6 +647,7 @@ impl App for AppMain {
                     }
                     state.pane_manager.remove_window(&Window::Terminal(tid));
                     sync_terminal_grabbed(state);
+                    state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -625,6 +700,7 @@ impl App for AppMain {
                         .state
                         .pane_manager
                         .resize_focused(ResizeDelta::Grow);
+                    global_data.state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -639,6 +715,7 @@ impl App for AppMain {
                         .state
                         .pane_manager
                         .resize_focused(ResizeDelta::Shrink);
+                    global_data.state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -653,6 +730,7 @@ impl App for AppMain {
                         return Ok(EventPropagation::ConsumedRender);
                     };
                     global_data.state.pane_manager.move_forward(&focused);
+                    global_data.state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -667,6 +745,7 @@ impl App for AppMain {
                         return Ok(EventPropagation::ConsumedRender);
                     };
                     global_data.state.pane_manager.move_backward(&focused);
+                    global_data.state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 _ => {}
@@ -723,7 +802,7 @@ impl App for AppMain {
         if let AppSignal::OpenTerminal { cmd, cwd } = action {
             let cmd = cmd.clone();
             let cwd = cwd.clone();
-            return self.open_terminal(global_data, cmd, Some(cwd));
+            return self.open_terminal(global_data, cmd, Some(cwd), None, None);
         }
         throws_with_return!({
             let state = &mut global_data.state;
@@ -746,7 +825,7 @@ impl App for AppMain {
                         }
                     }
 
-                    let mut new_files: Vec<LoadedFile> = vec![];
+                    let mut new_files: Vec<Arc<LoadedFile>> = vec![];
                     for path in &batch.created {
                         if let Some(file) = snapshot
                             .iter()
@@ -762,50 +841,19 @@ impl App for AppMain {
                     }
 
                     if !new_files.is_empty() {
-                        let mut next: Vec<LoadedFile> = snapshot
-                            .iter()
-                            .map(|f| LoadedFile {
-                                path: f.path.clone(),
-                                data: std::sync::Mutex::new(if let Ok(d) = f.data.lock() {
-                                    crate::loader::FileData {
-                                        content: d.content.clone(),
-                                        line_starts: d.line_starts.clone(),
-                                    }
-                                } else {
-                                    crate::loader::FileData {
-                                        content: String::new(),
-                                        line_starts: vec![],
-                                    }
-                                }),
-                                colored_lines: std::sync::Mutex::new(
-                                    if let Ok(lines) = f.colored_lines.lock() {
-                                        lines.clone()
-                                    } else {
-                                        Vec::new()
-                                    },
-                                ),
-                                removed: std::sync::atomic::AtomicBool::new(
-                                    f.removed.load(Ordering::Relaxed),
-                                ),
-                            })
-                            .collect();
+                        let mut next: Vec<Arc<LoadedFile>> =
+                            snapshot.iter().map(Arc::clone).collect();
                         next.extend(new_files);
-                        next.sort_by(|a, b| a.path.cmp(&b.path));
                         self.files.store(Arc::new(next));
                     }
 
-                    let snapshot = self.files.load();
                     if state
                         .pane_manager
                         .window_stack
                         .contains(&Window::FileNamePicker)
                     {
                         if state.file_name_picker.query.is_empty() {
-                            state.file_name_picker.results =
-                                FileNamePickerComponent::open_previews_results(
-                                    &snapshot,
-                                    &state.pane_manager.window_stack,
-                                );
+                            state.recompute_file_name_picker_results();
                         } else {
                             FileNamePickerComponent::spawn_match(
                                 &*state,
@@ -818,7 +866,9 @@ impl App for AppMain {
                     state.bump_files_version();
                 }
                 AppSignal::OpenTerminal { .. } => {}
-                AppSignal::Noop => {}
+                AppSignal::Noop => {
+                    maybe_save_session(state, &self.root);
+                }
             }
 
             EventPropagation::ConsumedRender
@@ -1076,7 +1126,7 @@ fn render_status_bar(
 }
 
 pub fn build_state(
-    files: Arc<ArcSwap<Vec<LoadedFile>>>,
+    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     root: Utf8PathBuf,
     theme: crate::tui::theme::HelixTheme,
 ) -> AppState {
@@ -1085,14 +1135,14 @@ pub fn build_state(
 
 pub async fn run(
     initial_state: AppState,
-    files: Arc<ArcSwap<Vec<LoadedFile>>>,
+    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     root: Utf8PathBuf,
 ) -> CommonResult<()> {
     let exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>> =
         Arc::new(OnceLock::new());
     let exit_message: Arc<OnceLock<&'static str>> = Arc::new(OnceLock::new());
 
-    // Send Exit to the TUI event loop on SIGTERM/SIGINT so RawMode::end() runs cleanly.
+    // Send Exit to the TUI event loop on SIGTERM/SIGINT/SIGHUP so RawMode::end() runs cleanly.
     for (kind, message) in [
         (
             tokio::signal::unix::SignalKind::terminate(),
@@ -1101,6 +1151,10 @@ pub async fn run(
         (
             tokio::signal::unix::SignalKind::interrupt(),
             "How DARE you interrupt me!",
+        ),
+        (
+            tokio::signal::unix::SignalKind::hangup(),
+            "HANG UP AND DRIVE",
         ),
     ] {
         let exit_tx_signal = Arc::clone(&exit_tx);
@@ -1138,6 +1192,10 @@ pub async fn run(
         }
     }
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+
+    if let Err(e) = save_session(&global_data.state.root, &global_data.state) {
+        tracing::warn!("Failed to save session on exit: {e}");
+    }
 
     if let Some(msg) = exit_message.get() {
         eprintln!("{msg}");

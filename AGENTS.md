@@ -25,6 +25,7 @@ Source is organized as:
 - `src/cli.rs` — CLI argument parsing via `pico-args`
 - `src/config.rs` — KDL configuration file parsing (theme, future fields)
 - `src/loader.rs` — parallel file walking and `LoadedFile` construction
+- `src/session.rs` — session save/restore (pane stack, terminals, highlights)
 - `src/lsp.rs` — LSP client (JSON-RPC over stdio)
 - `src/watcher.rs` — filesystem watcher via `notify`; debounces events into `BatchedWatchEvent` and broadcasts via `WATCHER_RRT`
 - `src/tui/mod.rs` — module declarations
@@ -109,8 +110,10 @@ cargo test <module>::<test_name>
 
 | Crate                  | Version | Purpose                                                        |
 |------------------------|---------|----------------------------------------------------------------|
-| `arc-swap`             | 1.x     | Lock-free atomic swap for the shared file list (`Arc<ArcSwap<Vec<LoadedFile>>>`) |
+| `arc-swap`             | 1.x     | Lock-free atomic swap for the shared file list (`Arc<ArcSwap<Vec<Arc<LoadedFile>>>>`) |
 | `camino`               | 1.x     | UTF-8–typed path types (`Utf8PathBuf`, etc.)                   |
+| `directories`          | 5.x     | XDG Base Directory resolution for config and session storage   |
+| `hex`                  | 0.4.x   | Hex encoding for session filename hashes                       |
 | `jwalk`                | 0.8.x   | Parallel directory traversal (uses rayon)                      |
 | `kdl`                  | 6.x     | KDL config file parsing                                        |
 | `libc`                 | 0.2.x   | PTY/OS-level syscalls used by terminal emulation               |
@@ -122,14 +125,13 @@ cargo test <module>::<test_name>
 | `r3bl_tui`             | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
 | `serde`                | 1.x     | Derive macros for serialization (`derive` feature)             |
 | `serde_json`           | 1.x     | JSON-RPC message serialization for LSP protocol                |
+| `sha2`                 | 0.10.x  | Stable repo-root hashing for session filenames                 |
 | `toml`                 | 0.8.x   | Theme file parsing (`themes/*.toml`)                           |
 | `tokio`                | 1.x     | Async runtime required by `r3bl_tui`                           |
 | `tracing`              | 0.1.x   | Structured logging macros (`debug!`, `info!`, etc.)            |
 | `tracing-core`         | 0.1.x   | `LevelFilter` type used to configure `r3bl_tui` logger         |
 | `unicode-segmentation` | 1.x     | Word boundary detection in `input_line`                        |
 | `url`                  | 2.x     | URL parsing in `word_bounds` for cursor-based URL selection    |
-
-Add a dependency when it provides substantial value that would take significant effort to replicate correctly — covering performance, correctness, or capability. Prefer `std` for trivial things. Each dep must have a concrete, stated purpose in this table.
 
 Planned feature areas and their likely dependencies:
 - **Git information** (blame, diff, status): `git2`

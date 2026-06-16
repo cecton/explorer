@@ -176,6 +176,7 @@ impl PaneComponent {
             Window::FilePreview(_) => {
                 state.pane_manager.set_window_scroll(window, target);
                 state.pane_manager.clamp_scroll(window);
+                state.mark_session_dirty();
                 EventPropagation::ConsumedRender
             }
             Window::FileNamePicker => {
@@ -388,6 +389,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
             {
                 self.preview
                     .scroll_to_range(&mut global_data.state, key, lo, hi);
+                global_data.state.mark_session_dirty();
                 return Ok(EventPropagation::ConsumedRender);
             }
         }
@@ -579,7 +581,12 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     let rel_y = row.saturating_sub(origin_row);
                     let line = (scroll + rel_y + 1).clamp(1, scroll_max.max(1));
 
+                    let before = state.highlight_ranges.get(&key).cloned();
                     self.preview.update_drag(state, key, line);
+                    let after = state.highlight_ranges.get(&key).cloned();
+                    if before != after {
+                        state.mark_session_dirty();
+                    }
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 MouseInputKind::MouseUp(Button::Left) if self.text_drag_active => {

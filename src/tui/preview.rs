@@ -256,6 +256,7 @@ impl FilePreviewComponent {
             state.pane_manager.set_window_scroll(window, target);
             state.pane_manager.clamp_scroll(window);
         }
+        state.mark_session_dirty();
     }
 
     fn is_line_highlighted(state: &AppState, file_key: FileKey, line_1_indexed: usize) -> bool {
@@ -454,6 +455,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             }) = input_event
             {
                 global_data.state.pane_manager.send_to_back(&window);
+                global_data.state.mark_session_dirty();
                 return Ok(EventPropagation::ConsumedRender);
             }
 
@@ -469,6 +471,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                             .pane_manager
                             .set_window_scroll(&window, current.saturating_sub(page));
                         state.pane_manager.clamp_scroll(&window);
+                        state.mark_session_dirty();
                     }
                     Key::SpecialKey(SpecialKey::PageDown) => {
                         consumed = true;
@@ -478,6 +481,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                             .pane_manager
                             .set_window_scroll(&window, current.saturating_add(page));
                         state.pane_manager.clamp_scroll(&window);
+                        state.mark_session_dirty();
                     }
                     Key::SpecialKey(SpecialKey::Up) => {
                         consumed = true;
@@ -486,6 +490,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                             .pane_manager
                             .set_window_scroll(&window, current.saturating_sub(1));
                         state.pane_manager.clamp_scroll(&window);
+                        state.mark_session_dirty();
                     }
                     Key::SpecialKey(SpecialKey::Down) => {
                         consumed = true;
@@ -494,16 +499,19 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                             .pane_manager
                             .set_window_scroll(&window, current.saturating_add(1));
                         state.pane_manager.clamp_scroll(&window);
+                        state.mark_session_dirty();
                     }
                     Key::SpecialKey(SpecialKey::Home) => {
                         consumed = true;
                         state.pane_manager.set_window_scroll(&window, 0);
+                        state.mark_session_dirty();
                     }
                     Key::SpecialKey(SpecialKey::End) => {
                         consumed = true;
                         let max = state.pane_manager.window_scroll_max(&window);
                         state.pane_manager.set_window_scroll(&window, max);
                         state.pane_manager.clamp_scroll(&window);
+                        state.mark_session_dirty();
                     }
                     _ => {}
                 }
@@ -518,12 +526,14 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                     Key::Character('a') => {
                         consumed = true;
                         state.pane_manager.set_window_scroll(&window, 0);
+                        state.mark_session_dirty();
                     }
                     Key::Character('e') => {
                         consumed = true;
                         let max = state.pane_manager.window_scroll_max(&window);
                         state.pane_manager.set_window_scroll(&window, max);
                         state.pane_manager.clamp_scroll(&window);
+                        state.mark_session_dirty();
                     }
                     _ => {}
                 }
@@ -537,6 +547,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                             .pane_manager
                             .set_window_scroll(&window, current.saturating_sub(3));
                         state.pane_manager.clamp_scroll(&window);
+                        state.mark_session_dirty();
                     }
                     MouseInputKind::ScrollDown => {
                         consumed = true;
@@ -545,6 +556,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                             .pane_manager
                             .set_window_scroll(&window, current.saturating_add(3));
                         state.pane_manager.clamp_scroll(&window);
+                        state.mark_session_dirty();
                     }
                     _ => {}
                 }
@@ -589,7 +601,10 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             let total_lines = {
                 let snapshot = global_data.state.files.load();
                 let file = &snapshot[file_key.0];
-                let data = file.data.lock().unwrap();
+                let data = file
+                    .data
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner());
                 data.line_starts.len()
             };
             global_data
@@ -604,9 +619,15 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             let snapshot = state.files.load();
             let file = &snapshot[file_key.0];
 
-            let data = file.data.lock().unwrap();
+            let data = file
+                .data
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
             let scroll = state.pane_manager.window_scroll(&window);
-            let colored_guard = file.colored_lines.lock().unwrap();
+            let colored_guard = file
+                .colored_lines
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
 
             let pane_bg = state.theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
             let pane_width = bounds.col_width.as_usize();

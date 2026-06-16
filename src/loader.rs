@@ -1,17 +1,18 @@
-use camino::Utf8PathBuf;
+use camino::{Utf8Path, Utf8PathBuf};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
-use std::sync::Mutex;
 use std::sync::atomic::AtomicBool;
+use std::sync::{Arc, Mutex};
 
 use crate::lsp;
 
 /// Stable index into the file list.
 ///
-/// The underlying `Vec<LoadedFile>` is append-only: files are never removed or reordered,
-/// only marked `removed = true`. This makes the raw `usize` permanently stable. The
-/// newtype exists to prevent accidental confusion with other `usize` values.
+/// The underlying `Vec<Arc<LoadedFile>>` is append-only: files are never
+/// removed or reordered, only marked `removed = true`. This makes the
+/// raw `usize` permanently stable for the lifetime of `AppState`.
+/// The newtype exists to prevent accidental confusion with other `usize` values.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, PartialOrd, Ord)]
 pub struct FileKey(pub usize);
 
@@ -155,11 +156,11 @@ pub struct LoadedFile {
 }
 
 impl LoadedFile {
-    pub fn load(path: PathBuf) -> Option<Self> {
+    pub fn load(path: PathBuf) -> Option<Arc<Self>> {
         let path = Utf8PathBuf::from_path_buf(path).ok()?;
         let content = fs::read_to_string(&path).ok()?;
         let line_starts = compute_line_starts(&content);
-        Some(Self {
+        Some(Arc::new(Self {
             path,
             data: Mutex::new(FileData {
                 content,
@@ -167,7 +168,7 @@ impl LoadedFile {
             }),
             colored_lines: Mutex::new(vec![]),
             removed: AtomicBool::new(false),
-        })
+        }))
     }
 
     /// Re-reads the file from disk, updates content and line_starts, clears colored_lines.
@@ -177,11 +178,17 @@ impl LoadedFile {
             return false;
         };
         let line_starts = compute_line_starts(&content);
-        let mut data = self.data.lock().unwrap();
+        let mut data = self
+            .data
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
         data.content = content;
         data.line_starts = line_starts;
         drop(data);
-        *self.colored_lines.lock().unwrap() = vec![];
+        *self
+            .colored_lines
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner()) = vec![];
         true
     }
 }
@@ -208,6 +215,28 @@ pub fn find_git_root() -> PathBuf {
         if !dir.pop() {
             panic!("no git repository found (no .git directory in any parent)");
         }
+    }
+}
+
+pub fn path_for_file_key(files: &[Arc<LoadedFile>], key: FileKey) -> Option<&Utf8Path> {
+    files.get(key.0).map(|f| f.path.as_ref())
+}
+
+pub fn file_key_for_path(files: &[Arc<LoadedFile>], path: &Utf8Path) -> Option<FileKey> {
+    files.iter().position(|f| f.path == path).map(FileKey)
+}
+
+impl LoadedFile {
+    pub fn stub(path: Utf8PathBuf) -> Arc<Self> {
+        Arc::new(Self {
+            path,
+            data: Mutex::new(FileData {
+                content: String::new(),
+                line_starts: vec![0],
+            }),
+            colored_lines: Mutex::new(vec![]),
+            removed: AtomicBool::new(true),
+        })
     }
 }
 
@@ -349,5 +378,31 @@ mod tests {
         let data = fd("foo.bar");
         let (start, end) = data.word_bounds(3);
         assert_eq!(data.extract_text(start, end).as_deref(), Some("."));
+    }
+
+    #[test]
+    fn path_for_file_key_returns_path() {
+        let file = LoadedFile::load(PathBuf::from("src/loader.rs"))
+            .expect("loader.rs exists and is UTF-8");
+        let files = vec![file];
+        let key = FileKey(0);
+        let path = path_for_file_key(&files, key);
+        assert!(path.is_some());
+    }
+
+    #[test]
+    fn file_key_for_path_finds_matching_file() {
+        let file = LoadedFile::load(PathBuf::from("src/loader.rs"))
+            .expect("loader.rs exists and is UTF-8");
+        let files = vec![file];
+        let path = path_for_file_key(&files, FileKey(0)).unwrap();
+        assert_eq!(file_key_for_path(&files, path), Some(FileKey(0)));
+    }
+
+    #[test]
+    fn stub_file_is_marked_removed() {
+        let stub = LoadedFile::stub(Utf8PathBuf::from("/repo/missing.rs"));
+        assert!(stub.removed.load(std::sync::atomic::Ordering::Relaxed));
+        assert!(stub.data.lock().unwrap().content.is_empty());
     }
 }

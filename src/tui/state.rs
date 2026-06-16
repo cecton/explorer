@@ -1,5 +1,7 @@
 use crate::loader::{FileKey, LoadedFile};
-use crate::tui::pane_manager::{PaneManager, TextSelection, Window, WindowState};
+use crate::session::TerminalRestoreInfo;
+use crate::tui::file_name_picker::FileNamePickerComponent;
+use crate::tui::pane_manager::{PaneManager, TextSelection, Window};
 use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
@@ -10,6 +12,7 @@ use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Instant;
 use tokio::sync::mpsc;
 
 static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
@@ -59,6 +62,10 @@ pub struct TerminalPane {
     /// How many lines back from the bottom of the terminal the viewport is scrolled.
     /// 0 means showing the current buffer (bottom); >0 shows scrollback history.
     pub scroll_offset: usize,
+    /// Working directory of the terminal process.
+    pub cwd: Utf8PathBuf,
+    /// Command used to start the terminal process, if any.
+    pub command: Option<String>,
 }
 
 impl Debug for TerminalPane {
@@ -78,13 +85,15 @@ impl Debug for TerminalPane {
             .field("exit_code", &self.exit_code)
             .field("exit_signal", &self.exit_signal)
             .field("scroll_offset", &self.scroll_offset)
+            .field("cwd", &self.cwd)
+            .field("command", &self.command)
             .finish()
     }
 }
 
 #[derive(Clone, Default)]
 pub struct AppState {
-    pub files: Arc<ArcSwap<Vec<LoadedFile>>>,
+    pub files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     pub files_version: u64,
     pub root: Utf8PathBuf,
     /// Pane stack, sizes, layout, and focus state.
@@ -103,27 +112,38 @@ pub struct AppState {
     pub terminal_panes: HashMap<usize, Arc<Mutex<TerminalPane>>>,
     /// Next available terminal pane ID.
     pub next_terminal_id: usize,
+    /// Terminal windows restored from the session that still need a PTY spawned.
+    pub pending_terminals: HashMap<usize, TerminalRestoreInfo>,
     pub mouse_drag_active: bool,
     pub terminal_grabbed: bool,
     pub text_selection: Option<TextSelection>,
+    pub session_dirty_at: Option<Instant>,
 }
 
 impl AppState {
     pub fn bump_files_version(&mut self) {
         self.files_version = FILES_VERSION.fetch_add(1, Ordering::Relaxed) + 1;
     }
+
+    pub fn mark_session_dirty(&mut self) {
+        self.session_dirty_at = Some(Instant::now());
+    }
+
+    pub fn recompute_file_name_picker_results(&mut self) {
+        self.file_name_picker.results = FileNamePickerComponent::compute_results(self);
+    }
 }
 
 impl AppState {
-    pub fn new(files: Arc<ArcSwap<Vec<LoadedFile>>>, root: Utf8PathBuf, theme: HelixTheme) -> Self {
-        let snapshot = files.load();
+    pub fn new(
+        files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
+        root: Utf8PathBuf,
+        theme: HelixTheme,
+    ) -> Self {
         let saved_theme = theme.clone();
         let mut pane_manager = PaneManager::new();
         pane_manager.push_window(Window::FileNamePicker);
         pane_manager.focused_window = Some(Window::FileNamePicker);
-        pane_manager
-            .window_states
-            .insert(Window::FileNamePicker, WindowState::default());
 
         let mut state = Self {
             files,
@@ -140,15 +160,23 @@ impl AppState {
             saved_theme,
             terminal_panes: HashMap::new(),
             next_terminal_id: 0,
+            pending_terminals: HashMap::new(),
             mouse_drag_active: false,
             terminal_grabbed: false,
             text_selection: None,
+            session_dirty_at: None,
         };
-        state.file_name_picker.results =
-            crate::tui::file_name_picker::FileNamePickerComponent::open_previews_results(
-                &snapshot,
-                &state.pane_manager.window_stack,
-            );
+        state.recompute_file_name_picker_results();
+
+        let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
+            .map(|n| (n.to_string(), Vec::new()))
+            .collect();
+        state.theme_picker.selected = all_themes
+            .iter()
+            .position(|(n, _)| n == state.theme.name())
+            .and_then(|i| all_themes.get(i).map(|(n, _)| n.clone()));
+        state.theme_picker.results = all_themes;
+
         state
     }
 }

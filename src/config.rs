@@ -6,7 +6,7 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Result<Option<Self>, String> {
-        let path = config_path().ok_or("HOME environment variable not set")?;
+        let path = config_path().ok_or("could not determine config directory")?;
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
@@ -23,7 +23,7 @@ impl Config {
 }
 
 pub fn save_theme(theme_name: &str) -> Result<(), String> {
-    let path = config_path().ok_or("HOME environment variable not set")?;
+    let path = config_path().ok_or("could not determine config directory")?;
 
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)
@@ -71,9 +71,9 @@ pub fn save_theme(theme_name: &str) -> Result<(), String> {
 }
 
 fn config_path() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(|home| {
-        let mut path = PathBuf::from(home);
-        path.push(".config/explorer/config.kdl");
+    directories::ProjectDirs::from("", "", "explorer").map(|dirs| {
+        let mut path = dirs.config_dir().to_path_buf();
+        path.push("config.kdl");
         path
     })
 }
@@ -98,4 +98,17 @@ fn parse(content: &str) -> Result<Config, String> {
     }
 
     Ok(Config { theme })
+}
+
+#[cfg(test)]
+mod config_tests {
+    use super::*;
+
+    #[test]
+    fn config_path_uses_project_dirs() {
+        let path = config_path().expect("config_path should return Some");
+        let file_name = path.file_name().expect("path has file name");
+        assert_eq!(file_name, "config.kdl");
+        assert!(path.to_string_lossy().contains("explorer"));
+    }
 }
