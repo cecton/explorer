@@ -181,7 +181,6 @@ impl AppMain {
             tokio::spawn(async move {
                 let mut last_event = Instant::now();
                 let mut backoff: Option<Instant> = None;
-                let mut burst_start: Option<Instant> = None;
                 while let Some(event) = session.rx_output_event.recv().await {
                     let is_exit = matches!(&event, PtyOutputEvent::Exit(_));
                     match event {
@@ -238,26 +237,18 @@ impl AppMain {
                     // separating interactive typing (~200ms between keys).
                     // last_event is updated on every event (including
                     // suppressed), so a sustained burst keeps the gate
-                    // closed indefinitely.  A gap ≥100ms in events resets
-                    // burst tracking and the task tries to send again.
-                    if last_event.elapsed().as_millis() < 100 {
-                        if backoff.is_some()
-                            || burst_start.is_some_and(|t| t.elapsed().as_secs() >= 3)
-                        {
-                            backoff = Some(now);
-                            last_event = now;
-                            continue;
-                        } else if burst_start.is_none() {
-                            burst_start = Some(now);
-                        }
-                    } else {
-                        burst_start = None;
+                    // closed until the channel has room again.  A gap
+                    // ≥100ms in events resets and the task tries to send.
+                    if last_event.elapsed().as_millis() < 100 && backoff.is_some() {
+                        backoff = Some(now);
+                        last_event = now;
+                        continue;
                     }
 
                     // Channel has room (or backoff expired): try to send.
                     // If it succeeds, clear backoff.  If it fails (buffer
                     // full at 1000), enter backoff — subsequent events are
-                    // suppressed until activity pauses for >=1s.
+                    // suppressed until activity pauses for >=100ms.
                     match notify_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
                         AppSignal::Noop,
                     )) {
