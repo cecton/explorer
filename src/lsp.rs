@@ -407,26 +407,25 @@ impl RRTWorker for LspWorker {
             if let Some(SemanticTokens { data, .. }) = tokens {
                 let snapshot = self.files.load();
                 let file = &snapshot[file_idx];
-                let (lines, total_lines) = {
+                let lines = {
                     let d = file
                         .data
                         .lock()
                         .unwrap_or_else(|poison| poison.into_inner());
-                    let total_lines = d.line_starts.len();
                     let mut lines = decode_tokens(&data, &d.content);
                     if is_range {
-                        lines.truncate(RANGE_LINES.min(total_lines));
+                        lines.truncate(RANGE_LINES);
                     }
-                    (lines, total_lines)
+                    lines
                 };
                 let mut guard = file
                     .colored_lines
                     .lock()
                     .unwrap_or_else(|poison| poison.into_inner());
-                let should_write = if lines.len() == total_lines {
-                    guard.len() != total_lines
-                } else {
+                let should_write = if is_range {
                     guard.is_empty()
+                } else {
+                    guard.len() != lines.len()
                 };
                 if should_write {
                     *guard = lines;
@@ -548,8 +547,9 @@ fn request_tokens(
         .data
         .lock()
         .unwrap_or_else(|poison| poison.into_inner())
-        .line_starts
-        .len();
+        .content
+        .lines()
+        .count();
     let colored_len = file
         .colored_lines
         .lock()
