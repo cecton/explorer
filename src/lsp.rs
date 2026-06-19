@@ -129,10 +129,13 @@ impl Debug for LspWorker {
 }
 
 impl RRTWorker for LspWorker {
-    type Event = LspEvent;
+    type Output = LspEvent;
     type Interrupt = LspInterrupt;
 
-    fn create_and_register_os_sources() -> miette::Result<(Self, Self::Interrupt)> {
+    fn create_and_register_os_sources(
+        _config: Self::Config,
+        _receiver: tokio::sync::broadcast::Receiver<Self::Input>,
+    ) -> miette::Result<(Self, Self::Interrupt)> {
         let config = LSP_CONFIG
             .get()
             .expect("set_lsp_config must be called before subscribing");
@@ -307,7 +310,7 @@ impl RRTWorker for LspWorker {
 
     fn block_until_ready_then_dispatch(
         &mut self,
-        sender: &Sender<RRTEvent<Self::Event>>,
+        sender: &Sender<RRTEvent<Self::Output>>,
     ) -> Continuation {
         // Drain any user-requested file indices first (non-blocking).
         while let Ok(file_idx) = self.request_rx.try_recv() {

@@ -322,9 +322,14 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
             let render_ops = if scroll_offset == 0 {
                 let visible_rows = pane_height.min(buffer_height);
                 let is_grabbed = global_data.state.terminal_grabbed;
-                let cursor_visible = pane.ofs_buf.ansi_parser_support.cursor_visibility
+                let is_active = matches!(
+                    global_data.state.pane_manager.focused_window,
+                    Some(Window::Terminal(focused_id)) if focused_id == id
+                );
+                let cursor_visible = pane.ofs_buf.parser_global_state.cursor_visibility
                     == CursorVisibilityState::Visible
-                    && is_grabbed;
+                    && is_grabbed
+                    && is_active;
                 let cursor_pos = if cursor_visible {
                     Some(pane.ofs_buf.cursor_pos)
                 } else {

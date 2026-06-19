@@ -152,7 +152,7 @@ impl AppMain {
                 }
             };
 
-            let ofs_buf = r3bl_tui::OffscreenBuffer::new_empty(pty_size);
+            let ofs_buf = r3bl_tui::OfsBufVT100::new_empty(pty_size);
             let pty_input_tx = Arc::new(session.tx_input_event.clone());
             let child_killer = session.child_process_termination_handle;
             let initial_title = cmd.as_ref().filter(|s| !s.is_empty()).cloned();
@@ -285,7 +285,7 @@ fn shell_command() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "bash".into())
 }
 
-fn is_buffer_empty(ofs_buf: &OffscreenBuffer) -> bool {
+fn is_buffer_empty(ofs_buf: &r3bl_tui::OfsBufVT100) -> bool {
     ofs_buf.buffer.iter().all(|line| {
         line.iter()
             .all(|pc| !matches!(pc, PixelChar::PlainText { .. }))
@@ -383,7 +383,7 @@ impl App for AppMain {
         let root = self.root.clone();
 
         lsp::set_lsp_config(root.clone(), Arc::clone(&files));
-        match LSP_RRT.try_subscribe() {
+        match LSP_RRT.try_subscribe(()) {
             Ok(guard) => {
                 let lsp_notify = notify_tx.clone();
                 // LSP uses blocking send().await — natural backpressure
@@ -407,7 +407,7 @@ impl App for AppMain {
         }
 
         set_watcher_root(&root);
-        match WATCHER_RRT.try_subscribe() {
+        match WATCHER_RRT.try_subscribe(()) {
             Ok(guard) => {
                 let watcher_notify = notify_tx.clone();
                 tokio::spawn(async move {

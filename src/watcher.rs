@@ -50,10 +50,13 @@ impl Debug for WatcherWorker {
 }
 
 impl RRTWorker for WatcherWorker {
-    type Event = AppSignal;
+    type Output = AppSignal;
     type Interrupt = NoOpInterrupt;
 
-    fn create_and_register_os_sources() -> miette::Result<(Self, Self::Interrupt)> {
+    fn create_and_register_os_sources(
+        _config: Self::Config,
+        _receiver: tokio::sync::broadcast::Receiver<Self::Input>,
+    ) -> miette::Result<(Self, Self::Interrupt)> {
         // Root is stored on the static at startup; read it from the global.
         let root = WATCHER_ROOT
             .get()
@@ -84,7 +87,7 @@ impl RRTWorker for WatcherWorker {
 
     fn block_until_ready_then_dispatch(
         &mut self,
-        sender: &Sender<RRTEvent<Self::Event>>,
+        sender: &Sender<RRTEvent<Self::Output>>,
     ) -> Continuation {
         match self.rx.recv_timeout(DEBOUNCE) {
             Ok(Ok(event)) => {

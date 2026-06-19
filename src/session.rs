@@ -340,7 +340,7 @@ mod tests {
     use arc_swap::ArcSwap;
     use camino::Utf8PathBuf;
     use r3bl_tui::core::pty::CursorKeyMode;
-    use r3bl_tui::{OffscreenBuffer, Size};
+    use r3bl_tui::{OfsBufVT100, Size};
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
     use tokio::sync::mpsc;
@@ -359,7 +359,7 @@ mod tests {
     fn dummy_terminal_pane(cwd: Utf8PathBuf, command: Option<String>) -> TerminalPane {
         let (pty_input_tx, _) = mpsc::channel(1);
         TerminalPane {
-            ofs_buf: OffscreenBuffer::new_empty(Size::default()),
+            ofs_buf: OfsBufVT100::new_empty(Size::default()),
             cursor_key_mode: CursorKeyMode::default(),
             title: None,
             pty_input_tx: Arc::new(pty_input_tx),

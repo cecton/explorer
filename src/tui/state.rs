@@ -7,7 +7,7 @@ use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use r3bl_tui::core::pty::{ControlledChildTerminationHandle, CursorKeyMode, PtyInputEvent};
-use r3bl_tui::{OffscreenBuffer, Size};
+use r3bl_tui::{OfsBufVT100, Size};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -44,7 +44,7 @@ impl<T: Clone + PartialEq> FuzzyPickerState<T> {
 }
 
 pub struct TerminalPane {
-    pub ofs_buf: OffscreenBuffer,
+    pub ofs_buf: OfsBufVT100,
     pub cursor_key_mode: CursorKeyMode,
     pub title: Option<String>,
     pub pty_input_tx: Arc<mpsc::Sender<PtyInputEvent>>,
