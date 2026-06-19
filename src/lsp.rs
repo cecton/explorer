@@ -143,7 +143,8 @@ impl RRTWorker for LspWorker {
             .get()
             .unwrap()
             .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(tx);
+            .unwrap_or_else(|poison| poison.into_inner()) = Some(tx.clone());
+        drain_request_buffer(&tx);
 
         let mut child = Command::new("rust-analyzer")
             .stdin(Stdio::piped())
@@ -479,12 +480,28 @@ impl RRTWorker for LspWorker {
 
 static REQUEST_SLOT: OnceLock<std::sync::Mutex<Option<mpsc::SyncSender<usize>>>> = OnceLock::new();
 
+/// Buffer for file indices requested before the LSP worker's REQUEST_SLOT is populated.
+/// Drained atomically on the first successful send.
+static FILE_REQUEST_BUFFER: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+
+fn drain_request_buffer(tx: &mpsc::SyncSender<usize>) {
+    if let Ok(mut buf) = FILE_REQUEST_BUFFER.lock() {
+        for &idx in buf.iter() {
+            let _ = tx.try_send(idx);
+        }
+        buf.clear();
+    }
+}
+
 pub fn send_file_request(file_idx: usize) {
     if let Some(slot) = REQUEST_SLOT.get()
         && let Ok(guard) = slot.lock()
         && let Some(ref tx) = *guard
     {
+        drain_request_buffer(tx);
         let _ = tx.try_send(file_idx);
+    } else {
+        let _ = FILE_REQUEST_BUFFER.lock().map(|mut buf| buf.push(file_idx));
     }
 }
 

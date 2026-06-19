@@ -466,6 +466,13 @@ impl App for AppMain {
                 global_data.state.mark_session_dirty();
             }
         }
+
+        // Request full tokens for session-restored file previews.
+        for window in global_data.state.pane_manager.window_stack.iter() {
+            if let Window::FilePreview(key) = window {
+                crate::lsp::send_file_request(key.0);
+            }
+        }
     }
 
     fn app_handle_input_event(
