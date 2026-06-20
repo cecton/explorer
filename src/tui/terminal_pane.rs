@@ -198,6 +198,9 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 })
                 | InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Enter),
+                })
+                | InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::Character('q'),
                 }) => {
                     global_data.state.terminal_grabbed = true;
                     pane.scroll_offset = 0;
