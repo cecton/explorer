@@ -419,8 +419,9 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                         key: Key::Character('c'),
                         mask,
                     }) if mask == ModifierKeysMask::new().with_ctrl() => {
-                        self.command_mode = None;
-                        global_data.state.command_mode_active = false;
+                        if let Some(query) = &mut self.command_mode {
+                            query.clear();
+                        }
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     InputEvent::Keyboard(KeyPress::WithModifiers {

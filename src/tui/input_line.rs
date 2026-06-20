@@ -90,6 +90,19 @@ impl InputLine {
                     },
             }) => self.kill_to_end(query),
             InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('c'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) => {
+                query.clear();
+                self.cursor = 0;
+                true
+            }
+            InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::Character('u'),
                 mask:
                     ModifierKeysMask {

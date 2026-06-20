@@ -101,14 +101,6 @@ impl Component<AppState, AppSignal> for ThemePickerComponent {
         match &input_event {
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Esc),
-            })
-            | InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('c'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        ..
-                    },
             }) => {
                 let state = &mut global_data.state;
                 state.theme = state.saved_theme.clone();

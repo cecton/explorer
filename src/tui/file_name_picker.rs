@@ -222,19 +222,6 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                 state.mark_session_dirty();
                 return Ok(EventPropagation::ConsumedRender);
             }
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('c'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        ..
-                    },
-            }) => {
-                let state = &mut global_data.state;
-                state.pane_manager.remove_window(&Window::FileNamePicker);
-                state.file_name_picker.reset();
-                return Ok(EventPropagation::ConsumedRender);
-            }
             _ => {}
         }
 
