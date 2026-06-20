@@ -382,47 +382,19 @@ impl App for AppMain {
         let files = Arc::clone(&self.files);
         let root = self.root.clone();
 
-        match LSP_RRT.try_subscribe(lsp::LspConfig {
+        if let Err(e) = LSP_RRT.try_subscribe(lsp::LspConfig {
             root: root.clone(),
             files: Arc::clone(&files),
+            app_tx: notify_tx.clone(),
         }) {
-            Ok(guard) => {
-                let lsp_notify = notify_tx.clone();
-                // LSP uses blocking send().await — natural backpressure
-                // via the bounded channel (capacity 1000). No explicit
-                // backoff needed; the task blocks when the channel is
-                // full and resumes once the main thread drains it.
-                tokio::spawn(async move {
-                    let mut rx = guard.receiver;
-                    while let Ok(r3bl_tui::RRTEvent::Worker(_)) = rx.recv().await {
-                        let _ = lsp_notify
-                            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::Noop,
-                            ))
-                            .await;
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::warn!("LSP worker failed to start: {e}");
-            }
+            tracing::warn!("LSP worker failed to start: {e}");
         }
 
-        match WATCHER_RRT.try_subscribe(root) {
-            Ok(guard) => {
-                let watcher_notify = notify_tx.clone();
-                tokio::spawn(async move {
-                    let mut rx = guard.receiver;
-                    while let Ok(r3bl_tui::RRTEvent::Worker(signal)) = rx.recv().await {
-                        let _ = watcher_notify
-                            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
-                            .await;
-                    }
-                });
-            }
-            Err(e) => {
-                tracing::warn!("watcher failed to start: {e}");
-            }
+        if let Err(e) = WATCHER_RRT.try_subscribe(crate::watcher::WatcherConfig {
+            root,
+            app_tx: notify_tx.clone(),
+        }) {
+            tracing::warn!("watcher failed to start: {e}");
         }
 
         // Global 1s refresh timer — catches any final render state that the

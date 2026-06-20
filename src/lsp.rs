@@ -1,4 +1,5 @@
 use crate::loader::LoadedFile;
+use crate::tui::AppSignal;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use lsp_types::notification::{DidOpenTextDocument, Initialized, Notification};
@@ -13,17 +14,20 @@ use lsp_types::{
     TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem, TokenFormat, Uri,
     WorkDoneProgressParams, WorkspaceFolder,
 };
-use r3bl_tui::{Continuation, RRT, RRTEvent, RRTSoftwareInterrupt, RRTWorker, RestartPolicy};
+use r3bl_tui::core::ThreadState;
+use r3bl_tui::{
+    Continuation, RRT, RRTEvent, RRTSoftwareInterrupt, RRTWorker, RestartPolicy,
+    TerminalWindowMainThreadSignal,
+};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
-use std::sync::mpsc;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-use tokio::sync::broadcast::Sender;
+use tokio::sync::mpsc as tokio_mpsc;
 
 pub type ColoredSpan = (usize, usize, &'static str);
 pub type ColoredLine = Vec<ColoredSpan>;
@@ -58,14 +62,6 @@ struct RpcResponse {
     result: Option<Value>,
 }
 
-// ── Event broadcast by LspWorker to async consumers ──────────────────────────
-
-#[derive(Clone, Debug)]
-pub enum LspEvent {
-    /// Semantic tokens for one or more files were updated. Consumers should re-render.
-    TokensUpdated,
-}
-
 // ── Interrupt ─────────────────────────────────────────────────────────────────
 
 #[derive(Debug)]
@@ -85,6 +81,7 @@ pub static LSP_RRT: RRT<LspWorker> = RRT::new();
 pub struct LspConfig {
     pub root: Utf8PathBuf,
     pub files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
+    pub app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
 }
 
 impl Debug for LspConfig {
@@ -108,7 +105,8 @@ pub struct LspWorker {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     stdout_fd: std::os::unix::io::RawFd,
-    request_rx: mpsc::Receiver<usize>,
+    input_receiver: tokio::sync::broadcast::Receiver<usize>,
+    app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
     files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     req_state: TokenRequestState,
     warmup_queue: VecDeque<usize>,
@@ -133,21 +131,15 @@ impl Debug for LspWorker {
 
 impl RRTWorker for LspWorker {
     type Config = LspConfig;
-    type Output = LspEvent;
+    type Input = usize;
+    type Output = ();
     type Interrupt = LspInterrupt;
 
     fn create_and_register_os_sources(
         config: Self::Config,
-        _receiver: tokio::sync::broadcast::Receiver<Self::Input>,
+        input_receiver: tokio::sync::broadcast::Receiver<Self::Input>,
     ) -> miette::Result<(Self, Self::Interrupt)> {
-        let _ = REQUEST_SLOT.get_or_init(|| std::sync::Mutex::new(None));
-        let (tx, request_rx) = mpsc::sync_channel(64);
-        *REQUEST_SLOT
-            .get()
-            .unwrap()
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = Some(tx.clone());
-        drain_request_buffer(&tx);
+        let app_tx = config.app_tx.clone();
 
         let mut child = Command::new("rust-analyzer")
             .stdin(Stdio::piped())
@@ -287,7 +279,8 @@ impl RRTWorker for LspWorker {
                 stdin,
                 reader,
                 stdout_fd,
-                request_rx,
+                input_receiver,
+                app_tx,
                 files,
                 req_state: TokenRequestState {
                     next_id: 1,
@@ -310,10 +303,10 @@ impl RRTWorker for LspWorker {
 
     fn block_until_ready_then_dispatch(
         &mut self,
-        sender: &Sender<RRTEvent<Self::Output>>,
+        _sender: &tokio::sync::broadcast::Sender<RRTEvent<Self::Output>>,
     ) -> Continuation {
         // Drain any user-requested file indices first (non-blocking).
-        while let Ok(file_idx) = self.request_rx.try_recv() {
+        while let Ok(file_idx) = self.input_receiver.try_recv() {
             tracing::debug!("user request: file_idx={}", file_idx);
             let snapshot = self.files.load();
             let file = &snapshot[file_idx];
@@ -468,8 +461,11 @@ impl RRTWorker for LspWorker {
         }
 
         if notify
-            && sender
-                .send(RRTEvent::Worker(LspEvent::TokensUpdated))
+            && self
+                .app_tx
+                .try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                    AppSignal::Noop,
+                ))
                 .is_err()
         {
             return Continuation::Stop;
@@ -479,30 +475,25 @@ impl RRTWorker for LspWorker {
     }
 }
 
-// ── Shared sender slot (survives restarts) ────────────────────────────────────
+// ── Send file requests via the RRT input channel ─────────────────────────────
 
-static REQUEST_SLOT: OnceLock<std::sync::Mutex<Option<mpsc::SyncSender<usize>>>> = OnceLock::new();
-
-/// Buffer for file indices requested before the LSP worker's REQUEST_SLOT is populated.
-/// Drained atomically on the first successful send.
+/// Buffer for file indices requested before the LSP worker is in Running state.
 static FILE_REQUEST_BUFFER: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
 
-fn drain_request_buffer(tx: &mpsc::SyncSender<usize>) {
+fn drain_request_buffer(tx: &tokio::sync::broadcast::Sender<usize>) {
     if let Ok(mut buf) = FILE_REQUEST_BUFFER.lock() {
         for &idx in buf.iter() {
-            let _ = tx.try_send(idx);
+            let _ = tx.send(idx);
         }
         buf.clear();
     }
 }
 
 pub fn send_file_request(file_idx: usize) {
-    if let Some(slot) = REQUEST_SLOT.get()
-        && let Ok(guard) = slot.lock()
-        && let Some(ref tx) = *guard
-    {
+    let guard = LSP_RRT.shared_state.lock();
+    if let ThreadState::Running(_, tx) = &*guard {
         drain_request_buffer(tx);
-        let _ = tx.try_send(file_idx);
+        let _ = tx.send(file_idx);
     } else {
         let _ = FILE_REQUEST_BUFFER.lock().map(|mut buf| buf.push(file_idx));
     }

@@ -1,12 +1,15 @@
 use crate::tui::AppSignal;
 use camino::Utf8PathBuf;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use r3bl_tui::{Continuation, RRT, RRTEvent, RRTSoftwareInterrupt, RRTWorker, RestartPolicy};
+use r3bl_tui::{
+    Continuation, RRT, RRTEvent, RRTSoftwareInterrupt, RRTWorker, RestartPolicy,
+    TerminalWindowMainThreadSignal,
+};
 use std::collections::HashMap;
 use std::fmt::Debug;
 use std::sync::mpsc;
 use std::time::Duration;
-use tokio::sync::broadcast::Sender;
+use tokio::sync::mpsc as tokio_mpsc;
 
 const DEBOUNCE: Duration = Duration::from_millis(50);
 
@@ -33,8 +36,23 @@ impl RRTSoftwareInterrupt for NoOpInterrupt {
     fn trigger_software_interrupt(&self) {}
 }
 
+#[derive(Clone)]
+pub struct WatcherConfig {
+    pub root: Utf8PathBuf,
+    pub app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+}
+
+impl Debug for WatcherConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("WatcherConfig")
+            .field("root", &self.root)
+            .finish()
+    }
+}
+
 pub struct WatcherWorker {
     root: Utf8PathBuf,
+    app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
     rx: mpsc::Receiver<notify::Result<notify::Event>>,
     pending: HashMap<Utf8PathBuf, RawKind>,
     // Held to keep the watcher alive for the duration of the worker.
@@ -50,7 +68,7 @@ impl Debug for WatcherWorker {
 }
 
 impl RRTWorker for WatcherWorker {
-    type Config = Utf8PathBuf;
+    type Config = WatcherConfig;
     type Output = AppSignal;
     type Interrupt = NoOpInterrupt;
 
@@ -58,7 +76,7 @@ impl RRTWorker for WatcherWorker {
         config: Self::Config,
         _receiver: tokio::sync::broadcast::Receiver<Self::Input>,
     ) -> miette::Result<(Self, Self::Interrupt)> {
-        let root = config;
+        let WatcherConfig { root, app_tx } = config;
 
         let (tx, rx) = mpsc::channel();
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())
@@ -70,6 +88,7 @@ impl RRTWorker for WatcherWorker {
         Ok((
             Self {
                 root,
+                app_tx,
                 rx,
                 pending: HashMap::new(),
                 _watcher: watcher,
@@ -84,7 +103,7 @@ impl RRTWorker for WatcherWorker {
 
     fn block_until_ready_then_dispatch(
         &mut self,
-        sender: &Sender<RRTEvent<Self::Output>>,
+        _sender: &tokio::sync::broadcast::Sender<RRTEvent<Self::Output>>,
     ) -> Continuation {
         match self.rx.recv_timeout(DEBOUNCE) {
             Ok(Ok(event)) => {
@@ -133,7 +152,11 @@ impl RRTWorker for WatcherWorker {
                     }
                 }
                 let signal = AppSignal::FilesChanged(std::sync::Arc::new(batch));
-                if sender.send(RRTEvent::Worker(signal)).is_err() {
+                if self
+                    .app_tx
+                    .try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
+                    .is_err()
+                {
                     return Continuation::Stop;
                 }
                 Continuation::Continue
