@@ -763,7 +763,21 @@ impl App for AppMain {
                     if global_data.state.pane_manager.focused_window.as_ref() != Some(&slot.window)
                     {
                         global_data.state.pane_manager.focused_window = Some(slot.window);
-                        sync_terminal_grabbed(&mut global_data.state);
+                        // Grab state on mouse focus change depends on pane type + scroll.
+                        match slot.window {
+                            Window::Terminal(id) => {
+                                let scrolled = global_data
+                                    .state
+                                    .terminal_panes
+                                    .get(&id)
+                                    .and_then(|p| p.lock().ok())
+                                    .is_some_and(|p| p.scroll_offset > 0);
+                                global_data.state.terminal_grabbed = !scrolled;
+                            }
+                            _ => {
+                                global_data.state.terminal_grabbed = false;
+                            }
+                        }
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     break;
