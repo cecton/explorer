@@ -26,7 +26,7 @@ Source is organized as:
 - `src/config.rs` — KDL configuration file parsing (theme, future fields)
 - `src/loader.rs` — parallel file walking and `LoadedFile` construction
 - `src/session.rs` — session save/restore (pane stack, terminals, highlights)
-- `src/lsp.rs` — LSP client (JSON-RPC over stdio)
+- `src/lsp.rs` — LSP client (JSON-RPC over stdio); public API: `send_file_request`, `health_check`, `try_drain_pending_requests`, `LspHealth` enum
 - `src/watcher.rs` — filesystem watcher via `notify`; debounces events into `BatchedWatchEvent` and broadcasts via `WATCHER_RRT`
 - `src/tui/mod.rs` — module declarations
 - `src/tui/title_row.rs` — `TitleRow` trait, `render_pane_title` utility, `title_bar_colors`
@@ -157,6 +157,7 @@ Planned feature areas and their likely dependencies:
 - Group `use` statements: standard library first, then external crates, then local modules.
 - Prefer importing the type directly over aliasing (`use camino::Utf8PathBuf` not `use camino::Utf8PathBuf as UtfBuf`).
 - Glob imports are fine when they reduce boilerplate for large, stable external APIs (e.g. `use r3bl_tui::*;` in a module that re-exports to its children).
+- Function-scoped `use` is fine for rarely-used imports — no need to hoist them to module level.
 
 ### Paths
 

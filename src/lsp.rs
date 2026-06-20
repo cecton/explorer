@@ -19,12 +19,15 @@ use r3bl_tui::{
     Continuation, RRT, RRTEvent, RRTSoftwareInterrupt, RRTWorker, RestartPolicy,
     TerminalWindowMainThreadSignal,
 };
+use rustix::event::{PollFd, PollFlags, poll as rpoll};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::io::{BufRead, BufReader, Read, Write};
+use std::os::unix::io::AsFd;
 use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -104,16 +107,15 @@ pub struct LspWorker {
     child: Child,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
-    stdout_fd: std::os::unix::io::RawFd,
     input_receiver: tokio::sync::broadcast::Receiver<usize>,
     app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
     files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     req_state: TokenRequestState,
     warmup_queue: VecDeque<usize>,
-    warmup_remaining: usize,
     warmup_start: Instant,
     warmup_retries: HashMap<usize, u8>,
     supports_range: bool,
+    dispatch_count: u64,
 }
 
 impl Drop for LspWorker {
@@ -150,9 +152,6 @@ impl RRTWorker for LspWorker {
 
         let mut stdin = child.stdin.take().expect("stdin piped");
         let stdout = child.stdout.take().expect("stdout piped");
-
-        use std::os::unix::io::AsRawFd;
-        let stdout_fd = stdout.as_raw_fd();
         let mut reader = BufReader::new(stdout);
 
         let root = &config.root;
@@ -270,7 +269,6 @@ impl RRTWorker for LspWorker {
                 .map(|(i, _)| i)
                 .collect()
         };
-        let warmup_remaining = warmup_queue.len();
         let warmup_start = Instant::now();
 
         Ok((
@@ -278,7 +276,6 @@ impl RRTWorker for LspWorker {
                 child,
                 stdin,
                 reader,
-                stdout_fd,
                 input_receiver,
                 app_tx,
                 files,
@@ -288,10 +285,10 @@ impl RRTWorker for LspWorker {
                     opened: HashSet::new(),
                 },
                 warmup_queue,
-                warmup_remaining,
                 warmup_start,
                 warmup_retries: HashMap::new(),
                 supports_range,
+                dispatch_count: 0,
             },
             LspInterrupt,
         ))
@@ -305,32 +302,96 @@ impl RRTWorker for LspWorker {
         &mut self,
         _sender: &tokio::sync::broadcast::Sender<RRTEvent<Self::Output>>,
     ) -> Continuation {
+        self.dispatch_count += 1;
+        tracing::trace!("LSP: dispatch enter #{}", self.dispatch_count);
         // Drain any user-requested file indices first (non-blocking).
-        while let Ok(file_idx) = self.input_receiver.try_recv() {
-            tracing::debug!("user request: file_idx={}", file_idx);
-            let snapshot = self.files.load();
-            let file = &snapshot[file_idx];
-            if file.path.extension() == Some("rs")
-                && request_tokens(
-                    &mut self.stdin,
-                    file,
-                    file_idx,
-                    self.supports_range,
-                    &mut self.req_state,
-                    false,
-                )
-                .is_err()
-            {
-                return Continuation::Restart;
+        loop {
+            match self.input_receiver.try_recv() {
+                Ok(file_idx) => {
+                    let snapshot = self.files.load();
+                    let file = &snapshot[file_idx];
+                    tracing::debug!(
+                        "LSP: user request file_idx={} path={} ext={:?}",
+                        file_idx,
+                        file.path,
+                        file.path.extension()
+                    );
+                    if file.removed.load(Ordering::Relaxed) {
+                        if close_file(&mut self.stdin, file, file_idx, &mut self.req_state).is_err()
+                        {
+                            tracing::info!(
+                                "LSP: dispatch -> Restart (close_file failed for file_idx={})",
+                                file_idx
+                            );
+                            return Continuation::Restart;
+                        }
+                    } else if file.path.extension() == Some("rs")
+                        && request_tokens(
+                            &mut self.stdin,
+                            file,
+                            file_idx,
+                            self.supports_range,
+                            &mut self.req_state,
+                            false,
+                        )
+                        .is_err()
+                    {
+                        tracing::info!(
+                            "LSP: dispatch -> Restart (request_tokens failed for file_idx={})",
+                            file_idx
+                        );
+                        return Continuation::Restart;
+                    }
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
+                    tracing::warn!("LSP: input_receiver lagged by {} messages", n);
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
+                    tracing::info!("LSP: dispatch -> Stop (input_receiver closed)");
+                    return Continuation::Stop;
+                }
+                Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
             }
         }
 
+        // Force-complete warmup after 60s to prevent a stuck queue
+        // if the server fails to respond to a warmup request.
+        if !self.warmup_queue.is_empty()
+            && self.warmup_start.elapsed() > std::time::Duration::from_secs(60)
+        {
+            tracing::warn!("warmup timed out, forcing completion");
+            self.warmup_queue.clear();
+            self.warmup_retries.clear();
+        }
+
         // Send one warmup file if the queue is non-empty.
-        if let Some(file_idx) = self.warmup_queue.pop_front() {
+        // Before sending, drain one pending response if available to prevent
+        // pipe deadlock (filling stdout pipe → ra blocks → stdin fills → we block).
+        if !self.warmup_queue.is_empty() {
+            if !self.reader.buffer().is_empty()
+                || poll_readable(self.reader.get_ref(), std::time::Duration::from_millis(10))
+            {
+                let msg = match recv_msg(&mut self.reader) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        tracing::info!(
+                            "LSP: dispatch -> Restart (warmup drain recv_msg error: {:?})",
+                            e.kind(),
+                        );
+                        return Continuation::Restart;
+                    }
+                };
+                return self.handle_recv_msg(msg);
+            }
+
+            let file_idx = self
+                .warmup_queue
+                .pop_front()
+                .expect("just checked non-empty");
             let snapshot = self.files.load();
             let file = &snapshot[file_idx];
             tracing::debug!(
-                "warmup send: file_idx={} path={} queue_remaining={}",
+                "LSP: warmup send file_idx={} path={} queue_remaining={}",
                 file_idx,
                 file.path,
                 self.warmup_queue.len()
@@ -346,40 +407,77 @@ impl RRTWorker for LspWorker {
             .is_err()
             {
                 let _ = self.child.kill();
+                tracing::info!(
+                    "LSP: dispatch -> Restart (warmup request_tokens failed for file_idx={})",
+                    file_idx
+                );
                 return Continuation::Restart;
             }
+            tracing::debug!(
+                "LSP: warmup send OK file_idx={} queue_remaining={}",
+                file_idx,
+                self.warmup_queue.len()
+            );
         }
 
         // Poll stdout for up to READ_TIMEOUT before attempting a blocking read.
-        if !poll_readable(self.stdout_fd, READ_TIMEOUT) {
+        let poll_ret = poll_readable(self.reader.get_ref(), READ_TIMEOUT);
+        tracing::trace!(
+            "LSP: poll ret={} pending={} warmup_queue={}",
+            poll_ret,
+            self.req_state.pending.len(),
+            self.warmup_queue.len(),
+        );
+        if !poll_ret {
             return Continuation::Continue;
         }
 
         // Block on stdout for up to READ_TIMEOUT, then return.
         let msg = match recv_msg(&mut self.reader) {
             Ok(m) => m,
-            Err(_) => {
+            Err(e) => {
+                tracing::info!(
+                    "LSP: dispatch -> Restart (recv_msg error: {:?}, pending={})",
+                    e.kind(),
+                    self.req_state.pending.len()
+                );
                 return Continuation::Restart;
             }
         };
 
+        self.handle_recv_msg(msg)
+    }
+}
+
+impl LspWorker {
+    fn handle_recv_msg(&mut self, msg: RpcResponse) -> Continuation {
         let method = msg.method.as_deref().unwrap_or("");
         let has_id = msg.id.is_some();
         tracing::debug!(
-            "recv: method={:?} has_id={} warmup_remaining={}",
+            "recv: method={:?} has_id={} warmup_queue={}",
             method,
             has_id,
-            self.warmup_remaining
+            self.warmup_queue.len()
         );
 
         // Reply to server-initiated requests (e.g. window/workDoneProgress/create).
         if msg.method.is_some()
             && let Some(ref id) = msg.id
         {
-            tracing::debug!("replying to server request: method={:?} id={}", method, id);
-            let reply = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null});
-            if send_msg(&mut self.stdin, &reply).is_err() {
-                return Continuation::Restart;
+            match method {
+                "window/workDoneProgress/create" => {
+                    tracing::debug!("replying to server request: method={:?} id={}", method, id);
+                    let reply = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null});
+                    if send_msg(&mut self.stdin, &reply).is_err() {
+                        tracing::info!(
+                            "LSP: handle_recv_msg -> Restart (reply to server request failed)"
+                        );
+                        return Continuation::Restart;
+                    }
+                }
+                _ => {
+                    tracing::warn!("unhandled server request: method={:?} id={:?}", method, id);
+                }
             }
         }
 
@@ -392,13 +490,12 @@ impl RRTWorker for LspWorker {
                 msg.result.and_then(|v| serde_json::from_value(v).ok());
             let has_data = tokens.is_some();
             tracing::debug!(
-                "token response: id={} file_idx={} is_range={} is_warmup={} has_data={} warmup_remaining={}",
+                "LSP: token response id={} file_idx={} is_range={} is_warmup={} has_data={}",
                 id,
                 file_idx,
                 is_range,
                 is_warmup,
                 has_data,
-                self.warmup_remaining
             );
 
             if let Some(SemanticTokens { data, .. }) = tokens {
@@ -425,17 +522,20 @@ impl RRTWorker for LspWorker {
                     guard.len() != lines.len()
                 };
                 if should_write {
+                    let line_count = lines.len();
                     *guard = lines;
                     drop(guard);
                     notify = true;
-                }
-                if is_warmup && self.warmup_remaining > 0 {
-                    self.warmup_remaining -= 1;
-                    if self.warmup_remaining == 0 {
-                        let elapsed = self.warmup_start.elapsed().as_millis();
-                        notify = true;
-                        tracing::info!("warmup complete: elapsed={}ms", elapsed);
-                    }
+                    tracing::debug!(
+                        "LSP: wrote colored_lines for file_idx={} ({} lines)",
+                        file_idx,
+                        line_count
+                    );
+                } else {
+                    tracing::debug!(
+                        "LSP: skip write for file_idx={} (should_write=false)",
+                        file_idx
+                    );
                 }
             } else if is_warmup {
                 let retries = self.warmup_retries.entry(file_idx).or_insert(0);
@@ -445,30 +545,16 @@ impl RRTWorker for LspWorker {
                     self.warmup_queue.push_back(file_idx);
                 } else {
                     tracing::debug!("warmup give up: file_idx={}", file_idx);
-                    if self.warmup_remaining > 0 {
-                        self.warmup_remaining -= 1;
-                        if self.warmup_remaining == 0 {
-                            let elapsed = self.warmup_start.elapsed().as_millis();
-                            notify = true;
-                            tracing::info!(
-                                "warmup complete (with gave-up files): elapsed={}ms",
-                                elapsed
-                            );
-                        }
-                    }
                 }
             }
         }
 
-        if notify
-            && self
+        if notify {
+            let _ = self
                 .app_tx
                 .try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
                     AppSignal::Noop,
-                ))
-                .is_err()
-        {
-            return Continuation::Stop;
+                ));
         }
 
         Continuation::Continue
@@ -482,35 +568,128 @@ static FILE_REQUEST_BUFFER: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new
 
 fn drain_request_buffer(tx: &tokio::sync::broadcast::Sender<usize>) {
     if let Ok(mut buf) = FILE_REQUEST_BUFFER.lock() {
-        for &idx in buf.iter() {
-            let _ = tx.send(idx);
-        }
-        buf.clear();
+        buf.retain(|&idx| tx.send(idx).is_err());
     }
 }
 
+fn buffer_file_request(file_idx: usize) {
+    const MAX: usize = 10_000;
+    let _ = FILE_REQUEST_BUFFER.lock().map(|mut buf| {
+        if buf.len() >= MAX {
+            tracing::warn!(
+                "LSP: request buffer full ({} entries), dropping file_idx={}",
+                MAX,
+                file_idx
+            );
+        } else {
+            buf.push(file_idx);
+        }
+    });
+}
+
 pub fn send_file_request(file_idx: usize) {
+    let generation = LSP_RRT.get_thread_generation();
+    let output_receivers = LSP_RRT.get_receiver_count();
+    let guard = LSP_RRT.shared_state.lock();
+    match &*guard {
+        ThreadState::Running(_, tx) => {
+            drain_request_buffer(tx);
+            let input_receivers = tx.receiver_count();
+            match tx.send(file_idx) {
+                Ok(0) => {
+                    tracing::warn!(
+                        "LSP: send_file_request({}) sent to 0 receivers (input={} output={} gen={})",
+                        file_idx,
+                        input_receivers,
+                        output_receivers,
+                        generation
+                    );
+                    buffer_file_request(file_idx);
+                }
+                Ok(n) => {
+                    tracing::debug!(
+                        "LSP: send_file_request({}) sent to {} receivers (gen={})",
+                        file_idx,
+                        n,
+                        generation
+                    );
+                }
+                Err(e) => {
+                    tracing::error!(
+                        "LSP: send_file_request({}) send error: {:?} gen={}",
+                        file_idx,
+                        e,
+                        generation
+                    );
+                    buffer_file_request(file_idx);
+                }
+            }
+        }
+        state => {
+            tracing::warn!(
+                "LSP: send_file_request({}) -> Buffered state={:?} gen={} output_receivers={}",
+                file_idx,
+                state,
+                generation,
+                output_receivers
+            );
+            buffer_file_request(file_idx);
+        }
+    }
+}
+
+/// Health of the LSP worker, returned by [`health_check`].
+#[derive(Debug)]
+pub enum LspHealth {
+    Running {
+        input_receivers: usize,
+        generation: u8,
+    },
+    NotRunning,
+}
+
+/// Returns the current health of the LSP worker.
+/// Call this periodically to detect silent worker exit.
+pub fn health_check() -> LspHealth {
+    let generation = LSP_RRT.get_thread_generation();
+    let guard = LSP_RRT.shared_state.lock();
+    match &*guard {
+        ThreadState::Running(_, tx) => LspHealth::Running {
+            input_receivers: tx.receiver_count(),
+            generation,
+        },
+        _ => LspHealth::NotRunning,
+    }
+}
+
+/// Drain the file request buffer if the worker is running.
+/// Safe to call from the main thread on any tick.
+pub fn try_drain_pending_requests() {
     let guard = LSP_RRT.shared_state.lock();
     if let ThreadState::Running(_, tx) = &*guard {
         drain_request_buffer(tx);
-        let _ = tx.send(file_idx);
-    } else {
-        let _ = FILE_REQUEST_BUFFER.lock().map(|mut buf| buf.push(file_idx));
     }
 }
 
 // ── I/O helpers ───────────────────────────────────────────────────────────────
 
 /// Returns true if the fd has data available within the timeout.
-fn poll_readable(fd: std::os::unix::io::RawFd, timeout: std::time::Duration) -> bool {
-    let mut pfd = libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    };
+/// Retries on EINTR (signal interruption).
+fn poll_readable(fd: &impl AsFd, timeout: std::time::Duration) -> bool {
+    use rustix::io::Errno;
+    let mut pollfds = [PollFd::new(fd, PollFlags::IN)];
     let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
-    let ret = unsafe { libc::poll(&mut pfd, 1, ms) };
-    ret > 0 && (pfd.revents & (libc::POLLIN | libc::POLLHUP | libc::POLLERR)) != 0
+    loop {
+        match rpoll(&mut pollfds, ms) {
+            Ok(_) => {
+                return pollfds[0]
+                    .revents()
+                    .intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR);
+            }
+            Err(Errno::INTR) => continue,
+            Err(_) => return false,
+        }
+    }
 }
 
 fn send_msg<T: Serialize>(stdin: &mut ChildStdin, msg: &T) -> std::io::Result<()> {
@@ -530,17 +709,94 @@ fn recv_msg(reader: &mut BufReader<ChildStdout>) -> std::io::Result<RpcResponse>
         if trimmed.is_empty() {
             break;
         }
-        if let Some(val) = trimmed.strip_prefix("Content-Length: ") {
+        if let Some(val) = trimmed
+            .strip_prefix("Content-Length: ")
+            .or_else(|| trimmed.strip_prefix("content-length: "))
+        {
             content_length = val.trim().parse().unwrap_or(0);
         }
     }
+    if content_length == 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "zero content length",
+        ));
+    }
+    // Read body in chunks. BufReader may already have the body buffered
+    // (from the read_line calls above), so check buffer before polling fd.
     let mut buf = vec![0u8; content_length];
-    reader.read_exact(&mut buf)?;
+    let mut read = 0usize;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+    while read < content_length {
+        if std::time::Instant::now() > deadline {
+            tracing::info!(
+                "LSP: recv_msg body read timeout after {} of {} bytes",
+                read,
+                content_length,
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "body read total timeout",
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+        if reader.buffer().is_empty() && !poll_readable(reader.get_ref(), remaining) {
+            tracing::info!(
+                "LSP: recv_msg body chunk timeout after {} of {} bytes",
+                read,
+                content_length,
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "body read chunk timeout",
+            ));
+        }
+        let n = reader.read(&mut buf[read..])?;
+        if n == 0 {
+            tracing::info!(
+                "LSP: recv_msg body EOF after {} of {} bytes",
+                read,
+                content_length,
+            );
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::UnexpectedEof,
+                "body EOF",
+            ));
+        }
+        read += n;
+    }
     serde_json::from_slice(&buf)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 // ── Token helpers ─────────────────────────────────────────────────────────────
+
+/// Send didClose to the LSP server for a file that was removed.
+/// Safe to call even if the file was never opened with the server.
+fn close_file(
+    stdin: &mut ChildStdin,
+    file: &LoadedFile,
+    file_idx: usize,
+    state: &mut TokenRequestState,
+) -> std::io::Result<()> {
+    if !state.opened.contains(&file_idx) {
+        return Ok(());
+    }
+    let uri: Uri = format!("file://{}", file.path)
+        .parse()
+        .expect("valid file URI");
+    tracing::debug!("LSP: didClose for file_idx={} path={}", file_idx, file.path);
+    let close = RpcNotification {
+        jsonrpc: "2.0",
+        method: "textDocument/didClose",
+        params: serde_json::json!({
+            "textDocument": { "uri": uri }
+        }),
+    };
+    send_msg(stdin, &close)?;
+    state.opened.remove(&file_idx);
+    Ok(())
+}
 
 fn request_tokens(
     stdin: &mut ChildStdin,
@@ -554,13 +810,13 @@ fn request_tokens(
         .parse()
         .expect("valid file URI");
 
-    let total_lines = file
-        .data
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .content
-        .lines()
-        .count();
+    let (total_lines, content) = {
+        let guard = file
+            .data
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        (guard.content.lines().count(), guard.content.clone())
+    };
     let colored_len = file
         .colored_lines
         .lock()
@@ -570,13 +826,25 @@ fn request_tokens(
         return Ok(());
     }
 
+    if !is_warmup && state.opened.contains(&file_idx) && colored_len == 0 {
+        tracing::debug!("LSP: didClose for file_idx={}", file_idx);
+        let close = RpcNotification {
+            jsonrpc: "2.0",
+            method: "textDocument/didClose",
+            params: serde_json::json!({
+                "textDocument": { "uri": uri }
+            }),
+        };
+        send_msg(stdin, &close)?;
+        state.opened.remove(&file_idx);
+    }
+
     if !state.opened.contains(&file_idx) {
-        let content = file
-            .data
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner())
-            .content
-            .clone();
+        tracing::debug!(
+            "LSP: didOpen for file_idx={} ({} bytes)",
+            file_idx,
+            content.len()
+        );
         let did_open = RpcNotification {
             jsonrpc: "2.0",
             method: DidOpenTextDocument::METHOD,
@@ -597,6 +865,12 @@ fn request_tokens(
         let end_line = RANGE_LINES.min(total_lines) as u32;
         let range_id = state.next_id;
         state.next_id += 1;
+        tracing::debug!(
+            "LSP: range request id={} file_idx={} lines=0..{}",
+            range_id,
+            file_idx,
+            end_line
+        );
         let range_req = RpcRequest {
             jsonrpc: "2.0",
             id: range_id,
@@ -627,6 +901,7 @@ fn request_tokens(
 
     let full_id = state.next_id;
     state.next_id += 1;
+    tracing::debug!("LSP: full request id={} file_idx={}", full_id, file_idx);
     let full_req = RpcRequest {
         jsonrpc: "2.0",
         id: full_id,

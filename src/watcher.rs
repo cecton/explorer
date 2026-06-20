@@ -84,6 +84,7 @@ impl RRTWorker for WatcherWorker {
         watcher
             .watch(root.as_std_path(), RecursiveMode::Recursive)
             .map_err(|e| miette::miette!("notify watch error: {e}"))?;
+        tracing::info!("watcher created: root={}", root);
 
         Ok((
             Self {
@@ -125,16 +126,27 @@ impl RRTWorker for WatcherWorker {
                         continue;
                     }
                     let entry = self.pending.entry(utf8).or_insert(kind);
+                    // Created+Removed or Removed+Created within one debounce window
+                    // means an atomic replace (e.g. editor save strategy); treat as Modified.
                     match (*entry, kind) {
+                        (RawKind::Created, RawKind::Removed) => *entry = RawKind::Modified,
+                        (RawKind::Removed, RawKind::Created) => *entry = RawKind::Modified,
                         (_, RawKind::Removed) => *entry = RawKind::Removed,
                         (RawKind::Created, RawKind::Modified) => {}
-                        (RawKind::Modified, RawKind::Created) => *entry = RawKind::Created,
+                        (RawKind::Modified, RawKind::Created) => {}
                         _ => *entry = kind,
                     }
                 }
                 Continuation::Continue
             }
-            Ok(Err(_)) | Err(mpsc::RecvTimeoutError::Disconnected) => Continuation::Restart,
+            Ok(Err(e)) => {
+                tracing::warn!("watcher: notify error: {:?}", e);
+                Continuation::Restart
+            }
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                tracing::warn!("watcher: channel disconnected, restarting");
+                Continuation::Restart
+            }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if self.pending.is_empty() {
                     return Continuation::Continue;
@@ -151,12 +163,19 @@ impl RRTWorker for WatcherWorker {
                         RawKind::Removed => batch.removed.push(path),
                     }
                 }
+                tracing::debug!(
+                    "watcher: dispatching batch: {} modified, {} created, {} removed",
+                    batch.modified.len(),
+                    batch.created.len(),
+                    batch.removed.len()
+                );
                 let signal = AppSignal::FilesChanged(std::sync::Arc::new(batch));
                 if self
                     .app_tx
-                    .try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
+                    .blocking_send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
                     .is_err()
                 {
+                    tracing::warn!("watcher: app_tx closed, stopping");
                     return Continuation::Stop;
                 }
                 Continuation::Continue

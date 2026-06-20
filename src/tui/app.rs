@@ -4,9 +4,10 @@ use crate::session::save_session;
 use crate::tui::pane_component::PaneComponent;
 use crate::tui::panes_renderer::PanesRenderer;
 use crate::tui::*;
-use crate::watcher::WATCHER_RRT;
+use crate::watcher::{WATCHER_RRT, WatcherWorker};
 use arc_swap::ArcSwap;
 use camino::{Utf8Path, Utf8PathBuf};
+use r3bl_tui::SubscriberGuard;
 use r3bl_tui::core::osc::OscEvent;
 use r3bl_tui::core::pty::{
     CursorKeyMode, DefaultPtySessionConfig, PtyInputEvent, PtyOutputEvent, PtySessionBuilder,
@@ -83,6 +84,10 @@ pub struct AppMain {
     exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
     terminal_event_tx: mpsc::UnboundedSender<(usize, PtyOutputEvent)>,
     terminal_event_rx: mpsc::UnboundedReceiver<(usize, PtyOutputEvent)>,
+    lsp_guard: Option<SubscriberGuard<crate::lsp::LspWorker>>,
+    lsp_last_gen: u8,
+    lsp_health_skip: u32,
+    watcher_guard: Option<SubscriberGuard<WatcherWorker>>,
 }
 
 impl AppMain {
@@ -102,6 +107,10 @@ impl AppMain {
             exit_tx,
             terminal_event_tx,
             terminal_event_rx,
+            lsp_guard: None,
+            lsp_last_gen: 0,
+            lsp_health_skip: 0,
+            watcher_guard: None,
         })
     }
 
@@ -382,19 +391,27 @@ impl App for AppMain {
         let files = Arc::clone(&self.files);
         let root = self.root.clone();
 
-        if let Err(e) = LSP_RRT.try_subscribe(lsp::LspConfig {
+        match LSP_RRT.try_subscribe(lsp::LspConfig {
             root: root.clone(),
             files: Arc::clone(&files),
             app_tx: notify_tx.clone(),
         }) {
-            tracing::warn!("LSP worker failed to start: {e}");
+            Ok(guard) => {
+                self.lsp_guard = Some(guard);
+                tracing::info!("LSP worker started");
+            }
+            Err(e) => tracing::warn!("LSP worker failed to start: {e}"),
         }
 
-        if let Err(e) = WATCHER_RRT.try_subscribe(crate::watcher::WatcherConfig {
+        match WATCHER_RRT.try_subscribe(crate::watcher::WatcherConfig {
             root,
             app_tx: notify_tx.clone(),
         }) {
-            tracing::warn!("watcher failed to start: {e}");
+            Ok(guard) => {
+                self.watcher_guard = Some(guard);
+                tracing::info!("watcher started");
+            }
+            Err(e) => tracing::warn!("watcher failed to start: {e}"),
         }
 
         // Global 1s refresh timer — catches any final render state that the
@@ -779,35 +796,82 @@ impl App for AppMain {
             let state = &mut global_data.state;
             match action {
                 AppSignal::FilesChanged(batch) => {
+                    tracing::info!(
+                        "FilesChanged: {} modified, {} created, {} removed",
+                        batch.modified.len(),
+                        batch.created.len(),
+                        batch.removed.len()
+                    );
                     let snapshot = self.files.load_full();
 
                     for path in &batch.removed {
-                        if let Some(file) = snapshot.iter().find(|f| &f.path == path) {
+                        if let Some((file_idx, file)) =
+                            snapshot.iter().enumerate().find(|(_, f)| &f.path == path)
+                        {
+                            tracing::debug!(
+                                "FilesChanged: removed match idx={} path={}",
+                                file_idx,
+                                path
+                            );
                             file.removed.store(true, Ordering::Relaxed);
+                            crate::lsp::send_file_request(file_idx);
+                        } else {
+                            tracing::debug!("FilesChanged: removed no match for path={}", path);
                         }
                     }
 
                     for path in &batch.modified {
-                        if let Some(file) = snapshot
+                        if let Some((file_idx, file)) = snapshot
                             .iter()
-                            .find(|f| &f.path == path && !f.removed.load(Ordering::Relaxed))
+                            .enumerate()
+                            .find(|(_, f)| &f.path == path && !f.removed.load(Ordering::Relaxed))
                         {
+                            tracing::debug!(
+                                "FilesChanged: modified match idx={} path={}",
+                                file_idx,
+                                path
+                            );
                             file.reload();
+                            crate::lsp::send_file_request(file_idx);
+                        } else {
+                            tracing::debug!("FilesChanged: modified no match for path={}", path);
                         }
                     }
 
                     let mut new_files: Vec<Arc<LoadedFile>> = vec![];
                     for path in &batch.created {
-                        if let Some(file) = snapshot
+                        if let Some((file_idx, file)) = snapshot
                             .iter()
-                            .find(|f| &f.path == path && f.removed.load(Ordering::Relaxed))
+                            .enumerate()
+                            .find(|(_, f)| &f.path == path && f.removed.load(Ordering::Relaxed))
                         {
+                            tracing::debug!(
+                                "FilesChanged: created resurrect idx={} path={}",
+                                file_idx,
+                                path
+                            );
                             file.removed.store(false, Ordering::Relaxed);
                             file.reload();
+                            crate::lsp::send_file_request(file_idx);
+                        } else if let Some((file_idx, file)) = snapshot
+                            .iter()
+                            .enumerate()
+                            .find(|(_, f)| &f.path == path && !f.removed.load(Ordering::Relaxed))
+                        {
+                            tracing::debug!(
+                                "FilesChanged: created replace idx={} path={}",
+                                file_idx,
+                                path
+                            );
+                            file.reload();
+                            crate::lsp::send_file_request(file_idx);
                         } else if !snapshot.iter().any(|f| &f.path == path)
                             && let Some(loaded) = LoadedFile::load(path.clone().into_std_path_buf())
                         {
+                            tracing::debug!("FilesChanged: created new path={}", path);
                             new_files.push(loaded);
+                        } else {
+                            tracing::debug!("FilesChanged: created no match for path={}", path);
                         }
                     }
 
@@ -839,6 +903,31 @@ impl App for AppMain {
                 AppSignal::OpenTerminal { .. } => {}
                 AppSignal::Noop => {
                     maybe_save_session(state, &self.root);
+                    crate::lsp::try_drain_pending_requests();
+                    let health = crate::lsp::health_check();
+                    let generation = match &health {
+                        crate::lsp::LspHealth::Running { generation, .. } => *generation,
+                        crate::lsp::LspHealth::NotRunning => 0,
+                    };
+                    self.lsp_health_skip = self.lsp_health_skip.wrapping_add(1);
+                    if generation != self.lsp_last_gen {
+                        tracing::info!("LSP health: {:?}", health);
+                        self.lsp_last_gen = generation;
+                    }
+                    match &health {
+                        crate::lsp::LspHealth::Running {
+                            input_receivers: 0, ..
+                        } if self.lsp_health_skip.is_multiple_of(10) => {
+                            tracing::warn!("LSP health: {:?}", health);
+                        }
+                        crate::lsp::LspHealth::NotRunning => {
+                            tracing::warn!("LSP health: NotRunning");
+                        }
+                        _ if self.lsp_health_skip.is_multiple_of(10) => {
+                            tracing::debug!("LSP health: {:?}", health);
+                        }
+                        _ => {}
+                    }
                 }
             }
 
