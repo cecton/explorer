@@ -81,15 +81,18 @@ pub static LSP_RRT: RRT<LspWorker> = RRT::new();
 
 // ── Shared config set before first subscribe ──────────────────────────────────
 
-struct LspConfig {
-    root: Utf8PathBuf,
-    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
+#[derive(Clone)]
+pub struct LspConfig {
+    pub root: Utf8PathBuf,
+    pub files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
 }
 
-static LSP_CONFIG: OnceLock<LspConfig> = OnceLock::new();
-
-pub fn set_lsp_config(root: Utf8PathBuf, files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>) {
-    let _ = LSP_CONFIG.set(LspConfig { root, files });
+impl Debug for LspConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LspConfig")
+            .field("root", &self.root)
+            .finish()
+    }
 }
 
 // ── Worker ────────────────────────────────────────────────────────────────────
@@ -129,17 +132,14 @@ impl Debug for LspWorker {
 }
 
 impl RRTWorker for LspWorker {
+    type Config = LspConfig;
     type Output = LspEvent;
     type Interrupt = LspInterrupt;
 
     fn create_and_register_os_sources(
-        _config: Self::Config,
+        config: Self::Config,
         _receiver: tokio::sync::broadcast::Receiver<Self::Input>,
     ) -> miette::Result<(Self, Self::Interrupt)> {
-        let config = LSP_CONFIG
-            .get()
-            .expect("set_lsp_config must be called before subscribing");
-
         let _ = REQUEST_SLOT.get_or_init(|| std::sync::Mutex::new(None));
         let (tx, request_rx) = mpsc::sync_channel(64);
         *REQUEST_SLOT

@@ -1,5 +1,5 @@
 use crate::tui::AppSignal;
-use camino::{Utf8Path, Utf8PathBuf};
+use camino::Utf8PathBuf;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use r3bl_tui::{Continuation, RRT, RRTEvent, RRTSoftwareInterrupt, RRTWorker, RestartPolicy};
 use std::collections::HashMap;
@@ -50,18 +50,15 @@ impl Debug for WatcherWorker {
 }
 
 impl RRTWorker for WatcherWorker {
+    type Config = Utf8PathBuf;
     type Output = AppSignal;
     type Interrupt = NoOpInterrupt;
 
     fn create_and_register_os_sources(
-        _config: Self::Config,
+        config: Self::Config,
         _receiver: tokio::sync::broadcast::Receiver<Self::Input>,
     ) -> miette::Result<(Self, Self::Interrupt)> {
-        // Root is stored on the static at startup; read it from the global.
-        let root = WATCHER_ROOT
-            .get()
-            .expect("WATCHER_ROOT must be set before subscribing")
-            .clone();
+        let root = config;
 
         let (tx, rx) = mpsc::channel();
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())
@@ -143,10 +140,4 @@ impl RRTWorker for WatcherWorker {
             }
         }
     }
-}
-
-static WATCHER_ROOT: std::sync::OnceLock<Utf8PathBuf> = std::sync::OnceLock::new();
-
-pub fn set_watcher_root(root: &Utf8Path) {
-    let _ = WATCHER_ROOT.set(root.to_owned());
 }

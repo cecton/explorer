@@ -4,7 +4,7 @@ use crate::session::save_session;
 use crate::tui::pane_component::PaneComponent;
 use crate::tui::panes_renderer::PanesRenderer;
 use crate::tui::*;
-use crate::watcher::{WATCHER_RRT, set_watcher_root};
+use crate::watcher::WATCHER_RRT;
 use arc_swap::ArcSwap;
 use camino::{Utf8Path, Utf8PathBuf};
 use r3bl_tui::core::osc::OscEvent;
@@ -382,8 +382,10 @@ impl App for AppMain {
         let files = Arc::clone(&self.files);
         let root = self.root.clone();
 
-        lsp::set_lsp_config(root.clone(), Arc::clone(&files));
-        match LSP_RRT.try_subscribe(()) {
+        match LSP_RRT.try_subscribe(lsp::LspConfig {
+            root: root.clone(),
+            files: Arc::clone(&files),
+        }) {
             Ok(guard) => {
                 let lsp_notify = notify_tx.clone();
                 // LSP uses blocking send().await — natural backpressure
@@ -406,8 +408,7 @@ impl App for AppMain {
             }
         }
 
-        set_watcher_root(&root);
-        match WATCHER_RRT.try_subscribe(()) {
+        match WATCHER_RRT.try_subscribe(root) {
             Ok(guard) => {
                 let watcher_notify = notify_tx.clone();
                 tokio::spawn(async move {
