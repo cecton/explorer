@@ -463,6 +463,7 @@ impl App for AppMain {
                 crate::lsp::send_file_request(key.0);
             }
         }
+        crate::lsp::try_drain_pending_requests();
     }
 
     fn app_handle_input_event(
