@@ -644,10 +644,7 @@ impl App for AppMain {
                 }) => {
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                _ => {
-                    global_data.state.leader_active = true;
-                    return Ok(EventPropagation::Consumed);
-                }
+                _ => {}
             }
         }
 
