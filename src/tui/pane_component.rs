@@ -655,17 +655,25 @@ impl Component<AppState, AppSignal> for PaneComponent {
             let in_content_rows = row >= origin_row && row < origin_row + row_count;
             let in_content_cols = col >= origin_col && col < origin_col + col_count;
 
-            let is_alternate = global_data
+            let (is_alternate, mouse_tracking_active) = global_data
                 .state
                 .terminal_panes
                 .get(&term_id)
                 .and_then(|p| p.lock().ok())
-                .map(|p| p.ofs_buf.terminal_mode.alternate_screen == AlternateScreenState::Active)
-                .unwrap_or(false);
+                .map(|p| {
+                    let alt =
+                        p.ofs_buf.terminal_mode.alternate_screen == AlternateScreenState::Active;
+                    let mouse =
+                        p.ofs_buf.terminal_mode.mouse_tracking_mode != MouseTrackingMode::None;
+                    (alt, mouse)
+                })
+                .unwrap_or((false, false));
+
+            let selection_blocked = is_alternate && mouse_tracking_active;
 
             match mouse.kind {
                 MouseInputKind::MouseDown(Button::Left)
-                    if in_content_rows && in_content_cols && !is_alternate =>
+                    if in_content_rows && in_content_cols && !selection_blocked =>
                 {
                     let rel_row = row - origin_row;
                     let rel_col = col - origin_col;
@@ -731,7 +739,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 MouseInputKind::MouseDrag(Button::Left)
-                    if self.text_drag_active && !is_alternate =>
+                    if self.text_drag_active && !selection_blocked =>
                 {
                     let rel_row = row
                         .saturating_sub(origin_row)
@@ -828,7 +836,9 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     };
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                MouseInputKind::MouseUp(Button::Left) if self.text_drag_active && !is_alternate => {
+                MouseInputKind::MouseUp(Button::Left)
+                    if self.text_drag_active && !selection_blocked =>
+                {
                     let maybe_text = if let Some(ref sel) = global_data.state.text_selection {
                         if sel.window == Window::Terminal(term_id) {
                             global_data
