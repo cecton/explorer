@@ -461,11 +461,27 @@ impl LspWorker {
         );
 
         // Reply to server-initiated requests (e.g. window/workDoneProgress/create).
+        // Per JSON-RPC 2.0 every request (a message with an id) gets a response,
+        // even if the server just wants a null acknowledgement.
         if msg.method.is_some()
             && let Some(ref id) = msg.id
         {
             match method {
                 "window/workDoneProgress/create" => {
+                    tracing::debug!("replying to server request: method={:?} id={}", method, id);
+                    let reply = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null});
+                    if send_msg(&mut self.stdin, &reply).is_err() {
+                        tracing::info!(
+                            "LSP: handle_recv_msg -> Restart (reply to server request failed)"
+                        );
+                        return Continuation::Restart;
+                    }
+                }
+                // rust-analyzer asks us to re-pull diagnostics after workspace changes.
+                // Explorer doesn't render diagnostics, so we ack with null and move on
+                // instead of letting it fall through to the catch-all — that would
+                // spam WARN logs and may cause the server to retry.
+                "workspace/diagnostic/refresh" => {
                     tracing::debug!("replying to server request: method={:?} id={}", method, id);
                     let reply = serde_json::json!({"jsonrpc": "2.0", "id": id, "result": null});
                     if send_msg(&mut self.stdin, &reply).is_err() {
