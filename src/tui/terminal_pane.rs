@@ -762,14 +762,7 @@ pub fn extract_terminal_text(
         return None;
     }
 
-    // Expand to word/line bounds.
-    if sr == er {
-        let line = &lines[0];
-        let (ws, _) = terminal_word_bounds(line, sc);
-        let (_, we) = terminal_word_bounds(line, ec);
-        sc = ws;
-        ec = we;
-    } else {
+    if sr != er {
         sc = 0;
         ec = line_lengths.last().copied().unwrap_or(0);
     }
