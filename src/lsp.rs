@@ -396,13 +396,14 @@ impl RRTWorker for LspWorker {
                 file.path,
                 self.warmup_queue.len()
             );
+            let is_warmup = !file.needs_full_load.load(Ordering::Relaxed);
             if request_tokens(
                 &mut self.stdin,
                 file,
                 file_idx,
                 self.supports_range,
                 &mut self.req_state,
-                true,
+                is_warmup,
             )
             .is_err()
             {

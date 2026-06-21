@@ -153,6 +153,7 @@ pub struct LoadedFile {
     pub data: Mutex<FileData>,
     pub colored_lines: Mutex<Vec<lsp::ColoredLine>>,
     pub removed: AtomicBool,
+    pub needs_full_load: AtomicBool,
 }
 
 impl LoadedFile {
@@ -168,6 +169,7 @@ impl LoadedFile {
             }),
             colored_lines: Mutex::new(vec![]),
             removed: AtomicBool::new(false),
+            needs_full_load: AtomicBool::new(false),
         }))
     }
 
@@ -236,6 +238,7 @@ impl LoadedFile {
             }),
             colored_lines: Mutex::new(vec![]),
             removed: AtomicBool::new(true),
+            needs_full_load: AtomicBool::new(false),
         })
     }
 }

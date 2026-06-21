@@ -6,6 +6,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex};
 
 pub const SESSION_VERSION: u32 = 2;
@@ -154,6 +155,9 @@ impl Session {
                 } => {
                     let abs = state.root.join(&path);
                     if let Some(key) = file_key_for_path(&snapshot_after, &abs) {
+                        snapshot_after[key.0]
+                            .needs_full_load
+                            .store(true, Ordering::Relaxed);
                         let window = Window::FilePreview(key);
                         new_stack.push(window);
                         new_states.insert(
