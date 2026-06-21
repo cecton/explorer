@@ -861,7 +861,7 @@ fn request_tokens(
         state.opened.insert(file_idx);
     }
 
-    if supports_range && total_lines > RANGE_THRESHOLD && colored_len == 0 {
+    if is_warmup && supports_range && total_lines > RANGE_THRESHOLD && colored_len == 0 {
         let end_line = RANGE_LINES.min(total_lines) as u32;
         let range_id = state.next_id;
         state.next_id += 1;
