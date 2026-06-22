@@ -195,9 +195,21 @@ impl AppMain {
                     match event {
                         PtyOutputEvent::Output(bytes) => {
                             if let Ok(mut pane) = pane.lock() {
-                                pane.scroll_offset = 0;
+                                let combined_before = pane
+                                    .ofs_buf
+                                    .scrollback_len()
+                                    .saturating_add(pane.ofs_buf.buffer.len());
                                 let (osc_events, _, da_responses) =
                                     pane.ofs_buf.apply_ansi_bytes(&bytes);
+                                let combined_after = pane
+                                    .ofs_buf
+                                    .scrollback_len()
+                                    .saturating_add(pane.ofs_buf.buffer.len());
+                                if pane.scroll_offset > 0 {
+                                    pane.scroll_offset = pane.scroll_offset.saturating_add(
+                                        combined_after.saturating_sub(combined_before),
+                                    );
+                                }
                                 for osc_event in osc_events {
                                     if let OscEvent::SetTitleAndTab(title) = osc_event {
                                         pane.title = Some(title);
