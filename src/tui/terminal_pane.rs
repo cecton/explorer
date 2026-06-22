@@ -183,9 +183,13 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     maybe_modifier_keys: None,
                     ..
                 }) if !alternate_screen_active && scrollback_len > 0 => {
-                    global_data.state.terminal_grabbed = false;
                     let old_offset = pane.scroll_offset;
-                    pane.scroll_offset = pane.scroll_offset.saturating_sub(3);
+                    if old_offset > 0 {
+                        pane.scroll_offset = old_offset.saturating_sub(3);
+                        if pane.scroll_offset == 0 {
+                            global_data.state.terminal_grabbed = true;
+                        }
+                    }
                     if pane.scroll_offset != old_offset {
                         EventPropagation::ConsumedRender
                     } else {
