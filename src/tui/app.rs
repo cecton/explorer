@@ -283,6 +283,7 @@ impl AppMain {
 
             let window = Window::Terminal(id);
             if !restore {
+                let old = state.pane_manager.focused_window;
                 state.pane_manager.push_window(window);
                 if let Some(size) = pane_size {
                     state
@@ -293,6 +294,7 @@ impl AppMain {
                         .pane_size = size;
                 }
                 state.pane_manager.focused_window = Some(window);
+                notify_terminal_focus_change(state, old, Some(window));
                 state.terminal_grabbed = true;
                 state.mark_session_dirty();
             }
@@ -325,6 +327,16 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
                 .is_some_and(|p| is_buffer_empty(&p.ofs_buf));
 
             if remove_now {
+                // Send focus-lost before removing the pane.
+                if let Some(pane) = state.terminal_panes.get(&id)
+                    && let Ok(p) = pane.lock()
+                    && p.ofs_buf.terminal_mode.focus_events
+                {
+                    let _ = p
+                        .pty_input_tx
+                        .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
+                }
+                let old = state.pane_manager.focused_window;
                 if let Some(pane) = state.terminal_panes.remove(&id)
                     && let Ok(mut p) = pane.lock()
                     && let Some(mut killer) = p.child_killer.take()
@@ -332,6 +344,7 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
                     let _ = killer.kill();
                 }
                 state.pane_manager.remove_window(&Window::Terminal(id));
+                notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
                 state.mark_session_dirty();
                 sync_terminal_grabbed(state);
             } else if let Some(pane) = state.terminal_panes.get(&id)
@@ -531,8 +544,10 @@ impl App for AppMain {
                     key: Key::Character('f'),
                 }) => {
                     let state = &mut global_data.state;
+                    let old = state.pane_manager.focused_window;
                     state.pane_manager.push_window(Window::FileNamePicker);
                     state.pane_manager.focused_window = Some(Window::FileNamePicker);
+                    notify_terminal_focus_change(state, old, Some(Window::FileNamePicker));
                     state.file_name_picker.selected = None;
                     let snapshot = state.files.load();
                     state.file_name_picker.results = FileNamePickerComponent::open_previews_results(
@@ -551,6 +566,7 @@ impl App for AppMain {
                     key: Key::Character('T'),
                 }) => {
                     let state = &mut global_data.state;
+                    let old = state.pane_manager.focused_window;
                     if !state
                         .pane_manager
                         .window_stack
@@ -563,6 +579,7 @@ impl App for AppMain {
                         .collect();
                     state.pane_manager.push_window(Window::ThemePicker);
                     state.pane_manager.focused_window = Some(Window::ThemePicker);
+                    notify_terminal_focus_change(state, old, Some(Window::ThemePicker));
                     state.theme_picker.selected = all_themes
                         .iter()
                         .position(|(n, _)| n == state.theme.name())
@@ -620,7 +637,13 @@ impl App for AppMain {
                     key: Key::SpecialKey(SpecialKey::Tab),
                 }) => {
                     let visible = global_data.state.pane_manager.layout(surface_size);
+                    let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, 1);
+                    notify_terminal_focus_change(
+                        &global_data.state,
+                        old,
+                        global_data.state.pane_manager.focused_window,
+                    );
                     sync_terminal_grabbed(&mut global_data.state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -628,7 +651,13 @@ impl App for AppMain {
                     key: Key::SpecialKey(SpecialKey::BackTab),
                 }) => {
                     let visible = global_data.state.pane_manager.layout(surface_size);
+                    let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, -1);
+                    notify_terminal_focus_change(
+                        &global_data.state,
+                        old,
+                        global_data.state.pane_manager.focused_window,
+                    );
                     sync_terminal_grabbed(&mut global_data.state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -640,6 +669,16 @@ impl App for AppMain {
                         Some(Window::Terminal(tid)) => tid,
                         _ => return Ok(EventPropagation::ConsumedRender),
                     };
+                    // Send focus-lost before removing the pane.
+                    if let Some(pane) = state.terminal_panes.get(&tid)
+                        && let Ok(p) = pane.lock()
+                        && p.ofs_buf.terminal_mode.focus_events
+                    {
+                        let _ = p
+                            .pty_input_tx
+                            .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
+                    }
+                    let old = state.pane_manager.focused_window;
                     if let Some(pane) = state.terminal_panes.remove(&tid)
                         && let Ok(mut p) = pane.lock()
                         && let Some(mut killer) = p.child_killer.take()
@@ -647,6 +686,7 @@ impl App for AppMain {
                         let _ = killer.kill();
                     }
                     state.pane_manager.remove_window(&Window::Terminal(tid));
+                    notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
                     sync_terminal_grabbed(state);
                     state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
@@ -674,7 +714,13 @@ impl App for AppMain {
                     key: Key::SpecialKey(SpecialKey::Tab),
                 }) => {
                     let visible = global_data.state.pane_manager.layout(surface_size);
+                    let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, 1);
+                    notify_terminal_focus_change(
+                        &global_data.state,
+                        old,
+                        global_data.state.pane_manager.focused_window,
+                    );
                     sync_terminal_grabbed(&mut global_data.state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -682,7 +728,13 @@ impl App for AppMain {
                     key: Key::SpecialKey(SpecialKey::BackTab),
                 }) => {
                     let visible = global_data.state.pane_manager.layout(surface_size);
+                    let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, -1);
+                    notify_terminal_focus_change(
+                        &global_data.state,
+                        old,
+                        global_data.state.pane_manager.focused_window,
+                    );
                     sync_terminal_grabbed(&mut global_data.state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -771,7 +823,9 @@ impl App for AppMain {
                 {
                     if global_data.state.pane_manager.focused_window.as_ref() != Some(&slot.window)
                     {
+                        let old = global_data.state.pane_manager.focused_window;
                         global_data.state.pane_manager.focused_window = Some(slot.window);
+                        notify_terminal_focus_change(&global_data.state, old, Some(slot.window));
                         // Grab state on mouse focus change depends on pane type + scroll.
                         match slot.window {
                             Window::Terminal(id) => {
@@ -1078,6 +1132,28 @@ fn surface_size(window_size: Size) -> Size {
 fn sync_terminal_grabbed(state: &mut AppState) {
     if !matches!(state.pane_manager.focused_window, Some(Window::Terminal(_))) {
         state.terminal_grabbed = false;
+    }
+}
+
+fn notify_terminal_focus_change(state: &AppState, old: Option<Window>, new: Option<Window>) {
+    if old == new {
+        return;
+    }
+    for (window, bytes) in [(old, b"\x1b[O" as &[u8]), (new, b"\x1b[I")] {
+        let Some(Window::Terminal(id)) = window else {
+            continue;
+        };
+        let Some(pane) = state.terminal_panes.get(&id) else {
+            continue;
+        };
+        let Ok(p) = pane.lock() else {
+            continue;
+        };
+        if p.ofs_buf.terminal_mode.focus_events {
+            let _ = p
+                .pty_input_tx
+                .try_send(PtyInputEvent::Write(bytes.to_vec()));
+        }
     }
 }
 
