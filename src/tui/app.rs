@@ -199,7 +199,7 @@ impl AppMain {
                                     .ofs_buf
                                     .scrollback_len()
                                     .saturating_add(pane.ofs_buf.buffer.len());
-                                let (osc_events, _, da_responses) =
+                                let (osc_events, pty_response_events) =
                                     pane.ofs_buf.apply_ansi_bytes(&bytes);
                                 let combined_after = pane
                                     .ofs_buf
@@ -215,10 +215,10 @@ impl AppMain {
                                         pane.title = Some(title);
                                     }
                                 }
-                                for da_response in da_responses {
-                                    let _ = pane
-                                        .pty_input_tx
-                                        .try_send(PtyInputEvent::Write(da_response.into_bytes()));
+                                for pty_response_event in pty_response_events {
+                                    let _ = pane.pty_input_tx.try_send(PtyInputEvent::Write(
+                                        pty_response_event.to_string().into_bytes(),
+                                    ));
                                 }
                             }
                         }
