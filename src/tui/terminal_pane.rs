@@ -293,6 +293,10 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 pane.last_size = new_size;
             }
 
+            if pane.ofs_buf.terminal_mode.synchronized_output {
+                return Ok(render_pipeline!());
+            }
+
             let scrollback_len = pane.ofs_buf.scrollback_len();
             let scroll_offset = pane.scroll_offset.min(scrollback_len);
             let buffer_height = pane.ofs_buf.buffer.len();

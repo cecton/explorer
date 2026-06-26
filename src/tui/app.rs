@@ -192,6 +192,7 @@ impl AppMain {
                 let mut backoff: Option<Instant> = None;
                 while let Some(event) = session.rx_output_event.recv().await {
                     let is_exit = matches!(&event, PtyOutputEvent::Exit(_));
+                    let mut sync_active = false;
                     match event {
                         PtyOutputEvent::Output(bytes) => {
                             if let Ok(mut pane) = pane.lock() {
@@ -199,6 +200,7 @@ impl AppMain {
                                     .ofs_buf
                                     .scrollback_len()
                                     .saturating_add(pane.ofs_buf.buffer.len());
+                                pane.ofs_buf.reset_scrollback_eviction_count();
                                 let (osc_events, pty_response_events) =
                                     pane.ofs_buf.apply_ansi_bytes(&bytes);
                                 let combined_after = pane
@@ -206,10 +208,15 @@ impl AppMain {
                                     .scrollback_len()
                                     .saturating_add(pane.ofs_buf.buffer.len());
                                 if pane.scroll_offset > 0 {
-                                    pane.scroll_offset = pane.scroll_offset.saturating_add(
-                                        combined_after.saturating_sub(combined_before),
-                                    );
+                                    let naive_delta =
+                                        combined_after.saturating_sub(combined_before);
+                                    let evicted = pane.ofs_buf.scrollback_eviction_count();
+                                    let true_delta = naive_delta.saturating_sub(evicted);
+                                    pane.scroll_offset =
+                                        pane.scroll_offset.saturating_add(true_delta);
                                 }
+                                pane.scroll_offset =
+                                    pane.scroll_offset.min(pane.ofs_buf.scrollback_len());
                                 for osc_event in osc_events {
                                     if let OscEvent::SetTitleAndTab(title) = osc_event {
                                         pane.title = Some(title);
@@ -220,6 +227,7 @@ impl AppMain {
                                         pty_response_event.to_string().into_bytes(),
                                     ));
                                 }
+                                sync_active = pane.ofs_buf.terminal_mode.synchronized_output;
                             }
                         }
                         PtyOutputEvent::CursorModeChange(mode) => {
@@ -247,6 +255,14 @@ impl AppMain {
                             AppSignal::Noop,
                         ));
                         break;
+                    }
+
+                    // Synchronized output: skip render signal while the
+                    // program has requested atomic screen updates via
+                    // DEC private mode 2026.  The render will be
+                    // triggered when the mode is reset.
+                    if sync_active {
+                        continue;
                     }
 
                     let now = Instant::now();
