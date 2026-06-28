@@ -161,7 +161,8 @@ impl AppMain {
                 }
             };
 
-            let ofs_buf = r3bl_tui::OfsBufVT100::new_empty(pty_size);
+            let mut ofs_buf = r3bl_tui::OfsBufVT100::new_empty(pty_size);
+            ofs_buf.terminal_mode.cursor_key_mode = CursorKeyMode::Normal;
             let pty_input_tx = Arc::new(session.tx_input_event.clone());
             let child_killer = session.child_process_termination_handle;
             let initial_title = cmd.as_ref().filter(|s| !s.is_empty()).cloned();
@@ -229,6 +230,7 @@ impl AppMain {
                         PtyOutputEvent::CursorModeChange(mode) => {
                             if let Ok(mut pane) = pane.lock() {
                                 pane.cursor_key_mode = mode;
+                                pane.ofs_buf.terminal_mode.cursor_key_mode = mode;
                             }
                         }
                         PtyOutputEvent::MouseModeChange(mode) => {
