@@ -39,7 +39,7 @@ Source is organized as:
 - `src/tui/theme.rs` — `HelixTheme` type; loads bundled TOML files via `include!("../../themes/themes.rs")`
 - `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview (exceptions → input → navigation)
 - `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane); text selection uses global `AppState`
-- `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation; `render_ofs_buf_to_ir()` emits `ResetColor` for `Spacer` runs to prevent stale SGR inheritance; supports mouse selection, word/line text extraction, and clipboard copy; skips render when `synchronized_output` is active (DEC private mode 2026) to preserve previous frame during batch updates
+- `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation; `render_ofs_buf_to_ir()` emits `ResetColor` for `Spacer` runs to prevent stale SGR inheritance; supports mouse selection, word/line text extraction, and clipboard copy; synchronized output (DEC private mode 2026) is buffered natively by `OfsBufVT100` in r3bl-open-core
 - `src/tui/input_line.rs` — query input with Emacs-style key bindings; single flat `match` on `InputEvent`
 
 ---

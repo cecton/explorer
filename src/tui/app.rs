@@ -192,42 +192,38 @@ impl AppMain {
                 let mut backoff: Option<Instant> = None;
                 while let Some(event) = session.rx_output_event.recv().await {
                     let is_exit = matches!(&event, PtyOutputEvent::Exit(_));
-                    let mut sync_active = false;
+                    let mut is_buffering_sync = false;
                     match event {
                         PtyOutputEvent::Output(bytes) => {
                             if let Ok(mut pane) = pane.lock() {
-                                let combined_before = pane
-                                    .ofs_buf
-                                    .scrollback_len()
-                                    .saturating_add(pane.ofs_buf.buffer.len());
-                                pane.ofs_buf.reset_scrollback_eviction_count();
-                                let (osc_events, pty_response_events) =
-                                    pane.ofs_buf.apply_ansi_bytes(&bytes);
-                                let combined_after = pane
-                                    .ofs_buf
-                                    .scrollback_len()
-                                    .saturating_add(pane.ofs_buf.buffer.len());
-                                if pane.scroll_offset > 0 {
-                                    let naive_delta =
-                                        combined_after.saturating_sub(combined_before);
-                                    let evicted = pane.ofs_buf.scrollback_eviction_count();
-                                    let true_delta = naive_delta.saturating_sub(evicted);
-                                    pane.scroll_offset =
-                                        pane.scroll_offset.saturating_add(true_delta);
-                                }
-                                pane.scroll_offset =
-                                    pane.scroll_offset.min(pane.ofs_buf.scrollback_len());
-                                for osc_event in osc_events {
-                                    if let OscEvent::SetTitleAndTab(title) = osc_event {
-                                        pane.title = Some(title);
+                                match pane.ofs_buf.feed_pty_bytes(&bytes) {
+                                    Some(result) => {
+                                        if pane.scroll_offset > 0 {
+                                            let true_delta = result
+                                                .combined_after
+                                                .saturating_sub(result.combined_before)
+                                                .saturating_sub(result.evictions);
+                                            pane.scroll_offset = pane
+                                                .scroll_offset
+                                                .saturating_add(true_delta)
+                                                .min(pane.ofs_buf.scrollback_len());
+                                        }
+                                        for osc_event in result.osc_events {
+                                            if let OscEvent::SetTitleAndTab(title) = osc_event {
+                                                pane.title = Some(title);
+                                            }
+                                        }
+                                        for pty_response in result.pty_response_events {
+                                            let _ =
+                                                pane.pty_input_tx.try_send(PtyInputEvent::Write(
+                                                    pty_response.to_string().into_bytes(),
+                                                ));
+                                        }
+                                    }
+                                    None => {
+                                        is_buffering_sync = true;
                                     }
                                 }
-                                for pty_response_event in pty_response_events {
-                                    let _ = pane.pty_input_tx.try_send(PtyInputEvent::Write(
-                                        pty_response_event.to_string().into_bytes(),
-                                    ));
-                                }
-                                sync_active = pane.ofs_buf.terminal_mode.synchronized_output;
                             }
                         }
                         PtyOutputEvent::CursorModeChange(mode) => {
@@ -259,9 +255,10 @@ impl AppMain {
 
                     // Synchronized output: skip render signal while the
                     // program has requested atomic screen updates via
-                    // DEC private mode 2026.  The render will be
-                    // triggered when the mode is reset.
-                    if sync_active {
+                    // DEC private mode 2026.  OfsBufVT100 buffers raw PTY
+                    // bytes internally; the first feed_pty_bytes call after
+                    // sync-off returns Some(result) and triggers a render.
+                    if is_buffering_sync {
                         continue;
                     }
 
