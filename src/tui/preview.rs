@@ -452,7 +452,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             }
 
             if let InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Esc),
+                key: Key::SpecialKey(SpecialKey::Backspace),
             }) = input_event
             {
                 global_data.state.pane_manager.send_to_back(&window);

@@ -541,7 +541,6 @@ impl App for AppMain {
                 ) =>
                 {
                     global_data.state.terminal_grabbed = true;
-                    return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('f'),
@@ -1096,13 +1095,17 @@ fn surface_size(window_size: Size) -> Size {
     col_count + row_count
 }
 
-fn sync_terminal_grabbed(state: &mut AppState) {
+pub(super) fn sync_terminal_grabbed(state: &mut AppState) {
     if !matches!(state.pane_manager.focused_window, Some(Window::Terminal(_))) {
         state.terminal_grabbed = false;
     }
 }
 
-fn notify_terminal_focus_change(state: &AppState, old: Option<Window>, new: Option<Window>) {
+pub(super) fn notify_terminal_focus_change(
+    state: &AppState,
+    old: Option<Window>,
+    new: Option<Window>,
+) {
     if old == new {
         return;
     }
@@ -1183,9 +1186,9 @@ fn render_status_bar(
             let rest = match state.pane_manager.focused_window.as_ref() {
                 Some(Window::FileNamePicker) => "Esc:Close  Enter:Open",
                 Some(Window::ThemePicker) => "Esc:Cancel  Enter:Save",
-                Some(Window::FilePreview(_)) => "Esc:Send to back  ::Command",
+                Some(Window::FilePreview(_)) => "Backspace:Send to back  ::Command",
                 Some(Window::Terminal(_)) if !state.terminal_grabbed => {
-                    "Enter:grab  ↑↓PgUp/PgDn:scroll"
+                    "Backspace:Send to back  Enter:grab  ↑↓PgUp/PgDn:scroll"
                 }
                 Some(Window::Terminal(_)) | None => "",
             };

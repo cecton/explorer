@@ -1,3 +1,4 @@
+use crate::tui::app::{notify_terminal_focus_change, sync_terminal_grabbed};
 use crate::tui::pane_component::pane_slot;
 use crate::tui::*;
 
@@ -250,9 +251,6 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 }
 
                 InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::Esc),
-                })
-                | InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Enter),
                 })
                 | InputEvent::Keyboard(KeyPress::Plain {
@@ -260,6 +258,23 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 }) => {
                     global_data.state.terminal_grabbed = true;
                     pane.scroll_offset = 0;
+                    EventPropagation::ConsumedRender
+                }
+
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Backspace),
+                }) => {
+                    drop(pane);
+                    let window = Window::Terminal(id);
+                    let old = Some(window);
+                    global_data.state.pane_manager.send_to_back(&window);
+                    notify_terminal_focus_change(
+                        &global_data.state,
+                        old,
+                        global_data.state.pane_manager.focused_window,
+                    );
+                    sync_terminal_grabbed(&mut global_data.state);
+                    global_data.state.mark_session_dirty();
                     EventPropagation::ConsumedRender
                 }
 

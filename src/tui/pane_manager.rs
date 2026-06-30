@@ -177,12 +177,19 @@ impl PaneManager {
 
     /// Moves `window` to the back of the stack (last position).
     pub fn send_to_back(&mut self, window: &Window) {
-        if let Some(pos) = self.window_stack.iter().position(|w| w == window) {
-            let w = self.window_stack.remove(pos);
-            self.window_stack.push(w);
-        }
+        let Some(pos) = self.window_stack.iter().position(|w| w == window) else {
+            return;
+        };
+        let w = self.window_stack.remove(pos);
+        self.window_stack.push(w);
         if self.focused_window.as_ref() == Some(window) {
-            self.focused_window = self.window_stack.first().cloned();
+            // Focus the pane that took the sent pane's place.
+            self.focused_window = self
+                .window_stack
+                .get(pos)
+                .filter(|&&w| w != *window)
+                .cloned()
+                .or_else(|| self.window_stack.first().cloned());
         }
     }
 
@@ -816,6 +823,37 @@ mod tests {
                 Window::Terminal(2),
                 Window::Terminal(0)
             ]
+        );
+    }
+
+    #[test]
+    fn send_to_back_refocuses_next_pane() {
+        let mut manager = PaneManager::new();
+        manager.push_window(Window::Terminal(1));
+        manager.push_window(Window::Terminal(2));
+        manager.push_window(Window::FilePreview(FileKey::default()));
+        // push_window places each new window at the front, so reverse to the
+        // desired order before setting focus.
+        manager.window_stack = vec![
+            Window::Terminal(1),
+            Window::Terminal(2),
+            Window::FilePreview(FileKey::default()),
+        ];
+        manager.focused_window = Some(Window::Terminal(2));
+
+        manager.send_to_back(&Window::Terminal(2));
+
+        assert_eq!(
+            manager.window_stack,
+            vec![
+                Window::Terminal(1),
+                Window::FilePreview(FileKey::default()),
+                Window::Terminal(2)
+            ]
+        );
+        assert_eq!(
+            manager.focused_window,
+            Some(Window::FilePreview(FileKey::default()))
         );
     }
 

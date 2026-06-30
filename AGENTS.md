@@ -204,7 +204,7 @@ Planned feature areas and their likely dependencies:
 ### Terminal Pane Grab/Ungrab
 
 - `AppState::terminal_grabbed` is a single global flag: when `true`, keyboard events go to the focused PTY; when `false`, they propagate to app-level shortcuts.
-- Scrolling a terminal pane ungrabs it. Clicking the pane or pressing Enter/Esc re-grabs.
+- Scrolling a terminal pane ungrabs it. Clicking the pane or pressing Enter or `q` re-grabs.
 - When removing a terminal window via `remove_window`, only reset `terminal_grabbed` if the window being removed is the currently focused one — otherwise a background pane exit silently ungrabs an active terminal.
 
 ### Comments
