@@ -86,7 +86,8 @@ impl PaneComponent {
                 let Ok(pane) = pane.lock() else {
                     return EventPropagation::Propagate;
                 };
-                if pane.ofs_buf.terminal_mode.alternate_screen == AlternateScreenState::Active {
+                if pane.ofs_buf.terminal_mode.active_screen_buffer == ActiveScreenBuffer::Alternate
+                {
                     return EventPropagation::Propagate;
                 }
                 let scrollback_len = pane.ofs_buf.scrollback_len();
@@ -661,10 +662,10 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 .get(&term_id)
                 .and_then(|p| p.lock().ok())
                 .map(|p| {
-                    let alt =
-                        p.ofs_buf.terminal_mode.alternate_screen == AlternateScreenState::Active;
+                    let alt = p.ofs_buf.terminal_mode.active_screen_buffer
+                        == ActiveScreenBuffer::Alternate;
                     let mouse =
-                        p.ofs_buf.terminal_mode.mouse_tracking_mode != MouseTrackingMode::None;
+                        p.ofs_buf.terminal_mode.mouse_tracking != MouseTrackingMode::Disabled;
                     (alt, mouse)
                 })
                 .unwrap_or((false, false));
@@ -917,7 +918,8 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     .get(&id)
                     .and_then(|p| p.lock().ok())
                     .is_none_or(|pane| {
-                        pane.ofs_buf.terminal_mode.alternate_screen != AlternateScreenState::Active
+                        pane.ofs_buf.terminal_mode.active_screen_buffer
+                            != ActiveScreenBuffer::Alternate
                     }),
                 _ => true,
             };
@@ -1014,8 +1016,8 @@ impl Component<AppState, AppSignal> for PaneComponent {
                         let Ok(pane) = pane.lock() else {
                             return Ok(pipeline);
                         };
-                        if pane.ofs_buf.terminal_mode.alternate_screen
-                            == AlternateScreenState::Active
+                        if pane.ofs_buf.terminal_mode.active_screen_buffer
+                            == ActiveScreenBuffer::Alternate
                         {
                             return Ok(pipeline);
                         }

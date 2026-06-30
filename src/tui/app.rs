@@ -170,7 +170,6 @@ impl AppMain {
             let pane_command = if is_command_pane { cmd.clone() } else { None };
             let pane = Arc::new(Mutex::new(TerminalPane {
                 ofs_buf,
-                cursor_key_mode: CursorKeyMode::Normal,
                 title: initial_title,
                 pty_input_tx,
                 child_killer: Some(child_killer),
@@ -225,17 +224,6 @@ impl AppMain {
                                         is_buffering_sync = true;
                                     }
                                 }
-                            }
-                        }
-                        PtyOutputEvent::CursorModeChange(mode) => {
-                            if let Ok(mut pane) = pane.lock() {
-                                pane.cursor_key_mode = mode;
-                                pane.ofs_buf.terminal_mode.cursor_key_mode = mode;
-                            }
-                        }
-                        PtyOutputEvent::MouseModeChange(mode) => {
-                            if let Ok(mut pane) = pane.lock() {
-                                pane.ofs_buf.terminal_mode.mouse_tracking_mode = mode;
                             }
                         }
                         PtyOutputEvent::Exit(status) => {

@@ -146,19 +146,71 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
             };
             let tx = pane.pty_input_tx.clone();
             let alternate_screen_active =
-                pane.ofs_buf.terminal_mode.alternate_screen == AlternateScreenState::Active;
+                pane.ofs_buf.terminal_mode.active_screen_buffer == ActiveScreenBuffer::Alternate;
             let scrollback_len = pane.ofs_buf.scrollback_len();
 
             if global_data.state.terminal_grabbed {
-                let origin =
-                    col(self.content_origin_col as u16) + row(self.content_origin_row as u16);
-                if let Some(pty_event) = PtyInputEvent::from_input_event(
-                    &input_event,
-                    &pane.ofs_buf.terminal_mode,
-                    origin,
-                ) {
-                    let _ = tx.try_send(pty_event);
-                    return Ok(EventPropagation::ConsumedRender);
+                match &input_event {
+                    InputEvent::Keyboard(keypress) => {
+                        let mode = pane.ofs_buf.terminal_mode.cursor_key_mode;
+                        if let Some(pty_event) = (*keypress).into() {
+                            let pty_event = match pty_event {
+                                PtyInputEvent::SendControl(ctrl, _)
+                                    if matches!(
+                                        ctrl,
+                                        ControlSequence::ArrowUp
+                                            | ControlSequence::ArrowDown
+                                            | ControlSequence::ArrowLeft
+                                            | ControlSequence::ArrowRight
+                                            | ControlSequence::Home
+                                            | ControlSequence::End
+                                    ) =>
+                                {
+                                    PtyInputEvent::SendControl(ctrl, mode)
+                                }
+                                other => other,
+                            };
+                            let _ = tx.try_send(pty_event);
+                            return Ok(EventPropagation::ConsumedRender);
+                        }
+                    }
+                    InputEvent::Mouse(mouse)
+                        if pane.ofs_buf.terminal_mode.mouse_tracking
+                            == MouseTrackingMode::Enabled =>
+                    {
+                        let col = mouse
+                            .pos
+                            .col_index
+                            .as_usize()
+                            .saturating_sub(self.content_origin_col);
+                        let row = mouse
+                            .pos
+                            .row_index
+                            .as_usize()
+                            .saturating_sub(self.content_origin_row);
+                        if let Some(bytes) = SgrMouseSequence::generate(
+                            mouse,
+                            TermCol::from_zero_based(ColIndex::from(ch(col))),
+                            TermRow::from_zero_based(RowIndex::from(ch(row))),
+                        ) {
+                            let _ = tx.try_send(PtyInputEvent::Write(bytes));
+                            return Ok(EventPropagation::ConsumedRender);
+                        }
+                    }
+                    InputEvent::BracketedPaste(text) => {
+                        let bytes = if pane.ofs_buf.terminal_mode.is_bracketed_paste_enabled() {
+                            let mut b = Vec::with_capacity(text.len() + 6);
+                            b.extend_from_slice(b"\x1b[200~");
+                            b.extend_from_slice(text.as_bytes());
+                            b.extend_from_slice(b"\x1b[201~");
+                            b
+                        } else {
+                            text.as_bytes().to_vec()
+                        };
+                        let _ = tx.try_send(PtyInputEvent::Write(bytes));
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                    _ => {}
                 }
             }
 
@@ -334,7 +386,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     Some(Window::Terminal(focused_id)) if focused_id == id
                 );
                 let cursor_visible = pane.ofs_buf.parser_global_state.cursor_visibility
-                    == CursorVisibilityState::Visible
+                    == CursorVisibilityMode::Visible
                     && is_grabbed
                     && is_active;
                 let cursor_pos = if cursor_visible {

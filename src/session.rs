@@ -343,7 +343,6 @@ mod tests {
     use crate::tui::pane_manager::{PaneSize, Window, WindowState};
     use arc_swap::ArcSwap;
     use camino::Utf8PathBuf;
-    use r3bl_tui::core::pty::CursorKeyMode;
     use r3bl_tui::{OfsBufVT100, Size};
     use std::sync::{Arc, Mutex};
     use tempfile::TempDir;
@@ -364,7 +363,6 @@ mod tests {
         let (pty_input_tx, _) = mpsc::channel(1);
         TerminalPane {
             ofs_buf: OfsBufVT100::new_empty(Size::default()),
-            cursor_key_mode: CursorKeyMode::default(),
             title: None,
             pty_input_tx: Arc::new(pty_input_tx),
             child_killer: None,
