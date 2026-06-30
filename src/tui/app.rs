@@ -597,46 +597,6 @@ impl App for AppMain {
                     return Ok(EventPropagation::ExitMainEventLoop);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::Character('='),
-                }) => {
-                    global_data
-                        .state
-                        .pane_manager
-                        .resize_focused(ResizeDelta::Grow);
-                    global_data.state.mark_session_dirty();
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::Character('-'),
-                }) => {
-                    global_data
-                        .state
-                        .pane_manager
-                        .resize_focused(ResizeDelta::Shrink);
-                    global_data.state.mark_session_dirty();
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::Up),
-                }) => {
-                    let Some(focused) = global_data.state.pane_manager.focused_window else {
-                        return Ok(EventPropagation::ConsumedRender);
-                    };
-                    global_data.state.pane_manager.move_forward(&focused);
-                    global_data.state.mark_session_dirty();
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::Down),
-                }) => {
-                    let Some(focused) = global_data.state.pane_manager.focused_window else {
-                        return Ok(EventPropagation::ConsumedRender);
-                    };
-                    global_data.state.pane_manager.move_backward(&focused);
-                    global_data.state.mark_session_dirty();
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Tab),
                 }) => {
                     let visible = global_data.state.pane_manager.layout(surface_size);
@@ -703,7 +663,7 @@ impl App for AppMain {
             }
         }
 
-        // Global shortcuts: Tab/BackTab cycles focus; Ctrl+=/- resize; Ctrl+Up/Down reorder.
+        // Global shortcuts: Tab/BackTab cycles focus; Ctrl+Up/Down resize; Ctrl+Left/Right reorder.
         // Skipped for Terminal panes so Tab reaches the PTY (e.g. shell completion).
         // When a terminal is ungrabbed Tab cycles focus.
         if (!matches!(
@@ -742,11 +702,12 @@ impl App for AppMain {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::Character('='),
+                    key: Key::SpecialKey(SpecialKey::Down),
                     mask:
                         ModifierKeysMask {
                             ctrl_key_state: KeyState::Pressed,
-                            ..
+                            shift_key_state: KeyState::NotPressed,
+                            alt_key_state: KeyState::NotPressed,
                         },
                 }) => {
                     global_data
@@ -757,11 +718,12 @@ impl App for AppMain {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::Character('-'),
+                    key: Key::SpecialKey(SpecialKey::Up),
                     mask:
                         ModifierKeysMask {
                             ctrl_key_state: KeyState::Pressed,
-                            ..
+                            shift_key_state: KeyState::NotPressed,
+                            alt_key_state: KeyState::NotPressed,
                         },
                 }) => {
                     global_data
@@ -772,11 +734,12 @@ impl App for AppMain {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::SpecialKey(SpecialKey::Up),
+                    key: Key::SpecialKey(SpecialKey::Left),
                     mask:
                         ModifierKeysMask {
                             ctrl_key_state: KeyState::Pressed,
-                            ..
+                            shift_key_state: KeyState::NotPressed,
+                            alt_key_state: KeyState::NotPressed,
                         },
                 }) => {
                     let Some(focused) = global_data.state.pane_manager.focused_window else {
@@ -787,11 +750,12 @@ impl App for AppMain {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::SpecialKey(SpecialKey::Down),
+                    key: Key::SpecialKey(SpecialKey::Right),
                     mask:
                         ModifierKeysMask {
                             ctrl_key_state: KeyState::Pressed,
-                            ..
+                            shift_key_state: KeyState::NotPressed,
+                            alt_key_state: KeyState::NotPressed,
                         },
                 }) => {
                     let Some(focused) = global_data.state.pane_manager.focused_window else {
@@ -1193,34 +1157,6 @@ fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
     })
 }
 
-fn pane_action_hints(prefix: &str, sep: &str) -> String {
-    [
-        ("=", "Grow"),
-        ("-", "Shrink"),
-        ("↑", "Forward"),
-        ("↓", "Backward"),
-    ]
-    .iter()
-    .map(|(key, label)| format!("{}{}:{}", prefix, key, label))
-    .collect::<Vec<_>>()
-    .join(sep)
-}
-
-pub trait WindowHints {
-    fn pane_key_hints(&self) -> &'static str;
-}
-
-impl WindowHints for Window {
-    fn pane_key_hints(&self) -> &'static str {
-        match self {
-            Window::FileNamePicker => "Esc:Close  Enter:Open",
-            Window::ThemePicker => "Esc:Cancel  Enter:Save",
-            Window::FilePreview(_) => "Esc:Send to back  ::Command",
-            Window::Terminal(_) => "",
-        }
-    }
-}
-
 fn render_status_bar(
     pipeline: &mut RenderPipeline,
     size: Size,
@@ -1239,28 +1175,31 @@ fn render_status_bar(
         (
             " Leader ".to_string(),
             format!(
-                "f:Picker  t:Term  T:Theme  x:Close  q:Quit  Tab:Next  Shift+Tab:Prev  {}  Esc:Cancel",
-                pane_action_hints("", "  ")
+                "f:Picker  t:Term  T:Theme  x:Close  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel",
             ),
         )
     } else {
-        let pane = match state.pane_manager.focused_window.as_ref() {
-            Some(w) => {
-                let base = w.pane_key_hints();
-                if matches!(w, Window::Terminal(_)) && !state.terminal_grabbed {
+        let pane = {
+            let rest = match state.pane_manager.focused_window.as_ref() {
+                Some(Window::FileNamePicker) => "Esc:Close  Enter:Open",
+                Some(Window::ThemePicker) => "Esc:Cancel  Enter:Save",
+                Some(Window::FilePreview(_)) => "Esc:Send to back  ::Command",
+                Some(Window::Terminal(_)) if !state.terminal_grabbed => {
                     "Enter:grab  ↑↓PgUp/PgDn:scroll"
-                } else {
-                    base
                 }
+                Some(Window::Terminal(_)) | None => "",
+            };
+            // Global shortcuts.
+            if (!matches!(state.pane_manager.focused_window, Some(Window::Terminal(_)))
+                || !state.terminal_grabbed)
+                && !state.mouse_drag_active
+            {
+                format!("Tab:Next  Shift+Tab:Prev  Ctrl+↑↓:Resize  Ctrl+←→:Move  {rest}")
+            } else {
+                rest.to_string()
             }
-            None => "",
         };
-        let mut rest = pane_action_hints("Ctrl+", "  ");
-        if !pane.is_empty() {
-            rest.push_str("  ");
-            rest.push_str(pane);
-        }
-        (" Alt+`: Leader ".to_string(), rest)
+        (" Alt+`: Leader ".to_string(), pane)
     };
 
     let styled_texts = tui_styled_texts! {
