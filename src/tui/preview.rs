@@ -576,8 +576,8 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
         current_box: FlexBox,
         _surface_bounds: SurfaceBounds,
         _has_focus: &mut HasFocus,
-    ) -> CommonResult<RenderPipeline> {
-        throws_with_return!({
+    ) -> CommonResult {
+        throws!({
             let origin = current_box.style_adjusted_origin_pos;
             let bounds = current_box.style_adjusted_bounds_size;
             let visible_rows = bounds.row_height.as_usize();
@@ -588,9 +588,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             self.content_row_count = visible_rows;
 
             let Some(file_key) = self.file_key(&global_data.state) else {
-                let mut pipeline = render_pipeline!();
-                pipeline.push(ZOrder::Normal, RenderOpIRVec::new());
-                return Ok(pipeline);
+                return Ok(());
             };
 
             let window = Window::FilePreview(file_key);
@@ -832,9 +830,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 }
             }
 
-            let mut pipeline = render_pipeline!();
-            pipeline.push(ZOrder::Normal, render_ops);
-            pipeline
+            global_data.pipeline.push(ZOrder::Normal, render_ops);
         });
     }
 }

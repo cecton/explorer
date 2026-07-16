@@ -176,7 +176,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                         }
                     }
                     InputEvent::Mouse(mouse)
-                        if pane.ofs_buf.terminal_mode.mouse_tracking
+                        if pane.ofs_buf.terminal_mode.mouse_tracking_mode
                             == MouseTrackingMode::Enabled =>
                     {
                         let col = mouse
@@ -189,7 +189,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                             .row_index
                             .as_usize()
                             .saturating_sub(self.content_origin_row);
-                        if let Some(bytes) = SgrMouseSequence::generate(
+                        if let Some(bytes) = r3bl_tui::ansi::mouse_sgr::generate(
                             mouse,
                             TermCol::from_zero_based(ColIndex::from(ch(col))),
                             TermRow::from_zero_based(RowIndex::from(ch(row))),
@@ -325,13 +325,13 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
         current_box: FlexBox,
         _surface_bounds: SurfaceBounds,
         _has_focus: &mut HasFocus,
-    ) -> CommonResult<RenderPipeline> {
-        throws_with_return!({
+    ) -> CommonResult {
+        throws!({
             let Some(id) = self.terminal_id(&global_data.state) else {
-                return Ok(render_pipeline!());
+                return Ok(());
             };
             let Some(pane) = global_data.state.terminal_panes.get(&id) else {
-                return Ok(render_pipeline!());
+                return Ok(());
             };
             let mut pane = match pane.lock() {
                 Ok(guard) => guard,
@@ -362,7 +362,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
 
             let scrollback_len = pane.ofs_buf.scrollback_len();
             let scroll_offset = pane.scroll_offset.min(scrollback_len);
-            let buffer_height = pane.ofs_buf.buffer.len();
+            let buffer_height = pane.ofs_buf.get_window_size().row_height.as_usize();
 
             let hl_rgb = global_data
                 .state
@@ -405,7 +405,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     && is_grabbed
                     && is_active;
                 let cursor_pos = if cursor_visible {
-                    Some(pane.ofs_buf.cursor_pos)
+                    Some(pane.ofs_buf.get_cursor_pos())
                 } else {
                     None
                 };
@@ -423,8 +423,9 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     }
                 }
                 if let Some(rect) = selection_rect {
-                    let lines: Vec<&PixelCharLine> =
-                        pane.ofs_buf.buffer.iter().take(visible_rows).collect();
+                    let lines: Vec<&[PixelChar]> = (0..visible_rows)
+                        .filter_map(|r| pane.ofs_buf.get_row(r))
+                        .collect();
                     overlay_selection(&mut ops, &lines, origin, rect, hl_rgb);
                 }
                 ops
@@ -433,13 +434,11 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 let viewport_bottom = combined_bottom.saturating_sub(scroll_offset);
                 let viewport_top = viewport_bottom.saturating_sub(pane_height);
 
-                let mut lines: Vec<&PixelCharLine> = Vec::with_capacity(pane_height);
+                let mut lines: Vec<&[PixelChar]> = Vec::with_capacity(pane_height);
                 for combined_idx in viewport_top..viewport_bottom {
-                    if let Some(line) = pane.ofs_buf.scrollback_get(combined_idx) {
+                    if let Some(line) = pane.ofs_buf.scrollback_buffer.lines.get(combined_idx) {
                         lines.push(line);
-                    } else if let Some(line) =
-                        pane.ofs_buf.buffer.get(combined_idx - scrollback_len)
-                    {
+                    } else if let Some(line) = pane.ofs_buf.get_row(combined_idx - scrollback_len) {
                         lines.push(line);
                     } else {
                         break;
@@ -465,9 +464,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 ops
             };
 
-            let mut pipeline = render_pipeline!();
-            pipeline.push(ZOrder::Normal, render_ops);
-            pipeline
+            global_data.pipeline.push(ZOrder::Normal, render_ops);
         });
     }
 }
@@ -485,17 +482,17 @@ fn cursor_at(row_idx: usize, col_idx: usize, cursor: Option<r3bl_tui::Pos>) -> b
 }
 
 fn render_ofs_buf_to_ir(
-    ofs_buf: &r3bl_tui::OffscreenBuffer,
+    ofs_buf: &r3bl_tui::OfsBuf,
     origin: r3bl_tui::Pos,
     max_rows: usize,
     cursor_pos: Option<r3bl_tui::Pos>,
 ) -> RenderOpIRVec {
-    let lines: Vec<&PixelCharLine> = ofs_buf.buffer.iter().take(max_rows).collect();
+    let lines: Vec<&[PixelChar]> = (0..max_rows).filter_map(|r| ofs_buf.get_row(r)).collect();
     render_lines_to_ir(&lines, origin, cursor_pos)
 }
 
 fn render_lines_to_ir(
-    lines: &[&PixelCharLine],
+    lines: &[&[PixelChar]],
     origin: r3bl_tui::Pos,
     cursor_pos: Option<r3bl_tui::Pos>,
 ) -> RenderOpIRVec {
@@ -613,7 +610,7 @@ fn compute_terminal_selection_ranges(
 
 fn overlay_selection(
     ops: &mut RenderOpIRVec,
-    lines: &[&PixelCharLine],
+    lines: &[&[PixelChar]],
     origin: r3bl_tui::Pos,
     selection: SelectionRect,
     hl_bg: [u8; 3],
@@ -722,7 +719,7 @@ pub fn terminal_word_bounds(line: &str, cursor_col: usize) -> (usize, usize) {
 
 /// Convert a PixelCharLine to a string, trimming trailing Spacer/Void cells.
 /// Returns `(trimmed_string, trimmed_len_in_chars)`.
-fn trimmed_pixel_char_line(line: &PixelCharLine) -> (String, usize) {
+fn trimmed_pixel_char_line(line: &[PixelChar]) -> (String, usize) {
     let trimmed_len = line
         .iter()
         .rposition(|pc| !matches!(pc, PixelChar::Spacer | PixelChar::Void))
@@ -745,11 +742,11 @@ pub fn terminal_line_at_viewport_row(
     pane_height: usize,
 ) -> (String, usize) {
     let scrollback_len = pane.ofs_buf.scrollback_len();
-    let buffer_height = pane.ofs_buf.buffer.len();
+    let buffer_height = pane.ofs_buf.get_window_size().row_height.as_usize();
     let scroll_offset = pane.scroll_offset.min(scrollback_len);
 
     if scroll_offset == 0 {
-        if let Some(line) = pane.ofs_buf.buffer.get(viewport_row) {
+        if let Some(line) = pane.ofs_buf.get_row(viewport_row) {
             let (s, trimmed_len) = trimmed_pixel_char_line(line);
             return (s, trimmed_len);
         }
@@ -758,10 +755,14 @@ pub fn terminal_line_at_viewport_row(
         let viewport_bottom = combined_bottom.saturating_sub(scroll_offset);
         let viewport_top = viewport_bottom.saturating_sub(pane_height);
         let combined_idx = viewport_top + viewport_row;
-        let line = if combined_idx < scrollback_len {
-            pane.ofs_buf.scrollback_get(combined_idx)
+        let line: Option<&[PixelChar]> = if combined_idx < scrollback_len {
+            pane.ofs_buf
+                .scrollback_buffer
+                .lines
+                .get(combined_idx)
+                .map(|l| l.pixel_chars.as_slice())
         } else {
-            pane.ofs_buf.buffer.get(combined_idx - scrollback_len)
+            pane.ofs_buf.get_row(combined_idx - scrollback_len)
         };
         if let Some(line) = line {
             let (s, trimmed_len) = trimmed_pixel_char_line(line);
@@ -796,7 +797,7 @@ pub fn extract_terminal_text(
     let mut ec = raw_sc.max(raw_ec);
 
     let scrollback_len = pane.ofs_buf.scrollback_len();
-    let buffer_height = pane.ofs_buf.buffer.len();
+    let buffer_height = pane.ofs_buf.get_window_size().row_height.as_usize();
     let scroll_offset = pane.scroll_offset.min(scrollback_len);
 
     let mut lines: Vec<String> = Vec::with_capacity(er - sr + 1);
@@ -804,7 +805,7 @@ pub fn extract_terminal_text(
 
     if scroll_offset == 0 {
         for i in sr..=er.min(buffer_height.saturating_sub(1)) {
-            if let Some(line) = pane.ofs_buf.buffer.get(i) {
+            if let Some(line) = pane.ofs_buf.get_row(i) {
                 let (s, trimmed_len) = trimmed_pixel_char_line(line);
                 line_lengths.push(trimmed_len);
                 lines.push(s);
@@ -816,10 +817,14 @@ pub fn extract_terminal_text(
         let viewport_top = viewport_bottom.saturating_sub(pane_height);
         for viewport_row in sr..=er {
             let combined_idx = viewport_top + viewport_row;
-            let line = if combined_idx < scrollback_len {
-                pane.ofs_buf.scrollback_get(combined_idx)
+            let line: Option<&[PixelChar]> = if combined_idx < scrollback_len {
+                pane.ofs_buf
+                    .scrollback_buffer
+                    .lines
+                    .get(combined_idx)
+                    .map(|l| l.pixel_chars.as_slice())
             } else {
-                pane.ofs_buf.buffer.get(combined_idx - scrollback_len)
+                pane.ofs_buf.get_row(combined_idx - scrollback_len)
             };
             if let Some(line) = line {
                 let (s, trimmed_len) = trimmed_pixel_char_line(line);

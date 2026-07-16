@@ -312,8 +312,12 @@ fn shell_command() -> String {
 }
 
 fn is_buffer_empty(ofs_buf: &r3bl_tui::OfsBufVT100) -> bool {
-    ofs_buf.buffer.iter().all(|line| {
-        line.iter()
+    let height = ofs_buf.get_window_size().row_height.as_usize();
+    (0..height).all(|r| {
+        ofs_buf
+            .get_row(r)
+            .unwrap_or(&[])
+            .iter()
             .all(|pc| !matches!(pc, PixelChar::PlainText { .. }))
     })
 }
@@ -984,7 +988,7 @@ impl App for AppMain {
         global_data: &mut GlobalData<AppState, AppSignal>,
         component_registry_map: &mut ComponentRegistryMap<AppState, AppSignal>,
         has_focus: &mut HasFocus,
-    ) -> CommonResult<RenderPipeline> {
+    ) -> CommonResult {
         sync_has_focus(&global_data.state, has_focus);
 
         let mut best_generation = 0u64;
@@ -1001,7 +1005,7 @@ impl App for AppMain {
 
         poll_terminal_output(self, &mut global_data.state);
 
-        throws_with_return!({
+        throws!({
             let window_size = global_data.window_size;
             let surface_size = surface_size(window_size);
             global_data.state.last_surface_size = surface_size;
@@ -1023,7 +1027,8 @@ impl App for AppMain {
             }
             sync_has_focus(&global_data.state, has_focus);
 
-            let surface = {
+            // Build surface and render components. They push ops into global_data.pipeline.
+            {
                 let mut it = surface!(stylesheet: create_stylesheet(&global_data.state.theme)?);
                 it.surface_start(SurfaceProps {
                     pos: col(0) + row(0),
@@ -1038,10 +1043,11 @@ impl App for AppMain {
                 )?;
 
                 it.surface_end()?;
-                it
-            };
+            }
 
-            let mut pipeline = surface.render_pipeline;
+            // Take the pipeline (components have already pushed into it) and add
+            // background fill and status bar on top.
+            let mut pipeline = std::mem::take(&mut global_data.pipeline);
 
             // Fill entire surface area with pane background (covers padding
             // between panes, which the FlexBox layout system does not fill).
@@ -1076,7 +1082,7 @@ impl App for AppMain {
                 &global_data.state.theme,
             );
 
-            pipeline
+            global_data.pipeline = pipeline;
         });
     }
 }

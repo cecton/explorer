@@ -264,17 +264,15 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
         current_box: FlexBox,
         _surface_bounds: SurfaceBounds,
         _has_focus: &mut HasFocus,
-    ) -> CommonResult<RenderPipeline> {
-        throws_with_return!({
+    ) -> CommonResult {
+        throws!({
             let origin = current_box.style_adjusted_origin_pos;
             let bounds = current_box.style_adjusted_bounds_size;
             let total_rows = bounds.row_height.as_usize();
             let pane_width = bounds.col_width.as_usize();
 
-            let mut pipeline = render_pipeline!();
-
             if total_rows == 0 {
-                return Ok(pipeline);
+                return Ok(());
             }
 
             let result_ops = self.picker.render_results(
@@ -305,8 +303,7 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                 .pane_manager
                 .set_window_page_size(&Window::FileNamePicker, total_rows);
 
-            pipeline.push(ZOrder::Normal, result_ops);
-            pipeline
+            global_data.pipeline.push(ZOrder::Normal, result_ops);
         });
     }
 }

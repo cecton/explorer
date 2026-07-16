@@ -91,7 +91,7 @@ impl PaneComponent {
                     return EventPropagation::Propagate;
                 }
                 let scrollback_len = pane.ofs_buf.scrollback_len();
-                let buffer_height = pane.ofs_buf.buffer.len();
+                let buffer_height = pane.ofs_buf.get_window_size().row_height.as_usize();
                 if scrollback_len == 0 {
                     return EventPropagation::Propagate;
                 }
@@ -665,7 +665,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     let alt = p.ofs_buf.terminal_mode.active_screen_buffer
                         == ActiveScreenBuffer::Alternate;
                     let mouse =
-                        p.ofs_buf.terminal_mode.mouse_tracking != MouseTrackingMode::Disabled;
+                        p.ofs_buf.terminal_mode.mouse_tracking_mode != MouseTrackingMode::Disabled;
                     (alt, mouse)
                 })
                 .unwrap_or((false, false));
@@ -898,8 +898,8 @@ impl Component<AppState, AppSignal> for PaneComponent {
         current_box: FlexBox,
         surface_bounds: SurfaceBounds,
         has_focus: &mut HasFocus,
-    ) -> CommonResult<RenderPipeline> {
-        throws_with_return!({
+    ) -> CommonResult {
+        throws!({
             let mut title_ops = RenderOpIRVec::new();
             let focused = has_focus.get_id() == Some(self.id);
             let active_window = self.active_window(&global_data.state);
@@ -975,7 +975,13 @@ impl Component<AppState, AppSignal> for PaneComponent {
             self.content_col_count = content_box.style_adjusted_bounds_size.col_width.as_u16();
             self.content_row_count = content_box.style_adjusted_bounds_size.row_height.as_u16();
 
-            let inner_pipeline = match active_window {
+            // Push title ops first (display behind content).
+            if title_height > 0 {
+                global_data.pipeline.push(ZOrder::Normal, title_ops);
+            }
+
+            // Render active child component (pushes into global_data.pipeline).
+            match active_window {
                 Some(Window::FileNamePicker) => {
                     self.picker
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
@@ -994,16 +1000,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     self.terminal
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
-                None => r3bl_tui::render_pipeline!(),
-            };
-
-            let mut pipeline = if title_height > 0 {
-                let mut p = r3bl_tui::render_pipeline!();
-                p.push(ZOrder::Normal, title_ops);
-                p.join_into(inner_pipeline);
-                p
-            } else {
-                inner_pipeline
+                None => {}
             };
 
             // Render scrollbar on the rightmost column if there's an active window.
@@ -1011,18 +1008,18 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 let (scroll, scroll_max, page_size) = match window {
                     Window::Terminal(id) => {
                         let Some(pane) = global_data.state.terminal_panes.get(&id) else {
-                            return Ok(pipeline);
+                            return Ok(());
                         };
                         let Ok(pane) = pane.lock() else {
-                            return Ok(pipeline);
+                            return Ok(());
                         };
                         if pane.ofs_buf.terminal_mode.active_screen_buffer
                             == ActiveScreenBuffer::Alternate
                         {
-                            return Ok(pipeline);
+                            return Ok(());
                         }
                         let scrollback_len = pane.ofs_buf.scrollback_len();
-                        let buffer_height = pane.ofs_buf.buffer.len();
+                        let buffer_height = pane.ofs_buf.get_window_size().row_height.as_usize();
                         let scroll =
                             scrollback_len.saturating_sub(pane.scroll_offset.min(scrollback_len));
                         (scroll, scrollback_len + buffer_height, buffer_height)
@@ -1045,10 +1042,8 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     page_size,
                     &global_data.state.theme,
                 );
-                pipeline.push(ZOrder::Normal, scrollbar_ops);
+                global_data.pipeline.push(ZOrder::Normal, scrollbar_ops);
             }
-
-            pipeline
         });
     }
 }
