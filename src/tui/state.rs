@@ -118,6 +118,8 @@ pub struct AppState {
     pub terminal_grabbed: bool,
     pub text_selection: Option<TextSelection>,
     pub session_dirty_at: Option<Instant>,
+    pub symbol_highlights: Vec<SymbolHighlightGroup>,
+    pub next_palette_index: usize,
 }
 
 impl AppState {
@@ -166,6 +168,8 @@ impl AppState {
             terminal_grabbed: false,
             text_selection: None,
             session_dirty_at: None,
+            symbol_highlights: Vec::new(),
+            next_palette_index: 0,
         };
         state.recompute_file_name_picker_results();
 
@@ -215,6 +219,50 @@ pub enum AppSignal {
         cwd: Utf8PathBuf,
         file_key: FileKey,
     },
+    SymbolHighlightResult {
+        qualified_name: String,
+        group_id: Option<usize>,
+        origin_file_idx: usize,
+        origin_line: u32,
+        origin_char: u32,
+        origin_word: Option<String>,
+        origin_locations: Vec<SymbolRefLocation>,
+        reference_locations: Vec<SymbolRefLocation>,
+    },
     #[default]
     Noop,
 }
+
+#[derive(Clone, Debug)]
+pub struct SymbolRefLocation {
+    pub file_key: FileKey,
+    pub start_byte: usize,
+    pub end_byte: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct SymbolHighlightGroup {
+    pub qualified_name: String,
+    pub origin_file: FileKey,
+    pub origin_line: u32,
+    pub origin_char: u32,
+    /// Word originally clicked, re-sent on rebuild so the PlainText-hover
+    /// fallback synthesizes the same `parent::word` qualified name.
+    pub origin_word: Option<String>,
+    pub origin_byte_start: Option<usize>,
+    pub origin_byte_end: Option<usize>,
+    pub color: [u8; 3],
+    pub locations: Vec<SymbolRefLocation>,
+    pub needs_rebuild: bool,
+}
+
+pub const SYMBOL_PALETTE: [[u8; 3]; 8] = [
+    [255, 100, 100],
+    [100, 200, 255],
+    [255, 200, 100],
+    [150, 255, 100],
+    [255, 150, 255],
+    [255, 255, 100],
+    [100, 150, 255],
+    [200, 255, 200],
+];

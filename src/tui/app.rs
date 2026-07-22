@@ -973,11 +973,172 @@ impl App for AppMain {
                             );
                         }
                     }
+
+                    // Invalidate symbol highlight groups when files change.
+                    let mut idx = 0;
+                    while idx < state.symbol_highlights.len() {
+                        let origin_path = {
+                            let group = &state.symbol_highlights[idx];
+                            crate::loader::path_for_file_key(&snapshot, group.origin_file)
+                                .map(|p| p.to_path_buf())
+                        };
+                        let Some(ref origin_path) = origin_path else {
+                            idx += 1;
+                            continue;
+                        };
+
+                        let origin_removed = batch
+                            .removed
+                            .iter()
+                            .any(|p| p.as_path() == origin_path.as_path());
+                        if origin_removed {
+                            state.symbol_highlights.remove(idx);
+                            state.mark_session_dirty();
+                            continue;
+                        }
+
+                        let origin_changed = batch
+                            .modified
+                            .iter()
+                            .any(|p| p.as_path() == origin_path.as_path());
+                        if origin_changed {
+                            if let Some(g) = state.symbol_highlights.get_mut(idx) {
+                                g.needs_rebuild = true;
+                                g.origin_byte_start = None;
+                                g.origin_byte_end = None;
+                                g.locations.clear();
+                                crate::lsp::send_symbol_request(
+                                    g.origin_file.0,
+                                    g.origin_line,
+                                    g.origin_char,
+                                    g.origin_word.clone(),
+                                    Some(idx),
+                                );
+                            }
+                        } else {
+                            let stale_paths: Vec<&Utf8Path> = batch
+                                .modified
+                                .iter()
+                                .map(|p| p.as_path())
+                                .chain(batch.removed.iter().map(|p| p.as_path()))
+                                .collect();
+                            if let Some(g) = state.symbol_highlights.get_mut(idx) {
+                                g.locations.retain(|loc| {
+                                    !stale_paths.iter().any(|p| {
+                                        crate::loader::path_for_file_key(&snapshot, loc.file_key)
+                                            .is_some_and(|fp| fp.as_str() == p.as_str())
+                                    })
+                                });
+                            }
+                        }
+                        idx += 1;
+                    }
+
                     state.bump_files_version();
                 }
                 AppSignal::OpenTerminal { .. } => {}
                 AppSignal::OpenEditor { .. } => {
                     // Handled as early return above; unreachable here.
+                }
+                AppSignal::SymbolHighlightResult {
+                    qualified_name,
+                    group_id,
+                    origin_file_idx,
+                    origin_line,
+                    origin_char,
+                    origin_word,
+                    origin_locations,
+                    reference_locations,
+                } => {
+                    let qualified_name = qualified_name.clone();
+                    let group_id = *group_id;
+                    let origin_file_idx = *origin_file_idx;
+                    let origin_line = *origin_line;
+                    let origin_char = *origin_char;
+                    let origin_word = origin_word.clone();
+                    tracing::debug!(
+                        "AppSignal::SymbolHighlightResult: qn={:?} group_id={:?} origin_locs={} ref_locs={}",
+                        qualified_name,
+                        group_id,
+                        origin_locations.len(),
+                        reference_locations.len(),
+                    );
+                    // Rebuild responses locate their group by origin position, not
+                    // by the Vec index captured at send time — toggles that land
+                    // while the query is in flight shift indices.
+                    let target = state.symbol_highlights.iter().position(|g| {
+                        g.origin_file.0 == origin_file_idx
+                            && g.origin_line == origin_line
+                            && g.origin_char == origin_char
+                    });
+                    if origin_locations.is_empty() && reference_locations.is_empty() {
+                        if group_id.is_some()
+                            && let Some(idx) = target
+                        {
+                            state.symbol_highlights.remove(idx);
+                            state.mark_session_dirty();
+                        }
+                    } else if group_id.is_some() {
+                        let Some(idx) = target else {
+                            // Group was toggled off while the rebuild was in
+                            // flight; nothing to update.
+                            return Ok(EventPropagation::ConsumedRender);
+                        };
+                        let group = &mut state.symbol_highlights[idx];
+                        group.qualified_name.clone_from(&qualified_name);
+                        group.needs_rebuild = false;
+                        if let Some(origin) = origin_locations.first() {
+                            group.origin_byte_start = Some(origin.start_byte);
+                            group.origin_byte_end = Some(origin.end_byte);
+                        }
+                        group.locations.clear();
+                        group.locations.extend(origin_locations.iter().cloned());
+                        group.locations.extend(reference_locations.iter().cloned());
+                        let qn = group.qualified_name.clone();
+                        let mut i = 0;
+                        while i < state.symbol_highlights.len() {
+                            if i != idx && state.symbol_highlights[i].qualified_name == qn {
+                                state.symbol_highlights.remove(i);
+                            } else {
+                                i += 1;
+                            }
+                        }
+                        state.mark_session_dirty();
+                    } else {
+                        let origin = origin_locations.first().cloned();
+                        let color_idx =
+                            state.next_palette_index % crate::tui::state::SYMBOL_PALETTE.len();
+                        state.next_palette_index = (state.next_palette_index + 1)
+                            % crate::tui::state::SYMBOL_PALETTE.len();
+                        let mut locations: Vec<crate::tui::state::SymbolRefLocation> =
+                            origin_locations.clone();
+                        locations.extend(reference_locations.iter().cloned());
+                        state
+                            .symbol_highlights
+                            .push(crate::tui::state::SymbolHighlightGroup {
+                                qualified_name: qualified_name.clone(),
+                                origin_file: crate::loader::FileKey(origin_file_idx),
+                                origin_line,
+                                origin_char,
+                                origin_word,
+                                origin_byte_start: origin.as_ref().map(|l| l.start_byte),
+                                origin_byte_end: origin.as_ref().map(|l| l.end_byte),
+                                color: crate::tui::state::SYMBOL_PALETTE[color_idx],
+                                locations,
+                                needs_rebuild: false,
+                            });
+                        // Dedup: remove any previous group with the same qualified_name.
+                        let qn = qualified_name;
+                        let mut i = 0;
+                        while i < state.symbol_highlights.len() - 1 {
+                            if state.symbol_highlights[i].qualified_name == qn {
+                                state.symbol_highlights.remove(i);
+                            } else {
+                                i += 1;
+                            }
+                        }
+                        state.mark_session_dirty();
+                    }
                 }
                 AppSignal::Noop => {
                     maybe_save_session(state, &self.root);

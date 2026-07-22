@@ -1,5 +1,6 @@
 use crate::loader::LoadedFile;
 use crate::tui::AppSignal;
+use crate::tui::SymbolRefLocation;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use lsp_types::notification::{DidOpenTextDocument, Initialized, Notification};
@@ -7,12 +8,13 @@ use lsp_types::request::{
     Initialize, Request, SemanticTokensFullRequest, SemanticTokensRangeRequest,
 };
 use lsp_types::{
-    ClientCapabilities, DidOpenTextDocumentParams, InitializeParams, InitializeResult,
-    InitializedParams, PartialResultParams, Position, Range, SemanticToken, SemanticTokens,
+    ClientCapabilities, DidOpenTextDocumentParams, HoverContents, HoverParams, InitializeParams,
+    InitializeResult, InitializedParams, Location, PartialResultParams, Position, Range,
+    ReferenceContext, ReferenceParams, SemanticToken, SemanticTokens,
     SemanticTokensClientCapabilities, SemanticTokensClientCapabilitiesRequests,
     SemanticTokensFullOptions, SemanticTokensParams, SemanticTokensRangeParams,
-    TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem, TokenFormat, Uri,
-    WorkDoneProgressParams, WorkspaceFolder,
+    TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TokenFormat, Uri, WorkDoneProgressParams, WorkspaceFolder,
 };
 use r3bl_tui::core::ThreadState;
 use r3bl_tui::{
@@ -31,6 +33,18 @@ use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
 use tokio::sync::mpsc as tokio_mpsc;
+
+#[derive(Clone, Debug)]
+pub enum LspInput {
+    TokenRequest(usize),
+    HoverThenReferences {
+        file_idx: usize,
+        line: u32,
+        character: u32,
+        word: Option<String>,
+        group_id: Option<usize>,
+    },
+}
 
 pub type ColoredSpan = (usize, usize, &'static str);
 pub type ColoredLine = Vec<ColoredSpan>;
@@ -103,11 +117,27 @@ struct TokenRequestState {
     opened: HashSet<usize>,
 }
 
+#[derive(Clone, Debug)]
+enum RefQueryPhase {
+    Hover,
+    References,
+}
+
+struct PendingRefQuery {
+    file_idx: usize,
+    line: u32,
+    character: u32,
+    word: Option<String>,
+    phase: RefQueryPhase,
+    qualified_name: Option<String>,
+    group_id: Option<usize>,
+}
+
 pub struct LspWorker {
     child: Child,
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
-    input_receiver: tokio::sync::broadcast::Receiver<usize>,
+    input_receiver: tokio::sync::broadcast::Receiver<LspInput>,
     app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
     files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     req_state: TokenRequestState,
@@ -116,7 +146,25 @@ pub struct LspWorker {
     warmup_retries: HashMap<usize, u8>,
     supports_range: bool,
     dispatch_count: u64,
+    ref_queries: HashMap<u64, PendingRefQuery>,
+    /// Hover requests received during warmup, replayed once warmup completes:
+    /// (file_idx, line, character, word, group_id).
+    deferred_hovers: VecDeque<(usize, u32, u32, Option<String>, Option<usize>)>,
+    /// Retry counts for group-rebuild hovers (group_id: Some) keyed by
+    /// (file_idx, line, character). Our own tiny per-file warmup queue draining
+    /// doesn't mean rust-analyzer has finished indexing the workspace — a hover
+    /// sent right as warmup drains (e.g. right after session-restore re-queries
+    /// fire at startup) commonly returns null just because the server isn't
+    /// ready yet, not because the symbol is gone. Only rebuild/restore hovers
+    /// retry; a user-initiated double-click (group_id: None) fails immediately,
+    /// since by the time a human clicks, the server has had time to settle.
+    hover_retries: HashMap<(usize, u32, u32), u8>,
 }
+
+const MAX_HOVER_RETRIES: u8 = 10;
+/// Delay between rebuild-hover retries (see `hover_retries`). 10 retries * 300ms
+/// gives rust-analyzer up to 3s to finish indexing after a cold start.
+const HOVER_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
 
 impl Drop for LspWorker {
     fn drop(&mut self) {
@@ -133,7 +181,7 @@ impl Debug for LspWorker {
 
 impl RRTWorker for LspWorker {
     type Config = LspConfig;
-    type Input = usize;
+    type Input = LspInput;
     type Output = ();
     type Interrupt = LspInterrupt;
 
@@ -178,6 +226,8 @@ impl RRTWorker for LspWorker {
                             overlapping_token_support: Some(false),
                             ..Default::default()
                         }),
+                        hover: Some(lsp_types::HoverClientCapabilities::default()),
+                        references: Some(lsp_types::ReferenceClientCapabilities::default()),
                         ..Default::default()
                     }),
                     ..Default::default()
@@ -289,6 +339,9 @@ impl RRTWorker for LspWorker {
                 warmup_retries: HashMap::new(),
                 supports_range,
                 dispatch_count: 0,
+                ref_queries: HashMap::new(),
+                deferred_hovers: VecDeque::new(),
+                hover_retries: HashMap::new(),
             },
             LspInterrupt,
         ))
@@ -307,42 +360,75 @@ impl RRTWorker for LspWorker {
         // Drain any user-requested file indices first (non-blocking).
         loop {
             match self.input_receiver.try_recv() {
-                Ok(file_idx) => {
-                    let snapshot = self.files.load();
-                    let file = &snapshot[file_idx];
-                    tracing::debug!(
-                        "LSP: user request file_idx={} path={} ext={:?}",
-                        file_idx,
-                        file.path,
-                        file.path.extension()
-                    );
-                    if file.removed.load(Ordering::Relaxed) {
-                        if close_file(&mut self.stdin, file, file_idx, &mut self.req_state).is_err()
+                Ok(input) => match input {
+                    LspInput::TokenRequest(file_idx) => {
+                        let snapshot = self.files.load();
+                        let file = &snapshot[file_idx];
+                        tracing::debug!(
+                            "LSP: user request file_idx={} path={} ext={:?}",
+                            file_idx,
+                            file.path,
+                            file.path.extension()
+                        );
+                        if file.removed.load(Ordering::Relaxed) {
+                            if close_file(&mut self.stdin, file, file_idx, &mut self.req_state)
+                                .is_err()
+                            {
+                                tracing::info!(
+                                    "LSP: dispatch -> Restart (close_file failed for file_idx={})",
+                                    file_idx
+                                );
+                                return Continuation::Restart;
+                            }
+                        } else if file.path.extension() == Some("rs")
+                            && request_tokens(
+                                &mut self.stdin,
+                                file,
+                                file_idx,
+                                self.supports_range,
+                                &mut self.req_state,
+                                false,
+                            )
+                            .is_err()
                         {
                             tracing::info!(
-                                "LSP: dispatch -> Restart (close_file failed for file_idx={})",
+                                "LSP: dispatch -> Restart (request_tokens failed for file_idx={})",
                                 file_idx
                             );
                             return Continuation::Restart;
                         }
-                    } else if file.path.extension() == Some("rs")
-                        && request_tokens(
-                            &mut self.stdin,
-                            file,
-                            file_idx,
-                            self.supports_range,
-                            &mut self.req_state,
-                            false,
-                        )
-                        .is_err()
-                    {
-                        tracing::info!(
-                            "LSP: dispatch -> Restart (request_tokens failed for file_idx={})",
-                            file_idx
-                        );
-                        return Continuation::Restart;
                     }
-                }
+                    LspInput::HoverThenReferences {
+                        file_idx,
+                        line,
+                        character,
+                        word,
+                        group_id,
+                    } => {
+                        // Queue behind warmup: interleaving hover requests with
+                        // the warmup didOpen flood risks the mutual pipe stall
+                        // documented below, and rust-analyzer can't answer
+                        // hover well mid-index anyway.
+                        if self.warmup_queue.is_empty() {
+                            if self
+                                .send_hover_request(file_idx, line, character, word, group_id)
+                                .is_err()
+                            {
+                                tracing::info!("LSP: dispatch -> Restart (hover send failed)");
+                                return Continuation::Restart;
+                            }
+                        } else {
+                            tracing::debug!(
+                                "LSP: deferring hover for file_idx={} until warmup done",
+                                file_idx
+                            );
+                            self.deferred_hovers
+                                .retain(|d| !(d.0 == file_idx && d.1 == line && d.2 == character));
+                            self.deferred_hovers
+                                .push_back((file_idx, line, character, word, group_id));
+                        }
+                    }
+                },
                 Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
                     tracing::warn!("LSP: input_receiver lagged by {} messages", n);
                 }
@@ -421,6 +507,20 @@ impl RRTWorker for LspWorker {
             );
         }
 
+        // Replay hovers that were deferred while warmup was in progress.
+        if self.warmup_queue.is_empty()
+            && let Some((file_idx, line, character, word, group_id)) =
+                self.deferred_hovers.pop_front()
+        {
+            if self
+                .send_hover_request(file_idx, line, character, word, group_id)
+                .is_err()
+            {
+                tracing::info!("LSP: dispatch -> Restart (deferred hover send failed)");
+                return Continuation::Restart;
+            }
+        }
+
         // Poll stdout for up to READ_TIMEOUT before attempting a blocking read.
         let poll_ret = poll_readable(self.reader.get_ref(), READ_TIMEOUT);
         tracing::trace!(
@@ -451,6 +551,48 @@ impl RRTWorker for LspWorker {
 }
 
 impl LspWorker {
+    fn send_hover_request(
+        &mut self,
+        file_idx: usize,
+        line: u32,
+        character: u32,
+        word: Option<String>,
+        group_id: Option<usize>,
+    ) -> std::io::Result<()> {
+        let snapshot = self.files.load();
+        let file = &snapshot[file_idx];
+        let uri: Uri = format!("file://{}", file.path).parse().expect("valid URI");
+        let id = self.req_state.next_id;
+        self.req_state.next_id += 1;
+        let hover_req = RpcRequest {
+            jsonrpc: "2.0",
+            id,
+            method: "textDocument/hover",
+            params: HoverParams {
+                text_document_position_params: TextDocumentPositionParams {
+                    text_document: TextDocumentIdentifier { uri },
+                    position: Position { line, character },
+                },
+                work_done_progress_params: WorkDoneProgressParams::default(),
+            },
+        };
+        tracing::debug!("LSP: sending hover id={} file_idx={}", id, file_idx);
+        send_msg(&mut self.stdin, &hover_req)?;
+        self.ref_queries.insert(
+            id,
+            PendingRefQuery {
+                file_idx,
+                line,
+                character,
+                word,
+                phase: RefQueryPhase::Hover,
+                qualified_name: None,
+                group_id,
+            },
+        );
+        Ok(())
+    }
+
     fn handle_recv_msg(&mut self, msg: RpcResponse) -> Continuation {
         let method = msg.method.as_deref().unwrap_or("");
         let has_id = msg.id.is_some();
@@ -503,8 +645,10 @@ impl LspWorker {
         if let Some(id) = msg.id.as_ref().and_then(|v| v.as_u64())
             && let Some((file_idx, is_range, is_warmup)) = self.req_state.pending.remove(&id)
         {
-            let tokens: Option<SemanticTokens> =
-                msg.result.and_then(|v| serde_json::from_value(v).ok());
+            let tokens: Option<SemanticTokens> = msg
+                .result
+                .as_ref()
+                .and_then(|v| serde_json::from_value(v.clone()).ok());
             let has_data = tokens.is_some();
             tracing::debug!(
                 "LSP: token response id={} file_idx={} is_range={} is_warmup={} has_data={}",
@@ -566,6 +710,260 @@ impl LspWorker {
             }
         }
 
+        if let Some(id) = msg.id.as_ref().and_then(|v| v.as_u64())
+            && let Some(pending) = self.ref_queries.remove(&id)
+        {
+            match pending.phase {
+                RefQueryPhase::Hover => {
+                    let hover_raw = msg
+                        .result
+                        .as_ref()
+                        .and_then(|v| serde_json::from_value::<lsp_types::Hover>(v.clone()).ok());
+                    let name: Option<String> =
+                        hover_raw.as_ref().and_then(|hover| match &hover.contents {
+                            HoverContents::Markup(content) => {
+                                let name = match content.kind {
+                                    lsp_types::MarkupKind::Markdown => {
+                                        let mut parts = content.value.split('`');
+                                        parts.nth(1)?.to_string()
+                                    }
+                                    lsp_types::MarkupKind::PlainText => {
+                                        let parent = content.value.lines().next()?;
+                                        // If hover returns just the parent type (e.g. for a
+                                        // struct field), append the clicked word to form a
+                                        // unique qualified name for the field.
+                                        if let Some(w) = &pending.word {
+                                            let last_seg = parent.rsplit("::").next().unwrap_or("");
+                                            if last_seg != w.as_str()
+                                                && !parent.contains(&format!("::{}", w))
+                                            {
+                                                format!("{}::{}", parent, w)
+                                            } else {
+                                                parent.to_string()
+                                            }
+                                        } else {
+                                            parent.to_string()
+                                        }
+                                    }
+                                };
+                                if name.contains("::") {
+                                    Some(name)
+                                } else {
+                                    tracing::debug!(
+                                        "LSP: hover name doesn't contain '::': {:?}",
+                                        name,
+                                    );
+                                    None
+                                }
+                            }
+                            other => {
+                                tracing::debug!(
+                                    "LSP: hover contents not Markup: {:?}",
+                                    std::mem::discriminant(other),
+                                );
+                                None
+                            }
+                        });
+                    if name.is_none() {
+                        tracing::debug!(
+                            "LSP: hover name extraction failed for id={}. hover_raw={:?}",
+                            id,
+                            hover_raw.as_ref().map(|h| &h.contents),
+                        );
+                    }
+                    let Some(name) = name else {
+                        // A null result (hover_raw = None) commonly just means
+                        // rust-analyzer hasn't finished indexing yet, not that the
+                        // symbol is gone — most visible right at startup, when
+                        // session-restore fires rebuild hovers the instant our own
+                        // (much smaller) local warmup queue drains. Retry those;
+                        // a user-initiated double-click (group_id: None) or a
+                        // hover that came back with real-but-unusable contents
+                        // (e.g. no `::` — a keyword or builtin) fails immediately.
+                        let retry_key = (pending.file_idx, pending.line, pending.character);
+                        if hover_raw.is_none() && pending.group_id.is_some() {
+                            let retries = self.hover_retries.entry(retry_key).or_insert(0);
+                            if *retries < MAX_HOVER_RETRIES {
+                                *retries += 1;
+                                tracing::debug!(
+                                    "LSP: hover null, retry {}/{} for file_idx={} line={} char={}",
+                                    retries,
+                                    MAX_HOVER_RETRIES,
+                                    pending.file_idx,
+                                    pending.line,
+                                    pending.character,
+                                );
+                                // rust-analyzer answers a "not ready" hover with a null
+                                // result essentially instantly (it's a fast rejection,
+                                // not a slow one) — resending immediately just burns
+                                // through all retries in the same millisecond, giving
+                                // indexing no time to actually progress. Block this
+                                // dedicated worker thread briefly instead, matching
+                                // the blocking-I/O design already used elsewhere here
+                                // (e.g. the 500ms body-read deadline in recv_msg).
+                                std::thread::sleep(HOVER_RETRY_DELAY);
+                                self.deferred_hovers.push_back((
+                                    pending.file_idx,
+                                    pending.line,
+                                    pending.character,
+                                    pending.word,
+                                    pending.group_id,
+                                ));
+                                return Continuation::Continue;
+                            }
+                            tracing::debug!(
+                                "LSP: hover retries exhausted for file_idx={} line={} char={}",
+                                pending.file_idx,
+                                pending.line,
+                                pending.character,
+                            );
+                        }
+                        self.hover_retries.remove(&retry_key);
+                        // blocking_send: this runs on the RRT std::thread, and a
+                        // dropped result would strand the group in limbo forever.
+                        let _ = self.app_tx.blocking_send(
+                            r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                AppSignal::SymbolHighlightResult {
+                                    qualified_name: String::new(),
+                                    group_id: pending.group_id,
+                                    origin_file_idx: pending.file_idx,
+                                    origin_line: pending.line,
+                                    origin_char: pending.character,
+                                    origin_word: pending.word,
+                                    origin_locations: Vec::new(),
+                                    reference_locations: Vec::new(),
+                                },
+                            ),
+                        );
+                        return Continuation::Continue;
+                    };
+                    self.hover_retries
+                        .remove(&(pending.file_idx, pending.line, pending.character));
+                    let snapshot = self.files.load();
+                    let file = &snapshot[pending.file_idx];
+                    let uri: Uri = format!("file://{}", file.path).parse().expect("valid URI");
+                    let refs_id = self.req_state.next_id;
+                    self.req_state.next_id += 1;
+                    let refs_req = RpcRequest {
+                        jsonrpc: "2.0",
+                        id: refs_id,
+                        method: "textDocument/references",
+                        params: ReferenceParams {
+                            text_document_position: TextDocumentPositionParams {
+                                text_document: TextDocumentIdentifier { uri },
+                                position: Position {
+                                    line: pending.line,
+                                    character: pending.character,
+                                },
+                            },
+                            context: ReferenceContext {
+                                include_declaration: true,
+                            },
+                            work_done_progress_params: WorkDoneProgressParams::default(),
+                            partial_result_params: PartialResultParams::default(),
+                        },
+                    };
+                    tracing::debug!(
+                        "LSP: hover succeeded name={:?}, sending references id={}",
+                        name,
+                        refs_id,
+                    );
+                    if send_msg(&mut self.stdin, &refs_req).is_err() {
+                        tracing::info!("LSP: refs send failed");
+                        return Continuation::Restart;
+                    }
+                    self.ref_queries.insert(
+                        refs_id,
+                        PendingRefQuery {
+                            file_idx: pending.file_idx,
+                            line: pending.line,
+                            character: pending.character,
+                            word: pending.word.clone(),
+                            phase: RefQueryPhase::References,
+                            qualified_name: Some(name),
+                            group_id: pending.group_id,
+                        },
+                    );
+                    tracing::debug!(
+                        "LSP: references request sent, pending refs count={}",
+                        self.ref_queries.len()
+                    );
+                }
+                RefQueryPhase::References => {
+                    let Some(name) = pending.qualified_name else {
+                        return Continuation::Continue;
+                    };
+                    let locations: Vec<Location> = msg
+                        .result
+                        .and_then(|v| serde_json::from_value(v).ok())
+                        .unwrap_or_default();
+                    let snapshot = self.files.load();
+                    let origin_path: String = snapshot[pending.file_idx].path.as_str().to_string();
+                    let mut origin_locations: Vec<SymbolRefLocation> = Vec::new();
+                    let mut reference_locations: Vec<SymbolRefLocation> = Vec::new();
+                    for loc in locations {
+                        let Some(path_str) = loc.uri.as_str().strip_prefix("file://") else {
+                            continue;
+                        };
+                        let path = camino::Utf8PathBuf::from(path_str);
+                        let Some(file_key) = crate::loader::file_key_for_path(&snapshot, &path)
+                        else {
+                            continue;
+                        };
+                        let file = &snapshot[file_key.0];
+                        let Ok(guard) = file.data.lock() else {
+                            continue;
+                        };
+                        let line_starts = &guard.line_starts;
+                        let content = &guard.content;
+                        let line = loc.range.start.line as usize;
+                        if line >= line_starts.len() {
+                            continue;
+                        }
+                        let line_start = line_starts[line];
+                        let line_str = &content[line_start..];
+                        let start_byte = line_start
+                            + utf16_to_byte(line_str, loc.range.start.character as usize);
+                        let end_byte =
+                            line_start + utf16_to_byte(line_str, loc.range.end.character as usize);
+                        drop(guard);
+                        let sl = SymbolRefLocation {
+                            file_key,
+                            start_byte,
+                            end_byte,
+                        };
+                        if loc.uri.as_str().strip_prefix("file://") == Some(&origin_path) {
+                            origin_locations.push(sl);
+                        } else {
+                            reference_locations.push(sl);
+                        }
+                    }
+                    tracing::debug!(
+                        "LSP: references response name={} origin_count={} ref_count={} group_id={:?}",
+                        name,
+                        origin_locations.len(),
+                        reference_locations.len(),
+                        pending.group_id,
+                    );
+                    let _ = self.app_tx.blocking_send(
+                        r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
+                            AppSignal::SymbolHighlightResult {
+                                qualified_name: name,
+                                group_id: pending.group_id,
+                                origin_file_idx: pending.file_idx,
+                                origin_line: pending.line,
+                                origin_char: pending.character,
+                                origin_word: pending.word,
+                                origin_locations,
+                                reference_locations,
+                            },
+                        ),
+                    );
+                }
+            }
+            return Continuation::Continue;
+        }
+
         if notify {
             let _ = self
                 .app_tx
@@ -581,78 +979,100 @@ impl LspWorker {
 // ── Send file requests via the RRT input channel ─────────────────────────────
 
 /// Buffer for file indices requested before the LSP worker is in Running state.
-static FILE_REQUEST_BUFFER: std::sync::Mutex<Vec<usize>> = std::sync::Mutex::new(Vec::new());
+static FILE_REQUEST_BUFFER: std::sync::Mutex<Vec<LspInput>> = std::sync::Mutex::new(Vec::new());
 
-fn drain_request_buffer(tx: &tokio::sync::broadcast::Sender<usize>) {
+fn drain_request_buffer(tx: &tokio::sync::broadcast::Sender<LspInput>) {
     if let Ok(mut buf) = FILE_REQUEST_BUFFER.lock() {
-        buf.retain(|&idx| tx.send(idx).is_err());
+        buf.retain(|item| tx.send(item.clone()).is_err());
     }
 }
 
-fn buffer_file_request(file_idx: usize) {
+fn buffer_file_request(input: LspInput) {
     const MAX: usize = 10_000;
     let _ = FILE_REQUEST_BUFFER.lock().map(|mut buf| {
         if buf.len() >= MAX {
             tracing::warn!(
-                "LSP: request buffer full ({} entries), dropping file_idx={}",
-                MAX,
-                file_idx
+                "LSP: request buffer full ({} entries), dropping request",
+                MAX
             );
         } else {
-            buf.push(file_idx);
+            buf.push(input);
         }
     });
 }
 
-pub fn send_file_request(file_idx: usize) {
+fn send_lsp_input(input: LspInput) {
     let generation = LSP_RRT.get_thread_generation();
     let output_receivers = LSP_RRT.get_receiver_count();
     let guard = LSP_RRT.shared_state.lock();
     match &*guard {
         ThreadState::Running(_, tx) => {
-            drain_request_buffer(tx);
+            let mut buf = FILE_REQUEST_BUFFER
+                .lock()
+                .unwrap_or_else(|e| e.into_inner());
+            for item in buf.drain(..) {
+                let _ = tx.send(item);
+            }
+            drop(buf);
             let input_receivers = tx.receiver_count();
-            match tx.send(file_idx) {
+            let input_for_buffer = input.clone();
+            match tx.send(input) {
                 Ok(0) => {
                     tracing::warn!(
-                        "LSP: send_file_request({}) sent to 0 receivers (input={} output={} gen={})",
-                        file_idx,
+                        "LSP: send to 0 receivers (input={} output={} gen={})",
                         input_receivers,
                         output_receivers,
                         generation
                     );
-                    buffer_file_request(file_idx);
+                    buffer_file_request(input_for_buffer);
                 }
                 Ok(n) => {
-                    tracing::debug!(
-                        "LSP: send_file_request({}) sent to {} receivers (gen={})",
-                        file_idx,
-                        n,
-                        generation
-                    );
+                    tracing::debug!("LSP: sent to {} receivers (gen={})", n, generation);
                 }
                 Err(e) => {
-                    tracing::error!(
-                        "LSP: send_file_request({}) send error: {:?} gen={}",
-                        file_idx,
-                        e,
-                        generation
-                    );
-                    buffer_file_request(file_idx);
+                    tracing::error!("LSP: send error: {:?} gen={}", e, generation);
+                    buffer_file_request(input_for_buffer);
                 }
             }
         }
         state => {
             tracing::warn!(
-                "LSP: send_file_request({}) -> Buffered state={:?} gen={} output_receivers={}",
-                file_idx,
+                "LSP: send -> Buffered state={:?} gen={} output_receivers={}",
                 state,
                 generation,
                 output_receivers
             );
-            buffer_file_request(file_idx);
+            buffer_file_request(input);
         }
     }
+}
+
+pub fn send_file_request(file_idx: usize) {
+    send_lsp_input(LspInput::TokenRequest(file_idx));
+}
+
+pub fn send_symbol_request(
+    file_idx: usize,
+    line: u32,
+    character: u32,
+    word: Option<String>,
+    group_id: Option<usize>,
+) {
+    tracing::debug!(
+        "LSP: send_symbol_request file_idx={} line={} char={} word={:?} group_id={:?}",
+        file_idx,
+        line,
+        character,
+        word,
+        group_id,
+    );
+    send_lsp_input(LspInput::HoverThenReferences {
+        file_idx,
+        line,
+        character,
+        word,
+        group_id,
+    });
 }
 
 /// Health of the LSP worker, returned by [`health_check`].
@@ -1007,4 +1427,44 @@ fn utf16_to_byte(s: &str, utf16_offset: usize) -> usize {
         u16_count += ch.len_utf16();
     }
     s.len()
+}
+
+pub(crate) fn byte_to_utf16(s: &str, byte_offset: usize) -> u32 {
+    let byte_offset = byte_offset.min(s.len());
+    let mut u16_count = 0u32;
+    for (i, c) in s.char_indices() {
+        if byte_offset < i + c.len_utf8() {
+            return u16_count;
+        }
+        u16_count += c.len_utf16() as u32;
+    }
+    u16_count
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_byte_to_utf16_ascii() {
+        assert_eq!(byte_to_utf16("hello", 0), 0);
+        assert_eq!(byte_to_utf16("hello", 3), 3);
+        assert_eq!(byte_to_utf16("hello", 5), 5);
+    }
+
+    #[test]
+    fn test_byte_to_utf16_multi_byte() {
+        assert_eq!(byte_to_utf16("héllo", 0), 0);
+        assert_eq!(byte_to_utf16("héllo", 2), 1);
+        assert_eq!(byte_to_utf16("héllo", 3), 2);
+
+        assert_eq!(byte_to_utf16("𐍈test", 0), 0);
+        assert_eq!(byte_to_utf16("𐍈test", 4), 2);
+        assert_eq!(byte_to_utf16("𐍈test", 5), 3);
+    }
+
+    #[test]
+    fn test_byte_to_utf16_bounds() {
+        assert_eq!(byte_to_utf16("hi", 100), 2);
+    }
 }

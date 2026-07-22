@@ -13,7 +13,9 @@ mod theme_picker;
 mod title_row;
 
 pub use app::{build_state, run};
-pub use state::{AppSignal, AppState, TerminalPane};
+pub use state::{
+    AppSignal, AppState, SYMBOL_PALETTE, SymbolHighlightGroup, SymbolRefLocation, TerminalPane,
+};
 pub use theme::HelixTheme;
 
 use self::app::*;

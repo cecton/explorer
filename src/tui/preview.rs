@@ -782,64 +782,68 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                         origin,
                         col(content_start_col) + row(rendered),
                     );
-                    if is_text_drag_single {
-                        let line_byte_start = data.line_starts[line_idx];
-                        let sel_lo = byte_to_char(line, text_drag_single_lo - line_byte_start);
-                        let sel_hi = byte_to_char(line, text_drag_single_hi - line_byte_start);
-                        if seg_end_char <= sel_lo || seg_start_char >= sel_hi {
-                            paint_line_segment(
-                                &mut render_ops,
-                                &data,
-                                &colored_guard,
-                                line_idx,
-                                (seg_start_char, seg_end_char),
-                                &state.theme,
-                                content_bg,
-                            );
-                        } else {
-                            if seg_start_char < sel_lo {
-                                paint_line_segment(
-                                    &mut render_ops,
-                                    &data,
-                                    &colored_guard,
-                                    line_idx,
-                                    (seg_start_char, sel_lo),
-                                    &state.theme,
-                                    content_bg,
+                    // Build color intervals for this sub-row segment.
+                    // Each interval is (start_char, end_char, bg_color).
+                    // Priority: text selection > symbol highlight > row default.
+                    let line_byte_start = data.line_starts[line_idx];
+                    let mut intervals: Vec<(usize, usize, [u8; 3])> =
+                        vec![(seg_start_char, seg_end_char, content_bg)];
+
+                    // Symbol highlight backgrounds. Skipped for fully selected rows
+                    // (multi-line selection) so selection feedback stays visible.
+                    if !is_text_drag_multi {
+                        for group in &state.symbol_highlights {
+                            for loc in &group.locations {
+                                if loc.file_key != file_key {
+                                    continue;
+                                }
+                                let line_byte_end = line_byte_start + line.len();
+                                if loc.end_byte <= line_byte_start
+                                    || loc.start_byte >= line_byte_end
+                                {
+                                    continue;
+                                }
+                                let loc_lo_char = byte_to_char(
+                                    line,
+                                    loc.start_byte.saturating_sub(line_byte_start),
                                 );
-                            }
-                            let o_lo = seg_start_char.max(sel_lo);
-                            let o_hi = seg_end_char.min(sel_hi);
-                            paint_line_segment(
-                                &mut render_ops,
-                                &data,
-                                &colored_guard,
-                                line_idx,
-                                (o_lo, o_hi),
-                                &state.theme,
-                                hl_rgb,
-                            );
-                            if seg_end_char > sel_hi {
-                                paint_line_segment(
-                                    &mut render_ops,
-                                    &data,
-                                    &colored_guard,
-                                    line_idx,
-                                    (sel_hi, seg_end_char),
-                                    &state.theme,
-                                    content_bg,
+                                let loc_hi_char =
+                                    byte_to_char(line, loc.end_byte - line_byte_start);
+                                overlay_interval(
+                                    &mut intervals,
+                                    seg_start_char.max(loc_lo_char),
+                                    seg_end_char.min(loc_hi_char),
+                                    group.color,
                                 );
                             }
                         }
-                    } else {
+                    }
+
+                    // Selection overlays last so it wins over symbol highlights.
+                    if is_text_drag_single {
+                        let sel_lo = byte_to_char(line, text_drag_single_lo - line_byte_start);
+                        let sel_hi = byte_to_char(line, text_drag_single_hi - line_byte_start);
+                        overlay_interval(
+                            &mut intervals,
+                            sel_lo.max(seg_start_char),
+                            sel_hi.min(seg_end_char),
+                            hl_rgb,
+                        );
+                    }
+
+                    // Paint each interval.
+                    for &(i_lo, i_hi, bg_color) in &intervals {
+                        if i_lo >= i_hi {
+                            continue;
+                        }
                         paint_line_segment(
                             &mut render_ops,
                             &data,
                             &colored_guard,
                             line_idx,
-                            (seg_start_char, seg_end_char),
+                            (i_lo, i_hi),
                             &state.theme,
-                            content_bg,
+                            bg_color,
                         );
                     }
 
@@ -952,6 +956,7 @@ fn paint_line_segment(
             }
             let text = &line_content[overlap_start..overlap_end];
             let fg_rgb = theme.color_for_lsp_token(token_type).unwrap_or(default_fg);
+            let fg_rgb = ensure_readable_fg(fg_rgb, pane_bg);
             let fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
             let style = new_style!(color_fg: {fg} color_bg: {bg});
             *render_ops += RenderOpCommon::ApplyColors(Some(style));
@@ -961,15 +966,76 @@ fn paint_line_segment(
     }
 
     let text = &line_content[seg_byte_start..seg_byte_end];
-    let fg = tui_color!(default_fg[0], default_fg[1], default_fg[2]);
+    let fg_rgb = ensure_readable_fg(default_fg, pane_bg);
+    let fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
     let style = new_style!(color_fg: {fg} color_bg: {bg});
     *render_ops += RenderOpCommon::ApplyColors(Some(style));
     *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
 }
 
+/// Perceived brightness on a 0-255 scale (standard luma weights). Good enough for
+/// picking readable terminal text; not meant to be WCAG-certified color science.
+fn luminance(c: [u8; 3]) -> f32 {
+    0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32
+}
+
+/// Minimum acceptable luminance gap between text and its background, on the same
+/// 0-255 scale as `luminance`. Chosen empirically against the symbol-highlight
+/// palette (`SYMBOL_PALETTE`), several of whose colors sit close in perceived
+/// brightness to common syntax-highlight foregrounds despite differing in hue.
+const MIN_FG_BG_CONTRAST: f32 = 100.0;
+
+/// Returns `fg` unchanged if it contrasts adequately against `bg`; otherwise swaps
+/// to near-black or near-white, whichever contrasts better with `bg`. Applied to
+/// every span so it transparently covers symbol-highlight and selection overlay
+/// backgrounds (`overlay_interval` in `render()`) as well as the normal pane
+/// background, without either call site needing to know which case it is.
+fn ensure_readable_fg(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
+    if (luminance(fg) - luminance(bg)).abs() >= MIN_FG_BG_CONTRAST {
+        return fg;
+    }
+    if luminance(bg) > 127.0 {
+        [20, 20, 20]
+    } else {
+        [235, 235, 235]
+    }
+}
+
 /// Converts a byte offset within `s` to a character count.
 fn byte_to_char(s: &str, byte_offset: usize) -> usize {
     s[..byte_offset.min(s.len())].chars().count()
+}
+
+/// Repaints `o_lo..o_hi` in `intervals` with `color`, splitting partially
+/// overlapped pieces. No-op when the range is empty.
+fn overlay_interval(
+    intervals: &mut Vec<(usize, usize, [u8; 3])>,
+    o_lo: usize,
+    o_hi: usize,
+    color: [u8; 3],
+) {
+    if o_lo >= o_hi {
+        return;
+    }
+    let mut result = Vec::with_capacity(intervals.len() + 2);
+    for &(i_lo, i_hi, i_color) in intervals.iter() {
+        if i_hi <= o_lo || i_lo >= o_hi {
+            result.push((i_lo, i_hi, i_color));
+        } else {
+            if i_lo < o_lo {
+                result.push((i_lo, o_lo, i_color));
+            }
+            let lo = i_lo.max(o_lo);
+            let hi = i_hi.min(o_hi);
+            if lo < hi {
+                result.push((lo, hi, color));
+            }
+            if i_hi > o_hi {
+                result.push((o_hi, i_hi, i_color));
+            }
+        }
+    }
+    *intervals = result;
 }
 
 fn compute_scroll_target(ranges: &[(usize, usize)], page_size: usize, _max: usize) -> usize {
@@ -1098,4 +1164,41 @@ fn expand_placeholders(cmd: &str, file_path: &Utf8Path, root: &Utf8Path) -> Resu
         }
     }
     Ok(result)
+}
+
+#[cfg(test)]
+mod contrast_tests {
+    use super::*;
+
+    #[test]
+    fn keeps_fg_when_contrast_is_already_adequate() {
+        // White text on a near-black background: plenty of contrast, unchanged.
+        assert_eq!(
+            ensure_readable_fg([230, 230, 230], [10, 10, 10]),
+            [230, 230, 230]
+        );
+    }
+
+    #[test]
+    fn overrides_fg_when_luminance_nearly_matches() {
+        // Yellow-ish syntax fg on a similarly bright symbol-highlight orange bg
+        // (SYMBOL_PALETTE[2] = [255, 200, 100]) — nearly identical luminance.
+        let fg = [255, 255, 100];
+        let bg = [255, 200, 100];
+        let result = ensure_readable_fg(fg, bg);
+        assert_ne!(result, fg);
+        assert!((luminance(result) - luminance(bg)).abs() >= MIN_FG_BG_CONTRAST);
+    }
+
+    #[test]
+    fn overridden_fg_picks_dark_text_on_light_bg_and_light_text_on_dark_bg() {
+        assert_eq!(
+            ensure_readable_fg([255, 255, 100], [255, 200, 100]),
+            [20, 20, 20]
+        );
+        assert_eq!(
+            ensure_readable_fg([50, 50, 50], [30, 30, 30]),
+            [235, 235, 235]
+        );
+    }
 }

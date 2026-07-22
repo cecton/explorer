@@ -87,6 +87,18 @@ async fn main() {
 
     if let Some(session) = session::load_session(&root) {
         session.apply(&mut initial_state);
+        // Locations aren't persisted (they'd be stale) — re-resolve each restored
+        // group against a running LSP worker using its saved origin identity, same
+        // as the rebuild-on-edit path. Requests buffer until the worker is up.
+        for (idx, group) in initial_state.symbol_highlights.iter().enumerate() {
+            lsp::send_symbol_request(
+                group.origin_file.0,
+                group.origin_line,
+                group.origin_char,
+                group.origin_word.clone(),
+                Some(idx),
+            );
+        }
     }
 
     tui::run(initial_state, files, root)

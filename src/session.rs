@@ -2,6 +2,7 @@ use crate::loader::{FileKey, LoadedFile, file_key_for_path, path_for_file_key};
 use crate::tui::AppState;
 use crate::tui::TerminalPane;
 use crate::tui::pane_manager::{PaneSize, Window, WindowState};
+use crate::tui::{SYMBOL_PALETTE, SymbolHighlightGroup};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -17,6 +18,22 @@ pub struct Session {
     pub repo_root: Utf8PathBuf,
     pub panes: Vec<PaneEntry>,
     pub highlight_ranges: HashMap<String, Vec<(usize, usize)>>,
+    #[serde(default)]
+    pub symbol_highlights: Vec<SessionSymbolGroup>,
+}
+
+/// Persisted symbol-highlight identity. Byte-offset locations are never saved —
+/// they go stale the moment a file changes outside the app — so restore re-queries
+/// rust-analyzer via `origin_path`/`origin_line`/`origin_char`/`origin_word`, the
+/// same (file, line, col) stable lookup key used for the live rebuild-on-edit path.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SessionSymbolGroup {
+    pub origin_path: String,
+    pub origin_line: u32,
+    pub origin_char: u32,
+    pub origin_word: Option<String>,
+    pub qualified_name: String,
+    pub color: [u8; 3],
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -104,11 +121,29 @@ impl Session {
             }
         }
 
+        let symbol_highlights: Vec<SessionSymbolGroup> = state
+            .symbol_highlights
+            .iter()
+            .filter_map(|group| {
+                let path = path_for_file_key(&snapshot, group.origin_file)?;
+                let rel = path.strip_prefix(&state.root).ok()?;
+                Some(SessionSymbolGroup {
+                    origin_path: rel.to_string(),
+                    origin_line: group.origin_line,
+                    origin_char: group.origin_char,
+                    origin_word: group.origin_word.clone(),
+                    qualified_name: group.qualified_name.clone(),
+                    color: group.color,
+                })
+            })
+            .collect();
+
         Self {
             version: SESSION_VERSION,
             repo_root: state.root.clone(),
             panes,
             highlight_ranges,
+            symbol_highlights,
         }
     }
 
@@ -215,6 +250,29 @@ impl Session {
                 state.highlight_ranges.insert(key, ranges);
             }
         }
+
+        // Locations are never restored (they'd be stale); only origin identity is
+        // kept. `needs_rebuild` triggers re-resolution against a running LSP worker,
+        // same as the modified-origin-file rebuild path.
+        state.symbol_highlights.clear();
+        for entry in self.symbol_highlights {
+            let abs = state.root.join(&entry.origin_path);
+            if let Some(origin_file) = file_key_for_path(&snapshot, &abs) {
+                state.symbol_highlights.push(SymbolHighlightGroup {
+                    qualified_name: entry.qualified_name,
+                    origin_file,
+                    origin_line: entry.origin_line,
+                    origin_char: entry.origin_char,
+                    origin_word: entry.origin_word,
+                    origin_byte_start: None,
+                    origin_byte_end: None,
+                    color: entry.color,
+                    locations: Vec::new(),
+                    needs_rebuild: true,
+                });
+            }
+        }
+        state.next_palette_index = state.symbol_highlights.len() % SYMBOL_PALETTE.len();
 
         if state
             .pane_manager
@@ -413,12 +471,34 @@ mod tests {
                 m.insert("src/lib.rs".to_string(), vec![(1, 10), (20, 30)]);
                 m
             },
+            symbol_highlights: vec![SessionSymbolGroup {
+                origin_path: "src/lib.rs".to_string(),
+                origin_line: 3,
+                origin_char: 7,
+                origin_word: Some("add_numbers".to_string()),
+                qualified_name: "crate::lib::add_numbers".to_string(),
+                color: [255, 100, 100],
+            }],
         };
 
         let value = serde_json::to_value(&session).unwrap();
         let restored: Session = serde_json::from_value(value.clone()).unwrap();
         let value2 = serde_json::to_value(&restored).unwrap();
         assert_eq!(value, value2);
+    }
+
+    #[test]
+    fn session_deserializes_without_symbol_highlights_field() {
+        // Older session files (or any writer that omits the field) must still load,
+        // defaulting to no persisted symbol highlights.
+        let json = serde_json::json!({
+            "version": SESSION_VERSION,
+            "repo_root": "/tmp/repo",
+            "panes": [],
+            "highlight_ranges": {},
+        });
+        let session: Session = serde_json::from_value(json).unwrap();
+        assert!(session.symbol_highlights.is_empty());
     }
 
     #[test]
@@ -505,6 +585,7 @@ mod tests {
                 m.insert("missing.rs".to_string(), vec![(1, 5)]);
                 m
             },
+            symbol_highlights: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -559,6 +640,7 @@ mod tests {
                 },
             ],
             highlight_ranges: HashMap::new(),
+            symbol_highlights: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -599,6 +681,7 @@ mod tests {
                 pane_size: SerializablePaneSize::Quarter,
             }],
             highlight_ranges: HashMap::new(),
+            symbol_highlights: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -625,6 +708,7 @@ mod tests {
                 pane_size: SerializablePaneSize::Half,
             }],
             highlight_ranges: HashMap::new(),
+            symbol_highlights: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -636,6 +720,67 @@ mod tests {
         ));
         assert!(state.highlight_ranges.is_empty());
         assert!(state.pending_terminals.is_empty());
+        assert!(state.symbol_highlights.is_empty());
+    }
+
+    #[test]
+    fn session_apply_restores_symbol_groups() {
+        let (_dir, root) = temp_root();
+
+        let file_path = root.join("src/util.rs");
+        std::fs::create_dir_all(file_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file_path,
+            "fn add_numbers(a: i32, b: i32) -> i32 {\n    a + b\n}\n",
+        )
+        .unwrap();
+        let loaded = LoadedFile::load(file_path.into()).unwrap();
+        let files = Arc::new(ArcSwap::from_pointee(vec![loaded]));
+        let mut state = AppState::new(files, root.clone(), HelixTheme::default());
+
+        let session = Session {
+            version: SESSION_VERSION,
+            repo_root: root.clone(),
+            panes: Vec::new(),
+            highlight_ranges: HashMap::new(),
+            symbol_highlights: vec![
+                SessionSymbolGroup {
+                    origin_path: "src/util.rs".to_string(),
+                    origin_line: 0,
+                    origin_char: 3,
+                    origin_word: Some("add_numbers".to_string()),
+                    qualified_name: "symtest::util::add_numbers".to_string(),
+                    color: [255, 100, 100],
+                },
+                // Origin file doesn't exist in this repo: must be skipped, not
+                // stubbed like a file-preview pane (the group has nothing to
+                // rebuild without a real file to re-query).
+                SessionSymbolGroup {
+                    origin_path: "src/missing.rs".to_string(),
+                    origin_line: 0,
+                    origin_char: 0,
+                    origin_word: None,
+                    qualified_name: "symtest::missing::gone".to_string(),
+                    color: [100, 200, 255],
+                },
+            ],
+        };
+
+        session.apply(&mut state);
+
+        assert_eq!(state.symbol_highlights.len(), 1);
+        let group = &state.symbol_highlights[0];
+        assert_eq!(group.qualified_name, "symtest::util::add_numbers");
+        assert_eq!(group.origin_line, 0);
+        assert_eq!(group.origin_char, 3);
+        assert_eq!(group.origin_word.as_deref(), Some("add_numbers"));
+        assert_eq!(group.color, [255, 100, 100]);
+        assert!(group.needs_rebuild);
+        assert!(group.locations.is_empty());
+        assert!(group.origin_byte_start.is_none());
+        assert!(group.origin_byte_end.is_none());
+
+        assert_eq!(state.next_palette_index, 1);
     }
 
     #[test]

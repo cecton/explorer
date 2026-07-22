@@ -479,6 +479,40 @@ impl Component<AppState, AppSignal> for PaneComponent {
                                     self.text_drag_active = true;
                                     state.mouse_drag_active = true;
                                 }
+                                2 => {
+                                    let line = data.line(line_idx);
+                                    let byte_in_line = cursor_byte - data.line_starts[line_idx];
+                                    let character = crate::lsp::byte_to_utf16(line, byte_in_line);
+
+                                    let hit = state.symbol_highlights.iter().position(|g| {
+                                        !(g.needs_rebuild && g.locations.is_empty())
+                                            && ((g.origin_file == key
+                                                && g.origin_byte_start
+                                                    .is_some_and(|s| cursor_byte >= s)
+                                                && g.origin_byte_end
+                                                    .is_some_and(|e| cursor_byte < e))
+                                                || g.locations.iter().any(|l| {
+                                                    l.file_key == key
+                                                        && cursor_byte >= l.start_byte
+                                                        && cursor_byte < l.end_byte
+                                                }))
+                                    });
+
+                                    if let Some(idx) = hit {
+                                        state.symbol_highlights.remove(idx);
+                                        state.mark_session_dirty();
+                                    } else {
+                                        let bounds = data.word_bounds(cursor_byte);
+                                        let word = data.content[bounds.0..bounds.1].to_string();
+                                        crate::lsp::send_symbol_request(
+                                            key.0,
+                                            line_idx as u32,
+                                            character,
+                                            Some(word),
+                                            None,
+                                        );
+                                    }
+                                }
                                 3 => {
                                     let bounds = data.line_bounds(line_idx);
                                     state.text_selection = Some(TextSelection {
