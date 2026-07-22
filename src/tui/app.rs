@@ -121,6 +121,7 @@ impl AppMain {
         cwd: Option<Utf8PathBuf>,
         pane_size: Option<PaneSize>,
         id: Option<usize>,
+        replace_window: Option<Window>,
     ) -> CommonResult<EventPropagation> {
         throws_with_return!({
             let state = &mut global_data.state;
@@ -287,7 +288,14 @@ impl AppMain {
             let window = Window::Terminal(id);
             if !restore {
                 let old = state.pane_manager.focused_window;
-                state.pane_manager.push_window(window);
+                if let Some(old_window) = replace_window {
+                    if let Window::FilePreview(file_key) = old_window {
+                        state.terminal_to_preview.insert(id, file_key);
+                    }
+                    state.pane_manager.replace_window(&old_window, window);
+                } else {
+                    state.pane_manager.push_window(window);
+                }
                 if let Some(size) = pane_size {
                     state
                         .pane_manager
@@ -350,7 +358,13 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
                 {
                     let _ = killer.kill();
                 }
-                state.pane_manager.remove_window(&Window::Terminal(id));
+                if let Some(file_key) = state.terminal_to_preview.remove(&id) {
+                    state
+                        .pane_manager
+                        .replace_window(&Window::Terminal(id), Window::FilePreview(file_key));
+                } else {
+                    state.pane_manager.remove_window(&Window::Terminal(id));
+                }
                 notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
                 state.mark_session_dirty();
                 sync_terminal_grabbed(state);
@@ -482,7 +496,7 @@ impl App for AppMain {
             } else {
                 None
             };
-            let _ = self.open_terminal(global_data, cmd, cwd, None, Some(id));
+            let _ = self.open_terminal(global_data, cmd, cwd, None, Some(id), None);
             if !global_data.state.terminal_panes.contains_key(&id) {
                 global_data.state.pane_manager.remove_window(&window);
                 global_data.state.mark_session_dirty();
@@ -566,7 +580,7 @@ impl App for AppMain {
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('t'),
                 }) => {
-                    return self.open_terminal(global_data, None, None, None, None);
+                    return self.open_terminal(global_data, None, None, None, None, None);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::Character('T'),
@@ -838,7 +852,20 @@ impl App for AppMain {
         if let AppSignal::OpenTerminal { cmd, cwd } = action {
             let cmd = cmd.clone();
             let cwd = cwd.clone();
-            return self.open_terminal(global_data, cmd, Some(cwd), None, None);
+            return self.open_terminal(global_data, cmd, Some(cwd), None, None, None);
+        }
+        if let AppSignal::OpenEditor { cmd, cwd, file_key } = action {
+            let cmd = cmd.clone();
+            let cwd = cwd.clone();
+            let key = *file_key;
+            return self.open_terminal(
+                global_data,
+                Some(cmd),
+                Some(cwd),
+                None,
+                None,
+                Some(Window::FilePreview(key)),
+            );
         }
         throws_with_return!({
             let state = &mut global_data.state;
@@ -949,6 +976,9 @@ impl App for AppMain {
                     state.bump_files_version();
                 }
                 AppSignal::OpenTerminal { .. } => {}
+                AppSignal::OpenEditor { .. } => {
+                    // Handled as early return above; unreachable here.
+                }
                 AppSignal::Noop => {
                     maybe_save_session(state, &self.root);
                     crate::lsp::try_drain_pending_requests();
@@ -1192,7 +1222,7 @@ fn render_status_bar(
             let rest = match state.pane_manager.focused_window.as_ref() {
                 Some(Window::FileNamePicker) => "Esc:Close  Enter:Open",
                 Some(Window::ThemePicker) => "Esc:Cancel  Enter:Save",
-                Some(Window::FilePreview(_)) => "Backspace:Send to back  ::Command",
+                Some(Window::FilePreview(_)) => "e:Edit  Backspace:Send to back  ::Command",
                 Some(Window::Terminal(_)) if !state.terminal_grabbed => {
                     "Backspace:Send to back  Enter:grab  ↑↓PgUp/PgDn:scroll"
                 }

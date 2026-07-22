@@ -452,6 +452,30 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             }
 
             if let InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character('e'),
+            }) = input_event
+            {
+                let file_path = {
+                    let snapshot = global_data.state.files.load();
+                    snapshot[key.0].path.clone()
+                };
+                let cwd = global_data.state.root.clone();
+                let editor = std::env::var("VISUAL")
+                    .or_else(|_| std::env::var("EDITOR"))
+                    .unwrap_or_else(|_| "nvim".into());
+                let editor_cmd = format!("{} {}", editor, sh_quote(file_path.as_str()));
+                send_signal!(
+                    global_data.main_thread_channel_sender,
+                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::OpenEditor {
+                        cmd: editor_cmd,
+                        cwd,
+                        file_key: key,
+                    })
+                );
+                return Ok(EventPropagation::ConsumedRender);
+            }
+
+            if let InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Backspace),
             }) = input_event
             {

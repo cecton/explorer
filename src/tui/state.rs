@@ -112,6 +112,8 @@ pub struct AppState {
     pub next_terminal_id: usize,
     /// Terminal windows restored from the session that still need a PTY spawned.
     pub pending_terminals: HashMap<usize, TerminalRestoreInfo>,
+    /// Maps editor terminal IDs back to the FileKey they should restore on exit.
+    pub terminal_to_preview: HashMap<usize, FileKey>,
     pub mouse_drag_active: bool,
     pub terminal_grabbed: bool,
     pub text_selection: Option<TextSelection>,
@@ -159,6 +161,7 @@ impl AppState {
             terminal_panes: HashMap::new(),
             next_terminal_id: 0,
             pending_terminals: HashMap::new(),
+            terminal_to_preview: HashMap::new(),
             mouse_drag_active: false,
             terminal_grabbed: false,
             text_selection: None,
@@ -205,6 +208,12 @@ pub enum AppSignal {
     OpenTerminal {
         cmd: Option<String>,
         cwd: Utf8PathBuf,
+    },
+    /// Open an embedded editor terminal that replaces the FilePreview in-place.
+    OpenEditor {
+        cmd: String,
+        cwd: Utf8PathBuf,
+        file_key: FileKey,
     },
     #[default]
     Noop,

@@ -193,6 +193,23 @@ impl PaneManager {
         }
     }
 
+    /// Replaces `old` with `new` at the same position in the stack, preserving
+    /// window state and focus. Does nothing if `old` is not in the stack.
+    pub fn replace_window(&mut self, old: &Window, new: Window) {
+        let Some(pos) = self.window_stack.iter().position(|w| w == old) else {
+            return;
+        };
+        self.window_stack[pos] = new;
+        if let Some(ws) = self.window_states.remove(old) {
+            self.window_states.insert(new, ws);
+        } else {
+            self.window_states.entry(new).or_default();
+        }
+        if self.focused_window.as_ref() == Some(old) {
+            self.focused_window = Some(new);
+        }
+    }
+
     /// Swaps `window` toward index 0 (the front / left).
     pub fn move_forward(&mut self, window: &Window) {
         let pos = match self.window_stack.iter().position(|w| w == window) {

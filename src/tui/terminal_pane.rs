@@ -126,7 +126,14 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                         let _ = killer.kill();
                     }
                 }
-                global_data.state.pane_manager.remove_window(&window);
+                if let Some(file_key) = global_data.state.terminal_to_preview.remove(&id) {
+                    global_data
+                        .state
+                        .pane_manager
+                        .replace_window(&Window::Terminal(id), Window::FilePreview(file_key));
+                } else {
+                    global_data.state.pane_manager.remove_window(&window);
+                }
                 if was_focused {
                     global_data.state.terminal_grabbed = false;
                 }

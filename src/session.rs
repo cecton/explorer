@@ -1,4 +1,4 @@
-use crate::loader::{LoadedFile, file_key_for_path, path_for_file_key};
+use crate::loader::{FileKey, LoadedFile, file_key_for_path, path_for_file_key};
 use crate::tui::AppState;
 use crate::tui::TerminalPane;
 use crate::tui::pane_manager::{PaneSize, Window, WindowState};
@@ -90,6 +90,7 @@ impl Session {
                     &state.root,
                     &state.pane_manager.window_states,
                     &state.terminal_panes,
+                    &state.terminal_to_preview,
                 )
             })
             .collect();
@@ -231,6 +232,7 @@ fn pane_entry_from_window(
     root: &Utf8Path,
     window_states: &HashMap<Window, WindowState>,
     terminal_panes: &HashMap<usize, Arc<Mutex<TerminalPane>>>,
+    terminal_to_preview: &HashMap<usize, FileKey>,
 ) -> Option<PaneEntry> {
     let window_state = window_states.get(window).cloned().unwrap_or_default();
     match window {
@@ -245,6 +247,17 @@ fn pane_entry_from_window(
         }
         Window::FileNamePicker | Window::ThemePicker => None,
         Window::Terminal(id) => {
+            // Editor terminals save as FilePreview so restore brings back the preview.
+            if let Some(file_key) = terminal_to_preview.get(id)
+                && let Some(path) = path_for_file_key(files, *file_key)
+                && let Ok(rel) = path.strip_prefix(root)
+            {
+                return Some(PaneEntry::FilePreview {
+                    path: rel.to_string(),
+                    scroll: 0,
+                    pane_size: window_state.pane_size.into(),
+                });
+            }
             let pane = terminal_panes
                 .get(id)?
                 .lock()
