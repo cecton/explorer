@@ -77,6 +77,11 @@ struct RpcResponse {
     id: Option<Value>,
     method: Option<String>,
     result: Option<Value>,
+    /// Payload of server-initiated requests/notifications (e.g.
+    /// `experimental/serverStatus`). Only `result` is set for responses to
+    /// our own requests, so this defaults to `None` there.
+    #[serde(default)]
+    params: Option<Value>,
 }
 
 // ── Interrupt ─────────────────────────────────────────────────────────────────
@@ -151,24 +156,24 @@ pub struct LspWorker {
     supports_range: bool,
     dispatch_count: u64,
     ref_queries: HashMap<u64, PendingRefQuery>,
-    /// Hover requests received during warmup, replayed once warmup completes:
-    /// (file_idx, line, character, word, group_id).
-    deferred_hovers: VecDeque<(usize, u32, u32, Option<String>, Option<usize>)>,
-    /// Retry counts for group-rebuild hovers (group_id: Some) keyed by
-    /// (file_idx, line, character). Our own tiny per-file warmup queue draining
-    /// doesn't mean rust-analyzer has finished indexing the workspace — a hover
-    /// sent right as warmup drains (e.g. right after session-restore re-queries
-    /// fire at startup) commonly returns null just because the server isn't
-    /// ready yet, not because the symbol is gone. Only rebuild/restore hovers
-    /// retry; a user-initiated double-click (group_id: None) fails immediately,
-    /// since by the time a human clicks, the server has had time to settle.
-    hover_retries: HashMap<(usize, u32, u32), u8>,
+    /// Whether rust-analyzer has finished indexing and can resolve cross-file
+    /// symbols. Driven by its `experimental/serverStatus` notification
+    /// (`quiescent`), with a timeout fallback. Hover→references requests are
+    /// held until this is true; it flips back to false when the server
+    /// re-indexes after edits. Semantic-token requests are *not* gated on it —
+    /// they answer early and are sent immediately for fast colors.
+    server_ready: bool,
+    /// Hover→references requests received before the server was ready, replayed
+    /// (highest priority, one per iteration) once it is. Replaces the old
+    /// warmup-based hover deferral and per-origin retry heuristics.
+    held_requests: VecDeque<LspInput>,
+    /// Worker start time, for the readiness timeout fallback.
+    worker_start: Instant,
 }
 
-const MAX_HOVER_RETRIES: u8 = 10;
-/// Delay between rebuild-hover retries (see `hover_retries`). 10 retries * 300ms
-/// gives rust-analyzer up to 3s to finish indexing after a cold start.
-const HOVER_RETRY_DELAY: std::time::Duration = std::time::Duration::from_millis(300);
+/// If rust-analyzer never reports `quiescent` (e.g. a broken project), proceed
+/// in degraded mode after this long rather than wedging the UI forever.
+const READINESS_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(90);
 
 impl Drop for LspWorker {
     fn drop(&mut self) {
@@ -234,6 +239,12 @@ impl RRTWorker for LspWorker {
                         references: Some(lsp_types::ReferenceClientCapabilities::default()),
                         ..Default::default()
                     }),
+                    // Ask rust-analyzer to push `experimental/serverStatus`
+                    // notifications so we know when it has finished indexing
+                    // (quiescent) and can actually answer feature requests.
+                    experimental: Some(serde_json::json!({
+                        "serverStatusNotification": true
+                    })),
                     ..Default::default()
                 },
                 workspace_folders: Some(vec![WorkspaceFolder {
@@ -323,7 +334,7 @@ impl RRTWorker for LspWorker {
                 .map(|(i, _)| i)
                 .collect()
         };
-        let last_warmup_progress = Instant::now();
+        let now = Instant::now();
 
         Ok((
             LspWorker {
@@ -339,13 +350,14 @@ impl RRTWorker for LspWorker {
                     opened: HashSet::new(),
                 },
                 warmup_queue,
-                last_warmup_progress,
+                last_warmup_progress: now,
                 warmup_retries: HashMap::new(),
                 supports_range,
                 dispatch_count: 0,
                 ref_queries: HashMap::new(),
-                deferred_hovers: VecDeque::new(),
-                hover_retries: HashMap::new(),
+                server_ready: false,
+                held_requests: VecDeque::new(),
+                worker_start: now,
             },
             LspInterrupt,
         ))
@@ -365,76 +377,28 @@ impl RRTWorker for LspWorker {
         loop {
             match self.input_receiver.try_recv() {
                 Ok(input) => match input {
-                    LspInput::TokenRequest(file_idx) => {
-                        let snapshot = self.files.load();
-                        let file = &snapshot[file_idx];
-                        tracing::debug!(
-                            "LSP: user request file_idx={} path={} ext={:?}",
-                            file_idx,
-                            file.path,
-                            file.path.extension()
-                        );
-                        if file.removed.load(Ordering::Relaxed) {
-                            if close_file(&mut self.stdin, file, file_idx, &mut self.req_state)
-                                .is_err()
-                            {
-                                tracing::info!(
-                                    "LSP: dispatch -> Restart (close_file failed for file_idx={})",
-                                    file_idx
-                                );
-                                return Continuation::Restart;
-                            }
-                        } else if file.path.extension() == Some("rs")
-                            && request_tokens(
-                                &mut self.stdin,
-                                file,
-                                file_idx,
-                                self.supports_range,
-                                &mut self.req_state,
-                                false,
-                            )
-                            .is_err()
-                        {
-                            tracing::info!(
-                                "LSP: dispatch -> Restart (request_tokens failed for file_idx={})",
-                                file_idx
-                            );
+                    // Semantic tokens (syntax highlighting) don't need a fully
+                    // indexed workspace — rust-analyzer answers them early from
+                    // the file's own syntax — so send them immediately for fast
+                    // colors, even before quiescent. (This is what made restored
+                    // files colorize quickly before the readiness gate existed.)
+                    LspInput::TokenRequest(_) => {
+                        if self.process_input(input).is_err() {
                             return Continuation::Restart;
                         }
                     }
-                    LspInput::HoverThenReferences {
-                        file_idx,
-                        line,
-                        character,
-                        word,
-                        group_id,
-                    } => {
-                        // User double-clicks (group_id: None) are sent
-                        // immediately, even mid-warmup: warmup yields to
-                        // in-flight user requests (see the `user_busy` gate on
-                        // the warmup send below), so there is no didOpen flood
-                        // to stall the pipe against. Programmatic hovers
-                        // (group_id: Some, from session-restore/rebuild) stay
-                        // deferred behind warmup — they are not latency-critical
-                        // and rely on rust-analyzer having settled first; they
-                        // retry via `hover_retries`.
-                        if group_id.is_none() || self.warmup_queue.is_empty() {
-                            if self
-                                .send_hover_request(file_idx, line, character, word, group_id)
-                                .is_err()
-                            {
-                                tracing::info!("LSP: dispatch -> Restart (hover send failed)");
+                    // Hover→references resolves a cross-file qualified name, which
+                    // genuinely needs the index — hold it until ready. This is the
+                    // request class the readiness gate exists for; it replaces the
+                    // old warmup-based deferral and per-origin retry heuristics.
+                    LspInput::HoverThenReferences { .. } => {
+                        if self.server_ready {
+                            if self.process_input(input).is_err() {
                                 return Continuation::Restart;
                             }
                         } else {
-                            tracing::debug!(
-                                "LSP: deferring hover for file_idx={} until warmup done",
-                                file_idx
-                            );
-                            self.deferred_hovers
-                                .retain(|d| !(d.0 == file_idx && d.1 == line && d.2 == character));
-                            self.deferred_hovers
-                                .push_back((file_idx, line, character, word, group_id));
+                            tracing::debug!("LSP: holding hover until ready: {:?}", input);
+                            self.hold_request(input);
                         }
                     }
                 },
@@ -447,6 +411,14 @@ impl RRTWorker for LspWorker {
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
             }
+        }
+
+        // Readiness timeout fallback: if rust-analyzer never reports quiescent
+        // (e.g. a broken project), proceed in degraded mode rather than holding
+        // requests forever. Held requests drain on the next iteration.
+        if !self.server_ready && self.worker_start.elapsed() > READINESS_TIMEOUT {
+            tracing::warn!("LSP: readiness timeout, proceeding in degraded mode");
+            self.server_ready = true;
         }
 
         // Force-complete warmup after 60s *without progress* to prevent a stuck
@@ -473,11 +445,26 @@ impl RRTWorker for LspWorker {
             .any(|(_, _, is_warmup)| !*is_warmup)
             || !self.ref_queries.is_empty();
 
-        // Send one warmup file if the queue is non-empty and no user request is
-        // outstanding. Before sending, drain one pending response if available
-        // to prevent pipe deadlock (filling stdout pipe → ra blocks → stdin
-        // fills → we block).
-        if !self.warmup_queue.is_empty() && !user_busy {
+        // Priority order once ready and idle: drain one held request (user
+        // opens, highlights, restored highlights) before any warmup. A held
+        // hover puts entries in ref_queries, so `user_busy` becomes true and
+        // both further held-drain and warmup wait for it — one thing in flight
+        // at a time. One-per-iteration mirrors warmup's anti-deadlock discipline
+        // and avoids flooding rust-analyzer when a restored session replays many
+        // highlight groups.
+        if self.server_ready && !user_busy && !self.held_requests.is_empty() {
+            let input = self
+                .held_requests
+                .pop_front()
+                .expect("just checked non-empty");
+            tracing::debug!("LSP: draining held request: {:?}", input);
+            if self.process_input(input).is_err() {
+                return Continuation::Restart;
+            }
+        } else if !self.warmup_queue.is_empty() && self.server_ready && !user_busy {
+            // Send one warmup file. Before sending, drain one pending response if
+            // available to prevent pipe deadlock (filling stdout pipe → ra blocks
+            // → stdin fills → we block).
             if !self.reader.buffer().is_empty()
                 || poll_readable(self.reader.get_ref(), std::time::Duration::from_millis(10))
             {
@@ -532,20 +519,6 @@ impl RRTWorker for LspWorker {
             );
         }
 
-        // Replay hovers that were deferred while warmup was in progress.
-        if self.warmup_queue.is_empty()
-            && let Some((file_idx, line, character, word, group_id)) =
-                self.deferred_hovers.pop_front()
-        {
-            if self
-                .send_hover_request(file_idx, line, character, word, group_id)
-                .is_err()
-            {
-                tracing::info!("LSP: dispatch -> Restart (deferred hover send failed)");
-                return Continuation::Restart;
-            }
-        }
-
         // Poll stdout for up to READ_TIMEOUT before attempting a blocking read.
         let poll_ret = poll_readable(self.reader.get_ref(), READ_TIMEOUT);
         tracing::trace!(
@@ -576,6 +549,94 @@ impl RRTWorker for LspWorker {
 }
 
 impl LspWorker {
+    /// Send a single user/restore request to rust-analyzer immediately. Returns
+    /// `Err(())` when the worker must Restart. Used both for live requests (once
+    /// the server is ready) and when draining the held queue.
+    fn process_input(&mut self, input: LspInput) -> Result<(), ()> {
+        match input {
+            LspInput::TokenRequest(file_idx) => {
+                let snapshot = self.files.load();
+                let file = &snapshot[file_idx];
+                tracing::debug!(
+                    "LSP: token request file_idx={} path={} ext={:?}",
+                    file_idx,
+                    file.path,
+                    file.path.extension()
+                );
+                if file.removed.load(Ordering::Relaxed) {
+                    if close_file(&mut self.stdin, file, file_idx, &mut self.req_state).is_err() {
+                        tracing::info!(
+                            "LSP: -> Restart (close_file failed for file_idx={})",
+                            file_idx
+                        );
+                        return Err(());
+                    }
+                } else if file.path.extension() == Some("rs")
+                    && request_tokens(
+                        &mut self.stdin,
+                        file,
+                        file_idx,
+                        self.supports_range,
+                        &mut self.req_state,
+                        false,
+                    )
+                    .is_err()
+                {
+                    tracing::info!(
+                        "LSP: -> Restart (request_tokens failed for file_idx={})",
+                        file_idx
+                    );
+                    return Err(());
+                }
+            }
+            LspInput::HoverThenReferences {
+                file_idx,
+                line,
+                character,
+                word,
+                group_id,
+            } => {
+                if self
+                    .send_hover_request(file_idx, line, character, word, group_id)
+                    .is_err()
+                {
+                    tracing::info!("LSP: -> Restart (hover send failed)");
+                    return Err(());
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Queue a request received before the server was ready, collapsing repeated
+    /// requests for the same target (same file for tokens; same position for
+    /// hovers) so a burst of identical requests replays only once.
+    fn hold_request(&mut self, input: LspInput) {
+        match &input {
+            LspInput::TokenRequest(file_idx) => {
+                let f = *file_idx;
+                self.held_requests
+                    .retain(|h| !matches!(h, LspInput::TokenRequest(i) if *i == f));
+            }
+            LspInput::HoverThenReferences {
+                file_idx,
+                line,
+                character,
+                ..
+            } => {
+                let (f, l, c) = (*file_idx, *line, *character);
+                self.held_requests.retain(|h| {
+                    !matches!(
+                        h,
+                        LspInput::HoverThenReferences { file_idx, line, character, .. }
+                        if *file_idx == f && *line == l && *character == c
+                    )
+                });
+            }
+        }
+        self.held_requests.push_back(input);
+    }
+
     fn send_hover_request(
         &mut self,
         file_idx: usize,
@@ -627,6 +688,26 @@ impl LspWorker {
             has_id,
             self.warmup_queue.len()
         );
+
+        // rust-analyzer readiness. `experimental/serverStatus` (enabled via the
+        // capability we advertise) reports `quiescent`: false while it indexes,
+        // true once it can answer feature requests. We hold all token/hover
+        // requests until ready, and go back to holding if it re-indexes after an
+        // edit. `health` (ok/warning/error) doesn't gate readiness — an errored
+        // project can still answer what it has.
+        if method == "experimental/serverStatus" {
+            let quiescent = msg
+                .params
+                .as_ref()
+                .and_then(|p| p.get("quiescent"))
+                .and_then(|q| q.as_bool())
+                .unwrap_or(false);
+            if quiescent != self.server_ready {
+                tracing::info!("LSP: server_ready {} -> {}", self.server_ready, quiescent);
+            }
+            self.server_ready = quiescent;
+            return Continuation::Continue;
+        }
 
         // Reply to server-initiated requests (e.g. window/workDoneProgress/create).
         // Per JSON-RPC 2.0 every request (a message with an id) gets a response,
@@ -797,53 +878,28 @@ impl LspWorker {
                         );
                     }
                     let Some(name) = name else {
-                        // A null result (hover_raw = None) commonly just means
-                        // rust-analyzer hasn't finished indexing yet, not that the
-                        // symbol is gone — most visible right at startup, when
-                        // session-restore fires rebuild hovers the instant our own
-                        // (much smaller) local warmup queue drains. Retry those;
-                        // a user-initiated double-click (group_id: None) or a
-                        // hover that came back with real-but-unusable contents
-                        // (e.g. no `::` — a keyword or builtin) fails immediately.
-                        let retry_key = (pending.file_idx, pending.line, pending.character);
-                        if hover_raw.is_none() && pending.group_id.is_some() {
-                            let retries = self.hover_retries.entry(retry_key).or_insert(0);
-                            if *retries < MAX_HOVER_RETRIES {
-                                *retries += 1;
-                                tracing::debug!(
-                                    "LSP: hover null, retry {}/{} for file_idx={} line={} char={}",
-                                    retries,
-                                    MAX_HOVER_RETRIES,
-                                    pending.file_idx,
-                                    pending.line,
-                                    pending.character,
-                                );
-                                // rust-analyzer answers a "not ready" hover with a null
-                                // result essentially instantly (it's a fast rejection,
-                                // not a slow one) — resending immediately just burns
-                                // through all retries in the same millisecond, giving
-                                // indexing no time to actually progress. Block this
-                                // dedicated worker thread briefly instead, matching
-                                // the blocking-I/O design already used elsewhere here
-                                // (e.g. the 500ms body-read deadline in recv_msg).
-                                std::thread::sleep(HOVER_RETRY_DELAY);
-                                self.deferred_hovers.push_back((
-                                    pending.file_idx,
-                                    pending.line,
-                                    pending.character,
-                                    pending.word,
-                                    pending.group_id,
-                                ));
-                                return Continuation::Continue;
-                            }
+                        // Null hover. If the server went back to indexing between
+                        // dequeue and response (not ready), re-hold and retry once
+                        // it's quiescent again. Otherwise the symbol has no usable
+                        // qualified name (a keyword/builtin, no `::`, or genuinely
+                        // gone) — report empty so the group resolves instead of
+                        // hanging. The readiness gate replaces the old ×10 retry.
+                        if hover_raw.is_none() && !self.server_ready {
                             tracing::debug!(
-                                "LSP: hover retries exhausted for file_idx={} line={} char={}",
+                                "LSP: hover null while not ready, re-holding file_idx={} line={} char={}",
                                 pending.file_idx,
                                 pending.line,
                                 pending.character,
                             );
+                            self.hold_request(LspInput::HoverThenReferences {
+                                file_idx: pending.file_idx,
+                                line: pending.line,
+                                character: pending.character,
+                                word: pending.word,
+                                group_id: pending.group_id,
+                            });
+                            return Continuation::Continue;
                         }
-                        self.hover_retries.remove(&retry_key);
                         // blocking_send: this runs on the RRT std::thread, and a
                         // dropped result would strand the group in limbo forever.
                         let _ = self.app_tx.blocking_send(
@@ -862,8 +918,6 @@ impl LspWorker {
                         );
                         return Continuation::Continue;
                     };
-                    self.hover_retries
-                        .remove(&(pending.file_idx, pending.line, pending.character));
                     let snapshot = self.files.load();
                     let file = &snapshot[pending.file_idx];
                     let uri: Uri = format!("file://{}", file.path).parse().expect("valid URI");
