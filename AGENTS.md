@@ -12,9 +12,39 @@ the code or format or use rustup.
 
 ---
 
+## Project Goal
+
+Explorer is a **personal, repo-scoped terminal workspace** — a keyboard- and
+mouse-driven cockpit for working inside a single git repository. For its owner it is
+meant to replace the everyday combination of a tiling window manager, a terminal
+multiplexer (tmux), a TUI file manager (yazi/nnn), and — eventually — `tig`.
+
+Guiding principles:
+
+- **Get back to work fast, every day.** Session persistence is the north star:
+  Explorer saves and restores *everything that was running* — pane layout, open files,
+  live terminals, and highlights (see `src/session.rs`) — so a work session resumes
+  instantly.
+- **Speed via whole-repo-in-memory.** The entire repository is walked in parallel and
+  held in memory (`src/loader.rs`), making navigation, preview, and search feel
+  instantaneous. Do not trade this away.
+- **Mouse and keyboard are both first-class.** This is not a keyboard-only TUI; mouse
+  interaction (selection, focus, resize) is a supported, well-developed input path.
+- **Editing is delegated, permanently.** Explorer orchestrates; real editing happens in
+  the owner's editor (helix/vim/…) spawned in a pane (`e` in the file preview). Explorer
+  will **not** grow its own native text editor — do not propose one.
+- **Personal tool.** Decisions are shaped by the owner's workflow, not by
+  general-purpose adoption. Prefer the direct solution over configurable generality.
+
+Direction (not yet built — do not scaffold ahead of need): deeper **AI tooling**
+integration, and native **git tooling** to replace `tig` (blame, diff, status).
+
+---
+
 ## Project Overview
 
-`explorer` is a Rust TUI file explorer that:
+`explorer` is a Rust TUI workspace built around a git repository. Its file-explorer
+core:
 1. Locates the nearest `.git` root from the current directory.
 2. Walks the entire repository tree in parallel (via `jwalk` + rayon), skipping `.git` and `target`.
 3. Loads every UTF-8 text file into memory as a `LoadedFile` struct.
@@ -134,7 +164,8 @@ cargo test <module>::<test_name>
 | `url`                  | 2.x     | URL parsing in `word_bounds` for cursor-based URL selection    |
 
 Planned feature areas and their likely dependencies:
-- **Git information** (blame, diff, status): `git2`
+- **Git tooling** (blame, diff, status — intended to replace `tig`): `git2`
+- **AI tooling** integration (deeper assistant workflows inside the workspace): TBD
 
 ---
 
