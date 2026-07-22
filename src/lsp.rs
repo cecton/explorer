@@ -142,7 +142,11 @@ pub struct LspWorker {
     files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     req_state: TokenRequestState,
     warmup_queue: VecDeque<usize>,
-    warmup_start: Instant,
+    /// Timestamp of the last warmup file actually sent. Warmup yields to
+    /// in-flight user requests, so wall-clock time since startup is not a
+    /// reliable staleness signal; we force-complete only after a stretch with
+    /// no warmup *progress* (see the timeout in the dispatch loop).
+    last_warmup_progress: Instant,
     warmup_retries: HashMap<usize, u8>,
     supports_range: bool,
     dispatch_count: u64,
@@ -319,7 +323,7 @@ impl RRTWorker for LspWorker {
                 .map(|(i, _)| i)
                 .collect()
         };
-        let warmup_start = Instant::now();
+        let last_warmup_progress = Instant::now();
 
         Ok((
             LspWorker {
@@ -335,7 +339,7 @@ impl RRTWorker for LspWorker {
                     opened: HashSet::new(),
                 },
                 warmup_queue,
-                warmup_start,
+                last_warmup_progress,
                 warmup_retries: HashMap::new(),
                 supports_range,
                 dispatch_count: 0,
@@ -405,11 +409,16 @@ impl RRTWorker for LspWorker {
                         word,
                         group_id,
                     } => {
-                        // Queue behind warmup: interleaving hover requests with
-                        // the warmup didOpen flood risks the mutual pipe stall
-                        // documented below, and rust-analyzer can't answer
-                        // hover well mid-index anyway.
-                        if self.warmup_queue.is_empty() {
+                        // User double-clicks (group_id: None) are sent
+                        // immediately, even mid-warmup: warmup yields to
+                        // in-flight user requests (see the `user_busy` gate on
+                        // the warmup send below), so there is no didOpen flood
+                        // to stall the pipe against. Programmatic hovers
+                        // (group_id: Some, from session-restore/rebuild) stay
+                        // deferred behind warmup — they are not latency-critical
+                        // and rely on rust-analyzer having settled first; they
+                        // retry via `hover_retries`.
+                        if group_id.is_none() || self.warmup_queue.is_empty() {
                             if self
                                 .send_hover_request(file_idx, line, character, word, group_id)
                                 .is_err()
@@ -440,20 +449,35 @@ impl RRTWorker for LspWorker {
             }
         }
 
-        // Force-complete warmup after 60s to prevent a stuck queue
-        // if the server fails to respond to a warmup request.
+        // Force-complete warmup after 60s *without progress* to prevent a stuck
+        // queue if the server fails to respond to a warmup request. Measured
+        // from the last warmup send (not startup) because warmup yields to user
+        // requests and may legitimately pause for long stretches under activity.
         if !self.warmup_queue.is_empty()
-            && self.warmup_start.elapsed() > std::time::Duration::from_secs(60)
+            && self.last_warmup_progress.elapsed() > std::time::Duration::from_secs(60)
         {
-            tracing::warn!("warmup timed out, forcing completion");
+            tracing::warn!("warmup stalled (no progress for 60s), forcing completion");
             self.warmup_queue.clear();
             self.warmup_retries.clear();
         }
 
-        // Send one warmup file if the queue is non-empty.
-        // Before sending, drain one pending response if available to prevent
-        // pipe deadlock (filling stdout pipe → ra blocks → stdin fills → we block).
-        if !self.warmup_queue.is_empty() {
+        // Warmup yields to in-flight user work: while any user-initiated token
+        // request, hover, or reference query is awaiting a response, don't feed
+        // rust-analyzer more warmup files — let it answer the user first. User
+        // token requests carry is_warmup=false in req_state.pending; any
+        // ref_queries entry is a hover/reference round-trip in progress.
+        let user_busy = self
+            .req_state
+            .pending
+            .values()
+            .any(|(_, _, is_warmup)| !*is_warmup)
+            || !self.ref_queries.is_empty();
+
+        // Send one warmup file if the queue is non-empty and no user request is
+        // outstanding. Before sending, drain one pending response if available
+        // to prevent pipe deadlock (filling stdout pipe → ra blocks → stdin
+        // fills → we block).
+        if !self.warmup_queue.is_empty() && !user_busy {
             if !self.reader.buffer().is_empty()
                 || poll_readable(self.reader.get_ref(), std::time::Duration::from_millis(10))
             {
@@ -500,6 +524,7 @@ impl RRTWorker for LspWorker {
                 );
                 return Continuation::Restart;
             }
+            self.last_warmup_progress = Instant::now();
             tracing::debug!(
                 "LSP: warmup send OK file_idx={} queue_remaining={}",
                 file_idx,
