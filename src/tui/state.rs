@@ -229,6 +229,10 @@ pub enum AppSignal {
         origin_locations: Vec<SymbolRefLocation>,
         reference_locations: Vec<SymbolRefLocation>,
     },
+    /// Forward a raw escape sequence (e.g. an OSC 52 clipboard copy emitted by an app
+    /// running in a terminal pane) to explorer's own stdout, so the host terminal
+    /// handles it. Written to the real terminal on the main thread in `app_handle_signal`.
+    ForwardOscToTerminal(Vec<u8>),
     #[default]
     Noop,
 }

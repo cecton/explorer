@@ -210,8 +210,32 @@ impl AppMain {
                                                 .min(pane.ofs_buf.scrollback_len());
                                         }
                                         for osc_event in result.osc_events {
-                                            if let OscEvent::SetTitleAndTab(title) = osc_event {
-                                                pane.title = Some(title);
+                                            match osc_event {
+                                                OscEvent::SetTitleAndTab(title) => {
+                                                    pane.title = Some(title);
+                                                }
+                                                // An app in the pane asked to set the
+                                                // clipboard via OSC 52. Forward it to the
+                                                // real (outer) terminal so the host
+                                                // handles the copy. Skip queries
+                                                // (Pd == "?"): the host would reply to
+                                                // explorer's stdin, which we can't route
+                                                // back into the inner PTY.
+                                                OscEvent::ClipboardCopy {
+                                                    selection,
+                                                    data,
+                                                } if data != "?" => {
+                                                    let seq = format!(
+                                                        "\x1b]52;{selection};{data}\x07"
+                                                    )
+                                                    .into_bytes();
+                                                    let _ = notify_tx.try_send(
+                                                        TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                                            AppSignal::ForwardOscToTerminal(seq),
+                                                        ),
+                                                    );
+                                                }
+                                                _ => {}
                                             }
                                         }
                                         for pty_response in result.pty_response_events {
@@ -867,6 +891,16 @@ impl App for AppMain {
                 Some(Window::FilePreview(key)),
             );
         }
+        if let AppSignal::ForwardOscToTerminal(bytes) = action {
+            // Write the raw sequence (e.g. OSC 52 clipboard copy) to the real terminal.
+            // Runs on the main thread, outside paint, so it won't corrupt the TUI; OSC 52
+            // is display-neutral (no cursor/screen change).
+            global_data.output_device.write(|w| {
+                let _ = w.write_all(bytes);
+            });
+            let _ = global_data.output_device.flush();
+            return Ok(EventPropagation::Propagate);
+        }
         throws_with_return!({
             let state = &mut global_data.state;
             match action {
@@ -1037,6 +1071,9 @@ impl App for AppMain {
                     state.bump_files_version();
                 }
                 AppSignal::OpenTerminal { .. } => {}
+                AppSignal::ForwardOscToTerminal(_) => {
+                    // Handled as early return above; unreachable here.
+                }
                 AppSignal::OpenEditor { .. } => {
                     // Handled as early return above; unreachable here.
                 }
