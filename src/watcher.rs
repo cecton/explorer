@@ -1,12 +1,16 @@
+use crate::loader::{LoadedFile, walk_repo_files};
 use crate::tui::AppSignal;
+use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
 use r3bl_tui::{
     Continuation, RRT, RRTEvent, RRTSoftwareInterrupt, RRTWorker, RestartPolicy,
     TerminalWindowMainThreadSignal,
 };
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
+use std::sync::Arc;
+use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::Duration;
 use tokio::sync::mpsc as tokio_mpsc;
@@ -40,6 +44,7 @@ impl RRTSoftwareInterrupt for NoOpInterrupt {
 pub struct WatcherConfig {
     pub root: Utf8PathBuf,
     pub app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+    pub files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
 }
 
 impl Debug for WatcherConfig {
@@ -53,8 +58,12 @@ impl Debug for WatcherConfig {
 pub struct WatcherWorker {
     root: Utf8PathBuf,
     app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     rx: mpsc::Receiver<notify::Result<notify::Event>>,
     pending: HashMap<Utf8PathBuf, RawKind>,
+    // Set when notify reports an event-queue overflow (`need_rescan`). On the
+    // next flush we re-walk the tree and reconcile, recovering dropped events.
+    pending_rescan: bool,
     // Held to keep the watcher alive for the duration of the worker.
     _watcher: RecommendedWatcher,
 }
@@ -76,7 +85,11 @@ impl RRTWorker for WatcherWorker {
         config: Self::Config,
         _receiver: tokio::sync::broadcast::Receiver<Self::Input>,
     ) -> miette::Result<(Self, Self::Interrupt)> {
-        let WatcherConfig { root, app_tx } = config;
+        let WatcherConfig {
+            root,
+            app_tx,
+            files,
+        } = config;
 
         let (tx, rx) = mpsc::channel();
         let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())
@@ -90,8 +103,10 @@ impl RRTWorker for WatcherWorker {
             Self {
                 root,
                 app_tx,
+                files,
                 rx,
                 pending: HashMap::new(),
+                pending_rescan: false,
                 _watcher: watcher,
             },
             NoOpInterrupt,
@@ -108,6 +123,14 @@ impl RRTWorker for WatcherWorker {
     ) -> Continuation {
         match self.rx.recv_timeout(DEBOUNCE) {
             Ok(Ok(event)) => {
+                // Event-queue overflow: the kernel dropped events, so per-path
+                // deltas are unreliable. Flag a full rescan on the next flush
+                // instead of trying to interpret this event's paths.
+                if event.need_rescan() {
+                    tracing::warn!("watcher: event-queue overflow, scheduling rescan");
+                    self.pending_rescan = true;
+                    return Continuation::Continue;
+                }
                 let kind = match event.kind {
                     EventKind::Create(_) => RawKind::Created,
                     EventKind::Modify(_) => RawKind::Modified,
@@ -122,7 +145,7 @@ impl RRTWorker for WatcherWorker {
                         continue;
                     };
                     let first = rel.components().next().map(|c| c.as_str());
-                    if matches!(first, Some(".git") | Some("target")) {
+                    if first.is_some_and(|f| crate::loader::IGNORED_DIRS.contains(&f)) {
                         continue;
                     }
                     let entry = self.pending.entry(utf8).or_insert(kind);
@@ -148,7 +171,7 @@ impl RRTWorker for WatcherWorker {
                 Continuation::Restart
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
-                if self.pending.is_empty() {
+                if self.pending.is_empty() && !self.pending_rescan {
                     return Continuation::Continue;
                 }
                 let mut batch = BatchedWatchEvent {
@@ -162,6 +185,10 @@ impl RRTWorker for WatcherWorker {
                         RawKind::Modified => batch.modified.push(path),
                         RawKind::Removed => batch.removed.push(path),
                     }
+                }
+                if self.pending_rescan {
+                    self.pending_rescan = false;
+                    self.reconcile_into(&mut batch);
                 }
                 tracing::debug!(
                     "watcher: dispatching batch: {} modified, {} created, {} removed",
@@ -181,5 +208,62 @@ impl RRTWorker for WatcherWorker {
                 Continuation::Continue
             }
         }
+    }
+}
+
+impl WatcherWorker {
+    /// Re-walk the tree and merge the delta versus the current file list into
+    /// `batch`. Called after an inotify overflow to recover dropped events:
+    /// files on disk but not active in the list become `created` (the app
+    /// handler resurrects a `removed` entry or appends a genuinely-new one),
+    /// and active entries whose path is gone from disk become `removed`.
+    fn reconcile_into(&self, batch: &mut BatchedWatchEvent) {
+        let on_disk: HashSet<Utf8PathBuf> = walk_repo_files(&self.root)
+            .into_iter()
+            .filter_map(|p| Utf8PathBuf::from_path_buf(p).ok())
+            .collect();
+
+        let snapshot = self.files.load();
+
+        // Paths already accounted for by this batch's coalesced events, so the
+        // rescan delta doesn't duplicate them.
+        let mut seen: HashSet<Utf8PathBuf> = batch
+            .created
+            .iter()
+            .chain(batch.modified.iter())
+            .chain(batch.removed.iter())
+            .cloned()
+            .collect();
+
+        // Active (non-removed) paths currently in the list.
+        let active: HashSet<&Utf8PathBuf> = snapshot
+            .iter()
+            .filter(|f| !f.removed.load(Ordering::Relaxed))
+            .map(|f| &f.path)
+            .collect();
+
+        // On disk but not active in the list -> created (new or resurrect).
+        for path in &on_disk {
+            if !active.contains(path) && seen.insert(path.clone()) {
+                batch.created.push(path.clone());
+            }
+        }
+
+        // Active in the list but gone from disk -> removed.
+        for file in snapshot.iter() {
+            if file.removed.load(Ordering::Relaxed) {
+                continue;
+            }
+            if !on_disk.contains(&file.path) && seen.insert(file.path.clone()) {
+                batch.removed.push(file.path.clone());
+            }
+        }
+
+        tracing::info!(
+            "watcher: rescan reconciled {} on-disk files -> {} created, {} removed",
+            on_disk.len(),
+            batch.created.len(),
+            batch.removed.len()
+        );
     }
 }

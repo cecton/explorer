@@ -221,14 +221,12 @@ impl AppMain {
                                                 // (Pd == "?"): the host would reply to
                                                 // explorer's stdin, which we can't route
                                                 // back into the inner PTY.
-                                                OscEvent::ClipboardCopy {
-                                                    selection,
-                                                    data,
-                                                } if data != "?" => {
-                                                    let seq = format!(
-                                                        "\x1b]52;{selection};{data}\x07"
-                                                    )
-                                                    .into_bytes();
+                                                OscEvent::ClipboardCopy { selection, data }
+                                                    if data != "?" =>
+                                                {
+                                                    let seq =
+                                                        format!("\x1b]52;{selection};{data}\x07")
+                                                            .into_bytes();
                                                     let _ = notify_tx.try_send(
                                                         TerminalWindowMainThreadSignal::ApplyAppSignal(
                                                             AppSignal::ForwardOscToTerminal(seq),
@@ -476,6 +474,7 @@ impl App for AppMain {
         match WATCHER_RRT.try_subscribe(crate::watcher::WatcherConfig {
             root,
             app_tx: notify_tx.clone(),
+            files: Arc::clone(&files),
         }) {
             Ok(guard) => {
                 self.watcher_guard = Some(guard);
@@ -913,10 +912,18 @@ impl App for AppMain {
                     );
                     let snapshot = self.files.load_full();
 
+                    // Index path -> position once. A rescan (post-overflow)
+                    // batch can carry hundreds of thousands of paths; a linear
+                    // `snapshot.iter().find()` per path would be quadratic.
+                    let index: std::collections::HashMap<&Utf8Path, usize> = snapshot
+                        .iter()
+                        .enumerate()
+                        .map(|(i, f)| (f.path.as_path(), i))
+                        .collect();
+
                     for path in &batch.removed {
-                        if let Some((file_idx, file)) =
-                            snapshot.iter().enumerate().find(|(_, f)| &f.path == path)
-                        {
+                        if let Some(&file_idx) = index.get(path.as_path()) {
+                            let file = &snapshot[file_idx];
                             tracing::debug!(
                                 "FilesChanged: removed match idx={} path={}",
                                 file_idx,
@@ -930,52 +937,49 @@ impl App for AppMain {
                     }
 
                     for path in &batch.modified {
-                        if let Some((file_idx, file)) = snapshot
-                            .iter()
-                            .enumerate()
-                            .find(|(_, f)| &f.path == path && !f.removed.load(Ordering::Relaxed))
-                        {
-                            tracing::debug!(
-                                "FilesChanged: modified match idx={} path={}",
-                                file_idx,
-                                path
-                            );
-                            file.reload();
-                            crate::lsp::send_file_request(file_idx);
-                        } else {
-                            tracing::debug!("FilesChanged: modified no match for path={}", path);
+                        match index.get(path.as_path()) {
+                            Some(&file_idx)
+                                if !snapshot[file_idx].removed.load(Ordering::Relaxed) =>
+                            {
+                                tracing::debug!(
+                                    "FilesChanged: modified match idx={} path={}",
+                                    file_idx,
+                                    path
+                                );
+                                snapshot[file_idx].reload();
+                                crate::lsp::send_file_request(file_idx);
+                            }
+                            _ => {
+                                tracing::debug!(
+                                    "FilesChanged: modified no match for path={}",
+                                    path
+                                );
+                            }
                         }
                     }
 
                     let mut new_files: Vec<Arc<LoadedFile>> = vec![];
                     for path in &batch.created {
-                        if let Some((file_idx, file)) = snapshot
-                            .iter()
-                            .enumerate()
-                            .find(|(_, f)| &f.path == path && f.removed.load(Ordering::Relaxed))
-                        {
-                            tracing::debug!(
-                                "FilesChanged: created resurrect idx={} path={}",
-                                file_idx,
-                                path
-                            );
-                            file.removed.store(false, Ordering::Relaxed);
+                        if let Some(&file_idx) = index.get(path.as_path()) {
+                            let file = &snapshot[file_idx];
+                            if file.removed.load(Ordering::Relaxed) {
+                                tracing::debug!(
+                                    "FilesChanged: created resurrect idx={} path={}",
+                                    file_idx,
+                                    path
+                                );
+                                file.removed.store(false, Ordering::Relaxed);
+                            } else {
+                                tracing::debug!(
+                                    "FilesChanged: created replace idx={} path={}",
+                                    file_idx,
+                                    path
+                                );
+                            }
                             file.reload();
                             crate::lsp::send_file_request(file_idx);
-                        } else if let Some((file_idx, file)) = snapshot
-                            .iter()
-                            .enumerate()
-                            .find(|(_, f)| &f.path == path && !f.removed.load(Ordering::Relaxed))
-                        {
-                            tracing::debug!(
-                                "FilesChanged: created replace idx={} path={}",
-                                file_idx,
-                                path
-                            );
-                            file.reload();
-                            crate::lsp::send_file_request(file_idx);
-                        } else if !snapshot.iter().any(|f| &f.path == path)
-                            && let Some(loaded) = LoadedFile::load(path.clone().into_std_path_buf())
+                        } else if let Some(loaded) =
+                            LoadedFile::load(path.clone().into_std_path_buf())
                         {
                             tracing::debug!("FilesChanged: created new path={}", path);
                             new_files.push(loaded);

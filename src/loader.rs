@@ -220,6 +220,36 @@ pub fn find_git_root() -> PathBuf {
     }
 }
 
+/// Directory names skipped everywhere we enumerate or watch repo files.
+/// Single source of truth for both the walk (`walk_repo_files`) and the
+/// watcher's live event filter (`watcher.rs`).
+pub const IGNORED_DIRS: [&str; 2] = ["target", ".git"];
+
+/// Walk `root` recursively and return every regular-file path, skipping the
+/// [`IGNORED_DIRS`]. Shared by the initial load (`main.rs`) and the watcher's
+/// overflow rescan so both see the same set of files.
+pub fn walk_repo_files(root: &Utf8Path) -> Vec<PathBuf> {
+    jwalk::WalkDir::new(root)
+        .process_read_dir(move |_, _, _, children| {
+            children.retain(|entry| {
+                entry.as_ref().map_or(true, |e| {
+                    !e.file_name
+                        .to_str()
+                        .is_some_and(|n| IGNORED_DIRS.contains(&n))
+                })
+            });
+        })
+        .into_iter()
+        .filter_map(|entry| {
+            let entry = entry.ok()?;
+            if !entry.file_type().is_file() {
+                return None;
+            }
+            Some(entry.path())
+        })
+        .collect()
+}
+
 pub fn path_for_file_key(files: &[Arc<LoadedFile>], key: FileKey) -> Option<&Utf8Path> {
     files.get(key.0).map(|f| f.path.as_ref())
 }
