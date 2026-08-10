@@ -848,12 +848,12 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                     }
 
                     rendered += 1;
+                    if rendered >= visible_rows {
+                        break 'rendered;
+                    }
                     seg_start_char += content_width;
                     if seg_start_char >= char_len {
                         break;
-                    }
-                    if rendered >= visible_rows {
-                        break 'rendered;
                     }
                 }
             }
