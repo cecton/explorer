@@ -16,6 +16,12 @@ pub struct FilePreviewComponent {
     id: FlexBoxId,
     command_mode: Option<String>,
     command_input: InputLine,
+    /// `Some(pattern)` while the `/` `?` search input is open. Prefilled with the pane's active
+    /// pattern. Mutually exclusive with `command_mode`.
+    search_mode: Option<String>,
+    /// Direction of the in-progress search input (set by `/` vs `?`).
+    search_direction: SearchDirection,
+    search_input: InputLine,
     error: Option<(String, Instant)>,
     drag_snapshot: Option<Vec<(usize, usize)>>,
     drag_start_line: Option<usize>,
@@ -33,6 +39,9 @@ impl FilePreviewComponent {
             id,
             command_mode: None,
             command_input: InputLine::new(),
+            search_mode: None,
+            search_direction: SearchDirection::Forward,
+            search_input: InputLine::new(),
             error: None,
             drag_snapshot: None,
             drag_start_line: None,
@@ -143,6 +152,102 @@ impl FilePreviewComponent {
         state.pane_manager.clamp_scroll(&window);
     }
 
+    /// Commits the in-progress search input for `key`. An empty pattern clears the active search;
+    /// an invalid regex shows a transient error and leaves any prior search intact; a valid pattern
+    /// becomes the active search and jumps to the first match in the search direction.
+    fn commit_search(&mut self, state: &mut AppState, key: FileKey) {
+        let pattern = self.search_mode.clone().unwrap_or_default();
+        if pattern.is_empty() {
+            state.search.remove(&key);
+            return;
+        }
+        match regex::Regex::new(&pattern) {
+            Ok(regex) => {
+                state.search.insert(
+                    key,
+                    PreviewSearch {
+                        pattern,
+                        regex,
+                        direction: self.search_direction,
+                        current: None,
+                    },
+                );
+                self.goto_match(state, key, self.search_direction);
+            }
+            Err(e) => {
+                self.error = Some((format!("bad regex: {e}"), Instant::now()));
+            }
+        }
+    }
+
+    /// Moves the active search for `key` to the next match in `direction`, wrapping around, and
+    /// scrolls it into view. Match positions are collected on demand (only on a keypress).
+    fn goto_match(&mut self, state: &mut AppState, key: FileKey, direction: SearchDirection) {
+        // Collect non-empty matches in document order: (line_idx, start_byte, end_byte) per line.
+        let matches: Vec<(usize, usize, usize)> = {
+            let Some(search) = state.search.get(&key) else {
+                return;
+            };
+            let snapshot = state.files.load();
+            let data = snapshot[key.0]
+                .data
+                .lock()
+                .unwrap_or_else(|poison| poison.into_inner());
+            let total_lines = data.line_starts.len();
+            let mut acc = Vec::new();
+            for line_idx in 0..total_lines {
+                let line = data.line(line_idx);
+                for m in search.regex.find_iter(line) {
+                    if m.start() < m.end() {
+                        acc.push((line_idx, m.start(), m.end()));
+                    }
+                }
+            }
+            acc
+        };
+
+        if matches.is_empty() {
+            if let Some(search) = state.search.get_mut(&key) {
+                search.current = None;
+            }
+            self.error = Some(("no matches".to_string(), Instant::now()));
+            return;
+        }
+
+        let current = state.search.get(&key).and_then(|s| s.current);
+        let window = Window::FilePreview(key);
+        let scroll = state.pane_manager.window_scroll(&window);
+        let target_idx = match direction {
+            SearchDirection::Forward => match current {
+                Some((cl, cs)) => matches
+                    .iter()
+                    .position(|&(l, s, _)| (l, s) > (cl, cs))
+                    .unwrap_or(0),
+                None => matches
+                    .iter()
+                    .position(|&(l, _, _)| l >= scroll)
+                    .unwrap_or(0),
+            },
+            SearchDirection::Backward => match current {
+                Some((cl, cs)) => matches
+                    .iter()
+                    .rposition(|&(l, s, _)| (l, s) < (cl, cs))
+                    .unwrap_or(matches.len() - 1),
+                None => matches
+                    .iter()
+                    .rposition(|&(l, _, _)| l <= scroll)
+                    .unwrap_or(matches.len() - 1),
+            },
+        };
+
+        let (line_idx, start, _end) = matches[target_idx];
+        if let Some(search) = state.search.get_mut(&key) {
+            search.current = Some((line_idx, start));
+        }
+        self.scroll_to_range(state, key, line_idx + 1, line_idx + 1);
+        state.mark_session_dirty();
+    }
+
     fn render_command_title(
         &self,
         ops: &mut RenderOpIRVec,
@@ -171,6 +276,47 @@ impl FilePreviewComponent {
         }
         self.command_input
             .render(ops, cmd, ":", origin, width, focused, (color_bg, color_fg));
+    }
+
+    fn render_search_title(
+        &self,
+        ops: &mut RenderOpIRVec,
+        origin: Pos,
+        width: u16,
+        height: usize,
+        focused: bool,
+        theme: &HelixTheme,
+    ) {
+        let Some(pattern) = self.search_mode.as_deref() else {
+            return;
+        };
+        let prompt = match self.search_direction {
+            SearchDirection::Forward => "/",
+            SearchDirection::Backward => "?",
+        };
+        let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
+        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
+        let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+        let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+
+        for row_offset in 0..height {
+            *ops +=
+                RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset as u16));
+            *ops += RenderOpCommon::SetBgColor(color_bg);
+            *ops += RenderOpIR::PaintTextWithAttributes(
+                " ".repeat(width as usize).as_str().into(),
+                Some(label_style),
+            );
+        }
+        self.search_input.render(
+            ops,
+            pattern,
+            prompt,
+            origin,
+            width,
+            focused,
+            (color_bg, color_fg),
+        );
     }
 
     fn execute_command(
@@ -377,6 +523,7 @@ impl FilePreviewComponent {
 impl Component<AppState, AppSignal> for FilePreviewComponent {
     fn reset(&mut self) {
         self.command_mode = None;
+        self.search_mode = None;
         self.drag_snapshot = None;
         self.drag_start_line = None;
         self.drag_modifier = None;
@@ -442,12 +589,95 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 }
             }
 
+            if self.search_mode.is_some() {
+                match input_event {
+                    InputEvent::Keyboard(KeyPress::Plain {
+                        key: Key::SpecialKey(SpecialKey::Enter),
+                    }) => {
+                        self.commit_search(&mut global_data.state, key);
+                        self.search_mode = None;
+                        global_data.state.command_mode_active = false;
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                    InputEvent::Keyboard(KeyPress::Plain {
+                        key: Key::SpecialKey(SpecialKey::Esc),
+                    }) => {
+                        global_data.state.search.remove(&key);
+                        self.search_mode = None;
+                        global_data.state.command_mode_active = false;
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                    InputEvent::Keyboard(KeyPress::WithModifiers {
+                        key: Key::Character('c'),
+                        mask,
+                    }) if mask == ModifierKeysMask::new().with_ctrl() => {
+                        if let Some(query) = &mut self.search_mode {
+                            query.clear();
+                        }
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                    InputEvent::Keyboard(KeyPress::WithModifiers {
+                        key: Key::Character('d'),
+                        mask,
+                    }) if mask == ModifierKeysMask::new().with_ctrl()
+                        && self.search_mode.as_deref() == Some("") =>
+                    {
+                        self.search_mode = None;
+                        global_data.state.command_mode_active = false;
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                    _ => {
+                        let query = self.search_mode.as_mut().unwrap();
+                        self.search_input.handle_key(&input_event, query);
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                }
+            }
+
             if let InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character(':'),
             }) = input_event
             {
                 self.command_mode = Some(String::new());
                 global_data.state.command_mode_active = true;
+                return Ok(EventPropagation::ConsumedRender);
+            }
+
+            if let InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character(c @ ('/' | '?')),
+            }) = input_event
+            {
+                self.search_direction = if c == '/' {
+                    SearchDirection::Forward
+                } else {
+                    SearchDirection::Backward
+                };
+                let prefill = global_data
+                    .state
+                    .search
+                    .get(&key)
+                    .map(|s| s.pattern.clone())
+                    .unwrap_or_default();
+                self.search_input.set_cursor_end(&prefill);
+                self.search_mode = Some(prefill);
+                global_data.state.command_mode_active = true;
+                return Ok(EventPropagation::ConsumedRender);
+            }
+
+            if let InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character(c @ ('n' | 'N')),
+            }) = input_event
+                && let Some(stored) = global_data.state.search.get(&key).map(|s| s.direction)
+            {
+                let direction = if c == 'n' {
+                    stored
+                } else {
+                    match stored {
+                        SearchDirection::Forward => SearchDirection::Backward,
+                        SearchDirection::Backward => SearchDirection::Forward,
+                    }
+                };
+                self.goto_match(&mut global_data.state, key, direction);
                 return Ok(EventPropagation::ConsumedRender);
             }
 
@@ -783,11 +1013,13 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                         col(content_start_col) + row(rendered),
                     );
                     // Build color intervals for this sub-row segment.
-                    // Each interval is (start_char, end_char, bg_color).
-                    // Priority: text selection > symbol highlight > row default.
+                    // Each interval is (start_char, end_char, bg_color, fg_override). A `Some`
+                    // fg_override paints a fixed foreground (search matches); `None` defers to
+                    // syntax colors via `ensure_readable_fg`.
+                    // Priority: text selection > search match > symbol highlight > row default.
                     let line_byte_start = data.line_starts[line_idx];
-                    let mut intervals: Vec<(usize, usize, [u8; 3])> =
-                        vec![(seg_start_char, seg_end_char, content_bg)];
+                    let mut intervals: Vec<(usize, usize, [u8; 3], Option<[u8; 3]>)> =
+                        vec![(seg_start_char, seg_end_char, content_bg, None)];
 
                     // Symbol highlight backgrounds. Skipped for fully selected rows
                     // (multi-line selection) so selection feedback stays visible.
@@ -814,8 +1046,34 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                                     seg_start_char.max(loc_lo_char),
                                     seg_end_char.min(loc_hi_char),
                                     group.color,
+                                    None,
                                 );
                             }
+                        }
+                    }
+
+                    // Search matches overlay after symbol highlights (search wins over them) but
+                    // before selection (selection still wins). Only the visible line is scanned.
+                    if !is_text_drag_multi && let Some(search) = state.search.get(&file_key) {
+                        for m in search.regex.find_iter(line) {
+                            if m.start() >= m.end() {
+                                continue;
+                            }
+                            let is_current = search.current == Some((line_idx, m.start()));
+                            let (bg, fg) = if is_current {
+                                (SEARCH_CURRENT, SEARCH_CURRENT_FG)
+                            } else {
+                                (SEARCH_MATCH, SEARCH_MATCH_FG)
+                            };
+                            let m_lo = byte_to_char(line, m.start());
+                            let m_hi = byte_to_char(line, m.end());
+                            overlay_interval(
+                                &mut intervals,
+                                seg_start_char.max(m_lo),
+                                seg_end_char.min(m_hi),
+                                bg,
+                                Some(fg),
+                            );
                         }
                     }
 
@@ -828,11 +1086,12 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                             sel_lo.max(seg_start_char),
                             sel_hi.min(seg_end_char),
                             hl_rgb,
+                            None,
                         );
                     }
 
                     // Paint each interval.
-                    for &(i_lo, i_hi, bg_color) in &intervals {
+                    for &(i_lo, i_hi, bg_color, fg_override) in &intervals {
                         if i_lo >= i_hi {
                             continue;
                         }
@@ -844,6 +1103,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                             (i_lo, i_hi),
                             &state.theme,
                             bg_color,
+                            fg_override,
                         );
                     }
 
@@ -919,6 +1179,12 @@ impl TitleRow for FilePreviewComponent {
             let height = InputLine::line_count(cmd);
             self.render_command_title(ops, origin, width, height, focused, theme);
             height
+        } else if let Some(pattern) = &self.search_mode {
+            let origin = pane_box.style_adjusted_origin_pos;
+            let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
+            let height = InputLine::line_count(pattern);
+            self.render_search_title(ops, origin, width, height, focused, theme);
+            height
         } else {
             let (title, removed) = self
                 .title_text_render(state)
@@ -937,6 +1203,7 @@ fn paint_line_segment(
     (seg_start_char, seg_end_char): (usize, usize),
     theme: &HelixTheme,
     pane_bg: [u8; 3],
+    fg_override: Option<[u8; 3]>,
 ) {
     if seg_start_char >= seg_end_char {
         return;
@@ -946,6 +1213,17 @@ fn paint_line_segment(
     let line_content = data.line(line_idx);
     let seg_byte_start = data.char_to_byte(line_idx, seg_start_char);
     let seg_byte_end = data.char_to_byte(line_idx, seg_end_char);
+
+    // A fixed foreground (search matches) paints the whole segment as one run, ignoring syntax
+    // spans and the `ensure_readable_fg` auto-contrast so the match text color is uniform.
+    if let Some(fg_rgb) = fg_override {
+        let text = &line_content[seg_byte_start..seg_byte_end];
+        let fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+        let style = new_style!(color_fg: {fg} color_bg: {bg});
+        *render_ops += RenderOpCommon::ApplyColors(Some(style));
+        *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+        return;
+    }
 
     if let Some(spans) = colored_guard.get(line_idx) {
         for &(span_start, span_end, token_type) in spans {
@@ -1009,29 +1287,30 @@ fn byte_to_char(s: &str, byte_offset: usize) -> usize {
 /// Repaints `o_lo..o_hi` in `intervals` with `color`, splitting partially
 /// overlapped pieces. No-op when the range is empty.
 fn overlay_interval(
-    intervals: &mut Vec<(usize, usize, [u8; 3])>,
+    intervals: &mut Vec<(usize, usize, [u8; 3], Option<[u8; 3]>)>,
     o_lo: usize,
     o_hi: usize,
     color: [u8; 3],
+    fg: Option<[u8; 3]>,
 ) {
     if o_lo >= o_hi {
         return;
     }
     let mut result = Vec::with_capacity(intervals.len() + 2);
-    for &(i_lo, i_hi, i_color) in intervals.iter() {
+    for &(i_lo, i_hi, i_color, i_fg) in intervals.iter() {
         if i_hi <= o_lo || i_lo >= o_hi {
-            result.push((i_lo, i_hi, i_color));
+            result.push((i_lo, i_hi, i_color, i_fg));
         } else {
             if i_lo < o_lo {
-                result.push((i_lo, o_lo, i_color));
+                result.push((i_lo, o_lo, i_color, i_fg));
             }
             let lo = i_lo.max(o_lo);
             let hi = i_hi.min(o_hi);
             if lo < hi {
-                result.push((lo, hi, color));
+                result.push((lo, hi, color, fg));
             }
             if i_hi > o_hi {
-                result.push((o_hi, i_hi, i_color));
+                result.push((o_hi, i_hi, i_color, i_fg));
             }
         }
     }

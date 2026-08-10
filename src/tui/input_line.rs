@@ -450,6 +450,12 @@ impl InputLine {
         query.matches('\n').count() + 1
     }
 
+    /// Places the cursor at the end of `query`. Used when opening an input prefilled with existing
+    /// text (e.g. the preview search box seeded with the active pattern).
+    pub fn set_cursor_end(&mut self, query: &str) {
+        self.cursor = query.graphemes(true).count();
+    }
+
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,

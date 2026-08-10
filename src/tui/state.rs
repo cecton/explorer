@@ -132,6 +132,9 @@ pub struct AppState {
     pub session_dirty_at: Option<Instant>,
     pub symbol_highlights: Vec<SymbolHighlightGroup>,
     pub next_palette_index: usize,
+    /// Per-file regex search (vim-style `/` `?` `n` `N`). Transient — never persisted to the
+    /// session file, mirroring `text_selection`.
+    pub search: HashMap<FileKey, PreviewSearch>,
 }
 
 impl AppState {
@@ -182,6 +185,7 @@ impl AppState {
             session_dirty_at: None,
             symbol_highlights: Vec::new(),
             next_palette_index: 0,
+            search: HashMap::new(),
         };
         state.recompute_file_name_picker_results();
 
@@ -271,6 +275,34 @@ pub struct SymbolHighlightGroup {
     pub locations: Vec<SymbolRefLocation>,
     pub needs_rebuild: bool,
 }
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SearchDirection {
+    Forward,
+    Backward,
+}
+
+/// Active regex search for a single preview pane. Built on commit (`Enter`); cleared when the
+/// committed pattern is empty. `regex::Regex` is `Clone` (reference-counted internally), so this
+/// is fine under `AppState: Clone`.
+#[derive(Clone)]
+pub struct PreviewSearch {
+    pub pattern: String,
+    pub regex: regex::Regex,
+    pub direction: SearchDirection,
+    /// The match `n`/`N` currently sits on: `(line_idx, match_start_byte_within_line)`.
+    pub current: Option<(usize, usize)>,
+}
+
+/// Search-match highlight background (teal) and the brighter variant for the current `n`/`N` match.
+/// Both are distinct from `ui.selection` and every `SYMBOL_PALETTE` color.
+pub const SEARCH_MATCH: [u8; 3] = [0, 140, 150];
+pub const SEARCH_CURRENT: [u8; 3] = [40, 205, 220];
+/// Manually-set foreground for search-match text (bypasses `ensure_readable_fg`). Inverted between
+/// the two states so the current match is unmistakable: near-white text on the teal matches,
+/// near-black text on the brighter-teal current match.
+pub const SEARCH_MATCH_FG: [u8; 3] = [235, 235, 235];
+pub const SEARCH_CURRENT_FG: [u8; 3] = [20, 20, 20];
 
 pub const SYMBOL_PALETTE: [[u8; 3]; 8] = [
     [255, 100, 100],
