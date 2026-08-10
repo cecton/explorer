@@ -67,7 +67,7 @@ impl FuzzyPicker {
         results_origin: Pos,
         result_rows: usize,
         pane_width: usize,
-        display: impl Fn(&K, &AppState) -> String,
+        display: impl Fn(&K, &AppState) -> (String, Option<[u8; 3]>),
     ) -> RenderOpIRVec {
         let bg_rgb = state.theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
         let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
@@ -137,21 +137,21 @@ impl FuzzyPicker {
                 let (k, pos) = &picker_state.results[result_idx];
                 (k.clone(), pos.clone())
             };
-            let display_str = display(&key, state);
+            let (display_str, accent) = display(&key, state);
+            // Rows that supply an accent color (e.g. terminals) render in that
+            // color and bold; others use the normal text color.
+            let base_fg = accent
+                .map(|c| tui_color!(c[0], c[1], c[2]))
+                .unwrap_or(color_normal_fg);
+            let emphasized = accent.is_some();
             let matched_set: HashSet<u32> = matched_positions.iter().copied().collect();
 
             for (char_idx, ch) in display_str.chars().enumerate() {
                 let is_match = matched_set.contains(&(char_idx as u32));
-                let fg = if is_match {
-                    color_match_fg
-                } else {
-                    color_normal_fg
-                };
-                let style = if is_selected && is_match {
-                    new_style!(bold color_fg: {fg} color_bg: {row_bg})
-                } else if is_selected {
-                    new_style!(color_fg: {fg} color_bg: {row_bg})
-                } else if is_match {
+                let fg = if is_match { color_match_fg } else { base_fg };
+                // Bold for fuzzy-match characters and for accented rows;
+                // selection is carried by `row_bg`.
+                let style = if is_match || emphasized {
                     new_style!(bold color_fg: {fg} color_bg: {row_bg})
                 } else {
                     new_style!(color_fg: {fg} color_bg: {row_bg})

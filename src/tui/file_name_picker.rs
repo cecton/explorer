@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::mpsc;
 
-pub(crate) type PickerResultMsg = (u64, Vec<(FileKey, Vec<u32>)>);
+pub(crate) type PickerResultMsg = (u64, Vec<(Window, Vec<u32>)>);
 
 pub struct FileNamePickerComponent {
     id: FlexBoxId,
@@ -74,21 +74,26 @@ impl FileNamePickerComponent {
     pub(crate) fn open_previews_results(
         files: &[Arc<LoadedFile>],
         window_stack: &[Window],
-    ) -> Vec<(FileKey, Vec<u32>)> {
-        let mut seen: HashSet<FileKey> = HashSet::new();
+    ) -> Vec<(Window, Vec<u32>)> {
+        let mut seen: HashSet<Window> = HashSet::new();
         let mut results = Vec::new();
         for window in window_stack {
-            if let Window::FilePreview(key) = window
-                && !files[key.0].removed.load(Ordering::Relaxed)
-                && seen.insert(*key)
-            {
-                results.push((*key, vec![]));
+            match window {
+                Window::FilePreview(key)
+                    if !files[key.0].removed.load(Ordering::Relaxed) && seen.insert(*window) =>
+                {
+                    results.push((*window, vec![]));
+                }
+                Window::Terminal(_) if seen.insert(*window) => {
+                    results.push((*window, vec![]));
+                }
+                _ => {}
             }
         }
         results
     }
 
-    pub(crate) fn compute_results(state: &AppState) -> Vec<(FileKey, Vec<u32>)> {
+    pub(crate) fn compute_results(state: &AppState) -> Vec<(Window, Vec<u32>)> {
         let snapshot = state.files.load();
         if state.file_name_picker.query.is_empty() {
             Self::open_previews_results(&snapshot, &state.pane_manager.window_stack)
@@ -138,12 +143,75 @@ impl TitleRow for FileNamePickerComponent {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loader::LoadedFile;
+
+    fn live_file(path: &str) -> Arc<LoadedFile> {
+        let f = LoadedFile::stub(path.into());
+        f.removed.store(false, Ordering::Relaxed);
+        f
+    }
+
+    #[test]
+    fn open_list_includes_terminals_and_files_in_stack_order() {
+        // index 0: live file, index 1: removed file.
+        let removed = LoadedFile::stub("gone.rs".into()); // stub() marks removed = true
+        let files = vec![live_file("src/main.rs"), removed];
+
+        // Stack front-to-back, with a duplicate terminal and the picker itself.
+        let stack = vec![
+            Window::FilePreview(FileKey(0)),
+            Window::Terminal(3),
+            Window::FileNamePicker,
+            Window::FilePreview(FileKey(1)), // removed -> excluded
+            Window::Terminal(3),             // duplicate -> deduped
+        ];
+
+        let results = FileNamePickerComponent::open_previews_results(&files, &stack);
+        let windows: Vec<Window> = results.into_iter().map(|(w, _)| w).collect();
+        assert_eq!(
+            windows,
+            vec![Window::FilePreview(FileKey(0)), Window::Terminal(3)],
+        );
+    }
+
+    #[test]
+    fn terminal_accent_is_distinct_and_theme_sourced() {
+        let theme = HelixTheme::default();
+        let accent = terminal_accent(&theme);
+        // Never identical to the file-row (ui.text) color.
+        assert_ne!(Some(accent), theme.ui_fg("ui.text"));
+        // On the default theme it resolves to the `function` scope color.
+        assert_eq!(Some(accent), theme.color_for_scope("function"));
+    }
+}
+
+/// Foreground color for terminal rows in the picker.
+///
+/// Pulls a vivid, theme-defined syntax color (preferring `function`) via
+/// [`HelixTheme::color_for_scope`], which walks each scope's fallback chain and
+/// always resolves to a real color. Picks the first candidate whose color
+/// differs from `ui.text` so terminal rows are never identical to file rows;
+/// falls back to the default `function` blue if the theme somehow lacks all of
+/// them. `constant` is intentionally excluded — it maps to the same color the
+/// picker uses for fuzzy-match highlights.
+fn terminal_accent(theme: &HelixTheme) -> [u8; 3] {
+    let text = theme.ui_fg("ui.text");
+    ["function", "string", "keyword", "type"]
+        .into_iter()
+        .filter_map(|scope| theme.color_for_scope(scope))
+        .find(|color| Some(*color) != text)
+        .unwrap_or([137, 180, 250])
+}
+
 fn run_file_name_match(
     query: &str,
     files: &[Arc<LoadedFile>],
     root: &Utf8PathBuf,
     window_stack: &[Window],
-) -> Vec<(FileKey, Vec<u32>)> {
+) -> Vec<(Window, Vec<u32>)> {
     let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
 
     if pattern.atoms.is_empty() {
@@ -170,7 +238,10 @@ fn run_file_name_match(
         })
         .collect();
     scored.sort_by_key(|&(_, score, _)| std::cmp::Reverse(score));
-    scored.into_iter().map(|(key, _, idx)| (key, idx)).collect()
+    scored
+        .into_iter()
+        .map(|(key, _, idx)| (Window::FilePreview(key), idx))
+        .collect()
 }
 
 impl Component<AppState, AppSignal> for FileNamePickerComponent {
@@ -203,19 +274,32 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 let selected = state.file_name_picker.resolve_selected_index();
-                if let Some(&(key, _)) = state.file_name_picker.results.get(selected) {
-                    if !state
-                        .pane_manager
-                        .window_states
-                        .contains_key(&Window::FilePreview(key))
-                    {
-                        state
-                            .pane_manager
-                            .set_window_scroll(&Window::FilePreview(key), 0);
+                if let Some(&(window, _)) = state.file_name_picker.results.get(selected) {
+                    let old = state.pane_manager.focused_window;
+                    match window {
+                        Window::FilePreview(key) => {
+                            if !state.pane_manager.window_states.contains_key(&window) {
+                                state.pane_manager.set_window_scroll(&window, 0);
+                            }
+                            state.pane_manager.push_window(window);
+                            state.pane_manager.focused_window = Some(window);
+                            crate::lsp::send_file_request(key.0);
+                        }
+                        Window::Terminal(id) => {
+                            state.pane_manager.push_window(window);
+                            state.pane_manager.focused_window = Some(window);
+                            // Mirror click-to-focus: grab the keyboard unless the
+                            // terminal is scrolled back into its history.
+                            let scrolled = state
+                                .terminal_panes
+                                .get(&id)
+                                .and_then(|p| p.lock().ok())
+                                .is_some_and(|p| p.scroll_offset > 0);
+                            state.terminal_grabbed = !scrolled;
+                            crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
+                        }
+                        _ => {}
                     }
-                    state.pane_manager.push_window(Window::FilePreview(key));
-                    state.pane_manager.focused_window = Some(Window::FilePreview(key));
-                    crate::lsp::send_file_request(key.0);
                 }
                 state.pane_manager.remove_window(&Window::FileNamePicker);
                 state.file_name_picker.reset();
@@ -281,11 +365,25 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                 origin,
                 total_rows,
                 pane_width,
-                |key, state| {
-                    let snapshot = state.files.load_full();
-                    let file = &snapshot[key.0];
-                    let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
-                    rel.to_string()
+                |window, state| match window {
+                    Window::FilePreview(key) => {
+                        let snapshot = state.files.load_full();
+                        let file = &snapshot[key.0];
+                        let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
+                        (rel.to_string(), None)
+                    }
+                    Window::Terminal(id) => {
+                        let title = state
+                            .terminal_panes
+                            .get(id)
+                            .and_then(|p| p.lock().ok())
+                            .and_then(|p| p.title.clone())
+                            .unwrap_or_else(|| format!("Terminal {id}"));
+                        // Render terminals in a distinct theme color (+ bold) so
+                        // they stand out from file paths.
+                        (title, Some(terminal_accent(&state.theme)))
+                    }
+                    _ => (String::new(), None),
                 },
             );
             let result_count = global_data.state.file_name_picker.results.len();

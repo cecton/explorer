@@ -17,11 +17,23 @@ use tokio::sync::mpsc;
 
 static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
 
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct FuzzyPickerState<T> {
     pub query: String,
     pub results: Vec<(T, Vec<u32>)>,
     pub selected: Option<T>,
+}
+
+// Manual `Default` avoids the `T: Default` bound the derive would add; the
+// picker's fields (`String`, `Vec`, `Option`) are all `Default` for any `T`.
+impl<T> Default for FuzzyPickerState<T> {
+    fn default() -> Self {
+        Self {
+            query: String::new(),
+            results: Vec::new(),
+            selected: None,
+        }
+    }
 }
 
 impl<T: Clone + PartialEq> FuzzyPickerState<T> {
@@ -102,7 +114,7 @@ pub struct AppState {
     pub highlight_ranges: HashMap<FileKey, Vec<(usize, usize)>>,
     pub leader_active: bool,
     pub command_mode_active: bool,
-    pub file_name_picker: FuzzyPickerState<FileKey>,
+    pub file_name_picker: FuzzyPickerState<Window>,
     pub theme_picker: FuzzyPickerState<String>,
     pub theme: HelixTheme,
     pub saved_theme: HelixTheme,

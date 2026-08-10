@@ -184,7 +184,7 @@ impl Component<AppState, AppSignal> for ThemePickerComponent {
                 origin,
                 total_rows,
                 pane_width,
-                |name, _state| name.clone(),
+                |name, _state| (name.clone(), None),
             );
             let result_count = global_data.state.theme_picker.results.len();
 
