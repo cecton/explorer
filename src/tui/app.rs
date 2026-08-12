@@ -1147,10 +1147,21 @@ impl App for AppMain {
                         state.mark_session_dirty();
                     } else {
                         let origin = origin_locations.first().cloned();
-                        let color_idx =
-                            state.next_palette_index % crate::tui::state::SYMBOL_PALETTE.len();
-                        state.next_palette_index = (state.next_palette_index + 1)
-                            % crate::tui::state::SYMBOL_PALETTE.len();
+                        let palette = &crate::tui::state::SYMBOL_PALETTE;
+                        // Prefer a color no active group is already using. Scan the
+                        // whole palette starting at the round-robin cursor; only fall
+                        // back to a reused color once every palette entry is taken.
+                        let start = state.next_palette_index % palette.len();
+                        let color_idx = (0..palette.len())
+                            .map(|off| (start + off) % palette.len())
+                            .find(|&i| {
+                                !state
+                                    .symbol_highlights
+                                    .iter()
+                                    .any(|g| g.color == palette[i])
+                            })
+                            .unwrap_or(start);
+                        state.next_palette_index = (color_idx + 1) % palette.len();
                         let mut locations: Vec<crate::tui::state::SymbolRefLocation> =
                             origin_locations.clone();
                         locations.extend(reference_locations.iter().cloned());
