@@ -439,7 +439,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                         let files = Arc::clone(&state.files);
                         let snapshot = files.load();
                         let file = &snapshot[key.0];
-                        let data = file.data.lock();
+                        let data = file.data.read();
                         let (line_idx, _char_idx, cursor_byte) = self
                             .preview
                             .screen_pos_to_line_char(state, row, col, key, &data);
@@ -538,7 +538,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     let files = Arc::clone(&state.files);
                     let snapshot = files.load();
                     let file = &snapshot[key.0];
-                    let data = file.data.lock();
+                    let data = file.data.read();
                     let (line_idx, _char_idx, cursor_byte) = self
                         .preview
                         .screen_pos_to_line_char(state, row, col, key, &data);
@@ -621,7 +621,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     {
                         let snapshot = state.files.load();
                         let file = &snapshot[key.0];
-                        let data = file.data.lock();
+                        let data = file.data.read();
                         let (start_byte, end_byte) = match (sel.start, sel.end) {
                             (
                                 SelPoint::Preview {

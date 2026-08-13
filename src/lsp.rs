@@ -769,7 +769,7 @@ impl LspWorker {
                 let snapshot = self.files.load();
                 let file = &snapshot[file_idx];
                 let lines = {
-                    let d = file.data.lock();
+                    let d = file.data.read();
                     let mut lines = decode_tokens(&data, &d.content);
                     if is_range {
                         lines.truncate(RANGE_LINES);
@@ -984,7 +984,7 @@ impl LspWorker {
                             continue;
                         };
                         let file = &snapshot[file_key.0];
-                        let guard = file.data.lock();
+                        let guard = file.data.read();
                         let line_starts = &guard.line_starts;
                         let content = &guard.content;
                         let line = loc.range.start.line as usize;
@@ -1316,7 +1316,7 @@ fn request_tokens(
         .expect("valid file URI");
 
     let (total_lines, content) = {
-        let guard = file.data.lock();
+        let guard = file.data.read();
         (guard.content.lines().count(), guard.content.clone())
     };
     let colored_len = file.colored_lines.lock().len();

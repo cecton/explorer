@@ -189,7 +189,7 @@ impl FilePreviewComponent {
                 return;
             };
             let snapshot = state.files.load();
-            let data = snapshot[key.0].data.lock();
+            let data = snapshot[key.0].data.read();
             let total_lines = data.line_starts.len();
             let mut acc = Vec::new();
             for line_idx in 0..total_lines {
@@ -472,7 +472,7 @@ impl FilePreviewComponent {
         row: usize,
         col: usize,
         key: FileKey,
-        data: &parking_lot::MutexGuard<'_, crate::loader::FileData>,
+        data: &parking_lot::RwLockReadGuard<'_, crate::loader::FileData>,
     ) -> (usize, usize, usize) {
         let window = Window::FilePreview(key);
         let scroll = state.pane_manager.window_scroll(&window);
@@ -851,7 +851,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             let total_lines = {
                 let snapshot = global_data.state.files.load();
                 let file = &snapshot[file_key.0];
-                let data = file.data.lock();
+                let data = file.data.read();
                 data.line_starts.len()
             };
             global_data
@@ -866,7 +866,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             let snapshot = state.files.load();
             let file = &snapshot[file_key.0];
 
-            let data = file.data.lock();
+            let data = file.data.read();
             let scroll = state.pane_manager.window_scroll(&window);
             let colored_guard = file.colored_lines.lock();
 

@@ -1,5 +1,5 @@
 use camino::{Utf8Path, Utf8PathBuf};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
@@ -151,7 +151,7 @@ impl FileData {
 
 pub struct LoadedFile {
     pub path: Utf8PathBuf,
-    pub data: Mutex<FileData>,
+    pub data: RwLock<FileData>,
     pub colored_lines: Mutex<Vec<lsp::ColoredLine>>,
     pub removed: AtomicBool,
     pub needs_full_load: AtomicBool,
@@ -164,7 +164,7 @@ impl LoadedFile {
         let line_starts = compute_line_starts(&content);
         Some(Arc::new(Self {
             path,
-            data: Mutex::new(FileData {
+            data: RwLock::new(FileData {
                 content,
                 line_starts,
             }),
@@ -181,7 +181,7 @@ impl LoadedFile {
             return false;
         };
         let line_starts = compute_line_starts(&content);
-        let mut data = self.data.lock();
+        let mut data = self.data.write();
         data.content = content;
         data.line_starts = line_starts;
         drop(data);
@@ -257,7 +257,7 @@ impl LoadedFile {
     pub fn stub(path: Utf8PathBuf) -> Arc<Self> {
         Arc::new(Self {
             path,
-            data: Mutex::new(FileData {
+            data: RwLock::new(FileData {
                 content: String::new(),
                 line_starts: vec![0],
             }),
@@ -431,6 +431,6 @@ mod tests {
     fn stub_file_is_marked_removed() {
         let stub = LoadedFile::stub(Utf8PathBuf::from("/repo/missing.rs"));
         assert!(stub.removed.load(std::sync::atomic::Ordering::Relaxed));
-        assert!(stub.data.lock().content.is_empty());
+        assert!(stub.data.read().content.is_empty());
     }
 }
