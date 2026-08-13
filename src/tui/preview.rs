@@ -261,8 +261,8 @@ impl FilePreviewComponent {
             return;
         };
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
-        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
-        let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+        let color_bg = TuiColor::from(bg_rgb);
+        let color_fg = TuiColor::from(fg_rgb);
         let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
         for row_offset in 0..height {
@@ -295,8 +295,8 @@ impl FilePreviewComponent {
             SearchDirection::Backward => "?",
         };
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
-        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
-        let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+        let color_bg = TuiColor::from(bg_rgb);
+        let color_fg = TuiColor::from(fg_rgb);
         let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
         for row_offset in 0..height {
@@ -882,26 +882,42 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 .lock()
                 .unwrap_or_else(|poison| poison.into_inner());
 
-            let pane_bg = state.theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
+            let pane_bg = state
+                .theme
+                .ui_bg("ui.background")
+                .unwrap_or(RgbValue::from_u8(15, 15, 25));
             let pane_width = bounds.col_width.as_usize();
-            let bg = tui_color!(pane_bg[0], pane_bg[1], pane_bg[2]);
+            let bg = TuiColor::from(pane_bg);
             let bg_style = new_style!(color_bg: {bg});
-            let hl_rgb = state.theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]);
-            let hl_bg = tui_color!(hl_rgb[0], hl_rgb[1], hl_rgb[2]);
+            let hl_rgb = state
+                .theme
+                .ui_bg("ui.selection")
+                .unwrap_or(RgbValue::from_u8(50, 50, 90));
+            let hl_bg = TuiColor::from(hl_rgb);
             let hl_bg_style = new_style!(color_bg: {hl_bg});
             let line_num_width = (total_lines.max(1)).to_string().len();
             let content_start_col = line_num_width + GUTTER_GAP.len();
             let content_width = pane_width.saturating_sub(content_start_col).max(1);
             let line_num_fg = state.theme.ui_fg("ui.linenr").unwrap_or({
-                let default_fg = state.theme.ui_fg("ui.text").unwrap_or([212, 212, 212]);
-                [default_fg[0] / 3, default_fg[1] / 3, default_fg[2] / 3]
+                let default_fg = state
+                    .theme
+                    .ui_fg("ui.text")
+                    .unwrap_or(RgbValue::from_u8(212, 212, 212));
+                RgbValue::from_u8(
+                    default_fg.red / 3,
+                    default_fg.green / 3,
+                    default_fg.blue / 3,
+                )
             });
             let line_num_bg = state.theme.ui_bg("ui.linenr").unwrap_or(pane_bg);
-            let line_num_fg_rgb = tui_color!(line_num_fg[0], line_num_fg[1], line_num_fg[2]);
-            let line_num_bg_rgb = tui_color!(line_num_bg[0], line_num_bg[1], line_num_bg[2]);
+            let line_num_fg_rgb = TuiColor::from(line_num_fg);
+            let line_num_bg_rgb = TuiColor::from(line_num_bg);
             let line_num_style = new_style!(color_fg: {line_num_fg_rgb} color_bg: {bg});
-            let hl_fg_rgb = state.theme.ui_fg("ui.selection").unwrap_or([255, 255, 255]);
-            let hl_line_num_fg = tui_color!(hl_fg_rgb[0], hl_fg_rgb[1], hl_fg_rgb[2]);
+            let hl_fg_rgb = state
+                .theme
+                .ui_fg("ui.selection")
+                .unwrap_or(RgbValue::from_u8(255, 255, 255));
+            let hl_line_num_fg = TuiColor::from(hl_fg_rgb);
             let hl_line_num_style =
                 new_style!(color_fg: {hl_line_num_fg} color_bg: {line_num_bg_rgb});
 
@@ -1018,7 +1034,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                     // syntax colors via `ensure_readable_fg`.
                     // Priority: text selection > search match > symbol highlight > row default.
                     let line_byte_start = data.line_starts[line_idx];
-                    let mut intervals: Vec<(usize, usize, [u8; 3], Option<[u8; 3]>)> =
+                    let mut intervals: Vec<(usize, usize, RgbValue, Option<RgbValue>)> =
                         vec![(seg_start_char, seg_end_char, content_bg, None)];
 
                     // Symbol highlight backgrounds. Skipped for fully selected rows
@@ -1202,14 +1218,16 @@ fn paint_line_segment(
     line_idx: usize,
     (seg_start_char, seg_end_char): (usize, usize),
     theme: &HelixTheme,
-    pane_bg: [u8; 3],
-    fg_override: Option<[u8; 3]>,
+    pane_bg: RgbValue,
+    fg_override: Option<RgbValue>,
 ) {
     if seg_start_char >= seg_end_char {
         return;
     }
-    let default_fg = theme.ui_fg("ui.text").unwrap_or([212, 212, 212]);
-    let bg = tui_color!(pane_bg[0], pane_bg[1], pane_bg[2]);
+    let default_fg = theme
+        .ui_fg("ui.text")
+        .unwrap_or(RgbValue::from_u8(212, 212, 212));
+    let bg = TuiColor::from(pane_bg);
     let line_content = data.line(line_idx);
     let seg_byte_start = data.char_to_byte(line_idx, seg_start_char);
     let seg_byte_end = data.char_to_byte(line_idx, seg_end_char);
@@ -1218,7 +1236,7 @@ fn paint_line_segment(
     // spans and the `ensure_readable_fg` auto-contrast so the match text color is uniform.
     if let Some(fg_rgb) = fg_override {
         let text = &line_content[seg_byte_start..seg_byte_end];
-        let fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+        let fg = TuiColor::from(fg_rgb);
         let style = new_style!(color_fg: {fg} color_bg: {bg});
         *render_ops += RenderOpCommon::ApplyColors(Some(style));
         *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
@@ -1235,7 +1253,7 @@ fn paint_line_segment(
             let text = &line_content[overlap_start..overlap_end];
             let fg_rgb = theme.color_for_lsp_token(token_type).unwrap_or(default_fg);
             let fg_rgb = ensure_readable_fg(fg_rgb, pane_bg);
-            let fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+            let fg = TuiColor::from(fg_rgb);
             let style = new_style!(color_fg: {fg} color_bg: {bg});
             *render_ops += RenderOpCommon::ApplyColors(Some(style));
             *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
@@ -1245,7 +1263,7 @@ fn paint_line_segment(
 
     let text = &line_content[seg_byte_start..seg_byte_end];
     let fg_rgb = ensure_readable_fg(default_fg, pane_bg);
-    let fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+    let fg = TuiColor::from(fg_rgb);
     let style = new_style!(color_fg: {fg} color_bg: {bg});
     *render_ops += RenderOpCommon::ApplyColors(Some(style));
     *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
@@ -1253,8 +1271,8 @@ fn paint_line_segment(
 
 /// Perceived brightness on a 0-255 scale (standard luma weights). Good enough for
 /// picking readable terminal text; not meant to be WCAG-certified color science.
-fn luminance(c: [u8; 3]) -> f32 {
-    0.299 * c[0] as f32 + 0.587 * c[1] as f32 + 0.114 * c[2] as f32
+fn luminance(c: RgbValue) -> f32 {
+    0.299 * c.red as f32 + 0.587 * c.green as f32 + 0.114 * c.blue as f32
 }
 
 /// Minimum acceptable luminance gap between text and its background, on the same
@@ -1268,14 +1286,14 @@ const MIN_FG_BG_CONTRAST: f32 = 100.0;
 /// every span so it transparently covers symbol-highlight and selection overlay
 /// backgrounds (`overlay_interval` in `render()`) as well as the normal pane
 /// background, without either call site needing to know which case it is.
-fn ensure_readable_fg(fg: [u8; 3], bg: [u8; 3]) -> [u8; 3] {
+fn ensure_readable_fg(fg: RgbValue, bg: RgbValue) -> RgbValue {
     if (luminance(fg) - luminance(bg)).abs() >= MIN_FG_BG_CONTRAST {
         return fg;
     }
     if luminance(bg) > 127.0 {
-        [20, 20, 20]
+        RgbValue::from_u8(20, 20, 20)
     } else {
-        [235, 235, 235]
+        RgbValue::from_u8(235, 235, 235)
     }
 }
 
@@ -1287,11 +1305,11 @@ fn byte_to_char(s: &str, byte_offset: usize) -> usize {
 /// Repaints `o_lo..o_hi` in `intervals` with `color`, splitting partially
 /// overlapped pieces. No-op when the range is empty.
 fn overlay_interval(
-    intervals: &mut Vec<(usize, usize, [u8; 3], Option<[u8; 3]>)>,
+    intervals: &mut Vec<(usize, usize, RgbValue, Option<RgbValue>)>,
     o_lo: usize,
     o_hi: usize,
-    color: [u8; 3],
-    fg: Option<[u8; 3]>,
+    color: RgbValue,
+    fg: Option<RgbValue>,
 ) {
     if o_lo >= o_hi {
         return;
@@ -1453,8 +1471,11 @@ mod contrast_tests {
     fn keeps_fg_when_contrast_is_already_adequate() {
         // White text on a near-black background: plenty of contrast, unchanged.
         assert_eq!(
-            ensure_readable_fg([230, 230, 230], [10, 10, 10]),
-            [230, 230, 230]
+            ensure_readable_fg(
+                RgbValue::from_u8(230, 230, 230),
+                RgbValue::from_u8(10, 10, 10),
+            ),
+            RgbValue::from_u8(230, 230, 230)
         );
     }
 
@@ -1462,8 +1483,8 @@ mod contrast_tests {
     fn overrides_fg_when_luminance_nearly_matches() {
         // Yellow-ish syntax fg on a similarly bright symbol-highlight orange bg
         // (SYMBOL_PALETTE[2] = [255, 200, 100]) — nearly identical luminance.
-        let fg = [255, 255, 100];
-        let bg = [255, 200, 100];
+        let fg = RgbValue::from_u8(255, 255, 100);
+        let bg = RgbValue::from_u8(255, 200, 100);
         let result = ensure_readable_fg(fg, bg);
         assert_ne!(result, fg);
         assert!((luminance(result) - luminance(bg)).abs() >= MIN_FG_BG_CONTRAST);
@@ -1472,12 +1493,15 @@ mod contrast_tests {
     #[test]
     fn overridden_fg_picks_dark_text_on_light_bg_and_light_text_on_dark_bg() {
         assert_eq!(
-            ensure_readable_fg([255, 255, 100], [255, 200, 100]),
-            [20, 20, 20]
+            ensure_readable_fg(
+                RgbValue::from_u8(255, 255, 100),
+                RgbValue::from_u8(255, 200, 100),
+            ),
+            RgbValue::from_u8(20, 20, 20)
         );
         assert_eq!(
-            ensure_readable_fg([50, 50, 50], [30, 30, 30]),
-            [235, 235, 235]
+            ensure_readable_fg(RgbValue::from_u8(50, 50, 50), RgbValue::from_u8(30, 30, 30),),
+            RgbValue::from_u8(235, 235, 235)
         );
     }
 }

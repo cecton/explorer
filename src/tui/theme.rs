@@ -1,3 +1,4 @@
+use crate::tui::RgbValue;
 use serde_json::Value;
 use std::collections::HashMap;
 
@@ -11,12 +12,12 @@ pub struct HelixTheme {
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Style {
-    pub fg: Option<[u8; 3]>,
-    pub bg: Option<[u8; 3]>,
+    pub fg: Option<RgbValue>,
+    pub bg: Option<RgbValue>,
 }
 
 struct RawTheme {
-    palette: HashMap<String, [u8; 3]>,
+    palette: HashMap<String, RgbValue>,
     styles: Vec<(String, Value)>,
     inherits: Option<String>,
 }
@@ -44,7 +45,7 @@ impl HelixTheme {
         let chain = collect_chain(name, toml_str);
 
         let mut styles: HashMap<String, Style> = HashMap::new();
-        let mut palette: HashMap<&str, [u8; 3]> = HashMap::new();
+        let mut palette: HashMap<&str, RgbValue> = HashMap::new();
 
         for raw in chain.iter().rev() {
             for (k, &v) in &raw.palette {
@@ -66,7 +67,7 @@ impl HelixTheme {
         }
     }
 
-    pub fn color_for_scope(&self, scope: &str) -> Option<[u8; 3]> {
+    pub fn color_for_scope(&self, scope: &str) -> Option<RgbValue> {
         let mut s = scope;
         loop {
             if let Some(style) = self.styles.get(s)
@@ -83,7 +84,7 @@ impl HelixTheme {
         self.styles.get("ui.text").and_then(|s| s.fg)
     }
 
-    pub fn color_for_lsp_token(&self, token_type: &str) -> Option<[u8; 3]> {
+    pub fn color_for_lsp_token(&self, token_type: &str) -> Option<RgbValue> {
         for scope in lsp_token_scopes(token_type) {
             if let Some(color) = self.color_for_scope(scope) {
                 return Some(color);
@@ -92,11 +93,11 @@ impl HelixTheme {
         None
     }
 
-    pub fn ui_fg(&self, key: &str) -> Option<[u8; 3]> {
+    pub fn ui_fg(&self, key: &str) -> Option<RgbValue> {
         self.styles.get(key).and_then(|s| s.fg)
     }
 
-    pub fn ui_bg(&self, key: &str) -> Option<[u8; 3]> {
+    pub fn ui_bg(&self, key: &str) -> Option<RgbValue> {
         self.styles.get(key).and_then(|s| s.bg)
     }
 }
@@ -155,11 +156,11 @@ fn parse_theme(toml_str: &str) -> RawTheme {
         }
     };
 
-    let mut palette: HashMap<String, [u8; 3]> = HashMap::new();
+    let mut palette: HashMap<String, RgbValue> = HashMap::new();
     if let Some(palette_table) = table.get("palette").and_then(|v| v.as_object()) {
         for (name, val) in palette_table {
-            if let Some(hex) = val.as_str().and_then(parse_hex_color) {
-                palette.insert(name.to_string(), hex);
+            if let Some(color) = val.as_str().and_then(parse_hex_color) {
+                palette.insert(name.to_string(), color);
             }
         }
     }
@@ -184,7 +185,7 @@ fn parse_theme(toml_str: &str) -> RawTheme {
     }
 }
 
-fn resolve_style(val: &Value, palette: &HashMap<&str, [u8; 3]>) -> Option<Style> {
+fn resolve_style(val: &Value, palette: &HashMap<&str, RgbValue>) -> Option<Style> {
     match val {
         Value::String(s) => {
             if let Some(rgb) = parse_hex_color(s) {
@@ -213,23 +214,14 @@ fn resolve_style(val: &Value, palette: &HashMap<&str, [u8; 3]>) -> Option<Style>
     }
 }
 
-fn parse_hex_color(s: &str) -> Option<[u8; 3]> {
+fn parse_hex_color(s: &str) -> Option<RgbValue> {
     let s = s.strip_prefix('#').unwrap_or(s);
-    match s.len() {
-        6 => {
-            let r = u8::from_str_radix(&s[0..2], 16).ok()?;
-            let g = u8::from_str_radix(&s[2..4], 16).ok()?;
-            let b = u8::from_str_radix(&s[4..6], 16).ok()?;
-            Some([r, g, b])
-        }
-        3 => {
-            let r = u8::from_str_radix(&s[0..1], 16).ok()? * 17;
-            let g = u8::from_str_radix(&s[1..2], 16).ok()? * 17;
-            let b = u8::from_str_radix(&s[2..3], 16).ok()? * 17;
-            Some([r, g, b])
-        }
-        _ => None,
-    }
+    let expanded = match s.len() {
+        6 => s.to_string(),
+        3 => s.chars().flat_map(|c| [c, c]).collect::<String>(),
+        _ => return None,
+    };
+    RgbValue::try_from_hex_color(&format!("#{expanded}")).ok()
 }
 
 fn lsp_token_scopes(token_type: &str) -> &[&str] {

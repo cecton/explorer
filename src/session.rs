@@ -2,7 +2,7 @@ use crate::loader::{FileKey, LoadedFile, file_key_for_path, path_for_file_key};
 use crate::tui::AppState;
 use crate::tui::TerminalPane;
 use crate::tui::pane_manager::{PaneSize, Window, WindowState};
-use crate::tui::{SYMBOL_PALETTE, SymbolHighlightGroup};
+use crate::tui::{RgbValue, SYMBOL_PALETTE, SymbolHighlightGroup};
 use camino::{Utf8Path, Utf8PathBuf};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -133,7 +133,7 @@ impl Session {
                     origin_char: group.origin_char,
                     origin_word: group.origin_word.clone(),
                     qualified_name: group.qualified_name.clone(),
-                    color: group.color,
+                    color: [group.color.red, group.color.green, group.color.blue],
                 })
             })
             .collect();
@@ -266,7 +266,7 @@ impl Session {
                     origin_word: entry.origin_word,
                     origin_byte_start: None,
                     origin_byte_end: None,
-                    color: entry.color,
+                    color: RgbValue::from_u8(entry.color[0], entry.color[1], entry.color[2]),
                     locations: Vec::new(),
                     needs_rebuild: true,
                 });
@@ -774,7 +774,7 @@ mod tests {
         assert_eq!(group.origin_line, 0);
         assert_eq!(group.origin_char, 3);
         assert_eq!(group.origin_word.as_deref(), Some("add_numbers"));
-        assert_eq!(group.color, [255, 100, 100]);
+        assert_eq!(group.color, RgbValue::from_u8(255, 100, 100));
         assert!(group.needs_rebuild);
         assert!(group.locations.is_empty());
         assert!(group.origin_byte_start.is_none());

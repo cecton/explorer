@@ -123,8 +123,8 @@ impl TitleRow for FileNamePickerComponent {
         let height = InputLine::line_count(query);
 
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
-        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
-        let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+        let color_bg = TuiColor::from(bg_rgb);
+        let color_fg = TuiColor::from(fg_rgb);
         let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
         for row_offset in 0..height {
@@ -197,13 +197,13 @@ mod tests {
 /// falls back to the default `function` blue if the theme somehow lacks all of
 /// them. `constant` is intentionally excluded — it maps to the same color the
 /// picker uses for fuzzy-match highlights.
-fn terminal_accent(theme: &HelixTheme) -> [u8; 3] {
+fn terminal_accent(theme: &HelixTheme) -> RgbValue {
     let text = theme.ui_fg("ui.text");
     ["function", "string", "keyword", "type"]
         .into_iter()
         .filter_map(|scope| theme.color_for_scope(scope))
         .find(|color| Some(*color) != text)
-        .unwrap_or([137, 180, 250])
+        .unwrap_or(RgbValue::from_u8(137, 180, 250))
 }
 
 fn run_file_name_match(

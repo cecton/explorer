@@ -11,16 +11,51 @@ pub(crate) trait TitleRow {
     ) -> usize;
 }
 
-pub(crate) fn title_bar_colors(focused: bool, theme: &HelixTheme) -> ([u8; 3], [u8; 3]) {
+pub(crate) const DEFAULT_BG: RgbValue = RgbValue {
+    red: 15,
+    green: 15,
+    blue: 25,
+};
+pub(crate) const DEFAULT_SELECTION_BG: RgbValue = RgbValue {
+    red: 50,
+    green: 50,
+    blue: 90,
+};
+pub(crate) const DEFAULT_STATUSLINE_BG: RgbValue = RgbValue {
+    red: 30,
+    green: 30,
+    blue: 50,
+};
+pub(crate) const DEFAULT_STATUSLINE_FG: RgbValue = RgbValue {
+    red: 180,
+    green: 180,
+    blue: 220,
+};
+pub(crate) const DEFAULT_TITLE_FG: RgbValue = RgbValue {
+    red: 220,
+    green: 220,
+    blue: 255,
+};
+pub(crate) const DEFAULT_ERROR_FG: RgbValue = RgbValue {
+    red: 220,
+    green: 80,
+    blue: 80,
+};
+
+pub(crate) fn title_bar_colors(focused: bool, theme: &HelixTheme) -> (RgbValue, RgbValue) {
     if focused {
         (
-            theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]),
-            theme.ui_fg("ui.text").unwrap_or([220, 220, 255]),
+            theme.ui_bg("ui.selection").unwrap_or(DEFAULT_SELECTION_BG),
+            theme.ui_fg("ui.text").unwrap_or(DEFAULT_TITLE_FG),
         )
     } else {
         (
-            theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]),
-            theme.ui_fg("ui.statusline").unwrap_or([180, 180, 220]),
+            theme
+                .ui_bg("ui.statusline")
+                .unwrap_or(DEFAULT_STATUSLINE_BG),
+            theme
+                .ui_fg("ui.statusline")
+                .unwrap_or(DEFAULT_STATUSLINE_FG),
         )
     }
 }
@@ -36,31 +71,21 @@ pub(crate) fn render_pane_title(
     let origin = pane_box.style_adjusted_origin_pos;
     let width = pane_box.style_adjusted_bounds_size.col_width.as_usize();
 
-    let (bg_active_rgb, fg_active_rgb) = (
-        theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]),
-        theme.ui_fg("ui.text").unwrap_or([220, 220, 255]),
-    );
-    let bg_inactive_rgb = theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]);
-    let fg_inactive_rgb = theme.ui_fg("ui.statusline").unwrap_or([180, 180, 220]);
-    let fg_deleted_rgb = theme.ui_fg("error").unwrap_or([220, 80, 80]);
-
-    let color_bg_active = tui_color!(bg_active_rgb[0], bg_active_rgb[1], bg_active_rgb[2]);
-    let color_fg_active = tui_color!(fg_active_rgb[0], fg_active_rgb[1], fg_active_rgb[2]);
-    let color_bg_inactive = tui_color!(bg_inactive_rgb[0], bg_inactive_rgb[1], bg_inactive_rgb[2]);
-    let color_fg_inactive = tui_color!(fg_inactive_rgb[0], fg_inactive_rgb[1], fg_inactive_rgb[2]);
-    let color_fg_deleted = tui_color!(fg_deleted_rgb[0], fg_deleted_rgb[1], fg_deleted_rgb[2]);
+    let (bg_active_rgb, fg_active_rgb) = title_bar_colors(true, theme);
+    let (bg_inactive_rgb, fg_inactive_rgb) = title_bar_colors(false, theme);
+    let fg_deleted_rgb = theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG);
 
     let color_bg = if focused {
-        color_bg_active
+        TuiColor::from(bg_active_rgb)
     } else {
-        color_bg_inactive
+        TuiColor::from(bg_inactive_rgb)
     };
     let color_fg = if is_deleted {
-        color_fg_deleted
+        TuiColor::from(fg_deleted_rgb)
     } else if focused {
-        color_fg_active
+        TuiColor::from(fg_active_rgb)
     } else {
-        color_fg_inactive
+        TuiColor::from(fg_inactive_rgb)
     };
 
     let padded = format!(" {title} ");

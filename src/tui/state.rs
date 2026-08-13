@@ -1,5 +1,6 @@
 use crate::loader::{FileKey, LoadedFile};
 use crate::session::TerminalRestoreInfo;
+use crate::tui::RgbValue;
 use crate::tui::file_name_picker::FileNamePickerComponent;
 use crate::tui::pane_manager::{PaneManager, TextSelection, Window};
 use crate::tui::theme::HelixTheme;
@@ -271,7 +272,7 @@ pub struct SymbolHighlightGroup {
     pub origin_word: Option<String>,
     pub origin_byte_start: Option<usize>,
     pub origin_byte_end: Option<usize>,
-    pub color: [u8; 3],
+    pub color: RgbValue,
     pub locations: Vec<SymbolRefLocation>,
     pub needs_rebuild: bool,
 }
@@ -296,21 +297,69 @@ pub struct PreviewSearch {
 
 /// Search-match highlight background (teal) and the brighter variant for the current `n`/`N` match.
 /// Both are distinct from `ui.selection` and every `SYMBOL_PALETTE` color.
-pub const SEARCH_MATCH: [u8; 3] = [0, 140, 150];
-pub const SEARCH_CURRENT: [u8; 3] = [40, 205, 220];
+pub const SEARCH_MATCH: RgbValue = RgbValue {
+    red: 0,
+    green: 140,
+    blue: 150,
+};
+pub const SEARCH_CURRENT: RgbValue = RgbValue {
+    red: 40,
+    green: 205,
+    blue: 220,
+};
 /// Manually-set foreground for search-match text (bypasses `ensure_readable_fg`). Inverted between
 /// the two states so the current match is unmistakable: near-white text on the teal matches,
 /// near-black text on the brighter-teal current match.
-pub const SEARCH_MATCH_FG: [u8; 3] = [235, 235, 235];
-pub const SEARCH_CURRENT_FG: [u8; 3] = [20, 20, 20];
+pub const SEARCH_MATCH_FG: RgbValue = RgbValue {
+    red: 235,
+    green: 235,
+    blue: 235,
+};
+pub const SEARCH_CURRENT_FG: RgbValue = RgbValue {
+    red: 20,
+    green: 20,
+    blue: 20,
+};
 
-pub const SYMBOL_PALETTE: [[u8; 3]; 8] = [
-    [255, 100, 100],
-    [100, 200, 255],
-    [255, 200, 100],
-    [150, 255, 100],
-    [255, 150, 255],
-    [255, 255, 100],
-    [100, 150, 255],
-    [200, 255, 200],
+pub const SYMBOL_PALETTE: [RgbValue; 8] = [
+    RgbValue {
+        red: 255,
+        green: 100,
+        blue: 100,
+    },
+    RgbValue {
+        red: 100,
+        green: 200,
+        blue: 255,
+    },
+    RgbValue {
+        red: 255,
+        green: 200,
+        blue: 100,
+    },
+    RgbValue {
+        red: 150,
+        green: 255,
+        blue: 100,
+    },
+    RgbValue {
+        red: 255,
+        green: 150,
+        blue: 255,
+    },
+    RgbValue {
+        red: 255,
+        green: 255,
+        blue: 100,
+    },
+    RgbValue {
+        red: 100,
+        green: 150,
+        blue: 255,
+    },
+    RgbValue {
+        red: 200,
+        green: 255,
+        blue: 200,
+    },
 ];

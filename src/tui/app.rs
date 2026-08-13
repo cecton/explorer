@@ -1298,8 +1298,8 @@ impl App for AppMain {
                 .state
                 .theme
                 .ui_bg("ui.background")
-                .unwrap_or([15, 15, 25]);
-            let bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
+                .unwrap_or(DEFAULT_BG);
+            let bg = TuiColor::from(bg_rgb);
             let bg_style = new_style!(color_bg: {bg});
             let mut bg_ops = RenderOpIRVec::new();
             let surface_rows = surface_size.row_height.as_usize();
@@ -1381,12 +1381,12 @@ fn sync_has_focus(state: &AppState, has_focus: &mut HasFocus) {
 }
 
 fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
-    let bg = theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
+    let bg = theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
     throws_with_return!({
         let mut styles = tui_stylesheet! {
             new_style!(
                 id: {Id::Container}
-                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
+                color_bg: {TuiColor::from(bg)}
             )
         };
         for col_idx in 0..MAX_PANES {
@@ -1394,7 +1394,7 @@ fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
             styles.add_style(new_style!(
                 id: {id}
                 padding: {0}
-                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
+                color_bg: {TuiColor::from(bg)}
             ))?;
         }
         for slot in 0..MAX_PANES {
@@ -1402,7 +1402,7 @@ fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
             styles.add_style(new_style!(
                 id: {id}
                 padding: {0}
-                color_bg: {tui_color!(bg[0], bg[1], bg[2])}
+                color_bg: {TuiColor::from(bg)}
             ))?;
         }
         styles
@@ -1415,10 +1415,14 @@ fn render_status_bar(
     state: &AppState,
     theme: &HelixTheme,
 ) {
-    let bg_rgb = theme.ui_bg("ui.statusline").unwrap_or([30, 30, 50]);
-    let fg_rgb = theme.ui_fg("ui.statusline").unwrap_or([180, 180, 220]);
-    let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
-    let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+    let bg_rgb = theme
+        .ui_bg("ui.statusline")
+        .unwrap_or(DEFAULT_STATUSLINE_BG);
+    let fg_rgb = theme
+        .ui_fg("ui.statusline")
+        .unwrap_or(DEFAULT_STATUSLINE_FG);
+    let color_bg = TuiColor::from(bg_rgb);
+    let color_fg = TuiColor::from(fg_rgb);
 
     let leader_style = new_style!(bold color_fg: {color_fg} color_bg: {color_bg});
     let normal_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});

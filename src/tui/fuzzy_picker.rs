@@ -67,20 +67,26 @@ impl FuzzyPicker {
         results_origin: Pos,
         result_rows: usize,
         pane_width: usize,
-        display: impl Fn(&K, &AppState) -> (String, Option<[u8; 3]>),
+        display: impl Fn(&K, &AppState) -> (String, Option<RgbValue>),
     ) -> RenderOpIRVec {
-        let bg_rgb = state.theme.ui_bg("ui.background").unwrap_or([15, 15, 25]);
-        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
+        let bg_rgb = state.theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
+        let color_bg = TuiColor::from(bg_rgb);
 
         let match_rgb = state
             .theme
             .ui_fg("ui.cursor.match")
-            .unwrap_or([255, 200, 60]);
-        let normal_rgb = state.theme.ui_fg("ui.text").unwrap_or([170, 170, 200]);
-        let selected_rgb = state.theme.ui_bg("ui.selection").unwrap_or([50, 50, 90]);
-        let color_match_fg = tui_color!(match_rgb[0], match_rgb[1], match_rgb[2]);
-        let color_normal_fg = tui_color!(normal_rgb[0], normal_rgb[1], normal_rgb[2]);
-        let color_selected_bg = tui_color!(selected_rgb[0], selected_rgb[1], selected_rgb[2]);
+            .unwrap_or(RgbValue::from_u8(255, 200, 60));
+        let normal_rgb = state
+            .theme
+            .ui_fg("ui.text")
+            .unwrap_or(RgbValue::from_u8(170, 170, 200));
+        let selected_rgb = state
+            .theme
+            .ui_bg("ui.selection")
+            .unwrap_or(DEFAULT_SELECTION_BG);
+        let color_match_fg = TuiColor::from(match_rgb);
+        let color_normal_fg = TuiColor::from(normal_rgb);
+        let color_selected_bg = TuiColor::from(selected_rgb);
 
         let mut render_ops = RenderOpIRVec::new();
 
@@ -140,9 +146,7 @@ impl FuzzyPicker {
             let (display_str, accent) = display(&key, state);
             // Rows that supply an accent color (e.g. terminals) render in that
             // color and bold; others use the normal text color.
-            let base_fg = accent
-                .map(|c| tui_color!(c[0], c[1], c[2]))
-                .unwrap_or(color_normal_fg);
+            let base_fg = accent.map(TuiColor::from).unwrap_or(color_normal_fg);
             let emphasized = accent.is_some();
             let matched_set: HashSet<u32> = matched_positions.iter().copied().collect();
 

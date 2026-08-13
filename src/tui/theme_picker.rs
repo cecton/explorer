@@ -34,8 +34,8 @@ impl TitleRow for ThemePickerComponent {
         let height = InputLine::line_count(query);
 
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
-        let color_bg = tui_color!(bg_rgb[0], bg_rgb[1], bg_rgb[2]);
-        let color_fg = tui_color!(fg_rgb[0], fg_rgb[1], fg_rgb[2]);
+        let color_bg = TuiColor::from(bg_rgb);
+        let color_fg = TuiColor::from(fg_rgb);
         let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
         for row_offset in 0..height {

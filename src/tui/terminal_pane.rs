@@ -375,7 +375,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 .state
                 .theme
                 .ui_bg("ui.selection")
-                .unwrap_or([50, 50, 90]);
+                .unwrap_or(DEFAULT_SELECTION_BG);
             let selection_rect = global_data.state.text_selection.as_ref().and_then(|sel| {
                 if sel.window != Window::Terminal(id) || !sel.active {
                     return None;
@@ -620,7 +620,7 @@ fn overlay_selection(
     lines: &[&[PixelChar]],
     origin: r3bl_tui::Pos,
     selection: SelectionRect,
-    hl_bg: [u8; 3],
+    hl_bg: RgbValue,
 ) {
     let line_lengths: Vec<usize> = lines
         .iter()
@@ -640,7 +640,7 @@ fn overlay_selection(
         0,
     );
 
-    let sel_bg = tui_color!(hl_bg[0], hl_bg[1], hl_bg[2]);
+    let sel_bg = TuiColor::from(hl_bg);
     let default_fg = tui_color!(255, 255, 255);
 
     for (row_idx, col_start, col_end) in ranges {
