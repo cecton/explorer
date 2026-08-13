@@ -151,6 +151,7 @@ cargo test <module>::<test_name>
 | `miette`               | 7.x     | Error reporting                                                |
 | `notify`               | 8.x     | Filesystem event watching (used in `watcher.rs`)               |
 | `nucleo`               | 0.5.x   | Fuzzy matching for paths and file content                      |
+| `parking_lot`          | 0.12.x  | Poison-free `Mutex`/`RwLock` primitives (used for shared panes, file data) |
 | `pico-args`            | 0.5.x   | Lightweight CLI argument parsing (no proc macros)              |
 | `r3bl_tui`             | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
 | `serde`                | 1.x     | Derive macros for serialization (`derive` feature)             |

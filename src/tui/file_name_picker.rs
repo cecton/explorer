@@ -293,8 +293,7 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                             let scrolled = state
                                 .terminal_panes
                                 .get(&id)
-                                .and_then(|p| p.lock().ok())
-                                .is_some_and(|p| p.scroll_offset > 0);
+                                .is_some_and(|p| p.lock().scroll_offset > 0);
                             state.terminal_grabbed = !scrolled;
                             crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
                         }
@@ -376,8 +375,8 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                         let title = state
                             .terminal_panes
                             .get(id)
-                            .and_then(|p| p.lock().ok())
-                            .and_then(|p| p.title.clone())
+                            .map(|p| p.lock())
+                            .and_then(|g| g.title.clone())
                             .unwrap_or_else(|| format!("Terminal {id}"));
                         // Render terminals in a distinct theme color (+ bold) so
                         // they stand out from file paths.

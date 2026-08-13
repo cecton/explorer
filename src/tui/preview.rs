@@ -189,10 +189,7 @@ impl FilePreviewComponent {
                 return;
             };
             let snapshot = state.files.load();
-            let data = snapshot[key.0]
-                .data
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
+            let data = snapshot[key.0].data.lock();
             let total_lines = data.line_starts.len();
             let mut acc = Vec::new();
             for line_idx in 0..total_lines {
@@ -475,7 +472,7 @@ impl FilePreviewComponent {
         row: usize,
         col: usize,
         key: FileKey,
-        data: &std::sync::MutexGuard<'_, crate::loader::FileData>,
+        data: &parking_lot::MutexGuard<'_, crate::loader::FileData>,
     ) -> (usize, usize, usize) {
         let window = Window::FilePreview(key);
         let scroll = state.pane_manager.window_scroll(&window);
@@ -854,10 +851,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             let total_lines = {
                 let snapshot = global_data.state.files.load();
                 let file = &snapshot[file_key.0];
-                let data = file
-                    .data
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
+                let data = file.data.lock();
                 data.line_starts.len()
             };
             global_data
@@ -872,15 +866,9 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             let snapshot = state.files.load();
             let file = &snapshot[file_key.0];
 
-            let data = file
-                .data
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
+            let data = file.data.lock();
             let scroll = state.pane_manager.window_scroll(&window);
-            let colored_guard = file
-                .colored_lines
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
+            let colored_guard = file.colored_lines.lock();
 
             let pane_bg = state
                 .theme

@@ -1,9 +1,10 @@
 use camino::{Utf8Path, Utf8PathBuf};
+use parking_lot::Mutex;
 use std::env;
 use std::fs;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::{Arc, Mutex};
 
 use crate::lsp;
 
@@ -180,17 +181,11 @@ impl LoadedFile {
             return false;
         };
         let line_starts = compute_line_starts(&content);
-        let mut data = self
-            .data
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let mut data = self.data.lock();
         data.content = content;
         data.line_starts = line_starts;
         drop(data);
-        *self
-            .colored_lines
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner()) = vec![];
+        *self.colored_lines.lock() = vec![];
         true
     }
 }
@@ -436,6 +431,6 @@ mod tests {
     fn stub_file_is_marked_removed() {
         let stub = LoadedFile::stub(Utf8PathBuf::from("/repo/missing.rs"));
         assert!(stub.removed.load(std::sync::atomic::Ordering::Relaxed));
-        assert!(stub.data.lock().unwrap().content.is_empty());
+        assert!(stub.data.lock().content.is_empty());
     }
 }

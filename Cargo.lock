@@ -941,6 +941,7 @@ dependencies = [
  "miette",
  "notify",
  "nucleo",
+ "parking_lot 0.12.5",
  "pico-args",
  "r3bl_tui",
  "regex",

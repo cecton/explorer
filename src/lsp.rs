@@ -769,20 +769,14 @@ impl LspWorker {
                 let snapshot = self.files.load();
                 let file = &snapshot[file_idx];
                 let lines = {
-                    let d = file
-                        .data
-                        .lock()
-                        .unwrap_or_else(|poison| poison.into_inner());
+                    let d = file.data.lock();
                     let mut lines = decode_tokens(&data, &d.content);
                     if is_range {
                         lines.truncate(RANGE_LINES);
                     }
                     lines
                 };
-                let mut guard = file
-                    .colored_lines
-                    .lock()
-                    .unwrap_or_else(|poison| poison.into_inner());
+                let mut guard = file.colored_lines.lock();
                 let should_write = if is_range {
                     guard.is_empty()
                 } else {
@@ -990,9 +984,7 @@ impl LspWorker {
                             continue;
                         };
                         let file = &snapshot[file_key.0];
-                        let Ok(guard) = file.data.lock() else {
-                            continue;
-                        };
+                        let guard = file.data.lock();
                         let line_starts = &guard.line_starts;
                         let content = &guard.content;
                         let line = loc.range.start.line as usize;
@@ -1058,26 +1050,25 @@ impl LspWorker {
 // ── Send file requests via the RRT input channel ─────────────────────────────
 
 /// Buffer for file indices requested before the LSP worker is in Running state.
-static FILE_REQUEST_BUFFER: std::sync::Mutex<Vec<LspInput>> = std::sync::Mutex::new(Vec::new());
+static FILE_REQUEST_BUFFER: parking_lot::Mutex<Vec<LspInput>> =
+    parking_lot::const_mutex(Vec::new());
 
 fn drain_request_buffer(tx: &tokio::sync::broadcast::Sender<LspInput>) {
-    if let Ok(mut buf) = FILE_REQUEST_BUFFER.lock() {
-        buf.retain(|item| tx.send(item.clone()).is_err());
-    }
+    let mut buf = FILE_REQUEST_BUFFER.lock();
+    buf.retain(|item| tx.send(item.clone()).is_err());
 }
 
 fn buffer_file_request(input: LspInput) {
     const MAX: usize = 10_000;
-    let _ = FILE_REQUEST_BUFFER.lock().map(|mut buf| {
-        if buf.len() >= MAX {
-            tracing::warn!(
-                "LSP: request buffer full ({} entries), dropping request",
-                MAX
-            );
-        } else {
-            buf.push(input);
-        }
-    });
+    let mut buf = FILE_REQUEST_BUFFER.lock();
+    if buf.len() >= MAX {
+        tracing::warn!(
+            "LSP: request buffer full ({} entries), dropping request",
+            MAX
+        );
+    } else {
+        buf.push(input);
+    }
 }
 
 fn send_lsp_input(input: LspInput) {
@@ -1086,9 +1077,7 @@ fn send_lsp_input(input: LspInput) {
     let guard = LSP_RRT.shared_state.lock();
     match &*guard {
         ThreadState::Running(_, tx) => {
-            let mut buf = FILE_REQUEST_BUFFER
-                .lock()
-                .unwrap_or_else(|e| e.into_inner());
+            let mut buf = FILE_REQUEST_BUFFER.lock();
             for item in buf.drain(..) {
                 let _ = tx.send(item);
             }
@@ -1327,17 +1316,10 @@ fn request_tokens(
         .expect("valid file URI");
 
     let (total_lines, content) = {
-        let guard = file
-            .data
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let guard = file.data.lock();
         (guard.content.lines().count(), guard.content.clone())
     };
-    let colored_len = file
-        .colored_lines
-        .lock()
-        .unwrap_or_else(|poison| poison.into_inner())
-        .len();
+    let colored_len = file.colored_lines.lock().len();
     if colored_len == total_lines {
         return Ok(());
     }

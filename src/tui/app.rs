@@ -7,6 +7,7 @@ use crate::tui::*;
 use crate::watcher::{WATCHER_RRT, WatcherWorker};
 use arc_swap::ArcSwap;
 use camino::{Utf8Path, Utf8PathBuf};
+use parking_lot::Mutex;
 use r3bl_tui::SubscriberGuard;
 use r3bl_tui::core::osc::OscEvent;
 use r3bl_tui::core::pty::{
@@ -14,7 +15,7 @@ use r3bl_tui::core::pty::{
     PtySessionConfigOption,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -196,56 +197,53 @@ impl AppMain {
                     let mut is_buffering_sync = false;
                     match event {
                         PtyOutputEvent::Output(bytes) => {
-                            if let Ok(mut pane) = pane.lock() {
-                                match pane.ofs_buf.feed_pty_bytes(&bytes) {
-                                    Some(result) => {
-                                        if pane.scroll_offset > 0 {
-                                            let true_delta = result
-                                                .combined_after
-                                                .saturating_sub(result.combined_before)
-                                                .saturating_sub(result.evictions);
-                                            pane.scroll_offset = pane
-                                                .scroll_offset
-                                                .saturating_add(true_delta)
-                                                .min(pane.ofs_buf.scrollback_len());
-                                        }
-                                        for osc_event in result.osc_events {
-                                            match osc_event {
-                                                OscEvent::SetTitleAndTab(title) => {
-                                                    pane.title = Some(title);
-                                                }
-                                                // An app in the pane asked to set the
-                                                // clipboard via OSC 52. Forward it to the
-                                                // real (outer) terminal so the host
-                                                // handles the copy. Skip queries
-                                                // (Pd == "?"): the host would reply to
-                                                // explorer's stdin, which we can't route
-                                                // back into the inner PTY.
-                                                OscEvent::ClipboardCopy { selection, data }
-                                                    if data != "?" =>
-                                                {
-                                                    let seq =
-                                                        format!("\x1b]52;{selection};{data}\x07")
-                                                            .into_bytes();
-                                                    let _ = notify_tx.try_send(
-                                                        TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                                            AppSignal::ForwardOscToTerminal(seq),
-                                                        ),
-                                                    );
-                                                }
-                                                _ => {}
+                            let mut pane = pane.lock();
+                            match pane.ofs_buf.feed_pty_bytes(&bytes) {
+                                Some(result) => {
+                                    if pane.scroll_offset > 0 {
+                                        let true_delta = result
+                                            .combined_after
+                                            .saturating_sub(result.combined_before)
+                                            .saturating_sub(result.evictions);
+                                        pane.scroll_offset = pane
+                                            .scroll_offset
+                                            .saturating_add(true_delta)
+                                            .min(pane.ofs_buf.scrollback_len());
+                                    }
+                                    for osc_event in result.osc_events {
+                                        match osc_event {
+                                            OscEvent::SetTitleAndTab(title) => {
+                                                pane.title = Some(title);
                                             }
-                                        }
-                                        for pty_response in result.pty_response_events {
-                                            let _ =
-                                                pane.pty_input_tx.try_send(PtyInputEvent::Write(
-                                                    pty_response.to_string().into_bytes(),
-                                                ));
+                                            // An app in the pane asked to set the
+                                            // clipboard via OSC 52. Forward it to the
+                                            // real (outer) terminal so the host
+                                            // handles the copy. Skip queries
+                                            // (Pd == "?"): the host would reply to
+                                            // explorer's stdin, which we can't route
+                                            // back into the inner PTY.
+                                            OscEvent::ClipboardCopy { selection, data }
+                                                if data != "?" =>
+                                            {
+                                                let seq = format!("\x1b]52;{selection};{data}\x07")
+                                                    .into_bytes();
+                                                let _ = notify_tx.try_send(
+                                                    TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                                        AppSignal::ForwardOscToTerminal(seq),
+                                                    ),
+                                                );
+                                            }
+                                            _ => {}
                                         }
                                     }
-                                    None => {
-                                        is_buffering_sync = true;
+                                    for pty_response in result.pty_response_events {
+                                        let _ = pane.pty_input_tx.try_send(PtyInputEvent::Write(
+                                            pty_response.to_string().into_bytes(),
+                                        ));
                                     }
+                                }
+                                None => {
+                                    is_buffering_sync = true;
                                 }
                             }
                         }
@@ -360,25 +358,24 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
             let remove_now = state
                 .terminal_panes
                 .get(&id)
-                .and_then(|pane| pane.lock().ok())
-                .is_some_and(|p| is_buffer_empty(&p.ofs_buf));
+                .is_some_and(|p| is_buffer_empty(&p.lock().ofs_buf));
 
             if remove_now {
                 // Send focus-lost before removing the pane.
-                if let Some(pane) = state.terminal_panes.get(&id)
-                    && let Ok(p) = pane.lock()
-                    && p.ofs_buf.terminal_mode.focus_events
-                {
-                    let _ = p
-                        .pty_input_tx
-                        .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
+                if let Some(pane) = state.terminal_panes.get(&id) {
+                    let p = pane.lock();
+                    if p.ofs_buf.terminal_mode.focus_events {
+                        let _ = p
+                            .pty_input_tx
+                            .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
+                    }
                 }
                 let old = state.pane_manager.focused_window;
-                if let Some(pane) = state.terminal_panes.remove(&id)
-                    && let Ok(mut p) = pane.lock()
-                    && let Some(mut killer) = p.child_killer.take()
-                {
-                    let _ = killer.kill();
+                if let Some(pane) = state.terminal_panes.remove(&id) {
+                    let mut p = pane.lock();
+                    if let Some(mut killer) = p.child_killer.take() {
+                        let _ = killer.kill();
+                    }
                 }
                 if let Some(file_key) = state.terminal_to_preview.remove(&id) {
                     state
@@ -390,9 +387,8 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
                 notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
                 state.mark_session_dirty();
                 sync_terminal_grabbed(state);
-            } else if let Some(pane) = state.terminal_panes.get(&id)
-                && let Ok(mut p) = pane.lock()
-            {
+            } else if let Some(pane) = state.terminal_panes.get(&id) {
+                let mut p = pane.lock();
                 p.exited = true;
                 p.exit_code = exit_code;
                 p.exit_signal = exit_signal;
@@ -673,20 +669,20 @@ impl App for AppMain {
                         _ => return Ok(EventPropagation::ConsumedRender),
                     };
                     // Send focus-lost before removing the pane.
-                    if let Some(pane) = state.terminal_panes.get(&tid)
-                        && let Ok(p) = pane.lock()
-                        && p.ofs_buf.terminal_mode.focus_events
-                    {
-                        let _ = p
-                            .pty_input_tx
-                            .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
+                    if let Some(pane) = state.terminal_panes.get(&tid) {
+                        let p = pane.lock();
+                        if p.ofs_buf.terminal_mode.focus_events {
+                            let _ = p
+                                .pty_input_tx
+                                .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
+                        }
                     }
                     let old = state.pane_manager.focused_window;
-                    if let Some(pane) = state.terminal_panes.remove(&tid)
-                        && let Ok(mut p) = pane.lock()
-                        && let Some(mut killer) = p.child_killer.take()
-                    {
-                        let _ = killer.kill();
+                    if let Some(pane) = state.terminal_panes.remove(&tid) {
+                        let mut p = pane.lock();
+                        if let Some(mut killer) = p.child_killer.take() {
+                            let _ = killer.kill();
+                        }
                     }
                     state.pane_manager.remove_window(&Window::Terminal(tid));
                     notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
@@ -840,8 +836,7 @@ impl App for AppMain {
                                     .state
                                     .terminal_panes
                                     .get(&id)
-                                    .and_then(|p| p.lock().ok())
-                                    .is_some_and(|p| p.scroll_offset > 0);
+                                    .is_some_and(|p| p.lock().scroll_offset > 0);
                                 global_data.state.terminal_grabbed = !scrolled;
                             }
                             _ => {
@@ -1365,9 +1360,7 @@ pub(super) fn notify_terminal_focus_change(
         let Some(pane) = state.terminal_panes.get(&id) else {
             continue;
         };
-        let Ok(p) = pane.lock() else {
-            continue;
-        };
+        let p = pane.lock();
         if p.ofs_buf.terminal_mode.focus_events {
             let _ = p
                 .pty_input_tx
@@ -1542,12 +1535,11 @@ pub async fn run(
 
     // Kill all terminal children gracefully.
     for pane in global_data.state.terminal_panes.values() {
-        if let Ok(mut pane) = pane.lock() {
-            if let Some(mut killer) = pane.child_killer.take() {
-                let _ = killer.kill(); // Sends SIGHUP.
-            }
-            let _ = pane.pty_input_tx.try_send(PtyInputEvent::Close);
+        let mut pane = pane.lock();
+        if let Some(mut killer) = pane.child_killer.take() {
+            let _ = killer.kill(); // Sends SIGHUP.
         }
+        let _ = pane.pty_input_tx.try_send(PtyInputEvent::Close);
     }
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 

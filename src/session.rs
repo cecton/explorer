@@ -4,11 +4,12 @@ use crate::tui::TerminalPane;
 use crate::tui::pane_manager::{PaneSize, Window, WindowState};
 use crate::tui::{RgbValue, SYMBOL_PALETTE, SymbolHighlightGroup};
 use camino::{Utf8Path, Utf8PathBuf};
+use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::{Arc, Mutex};
 
 pub const SESSION_VERSION: u32 = 2;
 
@@ -316,10 +317,7 @@ fn pane_entry_from_window(
                     pane_size: window_state.pane_size.into(),
                 });
             }
-            let pane = terminal_panes
-                .get(id)?
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner());
+            let pane = terminal_panes.get(id)?.lock();
             if pane.exited {
                 return None;
             }
@@ -414,8 +412,9 @@ mod tests {
     use crate::tui::pane_manager::{PaneSize, Window, WindowState};
     use arc_swap::ArcSwap;
     use camino::Utf8PathBuf;
+    use parking_lot::Mutex;
     use r3bl_tui::{OfsBufVT100, Size};
-    use std::sync::{Arc, Mutex};
+    use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
 

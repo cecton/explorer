@@ -83,9 +83,7 @@ impl PaneComponent {
                 let Some(pane) = state.terminal_panes.get(id) else {
                     return EventPropagation::Propagate;
                 };
-                let Ok(pane) = pane.lock() else {
-                    return EventPropagation::Propagate;
-                };
+                let pane = pane.lock();
                 if pane.ofs_buf.terminal_mode.active_screen_buffer == ActiveScreenBuffer::Alternate
                 {
                     return EventPropagation::Propagate;
@@ -209,11 +207,10 @@ impl PaneComponent {
                 let Some(pane) = state.terminal_panes.get(id) else {
                     return EventPropagation::ConsumedRender;
                 };
-                if let Ok(mut pane) = pane.lock() {
-                    let scrollback_len = pane.ofs_buf.scrollback_len();
-                    let clamped = target.min(scrollback_len);
-                    pane.scroll_offset = scrollback_len.saturating_sub(clamped);
-                }
+                let mut pane = pane.lock();
+                let scrollback_len = pane.ofs_buf.scrollback_len();
+                let clamped = target.min(scrollback_len);
+                pane.scroll_offset = scrollback_len.saturating_sub(clamped);
                 state.terminal_grabbed = false;
                 EventPropagation::ConsumedRender
             }
@@ -442,102 +439,98 @@ impl Component<AppState, AppSignal> for PaneComponent {
                         let files = Arc::clone(&state.files);
                         let snapshot = files.load();
                         let file = &snapshot[key.0];
-                        if let Ok(data) = file.data.lock() {
-                            let (line_idx, _char_idx, cursor_byte) = self
-                                .preview
-                                .screen_pos_to_line_char(state, row, col, key, &data);
+                        let data = file.data.lock();
+                        let (line_idx, _char_idx, cursor_byte) = self
+                            .preview
+                            .screen_pos_to_line_char(state, row, col, key, &data);
 
-                            match self.consecutive_clicks {
-                                1 => {
-                                    let bounds = data.word_bounds(cursor_byte);
-                                    state.text_selection = Some(TextSelection {
-                                        window: Window::FilePreview(key),
-                                        start: SelPoint::Preview {
+                        match self.consecutive_clicks {
+                            1 => {
+                                let bounds = data.word_bounds(cursor_byte);
+                                state.text_selection = Some(TextSelection {
+                                    window: Window::FilePreview(key),
+                                    start: SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: bounds.0,
+                                    },
+                                    end: SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: bounds.0,
+                                    },
+                                    click_anchor: Some(SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: cursor_byte,
+                                    }),
+                                    click_word: Some((
+                                        SelPoint::Preview {
                                             line_idx,
                                             byte_offset: bounds.0,
                                         },
-                                        end: SelPoint::Preview {
-                                            line_idx,
-                                            byte_offset: bounds.0,
-                                        },
-                                        click_anchor: Some(SelPoint::Preview {
-                                            line_idx,
-                                            byte_offset: cursor_byte,
-                                        }),
-                                        click_word: Some((
-                                            SelPoint::Preview {
-                                                line_idx,
-                                                byte_offset: bounds.0,
-                                            },
-                                            SelPoint::Preview {
-                                                line_idx,
-                                                byte_offset: bounds.1,
-                                            },
-                                        )),
-                                        active: true,
-                                    });
-                                    self.text_drag_active = true;
-                                    state.mouse_drag_active = true;
-                                }
-                                2 => {
-                                    let line = data.line(line_idx);
-                                    let byte_in_line = cursor_byte - data.line_starts[line_idx];
-                                    let character = crate::lsp::byte_to_utf16(line, byte_in_line);
-
-                                    let hit = state.symbol_highlights.iter().position(|g| {
-                                        !(g.needs_rebuild && g.locations.is_empty())
-                                            && ((g.origin_file == key
-                                                && g.origin_byte_start
-                                                    .is_some_and(|s| cursor_byte >= s)
-                                                && g.origin_byte_end
-                                                    .is_some_and(|e| cursor_byte < e))
-                                                || g.locations.iter().any(|l| {
-                                                    l.file_key == key
-                                                        && cursor_byte >= l.start_byte
-                                                        && cursor_byte < l.end_byte
-                                                }))
-                                    });
-
-                                    if let Some(idx) = hit {
-                                        state.symbol_highlights.remove(idx);
-                                        state.mark_session_dirty();
-                                    } else {
-                                        let bounds = data.word_bounds(cursor_byte);
-                                        let word = data.content[bounds.0..bounds.1].to_string();
-                                        crate::lsp::send_symbol_request(
-                                            key.0,
-                                            line_idx as u32,
-                                            character,
-                                            Some(word),
-                                            None,
-                                        );
-                                    }
-                                }
-                                3 => {
-                                    let bounds = data.line_bounds(line_idx);
-                                    state.text_selection = Some(TextSelection {
-                                        window: Window::FilePreview(key),
-                                        start: SelPoint::Preview {
-                                            line_idx,
-                                            byte_offset: bounds.0,
-                                        },
-                                        end: SelPoint::Preview {
+                                        SelPoint::Preview {
                                             line_idx,
                                             byte_offset: bounds.1,
                                         },
-                                        click_anchor: None,
-                                        click_word: None,
-                                        active: true,
-                                    });
-                                    self.text_drag_active = true;
-                                    state.mouse_drag_active = true;
-                                }
-                                _ => {}
+                                    )),
+                                    active: true,
+                                });
+                                self.text_drag_active = true;
+                                state.mouse_drag_active = true;
                             }
-                            return Ok(EventPropagation::ConsumedRender);
-                        } else {
-                            return Ok(EventPropagation::ConsumedRender);
+                            2 => {
+                                let line = data.line(line_idx);
+                                let byte_in_line = cursor_byte - data.line_starts[line_idx];
+                                let character = crate::lsp::byte_to_utf16(line, byte_in_line);
+
+                                let hit = state.symbol_highlights.iter().position(|g| {
+                                    !(g.needs_rebuild && g.locations.is_empty())
+                                        && ((g.origin_file == key
+                                            && g.origin_byte_start
+                                                .is_some_and(|s| cursor_byte >= s)
+                                            && g.origin_byte_end.is_some_and(|e| cursor_byte < e))
+                                            || g.locations.iter().any(|l| {
+                                                l.file_key == key
+                                                    && cursor_byte >= l.start_byte
+                                                    && cursor_byte < l.end_byte
+                                            }))
+                                });
+
+                                if let Some(idx) = hit {
+                                    state.symbol_highlights.remove(idx);
+                                    state.mark_session_dirty();
+                                } else {
+                                    let bounds = data.word_bounds(cursor_byte);
+                                    let word = data.content[bounds.0..bounds.1].to_string();
+                                    crate::lsp::send_symbol_request(
+                                        key.0,
+                                        line_idx as u32,
+                                        character,
+                                        Some(word),
+                                        None,
+                                    );
+                                }
+                            }
+                            3 => {
+                                let bounds = data.line_bounds(line_idx);
+                                state.text_selection = Some(TextSelection {
+                                    window: Window::FilePreview(key),
+                                    start: SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: bounds.0,
+                                    },
+                                    end: SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: bounds.1,
+                                    },
+                                    click_anchor: None,
+                                    click_word: None,
+                                    active: true,
+                                });
+                                self.text_drag_active = true;
+                                state.mouse_drag_active = true;
+                            }
+                            _ => {}
                         }
+                        return Ok(EventPropagation::ConsumedRender);
                     }
                 }
                 MouseInputKind::MouseDrag(Button::Left) if self.text_drag_active => {
@@ -545,68 +538,65 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     let files = Arc::clone(&state.files);
                     let snapshot = files.load();
                     let file = &snapshot[key.0];
-                    if let Ok(data) = file.data.lock() {
-                        let (line_idx, _char_idx, cursor_byte) = self
-                            .preview
-                            .screen_pos_to_line_char(state, row, col, key, &data);
+                    let data = file.data.lock();
+                    let (line_idx, _char_idx, cursor_byte) = self
+                        .preview
+                        .screen_pos_to_line_char(state, row, col, key, &data);
 
-                        let Some(ref mut sel) = state.text_selection else {
-                            return Ok(EventPropagation::ConsumedRender);
-                        };
-                        if sel.window != Window::FilePreview(key) {
-                            return Ok(EventPropagation::ConsumedRender);
-                        }
-
-                        if let (
-                            Some(SelPoint::Preview {
-                                line_idx: anchor_line,
-                                byte_offset: anchor_byte,
-                            }),
-                            Some((
-                                SelPoint::Preview {
-                                    byte_offset: word_start,
-                                    ..
-                                },
-                                SelPoint::Preview {
-                                    byte_offset: word_end,
-                                    ..
-                                },
-                            )),
-                        ) = (sel.click_anchor, sel.click_word)
-                            && anchor_line == line_idx
-                        {
-                            if cursor_byte >= anchor_byte {
-                                sel.start = SelPoint::Preview {
-                                    line_idx,
-                                    byte_offset: word_start,
-                                };
-                                let cur = data.word_bounds(cursor_byte);
-                                sel.end = SelPoint::Preview {
-                                    line_idx,
-                                    byte_offset: cur.1,
-                                };
-                            } else {
-                                let cur = data.word_bounds(cursor_byte);
-                                sel.start = SelPoint::Preview {
-                                    line_idx,
-                                    byte_offset: cur.0,
-                                };
-                                sel.end = SelPoint::Preview {
-                                    line_idx,
-                                    byte_offset: word_end,
-                                };
-                            }
-                            return Ok(EventPropagation::ConsumedRender);
-                        }
-
-                        sel.end = SelPoint::Preview {
-                            line_idx,
-                            byte_offset: cursor_byte,
-                        };
+                    let Some(ref mut sel) = state.text_selection else {
                         return Ok(EventPropagation::ConsumedRender);
-                    } else {
+                    };
+                    if sel.window != Window::FilePreview(key) {
                         return Ok(EventPropagation::ConsumedRender);
                     }
+
+                    if let (
+                        Some(SelPoint::Preview {
+                            line_idx: anchor_line,
+                            byte_offset: anchor_byte,
+                        }),
+                        Some((
+                            SelPoint::Preview {
+                                byte_offset: word_start,
+                                ..
+                            },
+                            SelPoint::Preview {
+                                byte_offset: word_end,
+                                ..
+                            },
+                        )),
+                    ) = (sel.click_anchor, sel.click_word)
+                        && anchor_line == line_idx
+                    {
+                        if cursor_byte >= anchor_byte {
+                            sel.start = SelPoint::Preview {
+                                line_idx,
+                                byte_offset: word_start,
+                            };
+                            let cur = data.word_bounds(cursor_byte);
+                            sel.end = SelPoint::Preview {
+                                line_idx,
+                                byte_offset: cur.1,
+                            };
+                        } else {
+                            let cur = data.word_bounds(cursor_byte);
+                            sel.start = SelPoint::Preview {
+                                line_idx,
+                                byte_offset: cur.0,
+                            };
+                            sel.end = SelPoint::Preview {
+                                line_idx,
+                                byte_offset: word_end,
+                            };
+                        }
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+
+                    sel.end = SelPoint::Preview {
+                        line_idx,
+                        byte_offset: cursor_byte,
+                    };
+                    return Ok(EventPropagation::ConsumedRender);
                 }
                 MouseInputKind::MouseDrag(Button::Left) if self.preview_drag_active => {
                     let state = &mut global_data.state;
@@ -631,33 +621,32 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     {
                         let snapshot = state.files.load();
                         let file = &snapshot[key.0];
-                        if let Ok(data) = file.data.lock() {
-                            let (start_byte, end_byte) = match (sel.start, sel.end) {
-                                (
-                                    SelPoint::Preview {
-                                        line_idx: s_line,
-                                        byte_offset: s_byte,
-                                    },
-                                    SelPoint::Preview {
-                                        line_idx: e_line,
-                                        byte_offset: e_byte,
-                                    },
-                                ) => {
-                                    if s_line == e_line {
-                                        let (lo, hi) = (s_byte.min(e_byte), s_byte.max(e_byte));
-                                        (lo, hi)
-                                    } else {
-                                        let s_bounds = data.line_bounds(s_line.min(e_line));
-                                        let e_bounds = data.line_bounds(s_line.max(e_line));
-                                        (s_bounds.0, e_bounds.1)
-                                    }
+                        let data = file.data.lock();
+                        let (start_byte, end_byte) = match (sel.start, sel.end) {
+                            (
+                                SelPoint::Preview {
+                                    line_idx: s_line,
+                                    byte_offset: s_byte,
+                                },
+                                SelPoint::Preview {
+                                    line_idx: e_line,
+                                    byte_offset: e_byte,
+                                },
+                            ) => {
+                                if s_line == e_line {
+                                    let (lo, hi) = (s_byte.min(e_byte), s_byte.max(e_byte));
+                                    (lo, hi)
+                                } else {
+                                    let s_bounds = data.line_bounds(s_line.min(e_line));
+                                    let e_bounds = data.line_bounds(s_line.max(e_line));
+                                    (s_bounds.0, e_bounds.1)
                                 }
-                                _ => (0, 0),
-                            };
-                            if let Some(text) = data.extract_text(start_byte, end_byte) {
-                                let mut cb = r3bl_tui::SystemClipboard;
-                                let _ = cb.try_to_put_content_into_clipboard(text);
                             }
+                            _ => (0, 0),
+                        };
+                        if let Some(text) = data.extract_text(start_byte, end_byte) {
+                            let mut cb = r3bl_tui::SystemClipboard;
+                            let _ = cb.try_to_put_content_into_clipboard(text);
                         }
                     }
                     state.text_selection = None;
@@ -694,12 +683,12 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 .state
                 .terminal_panes
                 .get(&term_id)
-                .and_then(|p| p.lock().ok())
-                .map(|p| {
-                    let alt = p.ofs_buf.terminal_mode.active_screen_buffer
+                .map(|p| p.lock())
+                .map(|g| {
+                    let alt = g.ofs_buf.terminal_mode.active_screen_buffer
                         == ActiveScreenBuffer::Alternate;
                     let mouse =
-                        p.ofs_buf.terminal_mode.mouse_tracking_mode != MouseTrackingMode::Disabled;
+                        g.ofs_buf.terminal_mode.mouse_tracking_mode != MouseTrackingMode::Disabled;
                     (alt, mouse)
                 })
                 .unwrap_or((false, false));
@@ -717,7 +706,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                         .state
                         .terminal_panes
                         .get(&term_id)
-                        .and_then(|p| p.lock().ok())
+                        .map(|p| p.lock())
                         .map(|pane| {
                             let (line, _) =
                                 terminal_line_at_viewport_row(&pane, rel_row, row_count);
@@ -795,7 +784,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                         .state
                         .terminal_panes
                         .get(&term_id)
-                        .and_then(|p| p.lock().ok())
+                        .map(|p| p.lock())
                         .map(|pane| {
                             let (line, count) =
                                 terminal_line_at_viewport_row(&pane, rel_row, row_count);
@@ -880,7 +869,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                                 .state
                                 .terminal_panes
                                 .get(&term_id)
-                                .and_then(|p| p.lock().ok())
+                                .map(|p| p.lock())
                                 .and_then(|pane| {
                                     extract_terminal_text(&pane, sel.start, sel.end, row_count)
                                         .filter(|t| !t.is_empty())
@@ -950,11 +939,12 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     .state
                     .terminal_panes
                     .get(&id)
-                    .and_then(|p| p.lock().ok())
-                    .is_none_or(|pane| {
+                    .map(|p| p.lock())
+                    .map(|pane| {
                         pane.ofs_buf.terminal_mode.active_screen_buffer
                             != ActiveScreenBuffer::Alternate
-                    }),
+                    })
+                    .unwrap_or(true),
                 _ => true,
             };
 
@@ -1044,9 +1034,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                         let Some(pane) = global_data.state.terminal_panes.get(&id) else {
                             return Ok(());
                         };
-                        let Ok(pane) = pane.lock() else {
-                            return Ok(());
-                        };
+                        let pane = pane.lock();
                         if pane.ofs_buf.terminal_mode.active_screen_buffer
                             == ActiveScreenBuffer::Alternate
                         {

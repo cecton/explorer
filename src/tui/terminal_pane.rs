@@ -57,7 +57,7 @@ impl TitleRow for TerminalPaneComponent {
         let (base, exited, exit_code, exit_signal) = state
             .terminal_panes
             .get(&id)
-            .and_then(|p| p.lock().ok())
+            .map(|p| p.lock())
             .map(|g| {
                 (
                     g.title.clone().unwrap_or_else(|| format!("Terminal {id}")),
@@ -108,20 +108,13 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 .state
                 .terminal_panes
                 .get(&id)
-                .and_then(|p| p.lock().ok())
-                .is_some_and(|p| p.exited)
+                .is_some_and(|p| p.lock().exited)
             {
                 let window = Window::Terminal(id);
                 let was_focused =
                     global_data.state.pane_manager.focused_window.as_ref() == Some(&window);
                 if let Some(pane) = global_data.state.terminal_panes.remove(&id) {
-                    let mut p = match pane.lock() {
-                        Ok(guard) => guard,
-                        Err(poison) => {
-                            tracing::error!("pane lock poisoned: {poison}");
-                            poison.into_inner()
-                        }
-                    };
+                    let mut p = pane.lock();
                     if let Some(mut killer) = p.child_killer.take() {
                         let _ = killer.kill();
                     }
@@ -145,13 +138,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 return Ok(EventPropagation::Propagate);
             };
 
-            let mut pane = match pane_arc.lock() {
-                Ok(guard) => guard,
-                Err(poison) => {
-                    tracing::error!("pane lock poisoned: {poison}");
-                    poison.into_inner()
-                }
-            };
+            let mut pane = pane_arc.lock();
             let tx = pane.pty_input_tx.clone();
             let alternate_screen_active =
                 pane.ofs_buf.terminal_mode.active_screen_buffer == ActiveScreenBuffer::Alternate;
@@ -340,13 +327,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
             let Some(pane) = global_data.state.terminal_panes.get(&id) else {
                 return Ok(());
             };
-            let mut pane = match pane.lock() {
-                Ok(guard) => guard,
-                Err(poison) => {
-                    tracing::error!("pane lock poisoned: {poison}");
-                    poison.into_inner()
-                }
-            };
+            let mut pane = pane.lock();
             let origin = current_box.style_adjusted_origin_pos;
 
             let pane_width = current_box.style_adjusted_bounds_size.col_width.as_usize();

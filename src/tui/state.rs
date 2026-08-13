@@ -7,12 +7,13 @@ use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
+use parking_lot::Mutex;
 use r3bl_tui::core::pty::{ControlledChildTerminationHandle, PtyInputEvent};
 use r3bl_tui::{OfsBufVT100, Size};
 use std::collections::HashMap;
 use std::fmt::{Debug, Display, Formatter};
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex};
 use std::time::Instant;
 use tokio::sync::mpsc;
 
