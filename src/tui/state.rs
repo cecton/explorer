@@ -151,6 +151,18 @@ impl AppState {
     pub fn recompute_file_name_picker_results(&mut self) {
         self.file_name_picker.results = FileNamePickerComponent::compute_results(self);
     }
+
+    pub fn with_terminal<R>(&self, id: usize, f: impl FnOnce(&TerminalPane) -> R) -> Option<R> {
+        self.terminal_panes.get(&id).map(|p| f(&p.lock()))
+    }
+
+    pub fn with_terminal_mut<R>(
+        &self,
+        id: usize,
+        f: impl FnOnce(&mut TerminalPane) -> R,
+    ) -> Option<R> {
+        self.terminal_panes.get(&id).map(|p| f(&mut p.lock()))
+    }
 }
 
 impl AppState {

@@ -681,14 +681,11 @@ impl Component<AppState, AppSignal> for PaneComponent {
 
             let (is_alternate, mouse_tracking_active) = global_data
                 .state
-                .terminal_panes
-                .get(&term_id)
-                .map(|p| p.lock())
-                .map(|g| {
-                    let alt = g.ofs_buf.terminal_mode.active_screen_buffer
+                .with_terminal(term_id, |p| {
+                    let alt = p.ofs_buf.terminal_mode.active_screen_buffer
                         == ActiveScreenBuffer::Alternate;
                     let mouse =
-                        g.ofs_buf.terminal_mode.mouse_tracking_mode != MouseTrackingMode::Disabled;
+                        p.ofs_buf.terminal_mode.mouse_tracking_mode != MouseTrackingMode::Disabled;
                     (alt, mouse)
                 })
                 .unwrap_or((false, false));
@@ -702,17 +699,11 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     let rel_row = row - origin_row;
                     let rel_col = col - origin_col;
 
-                    let word_bounds = global_data
-                        .state
-                        .terminal_panes
-                        .get(&term_id)
-                        .map(|p| p.lock())
-                        .map(|pane| {
-                            let (line, _) =
-                                terminal_line_at_viewport_row(&pane, rel_row, row_count);
-                            let (ws, we) = terminal_word_bounds(&line, rel_col);
-                            (ws, we)
-                        });
+                    let word_bounds = global_data.state.with_terminal(term_id, |pane| {
+                        let (line, _) = terminal_line_at_viewport_row(pane, rel_row, row_count);
+                        let (ws, we) = terminal_word_bounds(&line, rel_col);
+                        (ws, we)
+                    });
 
                     let state = &mut global_data.state;
                     if let Some((ws, we)) = word_bounds {
@@ -782,12 +773,9 @@ impl Component<AppState, AppSignal> for PaneComponent {
 
                     let (word_bounds, cur_line_len) = global_data
                         .state
-                        .terminal_panes
-                        .get(&term_id)
-                        .map(|p| p.lock())
-                        .map(|pane| {
+                        .with_terminal(term_id, |pane| {
                             let (line, count) =
-                                terminal_line_at_viewport_row(&pane, rel_row, row_count);
+                                terminal_line_at_viewport_row(pane, rel_row, row_count);
                             let wb = terminal_word_bounds(&line, rel_col);
                             let cl = click_anchor_row.filter(|&ar| ar != rel_row).map(|_| count);
                             (Some(wb), cl)
@@ -867,13 +855,11 @@ impl Component<AppState, AppSignal> for PaneComponent {
                         if sel.window == Window::Terminal(term_id) {
                             global_data
                                 .state
-                                .terminal_panes
-                                .get(&term_id)
-                                .map(|p| p.lock())
-                                .and_then(|pane| {
-                                    extract_terminal_text(&pane, sel.start, sel.end, row_count)
+                                .with_terminal(term_id, |pane| {
+                                    extract_terminal_text(pane, sel.start, sel.end, row_count)
                                         .filter(|t| !t.is_empty())
                                 })
+                                .flatten()
                         } else {
                             None
                         }
@@ -937,10 +923,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
             let has_scrollbar = match active_window {
                 Some(Window::Terminal(id)) => global_data
                     .state
-                    .terminal_panes
-                    .get(&id)
-                    .map(|p| p.lock())
-                    .map(|pane| {
+                    .with_terminal(id, |pane| {
                         pane.ofs_buf.terminal_mode.active_screen_buffer
                             != ActiveScreenBuffer::Alternate
                     })

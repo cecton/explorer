@@ -55,10 +55,7 @@ impl TitleRow for TerminalPaneComponent {
     ) -> usize {
         let id = self.terminal_id(state).unwrap_or(0);
         let (base, exited, exit_code, exit_signal) = state
-            .terminal_panes
-            .get(&id)
-            .map(|p| p.lock())
-            .map(|g| {
+            .with_terminal(id, |g| {
                 (
                     g.title.clone().unwrap_or_else(|| format!("Terminal {id}")),
                     g.exited,
@@ -106,9 +103,8 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 })
             ) && global_data
                 .state
-                .terminal_panes
-                .get(&id)
-                .is_some_and(|p| p.lock().exited)
+                .with_terminal(id, |p| p.exited)
+                .unwrap_or(false)
             {
                 let window = Window::Terminal(id);
                 let was_focused =

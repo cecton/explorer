@@ -356,9 +356,8 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
             let exit_code = Some(status.exit_code());
             let exit_signal = status.signal().map(String::from);
             let remove_now = state
-                .terminal_panes
-                .get(&id)
-                .is_some_and(|p| is_buffer_empty(&p.lock().ofs_buf));
+                .with_terminal(id, |p| is_buffer_empty(&p.ofs_buf))
+                .unwrap_or(false);
 
             if remove_now {
                 // Send focus-lost before removing the pane.
@@ -387,11 +386,12 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
                 notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
                 state.mark_session_dirty();
                 sync_terminal_grabbed(state);
-            } else if let Some(pane) = state.terminal_panes.get(&id) {
-                let mut p = pane.lock();
-                p.exited = true;
-                p.exit_code = exit_code;
-                p.exit_signal = exit_signal;
+            } else {
+                state.with_terminal_mut(id, |p| {
+                    p.exited = true;
+                    p.exit_code = exit_code;
+                    p.exit_signal = exit_signal;
+                });
             }
         }
     }
@@ -834,9 +834,8 @@ impl App for AppMain {
                             Window::Terminal(id) => {
                                 let scrolled = global_data
                                     .state
-                                    .terminal_panes
-                                    .get(&id)
-                                    .is_some_and(|p| p.lock().scroll_offset > 0);
+                                    .with_terminal(id, |p| p.scroll_offset > 0)
+                                    .unwrap_or(false);
                                 global_data.state.terminal_grabbed = !scrolled;
                             }
                             _ => {

@@ -291,9 +291,8 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                             // Mirror click-to-focus: grab the keyboard unless the
                             // terminal is scrolled back into its history.
                             let scrolled = state
-                                .terminal_panes
-                                .get(&id)
-                                .is_some_and(|p| p.lock().scroll_offset > 0);
+                                .with_terminal(id, |p| p.scroll_offset > 0)
+                                .unwrap_or(false);
                             state.terminal_grabbed = !scrolled;
                             crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
                         }
@@ -373,10 +372,8 @@ impl Component<AppState, AppSignal> for FileNamePickerComponent {
                     }
                     Window::Terminal(id) => {
                         let title = state
-                            .terminal_panes
-                            .get(id)
-                            .map(|p| p.lock())
-                            .and_then(|g| g.title.clone())
+                            .with_terminal(*id, |p| p.title.clone())
+                            .flatten()
                             .unwrap_or_else(|| format!("Terminal {id}"));
                         // Render terminals in a distinct theme color (+ bold) so
                         // they stand out from file paths.
