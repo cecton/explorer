@@ -470,8 +470,15 @@ impl InputLine {
         let width = width as usize;
         let prompt_width = prompt.graphemes(true).count();
         let (color_bg, color_text) = colors;
-        let cursor_style = new_style!(reverse);
         let text_style = new_style!(color_fg: {color_text} color_bg: {color_bg});
+        // The compositor takes a painted cell's *colors* from the current pen
+        // (`ApplyColors`/`SetBgColor`), not from the style handed to
+        // `PaintTextWithAttributes` — so we set the pen explicitly instead of relying on
+        // whatever the previously rendered pane left behind. The cursor is a solid block
+        // drawn with foreground/background swapped, which stays visible at any pane
+        // position (a bare `reverse` attribute inherits the stale pen and can vanish).
+        let cursor_style = new_style!(color_fg: {color_bg} color_bg: {color_text});
+        ops += RenderOpCommon::ApplyColors(Some(text_style));
 
         let lines: Vec<&str> = query.split('\n').collect();
         let line_grapheme_counts: Vec<usize> =
@@ -524,7 +531,9 @@ impl InputLine {
                     break;
                 }
                 if line_idx == cursor_line && gi == cursor_col && focused {
+                    ops += RenderOpCommon::ApplyColors(Some(cursor_style));
                     ops += RenderOpIR::PaintTextWithAttributes(gr.into(), Some(cursor_style));
+                    ops += RenderOpCommon::ApplyColors(Some(text_style));
                 } else {
                     ops += RenderOpIR::PaintTextWithAttributes(gr.into(), Some(text_style));
                 }
@@ -537,7 +546,9 @@ impl InputLine {
                         origin,
                         col(vis_cursor_col as u16) + row(line_idx as u16),
                     );
+                    ops += RenderOpCommon::ApplyColors(Some(cursor_style));
                     ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(cursor_style));
+                    ops += RenderOpCommon::ApplyColors(Some(text_style));
                 }
             }
         }
@@ -549,4 +560,99 @@ fn grapheme_byte_offset(text: &str, grapheme_idx: usize) -> usize {
         .nth(grapheme_idx)
         .map(|(byte, _)| byte)
         .unwrap_or(text.len())
+}
+
+#[cfg(test)]
+mod cursor_render_tests {
+    use super::*;
+
+    fn colors() -> (TuiColor, TuiColor) {
+        // (color_bg, color_text)
+        (
+            TuiColor::from(RgbValue::from_u8(50, 50, 90)),
+            TuiColor::from(RgbValue::from_u8(220, 220, 255)),
+        )
+    }
+
+    /// Returns the `ApplyColors` style immediately preceding the first
+    /// `PaintTextWithAttributes(text)` op, or `None`.
+    fn pen_before_paint(ops: &RenderOpIRVec, text: &str) -> Option<TuiStyle> {
+        let idx = ops.iter().position(
+            |op| matches!(op, RenderOpIR::PaintTextWithAttributes(s, _) if s.as_str() == text),
+        )?;
+        match ops.get(idx.checked_sub(1)?)? {
+            RenderOpIR::Common(RenderOpCommon::ApplyColors(Some(style))) => Some(*style),
+            _ => None,
+        }
+    }
+
+    // The cursor cell must be preceded by an explicit `ApplyColors` that sets the pen to
+    // the swapped (block-cursor) colors. The compositor reads a painted cell's colors from
+    // the current pen, not from the style handed to the paint op, so without this the
+    // cursor inherits whatever the previously rendered pane left behind and can vanish in
+    // non-top / non-left panes.
+    #[test]
+    fn end_of_line_cursor_sets_swapped_pen() {
+        let (color_bg, color_text) = colors();
+        let input = InputLine::new();
+        let mut ops = RenderOpIRVec::new();
+        input.render(
+            &mut ops,
+            "",
+            "",
+            col(0) + row(0),
+            20,
+            true,
+            (color_bg, color_text),
+        );
+
+        let pen = pen_before_paint(&ops, " ").expect("cursor space must set the pen");
+        assert_eq!(pen.color_fg, Some(color_bg));
+        assert_eq!(pen.color_bg, Some(color_text));
+    }
+
+    #[test]
+    fn mid_line_cursor_grapheme_sets_swapped_pen() {
+        let (color_bg, color_text) = colors();
+        // Fresh InputLine keeps the cursor at grapheme 0, so 'a' is the cursor cell.
+        let input = InputLine::new();
+        let mut ops = RenderOpIRVec::new();
+        input.render(
+            &mut ops,
+            "ab",
+            "",
+            col(0) + row(0),
+            20,
+            true,
+            (color_bg, color_text),
+        );
+
+        let pen = pen_before_paint(&ops, "a").expect("cursor grapheme must set the pen");
+        assert_eq!(pen.color_fg, Some(color_bg));
+        assert_eq!(pen.color_bg, Some(color_text));
+    }
+
+    #[test]
+    fn unfocused_input_paints_no_cursor_cell() {
+        let (color_bg, color_text) = colors();
+        let input = InputLine::new();
+        let mut ops = RenderOpIRVec::new();
+        input.render(
+            &mut ops,
+            "",
+            "",
+            col(0) + row(0),
+            20,
+            false,
+            (color_bg, color_text),
+        );
+
+        assert!(
+            !ops.iter().any(|op| matches!(
+                op,
+                RenderOpIR::PaintTextWithAttributes(s, _) if s.as_str() == " "
+            )),
+            "an unfocused input must not paint a cursor cell",
+        );
+    }
 }

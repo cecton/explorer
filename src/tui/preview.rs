@@ -70,17 +70,7 @@ impl FilePreviewComponent {
             rel.as_str().to_string()
         };
         let title = if let Some(ranges) = state.highlight_ranges.get(&key) {
-            let groups: Vec<String> = ranges
-                .iter()
-                .map(|&(lo, hi)| {
-                    if lo == hi {
-                        lo.to_string()
-                    } else {
-                        format!("{lo}-{hi}")
-                    }
-                })
-                .collect();
-            format!("{}  [{}]", base, groups.join(", "))
+            format!("{}  [{}]", base, format_highlight_ranges(ranges))
         } else {
             base
         };
@@ -110,17 +100,7 @@ impl FilePreviewComponent {
             rel.as_str().to_string()
         };
 
-        let groups: Vec<String> = ranges
-            .iter()
-            .map(|&(lo, hi)| {
-                if lo == hi {
-                    lo.to_string()
-                } else {
-                    format!("{lo}-{hi}")
-                }
-            })
-            .collect();
-        let title = format!("{}  [{}]", base, groups.join(", "));
+        let title = format!("{}  [{}]", base, format_highlight_ranges(ranges));
         let padded = format!(" {title} ");
         if padded.len() > pane_width {
             return None;
@@ -357,6 +337,14 @@ impl FilePreviewComponent {
         }
 
         let state = &mut global_data.state;
+        // An empty command clears the current highlights (mirrors committing an empty
+        // search pattern, which removes the active search).
+        if cmd.trim().is_empty() {
+            if state.highlight_ranges.remove(file_key).is_some() {
+                state.mark_session_dirty();
+            }
+            return;
+        }
         let max = state.pane_manager.window_scroll_max(window);
         if max == 0 {
             return;
@@ -555,8 +543,10 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                     InputEvent::Keyboard(KeyPress::Plain {
                         key: Key::SpecialKey(SpecialKey::Esc),
                     }) => {
+                        global_data.state.highlight_ranges.remove(&key);
                         self.command_mode = None;
                         global_data.state.command_mode_active = false;
+                        global_data.state.mark_session_dirty();
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -635,7 +625,14 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 key: Key::Character(':'),
             }) = input_event
             {
-                self.command_mode = Some(String::new());
+                let prefill = global_data
+                    .state
+                    .highlight_ranges
+                    .get(&key)
+                    .map(|ranges| format_highlight_ranges(ranges))
+                    .unwrap_or_default();
+                self.command_input.set_cursor_end(&prefill);
+                self.command_mode = Some(prefill);
                 global_data.state.command_mode_active = true;
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -1322,6 +1319,23 @@ fn overlay_interval(
         }
     }
     *intervals = result;
+}
+
+/// Formats highlight ranges as the canonical comma-separated string (single line `N`,
+/// range `lo-hi`, joined with `, `). Used for the pane title, title-bar hit testing, and
+/// prefilling the `:` command input so the current value can be edited.
+fn format_highlight_ranges(ranges: &[(usize, usize)]) -> String {
+    ranges
+        .iter()
+        .map(|&(lo, hi)| {
+            if lo == hi {
+                lo.to_string()
+            } else {
+                format!("{lo}-{hi}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 fn compute_scroll_target(ranges: &[(usize, usize)], page_size: usize, _max: usize) -> usize {
