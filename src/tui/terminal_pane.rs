@@ -622,13 +622,16 @@ fn overlay_selection(
 
     for (row_idx, col_start, col_end) in ranges {
         let line = lines[row_idx];
+        #[allow(clippy::needless_range_loop)]
+        // col_idx is the absolute column, needed for cursor pos
         for col_idx in col_start..col_end {
-            let ch = match &line[col_idx] {
+            let pc = &line[col_idx];
+            let ch = match pc {
                 PixelChar::PlainText { display_char, .. } => *display_char,
                 PixelChar::Spacer => ' ',
                 PixelChar::Void => continue,
             };
-            let style = match &line[col_idx] {
+            let style = match pc {
                 PixelChar::PlainText { style, .. } => Some(*style),
                 _ => None,
             };

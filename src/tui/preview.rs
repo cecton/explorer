@@ -1199,6 +1199,7 @@ impl TitleRow for FilePreviewComponent {
     }
 }
 
+#[allow(clippy::too_many_arguments)] // cohesive per-line paint context; single call site
 fn paint_line_segment(
     render_ops: &mut RenderOpIRVec,
     data: &FileData,

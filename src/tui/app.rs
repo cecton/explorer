@@ -1422,9 +1422,8 @@ fn render_status_bar(
     let (leader_text, rest_text) = if state.leader_active {
         (
             " Leader ".to_string(),
-            format!(
-                "f:Picker  t:Term  T:Theme  x:Close  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel",
-            ),
+            "f:Picker  t:Term  T:Theme  x:Close  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel"
+                .to_string(),
         )
     } else {
         let pane = {
