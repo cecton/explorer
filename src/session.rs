@@ -407,6 +407,7 @@ pub fn session_file_path(repo_root: &Utf8Path) -> Option<Utf8PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::keymap::Keymap;
     use crate::loader::FileKey;
     use crate::tui::HelixTheme;
     use crate::tui::pane_manager::{PaneSize, Window, WindowState};
@@ -426,7 +427,7 @@ mod tests {
 
     fn empty_state(root: Utf8PathBuf) -> AppState {
         let files = Arc::new(ArcSwap::from_pointee(Vec::<Arc<LoadedFile>>::new()));
-        AppState::new(files, root, HelixTheme::default())
+        AppState::new(files, root, HelixTheme::default(), Keymap::default())
     }
 
     fn dummy_terminal_pane(cwd: Utf8PathBuf, command: Option<String>) -> TerminalPane {
@@ -511,7 +512,7 @@ mod tests {
         let loaded = LoadedFile::load(file_path.into()).unwrap();
         let files = Arc::new(ArcSwap::from_pointee(vec![loaded]));
         let theme = HelixTheme::default();
-        let mut state = AppState::new(files, root.clone(), theme);
+        let mut state = AppState::new(files, root.clone(), theme, Keymap::default());
 
         state.pane_manager.window_stack =
             vec![Window::FilePreview(FileKey(0)), Window::Terminal(1)];
@@ -619,7 +620,7 @@ mod tests {
         let loaded = LoadedFile::load(existing_path.into()).unwrap();
         let files = Arc::new(ArcSwap::from_pointee(vec![loaded]));
         let theme = HelixTheme::default();
-        let mut state = AppState::new(files, root.clone(), theme);
+        let mut state = AppState::new(files, root.clone(), theme, Keymap::default());
 
         // Session has two missing-file previews whose paths sort differently
         // from the order they appear in the session.
@@ -735,7 +736,12 @@ mod tests {
         .unwrap();
         let loaded = LoadedFile::load(file_path.into()).unwrap();
         let files = Arc::new(ArcSwap::from_pointee(vec![loaded]));
-        let mut state = AppState::new(files, root.clone(), HelixTheme::default());
+        let mut state = AppState::new(
+            files,
+            root.clone(),
+            HelixTheme::default(),
+            Keymap::default(),
+        );
 
         let session = Session {
             version: SESSION_VERSION,
@@ -807,7 +813,7 @@ mod tests {
         let loaded = LoadedFile::load(file_path.into()).unwrap();
         let files = Arc::new(ArcSwap::from_pointee(vec![loaded]));
         let theme = HelixTheme::default();
-        let mut state = AppState::new(files, root.clone(), theme);
+        let mut state = AppState::new(files, root.clone(), theme, Keymap::default());
         state
             .pane_manager
             .push_window(Window::FilePreview(FileKey(0)));

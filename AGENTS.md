@@ -53,7 +53,8 @@ core:
 Source is organized as:
 - `src/main.rs` — async entry point, wires CLI → loader → TUI
 - `src/cli.rs` — CLI argument parsing via `pico-args`
-- `src/config.rs` — KDL configuration file parsing (theme, future fields)
+- `src/config.rs` — KDL configuration file parsing (theme, `keybindings` block); saving a theme re-serializes the document so bindings survive
+- `src/keymap.rs` — configurable top-level shortcuts: `Action` enum, `Keymap` mapping `KeyPress` → action per leader/global context, key-spec parsing, status-bar hint rendering
 - `src/loader.rs` — parallel file walking and `LoadedFile` construction
 - `src/session.rs` — session save/restore (pane stack, terminals, highlights)
 - `src/lsp.rs` — LSP client (JSON-RPC over stdio); public API: `send_file_request`, `health_check`, `try_drain_pending_requests`, `LspHealth` enum

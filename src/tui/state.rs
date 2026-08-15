@@ -1,3 +1,4 @@
+use crate::keymap::Keymap;
 use crate::loader::{FileKey, LoadedFile};
 use crate::session::TerminalRestoreInfo;
 use crate::tui::RgbValue;
@@ -137,6 +138,8 @@ pub struct AppState {
     /// Per-file regex search (vim-style `/` `?` `n` `N`). Transient — never persisted to the
     /// session file, mirroring `text_selection`.
     pub search: HashMap<FileKey, PreviewSearch>,
+    /// Configurable top-level (leader + global) key bindings.
+    pub keymap: Keymap,
 }
 
 impl AppState {
@@ -170,6 +173,7 @@ impl AppState {
         files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
         root: Utf8PathBuf,
         theme: HelixTheme,
+        keymap: Keymap,
     ) -> Self {
         let saved_theme = theme.clone();
         let mut pane_manager = PaneManager::new();
@@ -200,6 +204,7 @@ impl AppState {
             symbol_highlights: Vec::new(),
             next_palette_index: 0,
             search: HashMap::new(),
+            keymap,
         };
         state.recompute_file_name_picker_results();
 

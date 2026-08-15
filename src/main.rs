@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 mod cli;
 mod config;
+mod keymap;
 mod loader;
 mod lsp;
 mod session;
@@ -49,15 +50,17 @@ async fn main() {
         }
     };
 
-    let theme_name = args
-        .theme
-        .or(config.and_then(|c| c.theme))
-        .unwrap_or_else(|| {
-            tui::HelixTheme::theme_names()
-                .next()
-                .unwrap_or("catppuccin_mocha")
-                .to_string()
-        });
+    let (config_theme, keybindings) = match config {
+        Some(c) => (c.theme, c.keybindings),
+        None => (None, Vec::new()),
+    };
+
+    let theme_name = args.theme.or(config_theme).unwrap_or_else(|| {
+        tui::HelixTheme::theme_names()
+            .next()
+            .unwrap_or("catppuccin_mocha")
+            .to_string()
+    });
 
     let theme = if let Some(t) = tui::HelixTheme::from_name(&theme_name) {
         t
@@ -66,7 +69,14 @@ async fn main() {
         tui::HelixTheme::default()
     };
 
-    let mut initial_state = tui::build_state(Arc::clone(&files), root.clone(), theme.clone());
+    let mut keymap = keymap::Keymap::default();
+    if let Err(e) = keymap.apply_overrides(&keybindings) {
+        eprintln!("invalid keybindings in config: {e}");
+        std::process::exit(1);
+    }
+
+    let mut initial_state =
+        tui::build_state(Arc::clone(&files), root.clone(), theme.clone(), keymap);
 
     if let Some(session) = session::load_session(&root) {
         session.apply(&mut initial_state);

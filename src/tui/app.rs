@@ -1,3 +1,4 @@
+use crate::keymap::Action;
 use crate::loader::LoadedFile;
 use crate::lsp::{self, LSP_RRT};
 use crate::session::save_session;
@@ -542,16 +543,16 @@ impl App for AppMain {
         let surface_size = surface_size(global_data.window_size);
         global_data.state.last_surface_size = surface_size;
 
+        // The single KeyPress driving all top-level (leader + global) shortcuts, resolved
+        // against the configurable keymap below.
+        let keyboard = match input_event {
+            InputEvent::Keyboard(kp) => Some(kp),
+            _ => None,
+        };
+
         // Leader key activation.
-        if let InputEvent::Keyboard(KeyPress::WithModifiers {
-            key: Key::Character('`'),
-            mask:
-                ModifierKeysMask {
-                    alt_key_state: KeyState::Pressed,
-                    shift_key_state: KeyState::NotPressed,
-                    ctrl_key_state: KeyState::NotPressed,
-                },
-        }) = input_event
+        if let Some(kp) = keyboard
+            && kp == global_data.state.keymap.leader_key
             && !global_data.state.mouse_drag_active
             && !global_data.state.leader_active
         {
@@ -563,25 +564,19 @@ impl App for AppMain {
         // Leader key dispatch.
         if global_data.state.leader_active && !global_data.state.mouse_drag_active {
             global_data.state.leader_active = false;
-            match &input_event {
-                InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::Character('`'),
-                    mask:
-                        ModifierKeysMask {
-                            alt_key_state: KeyState::Pressed,
-                            shift_key_state: KeyState::NotPressed,
-                            ctrl_key_state: KeyState::NotPressed,
-                        },
-                }) if matches!(
-                    global_data.state.pane_manager.focused_window,
-                    Some(Window::Terminal(_))
-                ) =>
-                {
-                    global_data.state.terminal_grabbed = true;
+            match keyboard.and_then(|kp| global_data.state.keymap.leader_action(&kp)) {
+                Some(Action::GrabTerminal) => {
+                    // Pressing the leader key again grabs the focused terminal. Unlike the
+                    // other arms this deliberately does not return: the event still falls
+                    // through to the focused component (matching the original behavior).
+                    if matches!(
+                        global_data.state.pane_manager.focused_window,
+                        Some(Window::Terminal(_))
+                    ) {
+                        global_data.state.terminal_grabbed = true;
+                    }
                 }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::Character('f'),
-                }) => {
+                Some(Action::OpenFilePicker) => {
                     let state = &mut global_data.state;
                     let old = state.pane_manager.focused_window;
                     state.pane_manager.push_window(Window::FileNamePicker);
@@ -596,14 +591,10 @@ impl App for AppMain {
                     state.file_name_picker.query = String::new();
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::Character('t'),
-                }) => {
+                Some(Action::OpenTerminal) => {
                     return self.open_terminal(global_data, None, None, None, None, None);
                 }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::Character('T'),
-                }) => {
+                Some(Action::OpenThemePicker) => {
                     let state = &mut global_data.state;
                     let old = state.pane_manager.focused_window;
                     if !state
@@ -627,14 +618,10 @@ impl App for AppMain {
                     state.theme_picker.query = String::new();
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::Character('q'),
-                }) => {
+                Some(Action::Quit) => {
                     return Ok(EventPropagation::ExitMainEventLoop);
                 }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::Tab),
-                }) => {
+                Some(Action::FocusNext) => {
                     let visible = global_data.state.pane_manager.layout(surface_size);
                     let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, 1);
@@ -646,9 +633,7 @@ impl App for AppMain {
                     sync_terminal_grabbed(&mut global_data.state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::BackTab),
-                }) => {
+                Some(Action::FocusPrev) => {
                     let visible = global_data.state.pane_manager.layout(surface_size);
                     let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, -1);
@@ -660,9 +645,7 @@ impl App for AppMain {
                     sync_terminal_grabbed(&mut global_data.state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::Character('x'),
-                }) => {
+                Some(Action::ClosePane) => {
                     let state = &mut global_data.state;
                     let tid = match state.pane_manager.focused_window {
                         Some(Window::Terminal(tid)) => tid,
@@ -690,9 +673,7 @@ impl App for AppMain {
                     state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::Esc),
-                }) => {
+                Some(Action::DismissLeader) => {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 _ => {}
@@ -708,10 +689,8 @@ impl App for AppMain {
         ) || !global_data.state.terminal_grabbed)
             && !global_data.state.mouse_drag_active
         {
-            match &input_event {
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::Tab),
-                }) => {
+            match keyboard.and_then(|kp| global_data.state.keymap.global_action(&kp)) {
+                Some(Action::FocusNext) => {
                     let visible = global_data.state.pane_manager.layout(surface_size);
                     let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, 1);
@@ -723,9 +702,7 @@ impl App for AppMain {
                     sync_terminal_grabbed(&mut global_data.state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::BackTab),
-                }) => {
+                Some(Action::FocusPrev) => {
                     let visible = global_data.state.pane_manager.layout(surface_size);
                     let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, -1);
@@ -737,15 +714,7 @@ impl App for AppMain {
                     sync_terminal_grabbed(&mut global_data.state);
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::SpecialKey(SpecialKey::Down),
-                    mask:
-                        ModifierKeysMask {
-                            ctrl_key_state: KeyState::Pressed,
-                            shift_key_state: KeyState::NotPressed,
-                            alt_key_state: KeyState::NotPressed,
-                        },
-                }) => {
+                Some(Action::ResizeGrow) => {
                     global_data
                         .state
                         .pane_manager
@@ -753,15 +722,7 @@ impl App for AppMain {
                     global_data.state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::SpecialKey(SpecialKey::Up),
-                    mask:
-                        ModifierKeysMask {
-                            ctrl_key_state: KeyState::Pressed,
-                            shift_key_state: KeyState::NotPressed,
-                            alt_key_state: KeyState::NotPressed,
-                        },
-                }) => {
+                Some(Action::ResizeShrink) => {
                     global_data
                         .state
                         .pane_manager
@@ -769,15 +730,7 @@ impl App for AppMain {
                     global_data.state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::SpecialKey(SpecialKey::Left),
-                    mask:
-                        ModifierKeysMask {
-                            ctrl_key_state: KeyState::Pressed,
-                            shift_key_state: KeyState::NotPressed,
-                            alt_key_state: KeyState::NotPressed,
-                        },
-                }) => {
+                Some(Action::MovePaneForward) => {
                     let Some(focused) = global_data.state.pane_manager.focused_window else {
                         return Ok(EventPropagation::ConsumedRender);
                     };
@@ -785,15 +738,7 @@ impl App for AppMain {
                     global_data.state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Keyboard(KeyPress::WithModifiers {
-                    key: Key::SpecialKey(SpecialKey::Right),
-                    mask:
-                        ModifierKeysMask {
-                            ctrl_key_state: KeyState::Pressed,
-                            shift_key_state: KeyState::NotPressed,
-                            alt_key_state: KeyState::NotPressed,
-                        },
-                }) => {
+                Some(Action::MovePaneBackward) => {
                     let Some(focused) = global_data.state.pane_manager.focused_window else {
                         return Ok(EventPropagation::ConsumedRender);
                     };
@@ -1419,11 +1364,37 @@ fn render_status_bar(
     let leader_style = new_style!(bold color_fg: {color_fg} color_bg: {color_bg});
     let normal_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
+    // Status-bar shortcut hints are derived from the live keymap so they reflect any
+    // rebindings from config.kdl, rather than hardcoded key letters.
+    let leader_lbl = |a: Action| {
+        state
+            .keymap
+            .leader_key_for(a)
+            .map(|k| crate::keymap::hint(&k))
+            .unwrap_or_default()
+    };
+    let global_lbl = |a: Action| {
+        state
+            .keymap
+            .global_key_for(a)
+            .map(|k| crate::keymap::hint(&k))
+            .unwrap_or_default()
+    };
+
     let (leader_text, rest_text) = if state.leader_active {
         (
             " Leader ".to_string(),
-            "f:Picker  t:Term  T:Theme  x:Close  q:Quit  Tab:Next  Shift+Tab:Prev  Esc:Cancel"
-                .to_string(),
+            format!(
+                "{}:Picker  {}:Term  {}:Theme  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
+                leader_lbl(Action::OpenFilePicker),
+                leader_lbl(Action::OpenTerminal),
+                leader_lbl(Action::OpenThemePicker),
+                leader_lbl(Action::ClosePane),
+                leader_lbl(Action::Quit),
+                leader_lbl(Action::FocusNext),
+                leader_lbl(Action::FocusPrev),
+                leader_lbl(Action::DismissLeader),
+            ),
         )
     } else {
         let pane = {
@@ -1441,12 +1412,26 @@ fn render_status_bar(
                 || !state.terminal_grabbed)
                 && !state.mouse_drag_active
             {
-                format!("Tab:Next  Shift+Tab:Prev  Ctrl+↑↓:Resize  Ctrl+←→:Move  {rest}")
+                format!(
+                    "{}:Next  {}:Prev  {}/{}:Resize  {}/{}:Move  {rest}",
+                    global_lbl(Action::FocusNext),
+                    global_lbl(Action::FocusPrev),
+                    global_lbl(Action::ResizeShrink),
+                    global_lbl(Action::ResizeGrow),
+                    global_lbl(Action::MovePaneForward),
+                    global_lbl(Action::MovePaneBackward),
+                )
             } else {
                 rest.to_string()
             }
         };
-        (" Alt+`: Leader ".to_string(), pane)
+        (
+            format!(
+                " {}: Leader ",
+                crate::keymap::hint(&state.keymap.leader_key)
+            ),
+            pane,
+        )
     };
 
     let styled_texts = tui_styled_texts! {
@@ -1478,8 +1463,9 @@ pub fn build_state(
     files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     root: Utf8PathBuf,
     theme: crate::tui::theme::HelixTheme,
+    keymap: crate::keymap::Keymap,
 ) -> AppState {
-    AppState::new(files, root, theme)
+    AppState::new(files, root, theme, keymap)
 }
 
 pub async fn run(
