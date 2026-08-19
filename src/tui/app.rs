@@ -90,6 +90,8 @@ pub struct AppMain {
     lsp_last_gen: u8,
     lsp_health_skip: u32,
     watcher_guard: Option<SubscriberGuard<WatcherWorker>>,
+    /// Counts 1s Noop ticks so the time counters are flushed to disk periodically.
+    time_flush_ticks: u64,
 }
 
 impl AppMain {
@@ -113,6 +115,7 @@ impl AppMain {
             lsp_last_gen: 0,
             lsp_health_skip: 0,
             watcher_guard: None,
+            time_flush_ticks: 0,
         })
     }
 
@@ -480,6 +483,15 @@ impl App for AppMain {
             Err(e) => tracing::warn!("watcher failed to start: {e}"),
         }
 
+        // Enable terminal focus reporting (DECSET ?1004h) so the host terminal emits
+        // FocusGained/FocusLost. The r3bl setup doesn't turn this on, and without it the
+        // "active" time counter can't pause the instant the window loses focus. Disabled
+        // again in `run` on teardown. Safe here: runs before the first paint.
+        global_data.output_device.write(|w| {
+            let _ = w.write_all(b"\x1b[?1004h");
+        });
+        let _ = global_data.output_device.flush();
+
         // Global 1s refresh timer — catches any final render state that the
         // per-task 1s debounce might miss (burst ends, no more events).
         let timer_notify = notify_tx.clone();
@@ -542,6 +554,19 @@ impl App for AppMain {
         sync_has_focus(&global_data.state, has_focus);
         let surface_size = surface_size(global_data.window_size);
         global_data.state.last_surface_size = surface_size;
+
+        // Terminal focus gained/lost pauses/resumes the "active" time counter immediately,
+        // rather than waiting for the idle threshold. Focus events carry no other meaning
+        // for the app, so consume and re-render (the status-bar counter reflects the pause).
+        if let InputEvent::Focus(focus) = input_event {
+            global_data
+                .state
+                .time
+                .on_focus(matches!(focus, FocusEvent::Gained));
+            return Ok(EventPropagation::ConsumedRender);
+        }
+        // Any other input event counts as activity for the "active" time counter.
+        global_data.state.time.on_input();
 
         // The single KeyPress driving all top-level (leader + global) shortcuts, resolved
         // against the configurable keymap below.
@@ -1132,6 +1157,14 @@ impl App for AppMain {
                     }
                 }
                 AppSignal::Noop => {
+                    // Advance the time counters live (the status bar re-renders each tick).
+                    state.time.tick();
+                    // Flush the time counters to the session file roughly once a minute so a
+                    // crash loses at most ~1 min; the on-exit save captures the final value.
+                    self.time_flush_ticks = self.time_flush_ticks.wrapping_add(1);
+                    if self.time_flush_ticks.is_multiple_of(60) {
+                        state.mark_session_dirty();
+                    }
                     maybe_save_session(state, &self.root);
                     crate::lsp::try_drain_pending_requests();
                     let health = crate::lsp::health_check();
@@ -1456,7 +1489,50 @@ fn render_status_bar(
     );
     render_ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row_idx);
     render_tui_styled_texts_into(&styled_texts, &mut render_ops);
+
+    // Right-aligned time counters, framed off from the shortcut hints by a box-drawing
+    // vertical bar: `│ session_active/session_total  Σ project_active/project_total`.
+    // Σ separates the current session (left) from the cumulative project total (right).
+    let t = &state.time;
+    let counters = format!(
+        "│ {}/{}  Σ {}/{} ",
+        fmt_duration(t.session_active()),
+        fmt_duration(t.session_total()),
+        fmt_duration(t.project_active()),
+        fmt_duration(t.project_total()),
+    );
+    let counters_width = GCStringOwned::from(counters.as_str())
+        .display_width()
+        .as_usize();
+    // Only draw when it fits alongside the left hints (leave a small gap), so narrow
+    // terminals keep the shortcut hints rather than being overwritten.
+    let total_width = size.col_width.as_usize();
+    if total_width > counters_width + 2 {
+        let start_col = total_width - counters_width;
+        render_ops += RenderOpCommon::MoveCursorPositionAbs(col(start_col as u16) + row_idx);
+        render_ops += RenderOpIR::PaintTextWithAttributes(counters.into(), Some(normal_style));
+    }
+
     pipeline.push(ZOrder::Normal, render_ops);
+}
+
+/// Formats a duration compactly for the status bar: `5s`, `12m`, `1h20m`, `3h`.
+fn fmt_duration(d: Duration) -> String {
+    let secs = d.as_secs();
+    let h = secs / 3600;
+    let m = (secs % 3600) / 60;
+    let s = secs % 60;
+    if h > 0 {
+        if m > 0 {
+            format!("{h}h{m}m")
+        } else {
+            format!("{h}h")
+        }
+    } else if m > 0 {
+        format!("{m}m")
+    } else {
+        format!("{s}s")
+    }
 }
 
 pub fn build_state(
@@ -1516,6 +1592,12 @@ pub async fn run(
             TuiAvailability::Available(future) => future.await?,
             it => return it.into_err(),
         };
+
+    // Disable terminal focus reporting enabled in `app_start_background_services`.
+    global_data.output_device.write(|w| {
+        let _ = w.write_all(b"\x1b[?1004l");
+    });
+    let _ = global_data.output_device.flush();
 
     // Kill all terminal children gracefully.
     for pane in global_data.state.terminal_panes.values() {

@@ -21,6 +21,12 @@ pub struct Session {
     pub highlight_ranges: HashMap<String, Vec<(usize, usize)>>,
     #[serde(default)]
     pub symbol_highlights: Vec<SessionSymbolGroup>,
+    /// Cumulative active time (excluding inactivity) spent on this project, in seconds.
+    #[serde(default)]
+    pub time_active_secs: u64,
+    /// Cumulative total wall-clock time spent on this project, in seconds.
+    #[serde(default)]
+    pub time_total_secs: u64,
 }
 
 /// Persisted symbol-highlight identity. Byte-offset locations are never saved —
@@ -145,6 +151,8 @@ impl Session {
             panes,
             highlight_ranges,
             symbol_highlights,
+            time_active_secs: state.time.project_active().as_secs(),
+            time_total_secs: state.time.project_total().as_secs(),
         }
     }
 
@@ -479,12 +487,16 @@ mod tests {
                 qualified_name: "crate::lib::add_numbers".to_string(),
                 color: [255, 100, 100],
             }],
+            time_active_secs: 1230,
+            time_total_secs: 4560,
         };
 
         let value = serde_json::to_value(&session).unwrap();
         let restored: Session = serde_json::from_value(value.clone()).unwrap();
         let value2 = serde_json::to_value(&restored).unwrap();
         assert_eq!(value, value2);
+        assert_eq!(restored.time_active_secs, 1230);
+        assert_eq!(restored.time_total_secs, 4560);
     }
 
     #[test]
@@ -586,6 +598,8 @@ mod tests {
                 m
             },
             symbol_highlights: Vec::new(),
+            time_active_secs: 0,
+            time_total_secs: 0,
         };
 
         session.apply(&mut state);
@@ -641,6 +655,8 @@ mod tests {
             ],
             highlight_ranges: HashMap::new(),
             symbol_highlights: Vec::new(),
+            time_active_secs: 0,
+            time_total_secs: 0,
         };
 
         session.apply(&mut state);
@@ -682,6 +698,8 @@ mod tests {
             }],
             highlight_ranges: HashMap::new(),
             symbol_highlights: Vec::new(),
+            time_active_secs: 0,
+            time_total_secs: 0,
         };
 
         session.apply(&mut state);
@@ -709,6 +727,8 @@ mod tests {
             }],
             highlight_ranges: HashMap::new(),
             symbol_highlights: Vec::new(),
+            time_active_secs: 0,
+            time_total_secs: 0,
         };
 
         session.apply(&mut state);
@@ -769,6 +789,8 @@ mod tests {
                     color: [100, 200, 255],
                 },
             ],
+            time_active_secs: 0,
+            time_total_secs: 0,
         };
 
         session.apply(&mut state);

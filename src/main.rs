@@ -79,6 +79,12 @@ async fn main() {
         tui::build_state(Arc::clone(&files), root.clone(), theme.clone(), keymap);
 
     if let Some(session) = session::load_session(&root) {
+        // Seed the time counters with this project's cumulative totals before `apply`
+        // consumes the session; the running session adds to these.
+        initial_state.time.set_prior(
+            std::time::Duration::from_secs(session.time_active_secs),
+            std::time::Duration::from_secs(session.time_total_secs),
+        );
         session.apply(&mut initial_state);
         // Locations aren't persisted (they'd be stale) — re-resolve each restored
         // group against a running LSP worker using its saved origin identity, same
