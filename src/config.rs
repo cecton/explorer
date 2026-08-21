@@ -5,6 +5,27 @@ pub struct Config {
     /// `(action-slug, key-spec)` pairs from the `keybindings` block, applied on top of the
     /// default keymap by [`crate::keymap::Keymap::apply_overrides`].
     pub keybindings: Vec<(String, String)>,
+    /// Settings for the status-bar time counters, from the `counters { … }` block.
+    pub counters: CountersConfig,
+}
+
+/// Settings for the status-bar session/project time counters.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CountersConfig {
+    /// Whether to display the counters on the right of the status bar (`show`).
+    pub show: bool,
+    /// Whether terminal output ("stuff moving") counts as active time even without
+    /// keyboard input (`render-counts-as-active`).
+    pub render_counts_as_active: bool,
+}
+
+impl Default for CountersConfig {
+    fn default() -> Self {
+        Self {
+            show: true,
+            render_counts_as_active: true,
+        }
+    }
 }
 
 impl Config {
@@ -93,9 +114,29 @@ fn parse(content: &str) -> Result<Config, String> {
 
     let mut theme = None;
     let mut keybindings = Vec::new();
+    let mut counters = CountersConfig::default();
 
     for node in doc.nodes() {
         match node.name().value() {
+            "counters" => {
+                let Some(children) = node.children() else {
+                    continue;
+                };
+                for child in children.nodes() {
+                    let name = child.name().value();
+                    let val = child
+                        .entries()
+                        .iter()
+                        .find(|e| e.name().is_none())
+                        .and_then(|e| e.value().as_bool())
+                        .ok_or_else(|| format!("counters.{name} must have a boolean argument"))?;
+                    match name {
+                        "show" => counters.show = val,
+                        "render-counts-as-active" => counters.render_counts_as_active = val,
+                        _ => {}
+                    }
+                }
+            }
             "theme" => {
                 if let Some(arg) = node.entries().iter().find(|e| e.name().is_none()) {
                     if let Some(val) = arg.value().as_string() {
@@ -128,7 +169,11 @@ fn parse(content: &str) -> Result<Config, String> {
         }
     }
 
-    Ok(Config { theme, keybindings })
+    Ok(Config {
+        theme,
+        keybindings,
+        counters,
+    })
 }
 
 #[cfg(test)]
@@ -165,6 +210,42 @@ mod config_tests {
                 ("leader".to_string(), "alt+`".to_string()),
             ]
         );
+    }
+
+    #[test]
+    fn counters_default_when_block_absent() {
+        let config = parse("theme \"night_owl\"").expect("valid config");
+        assert_eq!(config.counters, CountersConfig::default());
+        assert!(config.counters.show);
+        assert!(config.counters.render_counts_as_active);
+    }
+
+    #[test]
+    fn counters_block_toggles_both_options() {
+        let config = parse("counters {\n    show #false\n    render-counts-as-active #false\n}")
+            .expect("valid config");
+        assert!(!config.counters.show);
+        assert!(!config.counters.render_counts_as_active);
+    }
+
+    #[test]
+    fn counters_block_partial_keeps_other_default() {
+        // Only `show` set -> render-counts-as-active stays at its default (true).
+        let config = parse("counters {\n    show #false\n}").expect("valid config");
+        assert!(!config.counters.show);
+        assert!(config.counters.render_counts_as_active);
+    }
+
+    #[test]
+    fn counters_option_requires_a_boolean_argument() {
+        assert!(parse("counters {\n    show \"yes\"\n}").is_err());
+        assert!(parse("counters {\n    show\n}").is_err());
+    }
+
+    #[test]
+    fn counters_ignores_unknown_child_nodes() {
+        let config = parse("counters {\n    show #false\n    wat #true\n}").expect("valid config");
+        assert!(!config.counters.show);
     }
 
     #[test]

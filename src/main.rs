@@ -50,9 +50,9 @@ async fn main() {
         }
     };
 
-    let (config_theme, keybindings) = match config {
-        Some(c) => (c.theme, c.keybindings),
-        None => (None, Vec::new()),
+    let (config_theme, keybindings, counters) = match config {
+        Some(c) => (c.theme, c.keybindings, c.counters),
+        None => (None, Vec::new(), config::CountersConfig::default()),
     };
 
     let theme_name = args.theme.or(config_theme).unwrap_or_else(|| {
@@ -77,6 +77,8 @@ async fn main() {
 
     let mut initial_state =
         tui::build_state(Arc::clone(&files), root.clone(), theme.clone(), keymap);
+    initial_state.show_timers = counters.show;
+    initial_state.count_render_as_active = counters.render_counts_as_active;
 
     if let Some(session) = session::load_session(&root) {
         // Seed the time counters with this project's cumulative totals before `apply`

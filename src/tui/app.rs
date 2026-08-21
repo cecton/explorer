@@ -299,7 +299,7 @@ impl AppMain {
                     // full at 1000), enter backoff — subsequent events are
                     // suppressed until activity pauses for >=100ms.
                     match notify_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                        AppSignal::Noop,
+                        AppSignal::TerminalOutput,
                     )) {
                         Ok(()) => backoff = None,
                         Err(_) => backoff = Some(now),
@@ -1156,7 +1156,12 @@ impl App for AppMain {
                         state.mark_session_dirty();
                     }
                 }
-                AppSignal::Noop => {
+                AppSignal::Noop | AppSignal::TerminalOutput => {
+                    // A terminal-output render frame counts as activity when the option is
+                    // on, so streaming output keeps the active counter alive without input.
+                    if matches!(action, AppSignal::TerminalOutput) && state.count_render_as_active {
+                        state.time.note_render();
+                    }
                     // Advance the time counters live (the status bar re-renders each tick).
                     state.time.tick();
                     // Flush the time counters to the session file roughly once a minute so a
@@ -1493,24 +1498,27 @@ fn render_status_bar(
     // Right-aligned time counters, framed off from the shortcut hints by a box-drawing
     // vertical bar: `│ session_active/session_total  Σ project_active/project_total`.
     // Σ separates the current session (left) from the cumulative project total (right).
-    let t = &state.time;
-    let counters = format!(
-        "│ {}/{}  Σ {}/{} ",
-        fmt_duration(t.session_active()),
-        fmt_duration(t.session_total()),
-        fmt_duration(t.project_active()),
-        fmt_duration(t.project_total()),
-    );
-    let counters_width = GCStringOwned::from(counters.as_str())
-        .display_width()
-        .as_usize();
-    // Only draw when it fits alongside the left hints (leave a small gap), so narrow
-    // terminals keep the shortcut hints rather than being overwritten.
-    let total_width = size.col_width.as_usize();
-    if total_width > counters_width + 2 {
-        let start_col = total_width - counters_width;
-        render_ops += RenderOpCommon::MoveCursorPositionAbs(col(start_col as u16) + row_idx);
-        render_ops += RenderOpIR::PaintTextWithAttributes(counters.into(), Some(normal_style));
+    // Suppressed entirely when the `show-timers` config option is disabled.
+    if state.show_timers {
+        let t = &state.time;
+        let counters = format!(
+            "│ {}/{}  Σ {}/{} ",
+            fmt_duration(t.session_active()),
+            fmt_duration(t.session_total()),
+            fmt_duration(t.project_active()),
+            fmt_duration(t.project_total()),
+        );
+        let counters_width = GCStringOwned::from(counters.as_str())
+            .display_width()
+            .as_usize();
+        // Only draw when it fits alongside the left hints (leave a small gap), so narrow
+        // terminals keep the shortcut hints rather than being overwritten.
+        let total_width = size.col_width.as_usize();
+        if total_width > counters_width + 2 {
+            let start_col = total_width - counters_width;
+            render_ops += RenderOpCommon::MoveCursorPositionAbs(col(start_col as u16) + row_idx);
+            render_ops += RenderOpIR::PaintTextWithAttributes(counters.into(), Some(normal_style));
+        }
     }
 
     pipeline.push(ZOrder::Normal, render_ops);

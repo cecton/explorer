@@ -99,6 +99,15 @@ impl SessionTime {
         self.settle(Instant::now());
     }
 
+    /// Treat a terminal-output render frame as recent activity, so streaming output
+    /// keeps the active counter alive even without keyboard input. Same effect as
+    /// [`Self::on_input`]; gated by the `render-counts-as-active` config at the call site.
+    pub fn note_render(&mut self) {
+        let now = Instant::now();
+        self.settle(now);
+        self.last_activity = now;
+    }
+
     /// Seed the cumulative project totals restored from the session file.
     pub fn set_prior(&mut self, active: Duration, total: Duration) {
         self.prior_active = active;
@@ -166,6 +175,25 @@ mod session_time_tests {
         st.focused = false;
         st.settle(t0 + Duration::from_secs(5));
         assert_eq!(st.active_accum, Duration::ZERO);
+    }
+
+    #[test]
+    fn note_render_keeps_active_accruing_past_idle() {
+        let t0 = Instant::now();
+        let mut st = tracker_at(t0);
+
+        // No input for 90s: a plain settle drops the idle stretch (nothing accrues).
+        st.settle(t0 + Duration::from_secs(90));
+        assert_eq!(st.active_accum, Duration::ZERO);
+
+        // A render frame refreshes last_activity to "now" (its internal Instant::now),
+        // so from that point the idle clock restarts.
+        st.note_render();
+        let base = st.active_accum;
+        // Settle 10s past that render: within the idle threshold -> the 10s counts,
+        // even though no key was ever pressed.
+        st.settle(st.last_tick + Duration::from_secs(10));
+        assert_eq!(st.active_accum, base + Duration::from_secs(10));
     }
 
     #[test]
@@ -294,6 +322,11 @@ pub struct AppState {
     pub session_dirty_at: Option<Instant>,
     /// Active/total time tracking for the session and project time counters.
     pub time: SessionTime,
+    /// Whether the status-bar time counters are rendered (config `counters.show`).
+    pub show_timers: bool,
+    /// Whether terminal output counts as active time even without keyboard input
+    /// (config `counters.render-counts-as-active`).
+    pub count_render_as_active: bool,
     pub symbol_highlights: Vec<SymbolHighlightGroup>,
     pub next_palette_index: usize,
     /// Per-file regex search (vim-style `/` `?` `n` `N`). Transient — never persisted to the
@@ -363,6 +396,8 @@ impl AppState {
             text_selection: None,
             session_dirty_at: None,
             time: SessionTime::default(),
+            show_timers: true,
+            count_render_as_active: true,
             symbol_highlights: Vec::new(),
             next_palette_index: 0,
             search: HashMap::new(),
@@ -430,6 +465,10 @@ pub enum AppSignal {
     /// running in a terminal pane) to explorer's own stdout, so the host terminal
     /// handles it. Written to the real terminal on the main thread in `app_handle_signal`.
     ForwardOscToTerminal(Vec<u8>),
+    /// A terminal pane produced output and was re-rendered. Handled like [`Self::Noop`]
+    /// for tick/flush bookkeeping, but additionally registers activity when
+    /// `count_render_as_active` is set, so streaming output keeps the active counter alive.
+    TerminalOutput,
     #[default]
     Noop,
 }
