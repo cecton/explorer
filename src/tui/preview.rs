@@ -336,6 +336,72 @@ impl FilePreviewComponent {
             return;
         }
 
+        let trimmed = cmd.trim();
+        if trimmed == "all-features" {
+            self.error = Some((
+                "cargo features: all (restarting rust-analyzer...)".to_string(),
+                Instant::now(),
+            ));
+            send_signal!(
+                global_data.main_thread_channel_sender,
+                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::SetCargoFeatures(
+                    crate::lsp::CargoFeatureSelection::All
+                ))
+            );
+            return;
+        }
+        if trimmed == "default-features" {
+            self.error = Some((
+                "cargo features: default (restarting rust-analyzer...)".to_string(),
+                Instant::now(),
+            ));
+            send_signal!(
+                global_data.main_thread_channel_sender,
+                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::SetCargoFeatures(
+                    crate::lsp::CargoFeatureSelection::Default
+                ))
+            );
+            return;
+        }
+        if trimmed == "features" || trimmed.starts_with("features ") {
+            let rest = trimmed["features".len()..].trim();
+            let mut tokens = rest.split_whitespace().peekable();
+            let no_default_features = tokens.peek() == Some(&"no-default");
+            if no_default_features {
+                tokens.next();
+            }
+            let features: Vec<String> = tokens.map(str::to_string).collect();
+            if features.is_empty() && !no_default_features {
+                self.error = Some((
+                    "features: expected at least one feature (or `no-default`)".to_string(),
+                    Instant::now(),
+                ));
+                return;
+            }
+            self.error = Some((
+                format!(
+                    "cargo features: {}{:?} (restarting rust-analyzer...)",
+                    if no_default_features {
+                        "no-default "
+                    } else {
+                        ""
+                    },
+                    features
+                ),
+                Instant::now(),
+            ));
+            send_signal!(
+                global_data.main_thread_channel_sender,
+                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::SetCargoFeatures(
+                    crate::lsp::CargoFeatureSelection::Explicit {
+                        no_default_features,
+                        features,
+                    }
+                ))
+            );
+            return;
+        }
+
         let state = &mut global_data.state;
         // An empty command clears the current highlights (mirrors committing an empty
         // search pattern, which removes the active search).

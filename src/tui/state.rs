@@ -334,6 +334,10 @@ pub struct AppState {
     pub search: HashMap<FileKey, PreviewSearch>,
     /// Configurable top-level (leader + global) key bindings.
     pub keymap: Keymap,
+    /// Which Cargo features rust-analyzer analyzes; set via `:features`/`:all-features`/
+    /// `:default-features` in the preview command line, persisted per-project in the
+    /// session file.
+    pub cargo_features: crate::lsp::CargoFeatureSelection,
 }
 
 impl AppState {
@@ -402,6 +406,7 @@ impl AppState {
             next_palette_index: 0,
             search: HashMap::new(),
             keymap,
+            cargo_features: crate::lsp::CargoFeatureSelection::default(),
         };
         state.recompute_file_name_picker_results();
 
@@ -469,6 +474,10 @@ pub enum AppSignal {
     /// for tick/flush bookkeeping, but additionally registers activity when
     /// `count_render_as_active` is set, so streaming output keeps the active counter alive.
     TerminalOutput,
+    /// Change which Cargo features rust-analyzer analyzes. rust-analyzer doesn't
+    /// hot-reload `cargo.*` settings, so applying this restarts the LSP worker
+    /// (deferred until the old one has actually exited — see `app_handle_signal`).
+    SetCargoFeatures(crate::lsp::CargoFeatureSelection),
     #[default]
     Noop,
 }

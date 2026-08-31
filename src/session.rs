@@ -27,6 +27,9 @@ pub struct Session {
     /// Cumulative total wall-clock time spent on this project, in seconds.
     #[serde(default)]
     pub time_total_secs: u64,
+    /// Which Cargo features rust-analyzer analyzes for this project.
+    #[serde(default)]
+    pub cargo_features: crate::lsp::CargoFeatureSelection,
 }
 
 /// Persisted symbol-highlight identity. Byte-offset locations are never saved —
@@ -153,6 +156,7 @@ impl Session {
             symbol_highlights,
             time_active_secs: state.time.project_active().as_secs(),
             time_total_secs: state.time.project_total().as_secs(),
+            cargo_features: state.cargo_features.clone(),
         }
     }
 
@@ -166,6 +170,8 @@ impl Session {
         if canon(&self.repo_root) != canon(&state.root) {
             return;
         }
+
+        state.cargo_features = self.cargo_features.clone();
 
         let mut missing_paths: Vec<Utf8PathBuf> = Vec::new();
         let snapshot_before = state.files.load();
@@ -489,6 +495,10 @@ mod tests {
             }],
             time_active_secs: 1230,
             time_total_secs: 4560,
+            cargo_features: crate::lsp::CargoFeatureSelection::Explicit {
+                no_default_features: true,
+                features: vec!["foo".to_string()],
+            },
         };
 
         let value = serde_json::to_value(&session).unwrap();
@@ -600,6 +610,7 @@ mod tests {
             symbol_highlights: Vec::new(),
             time_active_secs: 0,
             time_total_secs: 0,
+            cargo_features: crate::lsp::CargoFeatureSelection::default(),
         };
 
         session.apply(&mut state);
@@ -657,6 +668,7 @@ mod tests {
             symbol_highlights: Vec::new(),
             time_active_secs: 0,
             time_total_secs: 0,
+            cargo_features: crate::lsp::CargoFeatureSelection::default(),
         };
 
         session.apply(&mut state);
@@ -700,6 +712,7 @@ mod tests {
             symbol_highlights: Vec::new(),
             time_active_secs: 0,
             time_total_secs: 0,
+            cargo_features: crate::lsp::CargoFeatureSelection::default(),
         };
 
         session.apply(&mut state);
@@ -729,6 +742,7 @@ mod tests {
             symbol_highlights: Vec::new(),
             time_active_secs: 0,
             time_total_secs: 0,
+            cargo_features: crate::lsp::CargoFeatureSelection::default(),
         };
 
         session.apply(&mut state);
@@ -791,6 +805,7 @@ mod tests {
             ],
             time_active_secs: 0,
             time_total_secs: 0,
+            cargo_features: crate::lsp::CargoFeatureSelection::default(),
         };
 
         session.apply(&mut state);

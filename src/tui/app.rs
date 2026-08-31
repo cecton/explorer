@@ -89,6 +89,12 @@ pub struct AppMain {
     lsp_guard: Option<SubscriberGuard<crate::lsp::LspWorker>>,
     lsp_last_gen: u8,
     lsp_health_skip: u32,
+    /// Set when a `:features`/`:all-features`/`:default-features` command dropped
+    /// `lsp_guard` to kill the old rust-analyzer; the fresh one is only spawned once
+    /// `health_check()` confirms the old worker thread has actually exited (see the
+    /// `AppSignal::Noop` tick handler) since resubscribing too early would silently
+    /// rejoin the still-running old worker instead of restarting it.
+    lsp_restart_pending: bool,
     watcher_guard: Option<SubscriberGuard<WatcherWorker>>,
     /// Counts 1s Noop ticks so the time counters are flushed to disk periodically.
     time_flush_ticks: u64,
@@ -114,6 +120,7 @@ impl AppMain {
             lsp_guard: None,
             lsp_last_gen: 0,
             lsp_health_skip: 0,
+            lsp_restart_pending: false,
             watcher_guard: None,
             time_flush_ticks: 0,
         })
@@ -463,6 +470,7 @@ impl App for AppMain {
             root: root.clone(),
             files: Arc::clone(&files),
             app_tx: notify_tx.clone(),
+            cargo_features: global_data.state.cargo_features.clone(),
         }) {
             Ok(guard) => {
                 self.lsp_guard = Some(guard);
@@ -854,6 +862,19 @@ impl App for AppMain {
                 Some(Window::FilePreview(key)),
             );
         }
+        if let AppSignal::SetCargoFeatures(selection) = action {
+            // rust-analyzer doesn't hot-reload `cargo.*` init options, so applying a
+            // new feature selection means killing the current worker and respawning
+            // with fresh `initializationOptions`. Dropping the guard here only starts
+            // the teardown; the actual resubscribe is deferred to the Noop tick
+            // handler once `health_check()` confirms the old worker has exited (see
+            // that handler for why resubscribing immediately would be racy).
+            global_data.state.cargo_features = selection.clone();
+            global_data.state.mark_session_dirty();
+            self.lsp_guard = None;
+            self.lsp_restart_pending = true;
+            return Ok(EventPropagation::ConsumedRender);
+        }
         if let AppSignal::ForwardOscToTerminal(bytes) = action {
             // Write the raw sequence (e.g. OSC 52 clipboard copy) to the real terminal.
             // Runs on the main thread, outside paint, so it won't corrupt the TUI; OSC 52
@@ -1045,6 +1066,9 @@ impl App for AppMain {
                 AppSignal::OpenEditor { .. } => {
                     // Handled as early return above; unreachable here.
                 }
+                AppSignal::SetCargoFeatures(_) => {
+                    // Handled as early return above; unreachable here.
+                }
                 AppSignal::SymbolHighlightResult {
                     qualified_name,
                     group_id,
@@ -1195,6 +1219,44 @@ impl App for AppMain {
                             tracing::debug!("LSP health: {:?}", health);
                         }
                         _ => {}
+                    }
+
+                    // A `:features`/`:all-features`/`:default-features` command dropped
+                    // `lsp_guard` to kill the old rust-analyzer; only resubscribe once the
+                    // old worker thread has actually exited (`NotRunning`). Resubscribing
+                    // while it's merely `Running` with 0 receivers would take the RRT
+                    // framework's FastPath and silently rejoin the still-running old
+                    // worker instead of spawning a fresh one with the new init options.
+                    if self.lsp_restart_pending
+                        && matches!(health, crate::lsp::LspHealth::NotRunning)
+                    {
+                        for file in self.files.load().iter() {
+                            if file.path.extension() == Some("rs") {
+                                file.colored_lines.lock().clear();
+                            }
+                        }
+                        match LSP_RRT.try_subscribe(lsp::LspConfig {
+                            root: self.root.clone(),
+                            files: Arc::clone(&self.files),
+                            app_tx: global_data.main_thread_channel_sender.clone(),
+                            cargo_features: state.cargo_features.clone(),
+                        }) {
+                            Ok(guard) => {
+                                self.lsp_guard = Some(guard);
+                                tracing::info!(
+                                    "LSP worker restarted: cargo_features={:?}",
+                                    state.cargo_features
+                                );
+                                for window in state.pane_manager.window_stack.iter() {
+                                    if let Window::FilePreview(key) = window {
+                                        crate::lsp::send_file_request(key.0);
+                                    }
+                                }
+                                crate::lsp::try_drain_pending_requests();
+                            }
+                            Err(e) => tracing::warn!("LSP worker restart failed: {e}"),
+                        }
+                        self.lsp_restart_pending = false;
                     }
                 }
             }

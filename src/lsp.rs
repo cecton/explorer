@@ -99,18 +99,56 @@ pub static LSP_RRT: RRT<LspWorker> = RRT::new();
 
 // ── Shared config set before first subscribe ──────────────────────────────────
 
+/// Which Cargo features rust-analyzer should analyze. Set via the `:features` /
+/// `:all-features` / `:default-features` preview commands; changing it requires
+/// restarting the rust-analyzer process since these are initialization-time-only
+/// settings (rust-analyzer doesn't hot-reload `cargo.*` via `didChangeConfiguration`).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub enum CargoFeatureSelection {
+    #[default]
+    Default,
+    All,
+    Explicit {
+        no_default_features: bool,
+        features: Vec<String>,
+    },
+}
+
 #[derive(Clone)]
 pub struct LspConfig {
     pub root: Utf8PathBuf,
     pub files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     pub app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+    pub cargo_features: CargoFeatureSelection,
 }
 
 impl Debug for LspConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("LspConfig")
             .field("root", &self.root)
+            .field("cargo_features", &self.cargo_features)
             .finish()
+    }
+}
+
+/// Builds the `initializationOptions` value sent to rust-analyzer for a given
+/// [`CargoFeatureSelection`]. `Default` omits the `cargo` key entirely so
+/// rust-analyzer falls back to its own default (default-features-only) behavior.
+fn cargo_initialization_options(selection: &CargoFeatureSelection) -> Option<Value> {
+    match selection {
+        CargoFeatureSelection::Default => None,
+        CargoFeatureSelection::All => Some(serde_json::json!({
+            "cargo": { "features": "all" }
+        })),
+        CargoFeatureSelection::Explicit {
+            no_default_features,
+            features,
+        } => Some(serde_json::json!({
+            "cargo": {
+                "features": features,
+                "noDefaultFeatures": no_default_features,
+            }
+        })),
     }
 }
 
@@ -215,6 +253,8 @@ impl RRTWorker for LspWorker {
         let root_uri: Uri = format!("file://{root}").parse().expect("valid root URI");
         let pid = std::process::id();
 
+        let initialization_options = cargo_initialization_options(&config.cargo_features);
+
         let init_req = RpcRequest {
             jsonrpc: "2.0",
             id: 0,
@@ -251,6 +291,7 @@ impl RRTWorker for LspWorker {
                     uri: root_uri.clone(),
                     name: "root".to_string(),
                 }]),
+                initialization_options,
                 ..Default::default()
             },
         };
@@ -1527,5 +1568,55 @@ mod tests {
     #[test]
     fn test_byte_to_utf16_bounds() {
         assert_eq!(byte_to_utf16("hi", 100), 2);
+    }
+
+    #[test]
+    fn cargo_init_options_default_omits_cargo_key() {
+        assert_eq!(
+            cargo_initialization_options(&CargoFeatureSelection::Default),
+            None
+        );
+    }
+
+    #[test]
+    fn cargo_init_options_all_passes_all_features_string() {
+        assert_eq!(
+            cargo_initialization_options(&CargoFeatureSelection::All),
+            Some(serde_json::json!({ "cargo": { "features": "all" } }))
+        );
+    }
+
+    #[test]
+    fn cargo_init_options_explicit_sets_features_and_no_default_features() {
+        let selection = CargoFeatureSelection::Explicit {
+            no_default_features: true,
+            features: vec!["foo".to_string(), "bar".to_string()],
+        };
+        assert_eq!(
+            cargo_initialization_options(&selection),
+            Some(serde_json::json!({
+                "cargo": {
+                    "features": ["foo", "bar"],
+                    "noDefaultFeatures": true,
+                }
+            }))
+        );
+    }
+
+    #[test]
+    fn cargo_init_options_explicit_no_default_only_sends_empty_feature_list() {
+        let selection = CargoFeatureSelection::Explicit {
+            no_default_features: true,
+            features: vec![],
+        };
+        assert_eq!(
+            cargo_initialization_options(&selection),
+            Some(serde_json::json!({
+                "cargo": {
+                    "features": [],
+                    "noDefaultFeatures": true,
+                }
+            }))
+        );
     }
 }
