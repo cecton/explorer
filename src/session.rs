@@ -430,6 +430,7 @@ mod tests {
     use parking_lot::Mutex;
     use r3bl_tui::{OfsBufVT100, Size};
     use std::sync::Arc;
+    use std::time::Instant;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
 
@@ -459,6 +460,7 @@ mod tests {
             scroll_offset: 0,
             cwd,
             command,
+            last_output: Instant::now(),
         }
     }
 

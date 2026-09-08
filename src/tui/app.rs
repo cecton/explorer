@@ -194,6 +194,7 @@ impl AppMain {
                 scroll_offset: 0,
                 cwd: pane_cwd,
                 command: pane_command,
+                last_output: Instant::now(),
             }));
 
             state.terminal_panes.insert(id, Arc::clone(&pane));
@@ -209,6 +210,12 @@ impl AppMain {
                     match event {
                         PtyOutputEvent::Output(bytes) => {
                             let mut pane = pane.lock();
+                            // Recorded even when sync-buffered (the bytes render once
+                            // sync releases). This — not the render signal below — is
+                            // what keeps the time counters accruing during output: the
+                            // signal path goes silent once the main-thread channel
+                            // saturates, while the 1s Noop tick keeps polling this.
+                            pane.last_output = Instant::now();
                             match pane.ofs_buf.feed_pty_bytes(&bytes) {
                                 Some(result) => {
                                     if pane.scroll_offset > 0 {
@@ -1181,9 +1188,15 @@ impl App for AppMain {
                     }
                 }
                 AppSignal::Noop | AppSignal::TerminalOutput => {
-                    // A terminal-output render frame counts as activity when the option is
-                    // on, so streaming output keeps the active counter alive without input.
-                    if matches!(action, AppSignal::TerminalOutput) && state.count_render_as_active {
+                    // Streaming terminal output counts as activity when the option is on,
+                    // so a running command keeps the active counter alive without input.
+                    // Polled from per-pane `last_output` timestamps rather than tied to
+                    // TerminalOutput signal delivery: the render backoff suppresses all
+                    // signals during a sustained flood, while this 1s tick (and the
+                    // persisted timestamps) keep working through it.
+                    if state.count_render_as_active
+                        && state.any_terminal_output_recently(Duration::from_secs(2))
+                    {
                         state.time.note_render();
                     }
                     // Advance the time counters live (the status bar re-renders each tick).

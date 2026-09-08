@@ -267,6 +267,11 @@ pub struct TerminalPane {
     pub cwd: Utf8PathBuf,
     /// Command used to start the terminal process, if any.
     pub command: Option<String>,
+    /// Last time this pane's PTY produced output, updated by the feed task while it
+    /// already holds the pane lock. Lets the time counters treat streaming output as
+    /// activity without depending on the render-signal backoff path (which goes silent
+    /// while the main-thread channel is saturated).
+    pub last_output: Instant,
 }
 
 impl Debug for TerminalPane {
@@ -363,6 +368,15 @@ impl AppState {
         f: impl FnOnce(&mut TerminalPane) -> R,
     ) -> Option<R> {
         self.terminal_panes.get(&id).map(|p| f(&mut p.lock()))
+    }
+
+    /// True if any terminal pane produced output within `window`. Deliberately ignores
+    /// pane focus (any pane streaming output counts); window focus is still enforced
+    /// downstream by [`SessionTime::settle`].
+    pub fn any_terminal_output_recently(&self, window: Duration) -> bool {
+        self.terminal_panes
+            .values()
+            .any(|p| p.lock().last_output.elapsed() <= window)
     }
 }
 
@@ -591,3 +605,60 @@ pub const SYMBOL_PALETTE: [RgbValue; 8] = [
         blue: 200,
     },
 ];
+
+#[cfg(test)]
+mod recent_output_tests {
+    use super::*;
+
+    fn dummy_pane(last_output: Instant) -> TerminalPane {
+        let (pty_input_tx, _) = mpsc::channel(1);
+        TerminalPane {
+            ofs_buf: OfsBufVT100::new_empty(Size::default()),
+            title: None,
+            pty_input_tx: Arc::new(pty_input_tx),
+            child_killer: None,
+            last_size: Size::default(),
+            is_command_pane: false,
+            exited: false,
+            exit_code: None,
+            exit_signal: None,
+            scroll_offset: 0,
+            cwd: Utf8PathBuf::from("/tmp"),
+            command: None,
+            last_output,
+        }
+    }
+
+    fn empty_state() -> AppState {
+        let files = Arc::new(ArcSwap::from_pointee(Vec::<Arc<LoadedFile>>::new()));
+        AppState::new(
+            files,
+            Utf8PathBuf::from("/tmp"),
+            HelixTheme::default(),
+            Keymap::default(),
+        )
+    }
+
+    #[test]
+    fn any_terminal_output_recently_ignores_stale_and_missing_panes() {
+        let mut state = empty_state();
+
+        // No panes at all -> nothing counts as recent output.
+        assert!(!state.any_terminal_output_recently(Duration::from_secs(2)));
+
+        // A pane whose last output is older than the window doesn't count.
+        state.terminal_panes.insert(
+            0,
+            Arc::new(Mutex::new(dummy_pane(
+                Instant::now() - Duration::from_secs(10),
+            ))),
+        );
+        assert!(!state.any_terminal_output_recently(Duration::from_secs(2)));
+
+        // Any pane with fresh output counts, regardless of focus.
+        state
+            .terminal_panes
+            .insert(1, Arc::new(Mutex::new(dummy_pane(Instant::now()))));
+        assert!(state.any_terminal_output_recently(Duration::from_secs(2)));
+    }
+}
