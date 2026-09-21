@@ -112,13 +112,8 @@ impl Component<AppState, AppSignal> for ThemePickerComponent {
                 key: Key::SpecialKey(SpecialKey::Enter),
             }) => {
                 let state = &mut global_data.state;
-                let selected = state.theme_picker.resolve_selected_index();
-                if let Some((name, _)) = state.theme_picker.results.get(selected)
-                    && let Err(e) = crate::config::save_theme(name)
-                {
-                    tracing::error!("Failed to save theme to config: {e}");
-                }
                 state.saved_theme = state.theme.clone();
+                state.mark_session_dirty();
                 state.pane_manager.remove_window(&Window::ThemePicker);
                 state.theme_picker.reset();
                 return Ok(EventPropagation::ConsumedRender);

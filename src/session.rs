@@ -30,6 +30,9 @@ pub struct Session {
     /// Which Cargo features rust-analyzer analyzes for this project.
     #[serde(default)]
     pub cargo_features: crate::lsp::CargoFeatureSelection,
+    /// Selected UI theme name for this project.
+    #[serde(default)]
+    pub theme: Option<String>,
 }
 
 /// Persisted symbol-highlight identity. Byte-offset locations are never saved —
@@ -157,6 +160,7 @@ impl Session {
             time_active_secs: state.time.project_active().as_secs(),
             time_total_secs: state.time.project_total().as_secs(),
             cargo_features: state.cargo_features.clone(),
+            theme: Some(state.theme.name().to_string()),
         }
     }
 
@@ -172,6 +176,13 @@ impl Session {
         }
 
         state.cargo_features = self.cargo_features.clone();
+
+        if let Some(name) = &self.theme
+            && let Some(theme) = crate::tui::HelixTheme::from_name(name)
+        {
+            state.theme = theme.clone();
+            state.saved_theme = theme;
+        }
 
         let mut missing_paths: Vec<Utf8PathBuf> = Vec::new();
         let snapshot_before = state.files.load();
@@ -501,6 +512,7 @@ mod tests {
                 no_default_features: true,
                 features: vec!["foo".to_string()],
             },
+            theme: None,
         };
 
         let value = serde_json::to_value(&session).unwrap();
@@ -613,6 +625,7 @@ mod tests {
             time_active_secs: 0,
             time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
+            theme: None,
         };
 
         session.apply(&mut state);
@@ -671,6 +684,7 @@ mod tests {
             time_active_secs: 0,
             time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
+            theme: None,
         };
 
         session.apply(&mut state);
@@ -715,6 +729,7 @@ mod tests {
             time_active_secs: 0,
             time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
+            theme: None,
         };
 
         session.apply(&mut state);
@@ -745,6 +760,7 @@ mod tests {
             time_active_secs: 0,
             time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
+            theme: None,
         };
 
         session.apply(&mut state);
@@ -808,6 +824,7 @@ mod tests {
             time_active_secs: 0,
             time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
+            theme: None,
         };
 
         session.apply(&mut state);

@@ -1,6 +1,9 @@
 use std::path::PathBuf;
 
 pub struct Config {
+    /// Fallback theme used only when a project has no session (or no session-saved
+    /// theme) yet. Theme selection normally lives in the session; this can only be
+    /// changed by hand-editing the config file, not from the UI.
     pub theme: Option<String>,
     /// `(action-slug, key-spec)` pairs from the `keybindings` block, applied on top of the
     /// default keymap by [`crate::keymap::Keymap::apply_overrides`].
@@ -44,61 +47,6 @@ impl Config {
 
         parse(&content).map(Some)
     }
-}
-
-pub fn save_theme(theme_name: &str) -> Result<(), String> {
-    let path = config_path().ok_or("could not determine config directory")?;
-
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)
-            .map_err(|e| format!("failed to create config directory: {e}"))?;
-    }
-
-    let content = match std::fs::read_to_string(&path) {
-        Ok(c) => c,
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-        Err(e) => {
-            return Err(format!(
-                "error reading config file '{}': {e}",
-                path.display()
-            ));
-        }
-    };
-
-    let output = update_theme_in_kdl(&content, theme_name)?;
-    std::fs::write(&path, output)
-        .map_err(|e| format!("error writing config file '{}': {e}", path.display()))?;
-
-    Ok(())
-}
-
-/// Returns `content` (a KDL config document) with only its `theme` node updated or
-/// inserted. Every other node — notably any `keybindings` block — is parsed and
-/// re-serialized untouched, so saving a theme never clobbers the user's key bindings.
-fn update_theme_in_kdl(content: &str, theme_name: &str) -> Result<String, String> {
-    let mut doc: kdl::KdlDocument = if content.trim().is_empty() {
-        kdl::KdlDocument::new()
-    } else {
-        content.parse().map_err(|e: kdl::KdlError| e.to_string())?
-    };
-
-    let mut found = false;
-    for node in doc.nodes_mut() {
-        if node.name().value() == "theme" {
-            node.entries_mut().clear();
-            node.push(kdl::KdlEntry::new(theme_name));
-            found = true;
-            break;
-        }
-    }
-
-    if !found {
-        let mut node = kdl::KdlNode::new("theme");
-        node.push(kdl::KdlEntry::new(theme_name));
-        doc.nodes_mut().push(node);
-    }
-
-    Ok(doc.to_string())
 }
 
 fn config_path() -> Option<PathBuf> {
@@ -257,37 +205,5 @@ mod config_tests {
     #[test]
     fn keybinding_without_key_argument_is_an_error() {
         assert!(parse("keybindings {\n quit\n }").is_err());
-    }
-
-    #[test]
-    fn saving_theme_preserves_existing_keybindings() {
-        let original =
-            "theme \"night_owl\"\nkeybindings {\n    quit \"z\"\n    leader \"ctrl+b\"\n}\n";
-        let updated = update_theme_in_kdl(original, "catppuccin_mocha").expect("update ok");
-
-        // Theme changed...
-        let config = parse(&updated).expect("re-parse ok");
-        assert_eq!(config.theme.as_deref(), Some("catppuccin_mocha"));
-        // ...but every keybinding survived untouched.
-        assert_eq!(
-            config.keybindings,
-            vec![
-                ("quit".to_string(), "z".to_string()),
-                ("leader".to_string(), "ctrl+b".to_string()),
-            ]
-        );
-    }
-
-    #[test]
-    fn saving_theme_into_a_keybindings_only_config_keeps_them() {
-        // No theme node present yet — save must append theme without dropping bindings.
-        let original = "keybindings {\n    quit \"z\"\n}\n";
-        let updated = update_theme_in_kdl(original, "night_owl").expect("update ok");
-        let config = parse(&updated).expect("re-parse ok");
-        assert_eq!(config.theme.as_deref(), Some("night_owl"));
-        assert_eq!(
-            config.keybindings,
-            vec![("quit".to_string(), "z".to_string())]
-        );
     }
 }

@@ -55,7 +55,7 @@ async fn main() {
         None => (None, Vec::new(), config::CountersConfig::default()),
     };
 
-    let theme_name = args.theme.or(config_theme).unwrap_or_else(|| {
+    let theme_name = args.theme.clone().or(config_theme).unwrap_or_else(|| {
         tui::HelixTheme::theme_names()
             .next()
             .unwrap_or("catppuccin_mocha")
@@ -100,6 +100,12 @@ async fn main() {
                 Some(idx),
             );
         }
+    }
+
+    if args.theme.is_some() {
+        // An explicit --theme flag wins over whatever the session had saved.
+        initial_state.theme = theme.clone();
+        initial_state.saved_theme = theme;
     }
 
     tui::run(initial_state, files, root)
