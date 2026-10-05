@@ -6,6 +6,7 @@ mod file_name_picker;
 mod fuzzy_picker;
 pub(crate) mod git_log_pane;
 mod input_line;
+mod markdown;
 pub(crate) mod model_picker;
 mod pane_component;
 pub(crate) mod pane_manager;
