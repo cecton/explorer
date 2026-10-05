@@ -7,8 +7,9 @@ pub const MAX_PANES: usize = 16;
 
 /// A pane that can appear in the window stack.
 ///
-/// Each variant is unique: there is at most one `FileNamePicker` and at most one
-/// `FilePreview` per `FileKey` in the stack at any time.
+/// Each variant is unique: there is at most one `FileNamePicker`, one `ThemePicker`, one
+/// `GitLog`, and at most one `FilePreview`/`CommitDiff` per key (file/commit id) in the
+/// stack at any time.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Window {
     /// Preview of the file identified by `FileKey`.
@@ -19,6 +20,11 @@ pub enum Window {
     ThemePicker,
     /// Embedded terminal pane identified by its session id.
     Terminal(usize),
+    /// Git log pane listing first-parent history of HEAD or a chosen ref.
+    /// Identified by a unique id; `<leader>g` opens additional instances.
+    GitLog(usize),
+    /// Unified diff of a single commit, identified by its object id.
+    CommitDiff([u8; 20]),
 }
 
 /// A point in a window's content used as a text-selection anchor or endpoint.

@@ -12,6 +12,7 @@ arc-swap = "1"
 camino = { version = "1", features = ["serde1"] }
 directories = "5"
 hex = "0.4"
+gix = { version = "0.87", features = ["blob-diff"] }
 jwalk = "0.8"
 libc = "0.2"
 miette = "7"

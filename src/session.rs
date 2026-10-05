@@ -1,5 +1,6 @@
 use crate::loader::{FileKey, LoadedFile, file_key_for_path, path_for_file_key};
 use crate::tui::AppState;
+use crate::tui::GitLogWindowState;
 use crate::tui::TerminalPane;
 use crate::tui::pane_manager::{PaneSize, Window, WindowState};
 use crate::tui::{RgbValue, SYMBOL_PALETTE, SymbolHighlightGroup};
@@ -11,13 +12,17 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-pub const SESSION_VERSION: u32 = 2;
+pub const SESSION_VERSION: u32 = 3;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
+    #[serde(default)]
     pub version: u32,
+    #[serde(default)]
     pub repo_root: Utf8PathBuf,
+    #[serde(default)]
     pub panes: Vec<PaneEntry>,
+    #[serde(default)]
     pub highlight_ranges: HashMap<String, Vec<(usize, usize)>>,
     #[serde(default)]
     pub symbol_highlights: Vec<SessionSymbolGroup>,
@@ -64,6 +69,21 @@ pub enum PaneEntry {
         command: Option<String>,
         cwd: Utf8PathBuf,
         is_command_pane: bool,
+        pane_size: SerializablePaneSize,
+    },
+
+    #[serde(rename = "git_log")]
+    GitLog {
+        id: usize,
+        branch: Option<String>,
+        query: String,
+        scroll: usize,
+        pane_size: SerializablePaneSize,
+    },
+
+    #[serde(rename = "commit_diff")]
+    CommitDiff {
+        hash: String,
         pane_size: SerializablePaneSize,
     },
 }
@@ -121,6 +141,7 @@ impl Session {
                     &state.pane_manager.window_states,
                     &state.terminal_panes,
                     &state.terminal_to_preview,
+                    &state.git_logs,
                 )
             })
             .collect();
@@ -259,6 +280,55 @@ impl Session {
                         },
                     );
                 }
+
+                PaneEntry::GitLog {
+                    id,
+                    branch,
+                    query,
+                    scroll,
+                    pane_size,
+                } => {
+                    let window = Window::GitLog(id);
+                    new_stack.push(window);
+                    new_states.insert(
+                        window,
+                        WindowState {
+                            scroll,
+                            pane_size: pane_size.into(),
+                            ..Default::default()
+                        },
+                    );
+                    state.next_git_log_id = state.next_git_log_id.max(id.saturating_add(1));
+                    let mut win = GitLogWindowState {
+                        branch: branch.clone(),
+                        query: query.clone(),
+                        ..Default::default()
+                    };
+                    if !query.is_empty() {
+                        crate::tui::git_log_pane::apply_filter(&mut win);
+                    }
+                    state.git_logs.insert(id, win);
+                    state.pending_git_logs.push(id);
+                }
+
+                PaneEntry::CommitDiff { hash, pane_size } => {
+                    let Ok(bytes) = hex::decode(&hash) else {
+                        continue;
+                    };
+                    let Ok(id) = <[u8; 20]>::try_from(bytes.as_slice()) else {
+                        continue;
+                    };
+                    let window = Window::CommitDiff(id);
+                    new_stack.push(window);
+                    new_states.insert(
+                        window,
+                        WindowState {
+                            pane_size: pane_size.into(),
+                            ..Default::default()
+                        },
+                    );
+                    state.pending_diffs.push(id);
+                }
             }
         }
 
@@ -317,6 +387,7 @@ fn pane_entry_from_window(
     window_states: &HashMap<Window, WindowState>,
     terminal_panes: &HashMap<usize, Arc<Mutex<TerminalPane>>>,
     terminal_to_preview: &HashMap<usize, FileKey>,
+    git_logs: &HashMap<usize, GitLogWindowState>,
 ) -> Option<PaneEntry> {
     let window_state = window_states.get(window).cloned().unwrap_or_default();
     match window {
@@ -330,6 +401,20 @@ fn pane_entry_from_window(
             })
         }
         Window::FileNamePicker | Window::ThemePicker => None,
+        Window::GitLog(id) => {
+            let win = git_logs.get(id)?;
+            Some(PaneEntry::GitLog {
+                id: *id,
+                branch: win.branch.clone(),
+                query: win.query.clone(),
+                scroll: window_state.scroll,
+                pane_size: window_state.pane_size.into(),
+            })
+        }
+        Window::CommitDiff(id) => Some(PaneEntry::CommitDiff {
+            hash: hex::encode(id),
+            pane_size: window_state.pane_size.into(),
+        }),
         Window::Terminal(id) => {
             // Editor terminals save as FilePreview so restore brings back the preview.
             if let Some(file_key) = terminal_to_preview.get(id)
@@ -390,9 +475,9 @@ pub fn load_session(repo_root: &Utf8Path) -> Option<Session> {
             return None;
         }
     };
-    if session.version != SESSION_VERSION {
+    if session.version > SESSION_VERSION {
         tracing::debug!(
-            "session version mismatch ({} != {}), discarding",
+            "session version too new ({} > {}), discarding",
             session.version,
             SESSION_VERSION
         );
@@ -582,6 +667,8 @@ mod tests {
             .map(|entry| match entry {
                 PaneEntry::FilePreview { .. } => "file_preview",
                 PaneEntry::Terminal { .. } => "terminal",
+                PaneEntry::GitLog { .. } => "git_log",
+                PaneEntry::CommitDiff { .. } => "commit_diff",
             })
             .collect();
         assert_eq!(kinds, vec!["file_preview", "terminal"]);
@@ -845,6 +932,94 @@ mod tests {
     }
 
     #[test]
+    fn commit_diff_pane_round_trips_through_session() {
+        let (_dir, root) = temp_root();
+        let mut state = empty_state(root.clone());
+        let id = [0x42u8; 20];
+        state.pane_manager.window_stack = vec![Window::CommitDiff(id)];
+        state.pane_manager.window_states.insert(
+            Window::CommitDiff(id),
+            WindowState {
+                pane_size: PaneSize::Half,
+                ..Default::default()
+            },
+        );
+
+        let session = Session::from_state(&state);
+        assert_eq!(session.version, 3);
+        let kinds: Vec<_> = session
+            .panes
+            .iter()
+            .map(|entry| match entry {
+                PaneEntry::FilePreview { .. } => "file_preview",
+                PaneEntry::Terminal { .. } => "terminal",
+                PaneEntry::GitLog { .. } => "git_log",
+                PaneEntry::CommitDiff { .. } => "commit_diff",
+            })
+            .collect();
+        assert_eq!(kinds, vec!["commit_diff"]);
+        let PaneEntry::CommitDiff { hash, .. } = &session.panes[0] else {
+            panic!("expected commit_diff entry");
+        };
+        assert_eq!(hash, &hex::encode([0x42u8; 20]));
+
+        let mut restored = empty_state(root.clone());
+        session.apply(&mut restored);
+        assert_eq!(
+            restored.pane_manager.window_stack,
+            vec![Window::CommitDiff(id)]
+        );
+        assert_eq!(restored.pending_diffs, vec![id]);
+    }
+
+    #[test]
+    fn git_log_pane_round_trips_with_branch_and_query() {
+        let (_dir, root) = temp_root();
+        let mut state = empty_state(root.clone());
+        state.pane_manager.window_stack = vec![Window::GitLog(7)];
+        state.pane_manager.window_states.insert(
+            Window::GitLog(7),
+            WindowState {
+                scroll: 4,
+                pane_size: PaneSize::Third,
+                ..Default::default()
+            },
+        );
+        let mut win = GitLogWindowState {
+            branch: Some("origin/main".to_string()),
+            query: "fix:".to_string(),
+            ..Default::default()
+        };
+        state.git_logs.insert(7, win);
+        state.next_git_log_id = 8;
+
+        let session = Session::from_state(&state);
+        let PaneEntry::GitLog {
+            id,
+            branch,
+            query,
+            scroll,
+            ..
+        } = &session.panes[0]
+        else {
+            panic!("expected git_log entry");
+        };
+        assert_eq!(id, &7);
+        assert_eq!(branch.as_deref(), Some("origin/main"));
+        assert_eq!(query, "fix:");
+        assert_eq!(scroll, &4);
+
+        let mut restored = empty_state(root.clone());
+        session.apply(&mut restored);
+        assert_eq!(restored.pane_manager.window_stack, vec![Window::GitLog(7)]);
+        assert_eq!(restored.next_git_log_id, 8);
+        assert_eq!(restored.pending_git_logs, vec![7]);
+        let restored_win = restored.git_logs.get(&7).expect("window state");
+        assert_eq!(restored_win.branch.as_deref(), Some("origin/main"));
+        assert_eq!(restored_win.query, "fix:");
+    }
+
+    #[test]
     fn session_file_path_is_deterministic_and_under_sessions_dir() {
         let (_dir, root) = temp_root();
 
@@ -889,6 +1064,31 @@ mod tests {
         ));
 
         // Clean up.
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_session_accepts_older_versions() {
+        let (_dir, root) = temp_root();
+        let path = session_file_path(&root).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{{\"version\": {}}}", SESSION_VERSION - 1)).unwrap();
+
+        let session = load_session(&root).expect("older version must load");
+        assert_eq!(session.version, SESSION_VERSION - 1);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn load_session_discards_newer_versions() {
+        let (_dir, root) = temp_root();
+        let path = session_file_path(&root).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{{\"version\": {}}}", SESSION_VERSION + 1)).unwrap();
+
+        assert!(load_session(&root).is_none());
+
         let _ = std::fs::remove_file(&path);
     }
 }

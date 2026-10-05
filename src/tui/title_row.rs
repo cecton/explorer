@@ -89,12 +89,7 @@ pub(crate) fn render_pane_title(
     };
 
     let padded = format!(" {title} ");
-    let display = if padded.len() > width {
-        let truncated = &padded[..width.saturating_sub(1)];
-        format!("{truncated}…")
-    } else {
-        padded
-    };
+    let display = truncate_title(&padded, width);
 
     render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
     render_ops += RenderOpCommon::ResetColor;
@@ -109,4 +104,27 @@ pub(crate) fn render_pane_title(
             new_style!(color_fg: {color_fg} color_bg: {color_bg})
         }),
     );
+}
+
+fn truncate_title(padded: &str, width: usize) -> String {
+    if padded.chars().count() <= width {
+        return padded.to_string();
+    }
+    let max_chars = width.saturating_sub(1);
+    let truncated: String = padded.chars().take(max_chars).collect();
+    format!("{truncated}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn truncate_title_never_splits_multibyte_chars() {
+        let title = "commit abcdef0 né抵 — summary text that is long";
+        let out = truncate_title(title, 21);
+        assert!(out.chars().count() <= 21);
+        assert!(out.ends_with('…'));
+        assert_eq!(truncate_title("short", 21), "short");
+    }
 }

@@ -1,6 +1,8 @@
 mod app;
+mod commit_diff_pane;
 mod file_name_picker;
 mod fuzzy_picker;
+pub(crate) mod git_log_pane;
 mod input_line;
 mod pane_component;
 pub(crate) mod pane_manager;
@@ -15,15 +17,17 @@ mod title_row;
 pub use app::{build_state, run};
 pub use r3bl_tui::core::ansi::RgbValue;
 pub use state::{
-    AppSignal, AppState, PreviewSearch, SEARCH_CURRENT, SEARCH_CURRENT_FG, SEARCH_MATCH,
-    SEARCH_MATCH_FG, SYMBOL_PALETTE, SearchDirection, SymbolHighlightGroup, SymbolRefLocation,
-    TerminalPane,
+    AppSignal, AppState, GitLogWindowState, PreviewSearch, SEARCH_CURRENT, SEARCH_CURRENT_FG,
+    SEARCH_MATCH, SEARCH_MATCH_FG, SYMBOL_PALETTE, SearchDirection, SymbolHighlightGroup,
+    SymbolRefLocation, TerminalPane,
 };
 pub use theme::HelixTheme;
 
 use self::app::*;
+use self::commit_diff_pane::*;
 use self::file_name_picker::*;
 use self::fuzzy_picker::*;
+use self::git_log_pane::*;
 use self::input_line::*;
 
 use self::pane_manager::*;

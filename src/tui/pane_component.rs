@@ -12,6 +12,8 @@ pub struct PaneComponent {
     pub slot: usize,
     picker: FileNamePickerComponent,
     theme_picker: ThemePickerComponent,
+    git_log: GitLogPaneComponent,
+    commit_diff: CommitDiffPaneComponent,
     preview: FilePreviewComponent,
     terminal: TerminalPaneComponent,
     /// Origin row of the content area (below title bar), used for scrollbar mouse events.
@@ -44,6 +46,8 @@ impl PaneComponent {
             slot,
             picker: FileNamePickerComponent::new(id, picker_results_tx, picker_generation),
             theme_picker: ThemePickerComponent::new(id),
+            git_log: GitLogPaneComponent::new(id),
+            commit_diff: CommitDiffPaneComponent::new(id),
             preview: FilePreviewComponent::new(id),
             terminal: TerminalPaneComponent::new(id, slot),
             content_origin_row: 0,
@@ -178,6 +182,11 @@ impl PaneComponent {
                 state.mark_session_dirty();
                 EventPropagation::ConsumedRender
             }
+            Window::GitLog(_) | Window::CommitDiff(_) => {
+                state.pane_manager.set_window_scroll(window, target);
+                state.pane_manager.clamp_scroll(window);
+                EventPropagation::ConsumedRender
+            }
             Window::FileNamePicker => {
                 let scroll_max = state.pane_manager.window_scroll_max(window);
                 if scroll_max == 0 {
@@ -243,6 +252,12 @@ impl TitleRow for PaneComponent {
             Window::Terminal(_) => self
                 .terminal
                 .render_title_row(ops, pane_box, focused, theme, state),
+            Window::GitLog(id) => self
+                .git_log
+                .render_title_row(ops, pane_box, focused, theme, state, id),
+            Window::CommitDiff(_) => self
+                .commit_diff
+                .render_title_row(ops, pane_box, focused, theme, state),
         }
     }
 }
@@ -296,6 +311,8 @@ impl Component<AppState, AppSignal> for PaneComponent {
     fn reset(&mut self) {
         self.picker.reset();
         self.theme_picker.reset();
+        self.git_log.reset();
+        self.commit_diff.reset();
         self.preview.reset();
         self.terminal.reset();
         self.preview_drag_active = false;
@@ -897,6 +914,15 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 self.terminal
                     .handle_event(global_data, input_event, has_focus)
             }
+            Some(Window::GitLog(id)) => {
+                self.git_log.set_window_id(id);
+                self.git_log
+                    .handle_event(global_data, input_event, has_focus)
+            }
+            Some(Window::CommitDiff(_)) => {
+                self.commit_diff
+                    .handle_event(global_data, input_event, has_focus)
+            }
             None => Ok(EventPropagation::Propagate),
         }
     }
@@ -1005,6 +1031,15 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 }
                 Some(Window::Terminal(_)) => {
                     self.terminal
+                        .render(global_data, inner_bounds, surface_bounds, has_focus)?
+                }
+                Some(Window::GitLog(id)) => {
+                    self.git_log.set_window_id(id);
+                    self.git_log
+                        .render(global_data, inner_bounds, surface_bounds, has_focus)?
+                }
+                Some(Window::CommitDiff(_)) => {
+                    self.commit_diff
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
                 None => {}

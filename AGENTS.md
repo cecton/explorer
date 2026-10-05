@@ -36,8 +36,9 @@ Guiding principles:
 - **Personal tool.** Decisions are shaped by the owner's workflow, not by
   general-purpose adoption. Prefer the direct solution over configurable generality.
 
-Direction (not yet built — do not scaffold ahead of need): deeper **AI tooling**
-integration, and native **git tooling** to replace `tig` (blame, diff, status).
+Direction (partly built — log and diff panes shipped; status and blame are
+not — do not scaffold ahead of need): deeper **AI tooling** integration, and
+native **git tooling** to replace `tig` (status, blame).
 
 ---
 
@@ -54,9 +55,10 @@ Source is organized as:
 - `src/main.rs` — async entry point, wires CLI → loader → TUI
 - `src/cli.rs` — CLI argument parsing via `pico-args`
 - `src/config.rs` — KDL configuration file parsing (theme, `keybindings` block, `counters` block); saving a theme re-serializes the document so bindings survive
+- `src/git.rs` — gix-backed git data: `load_log` (first-parent walk of HEAD or a resolved branch/tag ref, capped at `MAX_LOG_ENTRIES` entries in a `LogHistory`, plus `refs`: commit → branches/remote branches/tags map built by peeling every ref), `load_refs` (flat branch/tag list for the branch picker), `load_commit_diff` (unified text), `LogEntry`, `GitRef`/`RefKind`, `DiffLine`/`DiffKind`, `commit_type_prefix` (conventional-commit parsing), datetime + short-id helpers
 - `src/keymap.rs` — configurable top-level shortcuts: `Action` enum, `Keymap` mapping `KeyPress` → action per leader/global context, key-spec parsing, status-bar hint rendering
 - `src/loader.rs` — parallel file walking and `LoadedFile` construction
-- `src/session.rs` — session save/restore (pane stack, terminals, highlights)
+- `src/session.rs` — session save/restore (pane stack incl. git log windows with branch + query, terminals, highlights)
 - `src/lsp.rs` — LSP client (JSON-RPC over stdio); public API: `send_file_request`, `health_check`, `try_drain_pending_requests`, `LspHealth` enum
 - `src/watcher.rs` — filesystem watcher via `notify`; debounces events into `BatchedWatchEvent` and broadcasts via `WATCHER_RRT`
 - `src/tui/mod.rs` — module declarations
@@ -67,6 +69,8 @@ Source is organized as:
 - `src/tui/pane_component.rs` — `PaneComponent` implementation: renders a stack of overlapping windows within a pane slot with tab-style headers; manages per-pane state and command routing to child components
 - `src/tui/file_name_picker.rs` — fuzzy file-name picker overlay (exceptions → input → navigation)
 - `src/tui/fuzzy_picker.rs` — shared fuzzy list picker component; navigation via flat `match` on `InputEvent`
+- `src/tui/git_log_pane.rs` — git log pane component; multiple windows (`Window::GitLog(id)`, state in `AppState.git_logs`); renders async-loaded log entries for HEAD or the window's chosen branch, arrow/page/home/end/mouse selection, `/` live filter via nucleo (`run_log_match`/`apply_filter`; ENTER validates, Esc clears search, Esc outside search is a noop), `b` in-window branch picker (fuzzy `run_ref_match` over all branches and tags, prompt `Show branch:`; ENTER loads that branch, Esc returns to HEAD), conventional-commit type coloring, 3-space date gap, right-aligned ref decoration per row (`layout_refs`: branches then tags, drop from the right with `...` in the dropped group's color), `Logs` title with `(branch)` segment, `(10000+)` when truncated, ` — <query>` suffix while a filter is validated), Enter opens a `CommitDiff` window (seeding `state.commit_diffs` and spawning `load_commit_diff` if absent)
+- `src/tui/commit_diff_pane.rs` — commit diff pane component; renders a colored unified diff for one commit (`+` green, `-` red, `@@` yellow, headers cyan); Backspace sends the window to back, Esc closes it
 - `src/tui/theme.rs` — `HelixTheme` type; loads bundled TOML files via `include!("../../themes/themes.rs")`
 - `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview (exceptions → input → navigation)
 - `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane); text selection uses global `AppState`
@@ -144,6 +148,7 @@ cargo test <module>::<test_name>
 | `arc-swap`             | 1.x     | Lock-free atomic swap for the shared file list (`Arc<ArcSwap<Vec<Arc<LoadedFile>>>>`) |
 | `camino`               | 1.x     | UTF-8–typed path types (`Utf8PathBuf`, etc.)                   |
 | `directories`          | 5.x     | XDG Base Directory resolution for config and session storage   |
+| `gix`                  | 0.87.x  | Git data (log walk, tree diff, blob unified diff); pure Rust   |
 | `hex`                  | 0.4.x   | Hex encoding for session filename hashes                       |
 | `jwalk`                | 0.8.x   | Parallel directory traversal (uses rayon)                      |
 | `kdl`                  | 6.x     | KDL config file parsing                                        |
@@ -166,7 +171,7 @@ cargo test <module>::<test_name>
 | `url`                  | 2.x     | URL parsing in `word_bounds` for cursor-based URL selection    |
 
 Planned feature areas and their likely dependencies:
-- **Git tooling** (blame, diff, status — intended to replace `tig`): `git2`
+- **Git tooling** (remaining: status, blame — intended to replace `tig`; log and diff have shipped). See `docs/superpowers/specs/2026-09-21-git-log-pane-design.md`
 - **AI tooling** integration (deeper assistant workflows inside the workspace): TBD
 
 ---

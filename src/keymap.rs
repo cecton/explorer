@@ -7,8 +7,9 @@
 //! be overridden from `config.kdl` (see [`Keymap::apply_overrides`]).
 //!
 //! Config slugs accepted in the `keybindings` block: `leader`, `quit`, `focus-next`,
-//! `focus-prev`, `open-file-picker`, `open-terminal`, `open-theme-picker`, `close-pane`,
-//! `resize-grow`, `resize-shrink`, `move-pane-forward`, `move-pane-backward`.
+//! `focus-prev`, `open-file-picker`, `open-terminal`, `open-theme-picker`,
+//! `open-git-log`, `close-pane`, `resize-grow`, `resize-shrink`, `move-pane-forward`,
+//! `move-pane-backward`.
 
 use r3bl_tui::{Key, KeyPress, KeyState, ModifierKeysMask, SpecialKey};
 
@@ -23,6 +24,7 @@ pub enum Action {
     OpenFilePicker,
     OpenTerminal,
     OpenThemePicker,
+    OpenGitLog,
     ClosePane,
     GrabTerminal,
     DismissLeader,
@@ -42,6 +44,7 @@ impl Action {
             "open-file-picker" => Action::OpenFilePicker,
             "open-terminal" => Action::OpenTerminal,
             "open-theme-picker" => Action::OpenThemePicker,
+            "open-git-log" => Action::OpenGitLog,
             "close-pane" => Action::ClosePane,
             "resize-grow" => Action::ResizeGrow,
             "resize-shrink" => Action::ResizeShrink,
@@ -76,6 +79,7 @@ impl Default for Keymap {
                 (plain_char('f'), Action::OpenFilePicker),
                 (plain_char('t'), Action::OpenTerminal),
                 (plain_char('T'), Action::OpenThemePicker),
+                (plain_char('g'), Action::OpenGitLog),
                 (plain_char('q'), Action::Quit),
                 (plain_char('x'), Action::ClosePane),
                 (plain_special(SpecialKey::Tab), Action::FocusNext),
@@ -251,6 +255,7 @@ mod tests {
             km.global_action(&ctrl_special(SpecialKey::Down)),
             Some(Action::ResizeGrow)
         );
+        assert_eq!(km.leader_action(&plain_char('g')), Some(Action::OpenGitLog));
         // Pressing the leader key inside leader mode grabs the terminal.
         assert_eq!(km.leader_action(&km.leader_key), Some(Action::GrabTerminal));
         assert_eq!(km.global_action(&plain_char('q')), None);

@@ -1,3 +1,4 @@
+use crate::git::{DiffLine, GitRef, LogHistory};
 use crate::keymap::Keymap;
 use crate::loader::{FileKey, LoadedFile};
 use crate::session::TerminalRestoreInfo;
@@ -245,6 +246,26 @@ impl<T: Clone + PartialEq> FuzzyPickerState<T> {
     }
 }
 
+#[derive(Clone, Default)]
+pub struct GitLogWindowState {
+    pub entries: Option<Arc<LogHistory>>,
+    pub error: Option<String>,
+    pub selected: usize,
+    pub query: String,
+    /// Some = query active: (entry index, nucleo match positions), relevance order.
+    pub filtered: Option<Vec<(usize, Vec<u32>)>>,
+    /// Ref whose history this window shows; None = HEAD.
+    pub branch: Option<String>,
+    pub branch_picking: bool,
+    pub branch_picker: FuzzyPickerState<usize>,
+}
+
+#[derive(Clone, Default)]
+pub struct CommitDiffState {
+    pub lines: Option<Arc<Vec<DiffLine>>>,
+    pub error: Option<String>,
+}
+
 pub struct TerminalPane {
     pub ofs_buf: OfsBufVT100,
     pub title: Option<String>,
@@ -301,6 +322,11 @@ pub struct AppState {
     pub files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     pub files_version: u64,
     pub root: Utf8PathBuf,
+    /// Shared git repository handle, opened once at startup and cheaply cloned
+    /// for each background git operation instead of re-opening `root` every
+    /// time. `None` only if opening fails (e.g. permissions) — git.rs call
+    /// sites already handle this gracefully via `Result<_, String>`.
+    pub repo: Option<gix::ThreadSafeRepository>,
     /// Pane stack, sizes, layout, and focus state.
     pub pane_manager: PaneManager,
     /// Last known surface size used for on-demand layout recomputation.
@@ -319,6 +345,19 @@ pub struct AppState {
     pub next_terminal_id: usize,
     /// Terminal windows restored from the session that still need a PTY spawned.
     pub pending_terminals: HashMap<usize, TerminalRestoreInfo>,
+    /// Git log windows keyed by their unique ID.
+    pub git_logs: HashMap<usize, GitLogWindowState>,
+    /// Next available git log window ID.
+    pub next_git_log_id: usize,
+    /// Cached flat list of all branches and tags for the branch picker.
+    pub git_refs: Option<Arc<Vec<crate::git::GitRef>>>,
+    /// Git log windows restored from the session that still need a log loaded:
+    /// (window id, branch ref, search query).
+    pub pending_git_logs: Vec<usize>,
+    /// Loaded commit diffs keyed by commit object id.
+    pub commit_diffs: HashMap<[u8; 20], CommitDiffState>,
+    /// Commit-diff windows restored from the session that still need a diff loaded.
+    pub pending_diffs: Vec<[u8; 20]>,
     /// Maps editor terminal IDs back to the FileKey they should restore on exit.
     pub terminal_to_preview: HashMap<usize, FileKey>,
     pub mouse_drag_active: bool,
@@ -332,6 +371,9 @@ pub struct AppState {
     /// Whether terminal output counts as active time even without keyboard input
     /// (config `counters.render-counts-as-active`).
     pub count_render_as_active: bool,
+    /// Whether the repository has uncommitted changes (staged or unstaged),
+    /// refreshed periodically by a background `git::is_dirty` check.
+    pub is_dirty: bool,
     pub symbol_highlights: Vec<SymbolHighlightGroup>,
     pub next_palette_index: usize,
     /// Per-file regex search (vim-style `/` `?` `n` `N`). Transient — never persisted to the
@@ -391,11 +433,13 @@ impl AppState {
         let mut pane_manager = PaneManager::new();
         pane_manager.push_window(Window::FileNamePicker);
         pane_manager.focused_window = Some(Window::FileNamePicker);
+        let repo = gix::ThreadSafeRepository::open(root.as_std_path()).ok();
 
         let mut state = Self {
             files,
             files_version: 0,
             root,
+            repo,
             pane_manager,
             last_surface_size: Size::default(),
             highlight_ranges: HashMap::new(),
@@ -408,6 +452,12 @@ impl AppState {
             terminal_panes: HashMap::new(),
             next_terminal_id: 0,
             pending_terminals: HashMap::new(),
+            git_logs: HashMap::new(),
+            next_git_log_id: 0,
+            git_refs: None,
+            pending_git_logs: Vec::new(),
+            commit_diffs: HashMap::new(),
+            pending_diffs: Vec::new(),
             terminal_to_preview: HashMap::new(),
             mouse_drag_active: false,
             terminal_grabbed: false,
@@ -416,6 +466,7 @@ impl AppState {
             time: SessionTime::default(),
             show_timers: true,
             count_render_as_active: true,
+            is_dirty: false,
             symbol_highlights: Vec::new(),
             next_palette_index: 0,
             search: HashMap::new(),
@@ -492,6 +543,20 @@ pub enum AppSignal {
     /// hot-reload `cargo.*` settings, so applying this restarts the LSP worker
     /// (deferred until the old one has actually exited — see `app_handle_signal`).
     SetCargoFeatures(crate::lsp::CargoFeatureSelection),
+    /// Result of an async `git::load_log` run for git log window `id`.
+    GitLogLoaded {
+        id: usize,
+        result: Result<Arc<LogHistory>, String>,
+    },
+    /// Result of an async `git::load_refs` run (branch picker list).
+    GitRefsLoaded(Result<Arc<Vec<GitRef>>, String>),
+    /// Result of an async `git::load_commit_diff` run for `id`.
+    CommitDiffLoaded {
+        id: [u8; 20],
+        result: Result<Arc<Vec<DiffLine>>, String>,
+    },
+    /// Result of an async `git::is_dirty` check.
+    DirtyStatusLoaded(Result<bool, String>),
     #[default]
     Noop,
 }

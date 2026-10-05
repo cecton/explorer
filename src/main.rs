@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 mod cli;
 mod config;
+mod git;
 mod keymap;
 mod loader;
 mod lsp;

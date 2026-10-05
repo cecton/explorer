@@ -98,6 +98,8 @@ pub struct AppMain {
     watcher_guard: Option<SubscriberGuard<WatcherWorker>>,
     /// Counts 1s Noop ticks so the time counters are flushed to disk periodically.
     time_flush_ticks: u64,
+    /// Counts 1s Noop ticks so the status-bar dirty flag is rechecked periodically.
+    dirty_check_ticks: u64,
 }
 
 impl AppMain {
@@ -123,6 +125,7 @@ impl AppMain {
             lsp_restart_pending: false,
             watcher_guard: None,
             time_flush_ticks: 0,
+            dirty_check_ticks: 0,
         })
     }
 
@@ -521,6 +524,21 @@ impl App for AppMain {
             }
         });
 
+        // Run one dirty-status check immediately so the status-bar flag isn't wrong for
+        // the first few seconds before the periodic Noop-tick recheck kicks in.
+        if let Some(repo) = global_data.state.repo.clone() {
+            let main_tx = notify_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = crate::git::is_dirty(&repo);
+                send_signal!(
+                    main_tx,
+                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::DirtyStatusLoaded(
+                        result
+                    ))
+                );
+            });
+        }
+
         let stack = global_data.state.pane_manager.window_stack.clone();
         for window in stack {
             let Window::Terminal(id) = window else {
@@ -548,6 +566,56 @@ impl App for AppMain {
                 global_data.state.pane_manager.remove_window(&window);
                 global_data.state.mark_session_dirty();
             }
+        }
+
+        for id in global_data.state.pending_diffs.drain(..) {
+            if global_data.state.commit_diffs.contains_key(&id) {
+                continue;
+            }
+            global_data
+                .state
+                .commit_diffs
+                .insert(id, CommitDiffState::default());
+            let main_tx = notify_tx.clone();
+            match global_data.state.repo.clone() {
+                Some(repo) => {
+                    tokio::task::spawn_blocking(move || {
+                        let result = crate::git::load_commit_diff(&repo, id)
+                            .map(|text| std::sync::Arc::new(crate::git::classify_diff(&text)));
+                        send_signal!(
+                            main_tx,
+                            TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                AppSignal::CommitDiffLoaded { id, result }
+                            )
+                        );
+                    });
+                }
+                None => {
+                    send_signal!(
+                        main_tx,
+                        TerminalWindowMainThreadSignal::ApplyAppSignal(
+                            AppSignal::CommitDiffLoaded {
+                                id,
+                                result: Err("open repository: not a git repository".to_string()),
+                            }
+                        )
+                    );
+                }
+            }
+        }
+
+        for id in global_data.state.pending_git_logs.drain(..) {
+            let main_tx = notify_tx.clone();
+            crate::tui::git_log_pane::GitLogPaneComponent::reload_log(
+                global_data.state.repo.clone(),
+                main_tx,
+                id,
+                global_data
+                    .state
+                    .git_logs
+                    .get(&id)
+                    .and_then(|win| win.branch.clone()),
+            );
         }
 
         // Request full tokens for session-restored file previews.
@@ -658,6 +726,25 @@ impl App for AppMain {
                     state.theme_picker.query = String::new();
                     return Ok(EventPropagation::ConsumedRender);
                 }
+                Some(Action::OpenGitLog) => {
+                    let state = &mut global_data.state;
+                    let id = state.next_git_log_id;
+                    state.next_git_log_id += 1;
+                    state.git_logs.insert(id, GitLogWindowState::default());
+                    let window = Window::GitLog(id);
+                    let old = state.pane_manager.focused_window;
+                    state.pane_manager.push_window(window);
+                    state.pane_manager.focused_window = Some(window);
+                    notify_terminal_focus_change(state, old, Some(window));
+                    let main_tx = global_data.main_thread_channel_sender.clone();
+                    crate::tui::git_log_pane::GitLogPaneComponent::reload_log(
+                        state.repo.clone(),
+                        main_tx,
+                        id,
+                        None,
+                    );
+                    return Ok(EventPropagation::ConsumedRender);
+                }
                 Some(Action::Quit) => {
                     return Ok(EventPropagation::ExitMainEventLoop);
                 }
@@ -687,29 +774,47 @@ impl App for AppMain {
                 }
                 Some(Action::ClosePane) => {
                     let state = &mut global_data.state;
-                    let tid = match state.pane_manager.focused_window {
-                        Some(Window::Terminal(tid)) => tid,
-                        _ => return Ok(EventPropagation::ConsumedRender),
+                    let Some(old) = state.pane_manager.focused_window else {
+                        return Ok(EventPropagation::ConsumedRender);
                     };
-                    // Send focus-lost before removing the pane.
-                    if let Some(pane) = state.terminal_panes.get(&tid) {
-                        let p = pane.lock();
-                        if p.ofs_buf.terminal_mode.focus_events {
-                            let _ = p
-                                .pty_input_tx
-                                .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
+                    if let Window::Terminal(tid) = old {
+                        // Send focus-lost before removing the pane.
+                        if let Some(pane) = state.terminal_panes.get(&tid) {
+                            let p = pane.lock();
+                            if p.ofs_buf.terminal_mode.focus_events {
+                                let _ = p
+                                    .pty_input_tx
+                                    .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
+                            }
                         }
-                    }
-                    let old = state.pane_manager.focused_window;
-                    if let Some(pane) = state.terminal_panes.remove(&tid) {
-                        let mut p = pane.lock();
-                        if let Some(mut killer) = p.child_killer.take() {
-                            let _ = killer.kill();
+                        if let Some(pane) = state.terminal_panes.remove(&tid) {
+                            let mut p = pane.lock();
+                            if let Some(mut killer) = p.child_killer.take() {
+                                let _ = killer.kill();
+                            }
                         }
+                        state.pane_manager.remove_window(&Window::Terminal(tid));
+                        notify_terminal_focus_change(
+                            state,
+                            Some(old),
+                            state.pane_manager.focused_window,
+                        );
+                        sync_terminal_grabbed(state);
+                        state.mark_session_dirty();
+                        return Ok(EventPropagation::ConsumedRender);
                     }
-                    state.pane_manager.remove_window(&Window::Terminal(tid));
-                    notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
-                    sync_terminal_grabbed(state);
+                    if let Window::GitLog(id) = old {
+                        state.git_logs.remove(&id);
+                    }
+                    if let Window::CommitDiff(id) = old {
+                        state.commit_diffs.remove(&id);
+                    }
+                    state.pane_manager.remove_window(&old);
+                    notify_terminal_focus_change(
+                        state,
+                        Some(old),
+                        state.pane_manager.focused_window,
+                    );
                     state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -1187,6 +1292,64 @@ impl App for AppMain {
                         state.mark_session_dirty();
                     }
                 }
+                AppSignal::GitLogLoaded { id, result } => {
+                    if let Some(win) = state.git_logs.get_mut(id) {
+                        match result {
+                            Ok(entries) => {
+                                win.entries = Some(entries.clone());
+                                win.error = None;
+                                let count = win
+                                    .entries
+                                    .as_ref()
+                                    .map_or(0, |history| history.entries.len());
+                                if win.selected >= count {
+                                    win.selected = count.saturating_sub(1);
+                                }
+                                crate::tui::git_log_pane::apply_filter(win);
+                            }
+                            Err(e) => win.error = Some(e.clone()),
+                        }
+                    }
+                }
+                AppSignal::GitRefsLoaded(result) => {
+                    if let Ok(refs) = result {
+                        state.git_refs = Some(refs.clone());
+                    }
+                    let picking: Vec<usize> = state
+                        .git_logs
+                        .iter()
+                        .filter(|(_, win)| win.branch_picking)
+                        .map(|(id, _)| *id)
+                        .collect();
+                    for id in picking {
+                        crate::tui::git_log_pane::GitLogPaneComponent::
+                            refresh_branch_results_for_window(state, id);
+                    }
+                }
+                AppSignal::CommitDiffLoaded { id, result } => {
+                    let still_open = state
+                        .pane_manager
+                        .window_stack
+                        .iter()
+                        .any(|w| matches!(w, Window::CommitDiff(other) if other == id));
+                    if still_open {
+                        let entry = state.commit_diffs.entry(*id).or_default();
+                        match result {
+                            Ok(lines) => {
+                                entry.lines = Some(lines.clone());
+                                entry.error = None;
+                            }
+                            Err(e) => entry.error = Some(e.clone()),
+                        }
+                    }
+                }
+                AppSignal::DirtyStatusLoaded(result) => {
+                    // Errors are transient (e.g. a momentary git-lock during a commit);
+                    // leave the previous value rather than surfacing them.
+                    if let Ok(dirty) = result {
+                        state.is_dirty = *dirty;
+                    }
+                }
                 AppSignal::Noop | AppSignal::TerminalOutput => {
                     // Streaming terminal output counts as activity when the option is on,
                     // so a running command keeps the active counter alive without input.
@@ -1206,6 +1369,23 @@ impl App for AppMain {
                     self.time_flush_ticks = self.time_flush_ticks.wrapping_add(1);
                     if self.time_flush_ticks.is_multiple_of(60) {
                         state.mark_session_dirty();
+                    }
+                    // Recheck the working-tree dirty status every ~5s rather than every
+                    // render, since it requires walking the index/worktree.
+                    self.dirty_check_ticks = self.dirty_check_ticks.wrapping_add(1);
+                    if self.dirty_check_ticks.is_multiple_of(5)
+                        && let Some(repo) = state.repo.clone()
+                    {
+                        let main_tx = global_data.main_thread_channel_sender.clone();
+                        tokio::task::spawn_blocking(move || {
+                            let result = crate::git::is_dirty(&repo);
+                            send_signal!(
+                                main_tx,
+                                TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                    AppSignal::DirtyStatusLoaded(result)
+                                )
+                            );
+                        });
                     }
                     maybe_save_session(state, &self.root);
                     crate::lsp::try_drain_pending_requests();
@@ -1498,10 +1678,11 @@ fn render_status_bar(
         (
             " Leader ".to_string(),
             format!(
-                "{}:Picker  {}:Term  {}:Theme  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
+                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
                 leader_lbl(Action::OpenFilePicker),
                 leader_lbl(Action::OpenTerminal),
                 leader_lbl(Action::OpenThemePicker),
+                leader_lbl(Action::OpenGitLog),
                 leader_lbl(Action::ClosePane),
                 leader_lbl(Action::Quit),
                 leader_lbl(Action::FocusNext),
@@ -1515,6 +1696,12 @@ fn render_status_bar(
                 Some(Window::FileNamePicker) => "Esc:Close  Enter:Open",
                 Some(Window::ThemePicker) => "Esc:Cancel  Enter:Save",
                 Some(Window::FilePreview(_)) => "e:Edit  Backspace:Send to back  ::Command",
+                Some(Window::GitLog(_)) => {
+                    "Backspace:Send to back  b:Branch  ↑↓:Select  /:Search  Enter:Diff  Esc:Clear search"
+                }
+                Some(Window::CommitDiff(_)) => {
+                    "Backspace:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll"
+                }
                 Some(Window::Terminal(_)) if !state.terminal_grabbed => {
                     "Backspace:Send to back  Enter:grab  ↑↓PgUp/PgDn:scroll"
                 }
@@ -1570,28 +1757,42 @@ fn render_status_bar(
     render_ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row_idx);
     render_tui_styled_texts_into(&styled_texts, &mut render_ops);
 
-    // Right-aligned time counters, framed off from the shortcut hints by a box-drawing
-    // vertical bar: `│ session_active/session_total  Σ project_active/project_total`.
-    // Σ separates the current session (left) from the cumulative project total (right).
-    // Suppressed entirely when the `show-timers` config option is disabled.
-    if state.show_timers {
+    // Right-aligned "dirty" flag (uncommitted staged/unstaged changes), shown in a
+    // bright error-like theme color, followed by the time counters. Each is
+    // independently optional: the flag reflects `state.is_dirty` unconditionally, the
+    // counters are gated on the `show-timers` config option.
+    let error_fg = TuiColor::from(theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG));
+    let dirty_style = new_style!(bold color_fg: {error_fg} color_bg: {color_bg});
+    let dirty_label = state.is_dirty.then(|| " dirty ".to_string());
+    let counters = state.show_timers.then(|| {
         let t = &state.time;
-        let counters = format!(
+        format!(
             "│ {}/{}  Σ {}/{} ",
             fmt_duration(t.session_active()),
             fmt_duration(t.session_total()),
             fmt_duration(t.project_active()),
             fmt_duration(t.project_total()),
-        );
-        let counters_width = GCStringOwned::from(counters.as_str())
-            .display_width()
-            .as_usize();
-        // Only draw when it fits alongside the left hints (leave a small gap), so narrow
-        // terminals keep the shortcut hints rather than being overwritten.
-        let total_width = size.col_width.as_usize();
-        if total_width > counters_width + 2 {
-            let start_col = total_width - counters_width;
-            render_ops += RenderOpCommon::MoveCursorPositionAbs(col(start_col as u16) + row_idx);
+        )
+    });
+    let dirty_width = dirty_label
+        .as_deref()
+        .map(|s| GCStringOwned::from(s).display_width().as_usize())
+        .unwrap_or(0);
+    let counters_width = counters
+        .as_deref()
+        .map(|s| GCStringOwned::from(s).display_width().as_usize())
+        .unwrap_or(0);
+    let combined_width = dirty_width + counters_width;
+    // Only draw when it fits alongside the left hints (leave a small gap), so narrow
+    // terminals keep the shortcut hints rather than being overwritten.
+    let total_width = size.col_width.as_usize();
+    if combined_width > 0 && total_width > combined_width + 2 {
+        let start_col = total_width - combined_width;
+        render_ops += RenderOpCommon::MoveCursorPositionAbs(col(start_col as u16) + row_idx);
+        if let Some(label) = dirty_label {
+            render_ops += RenderOpIR::PaintTextWithAttributes(label.into(), Some(dirty_style));
+        }
+        if let Some(counters) = counters {
             render_ops += RenderOpIR::PaintTextWithAttributes(counters.into(), Some(normal_style));
         }
     }
