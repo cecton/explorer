@@ -11,8 +11,8 @@ stored as plain files, survives restarts, and links each node to the git commits
 agent produced for it.
 
 Every prompt is sent in one of two modes chosen by the user: **feedback** (the agent
-teaches and advises, changes nothing) or **commit** (the agent executes an instruction
-and commits the result).
+teaches and advises; whatever it tries in the working tree is discarded when its turn
+ends) or **commit** (the agent executes an instruction and commits the result).
 
 Three windows make up the feature:
 
@@ -46,8 +46,9 @@ comes from the agent. This gives the two modes, and two very different agents:
 
 - **feedback — the teacher.** The agent shares knowledge: it explains, gives opinions,
   brings best practices and what is common elsewhere, and says when an idea is a bad
-  one. It is invited to be talkative. It changes nothing in the repository. (opencode
-  calls the equivalent mode "plan".)
+  one. It is invited to be talkative. It may experiment in the working tree to verify
+  what it says, but leaves nothing behind: the tree is reset when its turn ends, and it
+  never commits. (opencode calls the equivalent mode "plan".)
 - **commit — the executor.** The reasoning has been done. The agent follows the
   instruction as given, speaks up only for an unforeseen hurdle, and commits. (opencode:
   "build".)
@@ -84,10 +85,12 @@ reasons behind them.
 | Backend switch | Allowed. Crossing between `claude-code` and `openai` replays ancestors as prompt and reply text only (lossy handover). |
 | Storage | `~/.local/share/explorer/conversations/<repo-hash>/`, never inside the repository. Tokens in `~/.local/share/explorer/auth.kdl`. |
 | Committer | The agent commits; Explorer verifies after the turn and records the hashes. Amend and rebase are allowed. |
-| Dirty tree | A **commit** prompt is refused while the working tree has uncommitted changes. Feedback prompts are never refused for this. |
+| Dirty tree | Every prompt, whatever its mode, is refused while the working tree has uncommitted changes. |
+| Feedback scratch work | A feedback turn may edit, build and test freely; Explorer hard-resets the working tree when the turn ends, so a commit is the only change a turn can leave. |
 | Forgotten commit | Explorer stays in the loop and sends a hidden nudge asking the agent to commit. |
 | Leftovers | Only when nudging is impossible or exhausted, Explorer stashes what is left and flags the node. |
-| Locking | Like a read-write lock per repository: one commit turn excludes everything; any number of feedback turns may run together. |
+| Locking | One turn at a time per repository, whatever its mode. |
+| Reply and work log | The reply is the text of the answers that called no tools. The narration between tool calls and the tool calls themselves go to a display-only work log. |
 | Permissions | None in v1: every tool call is allowed, file tools are confined to the repository root. |
 | Model list | Fetched from each endpoint at startup; a fixed effort set is offered for every model. |
 | Context overflow | Manual `/compact` built-in command. No automatic compaction. |
@@ -107,6 +110,11 @@ reasons behind them.
 - **Prompt** — the user's text for a node.
 - **System prompt** — the instructions Explorer sends ahead of the conversation. This is
   the standard term for what was first called the "base prompt"; there is one per mode.
+- **Answer** — one response of the model within a turn. Every answer but the last ends
+  by calling tools.
+- **Reply** — the text of the answers that called no tools: what the turn has to say.
+- **Work log** — what led to the reply: the text of the answers that called tools, and
+  the tool calls. Shown to the user, never sent to a model.
 - **Transcript** — the exact message list of a turn as exchanged with the model.
 - **Model spec** — the string `endpoint/model/effort`.
 
@@ -161,6 +169,7 @@ head-before: <full hash>
 head-after: <full hash>
 commits: <full hash> <full hash>     commit nodes only; oldest first
 stash: <full hash>            only when leftovers were stashed
+scratch-reset: true           only when a feedback turn's changes were discarded
 favorite: true                only when set
 command: review               only when a slash command was expanded
 session-id: <uuid>            claude-code only
@@ -174,8 +183,8 @@ error: <one line>             only for failed
 Rules:
 
 - **Startup** reads, once and off the UI thread, every node's `metadata.md`, `title.md`
-  and `summary.md`, and builds the tree. `prompt.md`,
-  `reply.md` and `transcript.jsonl` are **never** kept for the whole tree: they are read
+  and `summary.md`, and builds the tree. `prompt.md`, `reply.md`, `activity.md` and
+  `transcript.jsonl` are **never** kept for the whole tree: they are read
   from disk when a Discussion window opens, when a context is assembled, or when the
   `conversation` tool asks, and dropped afterwards.
 - After startup, memory is the source of truth for the tree shape and metadata, and
@@ -274,26 +283,31 @@ changed model carries on from the node that used it.
 | System prompt | `prompts/feedback.md` | `prompts/commit.md` |
 | Role | teacher: explains, advises, disagrees | executor: follows the instruction |
 | Tools (own loop) | `read`, `glob`, `grep`, `shell`, `conversation` | all of them, plus `write` and `edit` |
-| Dirty tree on send | allowed | refused |
-| Lock | shared | exclusive |
-| After the turn | no git check | verify, nudge, record commits |
+| Working tree | a lab: edits are allowed and discarded | the deliverable: edits are committed |
+| Dirty tree on send | refused | refused |
+| Lock | exclusive | exclusive |
+| After the turn | hard reset of the working tree | verify, nudge, record commits |
 
 - `Shift+Tab` in a Discussion window toggles the mode of the prompt being written. The
   mode is shown as the input's label (`feedback>` / `commit>`, colored).
 - A window starts in the mode of the node it shows (a `compact` node counts as
   feedback); a new root starts in feedback. The window's mode is saved in the session.
-- In feedback mode the shell is available so the agent can run a build, tests or
-  `git log`; nothing enforces that it stays read-only beyond the system prompt and the
-  missing `write` and `edit` tools.
+- In feedback mode the working tree is a lab. The shell is available, and on
+  `claude-code` so is everything but the editing tools, so the agent can apply a
+  candidate fix, build and run the tests to verify what it claims. Nothing of it
+  survives: when the turn ends, however it ended, Explorer runs `git reset --hard HEAD`
+  and `git clean -fd` (ignored files are kept) and records `scratch-reset: true` if
+  there was something to discard. This is safe because the tree was clean when the
+  turn started, so only the turn's own changes can be lost.
+- The reset does not undo commits. The feedback prompt forbids committing and moving or
+  rewriting history, and nothing else enforces it: a commit made by a feedback turn
+  stays, and is not recorded in the node.
 
 ### Locking
 
-One lock per repository, with read-write semantics:
-
-- a **commit** turn needs the lock exclusively: it cannot start while any turn runs, and
-  while it runs every other send is refused;
-- **feedback** and `/compact` turns share the lock: any number may run together, and
-  they block only commit turns.
+One turn runs at a time per repository, whatever its mode: a feedback turn experiments
+in the working tree and a commit turn needs it clean and to itself, so two turns can
+never share it. A send is refused while any turn is running, `/compact` included.
 
 A refused send keeps the input and shows the reason on the status line.
 
@@ -312,8 +326,9 @@ New module tree `src/agent/`:
 - `commands.rs` — slash command expansion.
 - `models.rs` — model list fetch.
 
-A running turn shares a `LiveTurn` (reply so far, current tool, token count, session id)
-with the UI through its `TurnHandle`, the same way a terminal pane shares its buffer.
+A running turn shares a `LiveTurn` (reply so far, work log, current tool, token count,
+session id) with the UI through its `TurnHandle`, the same way a terminal pane shares
+its buffer.
 Discussion windows read it at render time; the task only sends `TurnProgress` to ask
 for a render and `TurnFinished` with the outcome.
 
@@ -389,8 +404,10 @@ claude -p --output-format stream-json --verbose --include-partial-messages \
 
 - The prompt is written to stdin. Text deltas, tool activity, usage and the final result
   are parsed from the stream-json events. An answer is known to call tools when a
-  `tool_use` block starts; its text then moves to the work log (section 8). The new session id is read from the stream and
-  stored in `metadata.md`.
+  `tool_use` block starts; its text then moves to the work log (section 8). The new
+  session id is read from the stream and stored in `metadata.md`.
+- The CLI returns no reasoning text (thinking blocks arrive empty, with a signature
+  only), so there is nothing to show for it.
 - Prompt snapshotting is turned off: by default a resumed session keeps the system
   prompt of its first request, so a commit turn forked from a feedback node would still
   be told it is in feedback mode.
@@ -419,14 +436,14 @@ marks such a node.
 On `Enter` in a Discussion window:
 
 1. **Guards.** The prompt is not empty; the window has a model (otherwise the picker
-   opens); the node shown is `done` (or the window is a new root); the lock can be taken
-   in the prompt's mode; in commit mode the working tree is clean, untracked non-ignored
-   files included.
+   opens); the node shown is `done` (or the window is a new root); no other turn is
+   running; the working tree is clean, untracked non-ignored files included, whatever
+   the mode.
 2. **Expand** a slash command if the prompt starts with one.
 3. **Persist.** Create the node directory; write `prompt.md` and `metadata.md`
    (`type`, `status: running`, `head-before`). The window now shows the new node and the
    tree selection follows it.
-4. **Start**, in parallel: the title and summary calls, and the turn itself.
+4. **Start** the turn. The title and the summary are asked once it has ended (8.2).
 5. **Stream.** Reply text is flushed to `reply.md`; transcript lines are appended as
    messages complete. A turn is a series of model answers, and all but the last end by
    calling tools. The text of an answer streams into the reply; when the answer calls
@@ -435,10 +452,12 @@ On `Enter` in a Discussion window:
    tool-free answers said, in both modes and for both backends, and
    `transcript.jsonl` is unaffected.
 6. **Close**, by mode:
-   - **feedback / compact**: record `head-after`; nothing else.
+   - **feedback / compact**: record `head-after`, then discard whatever the turn left
+     in the working tree (section 6) and record `scratch-reset` when something was
+     discarded.
    - **commit**: see 8.1.
-7. **Finish.** Rewrite `metadata.md`, release the lock; open Git Log windows and the
-   dirty flag refresh.
+7. **Finish.** Rewrite `metadata.md`; the turn no longer counts as running, so the next
+   prompt can be sent; open Git Log windows and the dirty flag refresh.
 
 ### 8.1 Closing a commit turn
 
@@ -476,9 +495,16 @@ prepended to the user message as sent: the commits reachable from HEAD and not f
 parent's `head-after`, short hash and title, capped at 20. Like a nudge, the note is in
 the transcript but not in `prompt.md`.
 
+**Workspace note.** Every feedback and `/compact` message carries a note saying that
+the tree was clean when the turn started and that everything changed in it is
+hard-reset when the turn ends, so the agent neither holds back from experimenting nor
+spends tokens reverting. Like the other notes it is in the transcript but not in
+`prompt.md`.
+
 **Cancel.** `Ctrl+C` in the Discussion window of a running node aborts the HTTP stream or
 kills the child process group (including a running `shell` command). Status becomes
-`cancelled`; the partial reply is kept; a commit turn is closed as described above.
+`cancelled`; the partial reply and the work log are kept; the turn is closed as
+described above for its mode, so a cancelled or failed feedback turn is reset too.
 
 **Quit.** Quitting Explorer cancels running turns the same way. A running turn is not
 resumable and is not part of session restore.
@@ -490,12 +516,14 @@ recovered nodes alike), one non-streaming call to `summary-model` without tools
 the turn: the prompt in `<prompt>`, the reply (cut at 8000 characters) in `<reply>` and,
 in commit mode, the subjects of the commits made in `<commits>`, closed by one line asking
 for the title and the summary. The tags and that line keep the model from answering the
-prompt instead of describing it. It answers in the shape of a commit message: a title of at most 72 characters, a blank
-line, then a summary of about 50 words. The first line is the title (hard cut at 100
-characters), the rest the summary; they replace `title.md` and `summary.md`. The call
+prompt instead of describing it. It answers in the shape of a commit message: a title of
+at most 72 characters, a blank line, then a summary of about 50 words. The first line
+is the title (hard cut at 100 characters), the rest the summary; they replace `title.md`
+and `summary.md`. The call
 starts after the turn's outcome is applied, so it never delays the node. Failed and
 cancelled turns keep the prompt-based display, and failures are silent: the files stay as
-they were.
+they were. Without a `summary-model` the call is skipped and nodes keep the prompt-based
+display.
 
 ## 9. Recovering, replaying and editing nodes
 
@@ -506,9 +534,9 @@ deal with them and with second opinions:
 - **`Enter` — open, and recover if incomplete.** Opens the node in a Discussion window.
   If the node is incomplete, its turn is run again **in place**: same directory, same
   prompt, same mode, and the endpoint, model and effort it was originally asked with.
-  `reply.md`, `activity.md` and `transcript.jsonl` start over. The guards of section 8 apply; if one
-  fails (dirty tree, lock, endpoint or model no longer available) the window opens on
-  the old partial reply and shows the reason.
+  `reply.md`, `activity.md` and `transcript.jsonl` start over. The guards of section 8
+  apply; if one fails (dirty tree, another turn running, endpoint or model no longer
+  available) the window opens on the old partial reply and shows the reason.
 - **`m` — same prompt, another model.** Opens the Model Picker; on `Enter` Explorer
   creates a **sibling** of the node with the same prompt and mode, run with the chosen
   model spec, and opens it. The pick belongs to that sibling only; it does not become
@@ -536,7 +564,8 @@ the end of the text, is looked up among the commands:
 - **`/compact [instructions]`** (built-in, cannot be overridden): creates a child node of
   type `compact`, whatever the mode selected. Its turn is one call to the window's model
   with the branch so far as context and `prompts/compact.md` as instruction, plus any
-  typed instructions; no tools, shared lock. Its `reply.md` is the summary. Descendants
+  typed instructions; no tools. It is guarded and closed like a feedback turn: clean
+  tree, no other turn running. Its `reply.md` is the summary. Descendants
   of a compact node replay context starting from it, with that summary as the opening
   message. On `claude-code`, the summary is produced in a fork of the parent session and
   descendants start a fresh session from it.
@@ -590,21 +619,28 @@ suggests `/compact` from the parent node.
 
 ### 11.2 Discussion window
 
-`Window::Discussion(u16)`, state in `AppState.discussions`; several can be open. A window
-holds its node's prompt and reply in memory only while it is open.
+`Window::Discussion(usize)`, state in `AppState.discussions`; several can be open. A
+window holds its node's prompt, reply and work log in memory only while it is open.
 
 - Top to bottom: title row (node title, the window's model spec on the right); the node's
-  prompt, visually set apart; the reply; a status line; the input with its mode label.
-- Prompt and reply form one scrollable document owned by the PaneManager (scrollbar,
-  wheel and drag for free). Both are shown as plain wrapped text: Explorer has no
-  Markdown or syntect highlighter of its own (preview colors come from LSP tokens).
-  While streaming, the view follows the end unless the user scrolled up.
+  prompt, visually set apart; the work log when shown; the reply; a status line; the
+  input with its mode label.
+- Prompt, work log and reply form one scrollable document owned by the PaneManager
+  (scrollbar, wheel and drag for free). While streaming, the view follows the end unless
+  the user scrolled up.
+- The prompt is plain wrapped text. The reply is rendered as Markdown by
+  `src/tui/markdown.rs` (`pulldown-cmark`): headings, emphasis, strikethrough, inline
+  and fenced code, block quotes, nested and task lists, links (text only, underlined)
+  and rules, wrapped to the pane width. Colors come from the theme's `markup.*` scopes
+  and attributes from the Markdown element; code blocks get a background and no syntax
+  highlighting. Tables are not rendered as such.
 - The work log is shown dimmed between the prompt and the reply while the turn runs,
   and for any node that is not done or has an empty reply, so a failed or cancelled
   turn still shows what it did. A done node with a reply hides it; `Ctrl+O` shows or
   hides it either way, and the status line of a node that has one says so.
-- Status line: running (current tool, elapsed time), done (type, short hashes, tokens),
-  failed (error), cancelled, or the reason a send was refused.
+- Status line: running (current tool, elapsed time), done (type, short hashes, stash or
+  discarded scratch work, tokens), failed (error), cancelled, or the reason a send was
+  refused.
 - The input is always active, also while a turn runs: the next prompt can be drafted,
   but `Enter` is refused until the node is done. Drafts are kept per window and saved in
   the session.
@@ -650,8 +686,10 @@ picker was opened:
   of a commit is found by scanning the nodes' metadata, which is fast enough not to
   need an index.
 - `src/config.rs` — `agent` block; new `auth.kdl` loader.
+- `src/tui/markdown.rs` — Markdown to theme-colored styled lines, for replies.
 - `AppState` gains the tree, `discussions` (each with its model spec), the model list,
-  the model last picked in this run, the repository lock and the running-turn handles.
+  the model last picked in this run and the running-turn handles, which are also the
+  lock: a prompt is refused while there is one.
 - `AppSignal` gains the tree-loaded, models-fetched, turn-event and title/summary-ready
   variants.
 - `Action::OpenConversations`, slug `open-conversations`, default `<leader>c`.
@@ -659,7 +697,8 @@ picker was opened:
   expanded set. No model is saved. The Model Picker is not saved. `SESSION_VERSION`
   3 → 4.
 - New dependencies: `genai`; `reqwest` for the model-list fetch, which genai only does
-  against a provider's default endpoint; `futures-util` to read genai's stream.
+  against a provider's default endpoint; `futures-util` to read genai's stream;
+  `pulldown-cmark` to parse replies.
 
 ## 13. Error handling
 
@@ -682,12 +721,17 @@ Hermetic unit tests:
 - tree load from a temp directory with missing files and an interrupted node; prompts
   and replies not retained;
 - `metadata.md` round trip;
-- lock: exclusive commit, shared feedback, refusal reasons;
+- lock: any running turn excludes every prompt;
 - slash expansion: custom, unknown, path-like, `/compact`;
 - context assembly: ancestor walk, compact cut-off, handover, repository-moved note,
   injected messages preserved;
 - commit-turn closing on a temporary git repository: clean, nudge then clean, nudges
   exhausted then stash, amended history;
+- feedback-turn closing: scratch work discarded, ignored files kept, a clean tree and a
+  repository without commits left alone;
+- recorder: the text of an answer that calls tools moves from the reply to the work
+  log, with one line per tool call;
+- Markdown rendering: styles, wrapping, nested and tight lists, code blocks;
 - recover in place, sibling with another model, edit-as-sibling target;
 - `conversation` pages: roots paging, path, straight-line segment cap, branches, commit
   lookup;
@@ -695,7 +739,8 @@ Hermetic unit tests:
   and summary) and the delete arming state machine;
 - model resolution: node's model when continuing, last pick for a new root, unset after
   startup;
-- title limit: cut at 100 characters, short single-line prompt reused;
+- title and summary: answer parsing, title cut at 100 characters, reply cut and commits
+  listed in the record sent;
 - stream-json parsing from a recorded `claude` fixture;
 - file tools refusing paths outside the root; `write` and `edit` absent in feedback
   mode.
@@ -744,13 +789,21 @@ Defaults chosen without an explicit answer; change freely.
 8. A commit node with no commits (nothing to change, or a question back) is valid.
 9. `metadata.md` is flat `key: value` lines rather than KDL or JSON.
 10. Slash expansion happens on send, not live in the input.
-11. One `summary-model` for both titles and summaries; short prompts skip the call.
+11. One `summary-model` for both titles and summaries, asked in one call after the
+    turn; without it nodes keep the first line of their prompt as title.
 12. A new root reuses the model last picked in this run instead of asking every time.
-13. Untracked files count as a dirty tree.
+13. Untracked files count as a dirty tree, and a dirty tree refuses feedback prompts
+    too: it is what makes the reset at the end of a feedback turn safe.
 14. `AGENTS.md` is injected into the system prompt of the own loop.
 15. `claude-code` runs with `--permission-mode bypassPermissions`.
 16. A turn found dirty after a commit turn is stashed with
     `git stash push --include-untracked`; the stash of an earlier attempt of the same
     node is no longer referenced by its metadata once the node is run again.
-17. Key choices: `<leader>c`, `n`, `f`, `c`, `Ctrl+C`; `Esc` inert in the Discussion
-    window.
+17. Key choices: `<leader>c`, `n`, `f`, `c`, `Ctrl+C`, `Ctrl+O`; `Esc` inert in the
+    Discussion window.
+18. Turns are serialized even when both are feedback turns, since each may use the
+    working tree.
+19. A commit made by a feedback turn is neither prevented nor undone; only the prompt
+    forbids it.
+20. The work log is kept out of `reply.md` rather than filtered at replay, and the
+    reasoning of the model is not shown.
