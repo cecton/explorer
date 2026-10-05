@@ -124,6 +124,7 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
             }
             Event::Start(Tag::Heading { level, .. }) => r.start_heading(level),
             Event::End(TagEnd::Heading(_)) => {
+                r.end_style();
                 r.flush_content();
                 r.push_blank();
             }
@@ -541,6 +542,27 @@ mod tests {
             span.fg,
             theme().color_for_scope("markup.heading.1").unwrap()
         );
+    }
+
+    #[test]
+    fn paragraphs_after_a_heading_revert_to_plain_text_color() {
+        let lines = render_md("# Title\n\nbody text", 40);
+        let plain_fg = theme().ui_fg("ui.text").unwrap();
+        let heading = &lines[0].spans[0];
+        assert_eq!(
+            heading.fg,
+            theme().color_for_scope("markup.heading.1").unwrap()
+        );
+        let body = &lines[2];
+        assert_eq!(text(body), "body text");
+        for span in &body.spans {
+            assert_eq!(
+                span.fg, plain_fg,
+                "span {:?} kept the heading color",
+                span.text
+            );
+            assert!(!span.bold);
+        }
     }
 
     #[test]
