@@ -1,4 +1,4 @@
-use crate::agent::{AgentConfig, Endpoint, ModelSpec};
+use crate::agent::{AgentConfig, CLAUDE_CODE_KIND, Endpoint, EndpointKind, ModelSpec};
 use std::collections::HashMap;
 use std::path::PathBuf;
 
@@ -19,8 +19,7 @@ pub struct Config {
 /// The `agent` block as written in `config.kdl`: endpoints still without their tokens.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AgentSettings {
-    /// `(name, url)` of every declared endpoint.
-    pub endpoints: Vec<(String, String)>,
+    pub endpoints: Vec<EndpointDecl>,
     pub summary_model: Option<ModelSpec>,
 }
 
@@ -60,6 +59,16 @@ impl Config {
         parse(&content).map(Some)
     }
 }
+
+/// An endpoint as declared, before its token is looked up.
+#[derive(Debug, PartialEq, Eq)]
+pub enum EndpointDecl {
+    OpenAi { name: String, url: String },
+    ClaudeCode { name: String, models: Vec<String> },
+}
+
+/// Models offered for a `claude-code` endpoint that lists none.
+const CLAUDE_CODE_DEFAULT_MODELS: [&str; 3] = ["opus", "sonnet", "haiku"];
 
 fn auth_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "explorer").map(|dirs| dirs.data_dir().join("auth.kdl"))
@@ -102,16 +111,24 @@ pub fn resolve_agent(settings: AgentSettings, tokens: &HashMap<String, String>) 
     let endpoints = settings
         .endpoints
         .into_iter()
-        .filter_map(|(name, url)| match tokens.get(&name) {
-            Some(token) => Some(Endpoint {
+        .filter_map(|decl| match decl {
+            EndpointDecl::ClaudeCode { name, models } => Some(Endpoint {
                 name,
-                url,
-                token: token.clone(),
+                kind: EndpointKind::ClaudeCode { models },
             }),
-            None => {
-                tracing::warn!("endpoint '{name}' has no token in auth.kdl; skipping it");
-                None
-            }
+            EndpointDecl::OpenAi { name, url } => match tokens.get(&name) {
+                Some(token) => Some(Endpoint {
+                    name,
+                    kind: EndpointKind::OpenAi {
+                        url,
+                        token: token.clone(),
+                    },
+                }),
+                None => {
+                    tracing::warn!("endpoint '{name}' has no token in auth.kdl; skipping it");
+                    None
+                }
+            },
         })
         .collect();
     AgentConfig {
@@ -142,8 +159,16 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                     ));
                 }
                 let mut url = None;
+                let mut kind = "openai";
+                let mut models: Vec<String> = Vec::new();
                 for field in child.children().map_or(&[][..], |c| c.nodes()) {
-                    let value = string_arg(field).ok_or_else(|| {
+                    let values: Vec<&str> = field
+                        .entries()
+                        .iter()
+                        .filter(|e| e.name().is_none())
+                        .filter_map(|e| e.value().as_string())
+                        .collect();
+                    let value = values.first().copied().ok_or_else(|| {
                         format!(
                             "endpoint '{name}': {} must have a string argument",
                             field.name().value()
@@ -151,15 +176,25 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                     })?;
                     match field.name().value() {
                         "url" => url = Some(value.to_string()),
-                        "kind" if value == "openai" => {}
-                        "kind" => {
-                            return Err(format!("endpoint '{name}': unknown kind '{value}'"));
-                        }
+                        "kind" => kind = value,
+                        "models" => models = values.iter().map(|v| v.to_string()).collect(),
                         _ => {}
                     }
                 }
-                let url = url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?;
-                settings.endpoints.push((name.to_string(), url));
+                let name = name.to_string();
+                settings.endpoints.push(match kind {
+                    "openai" => EndpointDecl::OpenAi {
+                        url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
+                        name,
+                    },
+                    CLAUDE_CODE_KIND => {
+                        if models.is_empty() {
+                            models = CLAUDE_CODE_DEFAULT_MODELS.map(str::to_string).to_vec();
+                        }
+                        EndpointDecl::ClaudeCode { name, models }
+                    }
+                    other => return Err(format!("endpoint '{name}': unknown kind '{other}'")),
+                });
             }
             "summary-model" => {
                 let value =
@@ -351,15 +386,49 @@ mod config_tests {
         assert_eq!(
             config.agent.endpoints,
             [
-                ("kimi".to_string(), "https://api.moonshot.ai/v1".to_string()),
-                (
-                    "router".to_string(),
-                    "https://openrouter.ai/api/v1".to_string()
-                ),
+                EndpointDecl::OpenAi {
+                    name: "kimi".to_string(),
+                    url: "https://api.moonshot.ai/v1".to_string()
+                },
+                EndpointDecl::OpenAi {
+                    name: "router".to_string(),
+                    url: "https://openrouter.ai/api/v1".to_string()
+                },
             ]
         );
         let summary = config.agent.summary_model.expect("summary model");
         assert_eq!(summary.to_string(), "router/openai/gpt-mini/low");
+    }
+
+    #[test]
+    fn claude_code_endpoint_needs_no_url_and_has_default_models() {
+        let config = parse(
+            r#"
+            agent {
+                endpoint "claude" {
+                    kind "claude-code"
+                }
+                endpoint "max" {
+                    kind "claude-code"
+                    models "opus" "fable"
+                }
+            }
+        "#,
+        )
+        .expect("valid config");
+        assert_eq!(
+            config.agent.endpoints,
+            [
+                EndpointDecl::ClaudeCode {
+                    name: "claude".to_string(),
+                    models: vec!["opus".into(), "sonnet".into(), "haiku".into()],
+                },
+                EndpointDecl::ClaudeCode {
+                    name: "max".to_string(),
+                    models: vec!["opus".into(), "fable".into()],
+                },
+            ]
+        );
     }
 
     #[test]
@@ -380,16 +449,32 @@ mod config_tests {
     fn endpoint_without_a_token_is_skipped() {
         let settings = AgentSettings {
             endpoints: vec![
-                ("kimi".to_string(), "https://k".to_string()),
-                ("router".to_string(), "https://r".to_string()),
+                EndpointDecl::OpenAi {
+                    name: "kimi".to_string(),
+                    url: "https://k".to_string(),
+                },
+                EndpointDecl::OpenAi {
+                    name: "router".to_string(),
+                    url: "https://r".to_string(),
+                },
+                EndpointDecl::ClaudeCode {
+                    name: "claude".to_string(),
+                    models: vec!["opus".to_string()],
+                },
             ],
             summary_model: None,
         };
         let tokens = parse_auth("router \"sk-or\"\nunused \"x\"").expect("valid auth");
         let agent = resolve_agent(settings, &tokens);
-        assert_eq!(agent.endpoints.len(), 1);
-        assert_eq!(agent.endpoints[0].name, "router");
-        assert_eq!(agent.endpoints[0].token, "sk-or");
+        let names: Vec<&str> = agent.endpoints.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["router", "claude"]);
+        assert_eq!(
+            agent.endpoints[0].kind,
+            EndpointKind::OpenAi {
+                url: "https://r".to_string(),
+                token: "sk-or".to_string()
+            }
+        );
         assert!(agent.endpoint("kimi").is_none());
     }
 

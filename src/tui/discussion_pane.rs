@@ -1,6 +1,5 @@
-use crate::agent::llm::LlmTarget;
 use crate::agent::turn::{self, TurnRequest};
-use crate::agent::{Mode, ModelSpec};
+use crate::agent::{CLAUDE_CODE_KIND, Mode, ModelSpec};
 use crate::conversation::{Metadata, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
@@ -201,7 +200,11 @@ impl DiscussionComponent {
                 discussion.notice = Some(reason);
             }
         };
-        let Some(endpoint) = state.agent.endpoint(&spec.endpoint).cloned() else {
+        let kind = state
+            .agent
+            .endpoint(&spec.endpoint)
+            .map(|endpoint| endpoint.kind.label());
+        let (Some(kind), Some(backend)) = (kind, state.agent.backend(&spec)) else {
             let reason = format!(
                 "endpoint '{}' is not configured or has no token",
                 spec.endpoint
@@ -248,7 +251,7 @@ impl DiscussionComponent {
                 Mode::Commit => NodeType::Commit,
             }),
             endpoint: Some(spec.endpoint.clone()),
-            kind: Some("openai".to_string()),
+            kind: Some(kind.to_string()),
             model: Some(spec.model.clone()),
             effort: Some(spec.effort.as_str().to_string()),
             status: Some(NodeStatus::Running),
@@ -261,13 +264,18 @@ impl DiscussionComponent {
                 .map(|node| {
                     let lineage = tree.lineage(&node);
                     let dirs: Vec<_> = lineage.iter().filter_map(|id| tree.node_dir(id)).collect();
-                    let parent_head = parent
+                    let parent_meta = parent
                         .as_ref()
-                        .and_then(|parent| tree.node(parent)?.meta.head_after.clone());
-                    (node, lineage, dirs, parent_head)
+                        .and_then(|parent| tree.node(parent))
+                        .map(|parent| &parent.meta);
+                    let parent_head = parent_meta.and_then(|meta| meta.head_after.clone());
+                    let parent_session = parent_meta
+                        .filter(|meta| meta.kind.as_deref() == Some(CLAUDE_CODE_KIND))
+                        .and_then(|meta| meta.session_id.clone());
+                    (node, lineage, dirs, parent_head, parent_session)
                 })
         };
-        let (node, lineage, mut dirs, parent_head) = match created {
+        let (node, lineage, mut dirs, parent_head, parent_session) = match created {
             Ok(created) => created,
             Err(e) => return refusal(state, format!("could not create the node: {e}")),
         };
@@ -290,21 +298,11 @@ impl DiscussionComponent {
         state.tree_view.expanded.extend(lineage);
         state.tree_view.selected = Some(node.clone());
 
-        let target = LlmTarget {
-            url: endpoint.url,
-            token: endpoint.token,
-            model: spec.model,
-            effort: spec.effort,
-        };
-        let summary_target = state.agent.summary_model.as_ref().and_then(|summary| {
-            let endpoint = state.agent.endpoint(&summary.endpoint)?;
-            Some(LlmTarget {
-                url: endpoint.url.clone(),
-                token: endpoint.token.clone(),
-                model: summary.model.clone(),
-                effort: summary.effort,
-            })
-        });
+        let summary_backend = state
+            .agent
+            .summary_model
+            .as_ref()
+            .and_then(|summary| state.agent.backend(summary));
         let request = TurnRequest {
             mode,
             node: node.clone(),
@@ -316,11 +314,12 @@ impl DiscussionComponent {
             repo: state.repo.clone(),
             prompt: prompt.clone(),
             date: utc_date(now),
-            target,
+            backend,
+            parent_session,
         };
         let handle = turn::spawn(request, main_tx.clone());
         state.running_turns.insert(node.clone(), handle);
-        turn::spawn_title_and_summary(node, node_dir, prompt, summary_target, main_tx);
+        turn::spawn_title_and_summary(node, node_dir, prompt, summary_backend, main_tx);
         state.mark_session_dirty();
     }
 

@@ -1,4 +1,5 @@
 pub mod agent_loop;
+pub mod claude_code;
 pub mod context;
 pub mod llm;
 pub mod models;
@@ -102,13 +103,42 @@ impl fmt::Display for ModelSpec {
     }
 }
 
-/// An OpenAI-compatible server the user declared, with the token found for it.
+/// A place to run models, as declared in `config.kdl`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Endpoint {
     pub name: String,
-    /// Base URL to which `chat/completions` and `models` are appended.
-    pub url: String,
-    pub token: String,
+    pub kind: EndpointKind,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EndpointKind {
+    /// An OpenAI-compatible server, driven by our own agent loop.
+    OpenAi {
+        /// Base URL to which `chat/completions` and `models` are appended.
+        url: String,
+        token: String,
+    },
+    /// The local `claude` CLI, which runs its own loop and tools with its own login.
+    ClaudeCode { models: Vec<String> },
+}
+
+impl EndpointKind {
+    /// The `kind` recorded in a node's metadata.
+    pub fn label(&self) -> &'static str {
+        match self {
+            EndpointKind::OpenAi { .. } => "openai",
+            EndpointKind::ClaudeCode { .. } => CLAUDE_CODE_KIND,
+        }
+    }
+}
+
+pub const CLAUDE_CODE_KIND: &str = "claude-code";
+
+/// A model ready to run: where it lives and how to reach it.
+#[derive(Clone, Debug)]
+pub enum Backend {
+    OpenAi(llm::LlmTarget),
+    ClaudeCode(claude_code::ClaudeTarget),
 }
 
 /// The `agent` block of `config.kdl`, joined with the tokens of `auth.kdl`.
@@ -123,6 +153,22 @@ pub struct AgentConfig {
 impl AgentConfig {
     pub fn endpoint(&self, name: &str) -> Option<&Endpoint> {
         self.endpoints.iter().find(|endpoint| endpoint.name == name)
+    }
+
+    /// The backend `spec` designates, if its endpoint is usable.
+    pub fn backend(&self, spec: &ModelSpec) -> Option<Backend> {
+        Some(match &self.endpoint(&spec.endpoint)?.kind {
+            EndpointKind::OpenAi { url, token } => Backend::OpenAi(llm::LlmTarget {
+                url: url.clone(),
+                token: token.clone(),
+                model: spec.model.clone(),
+                effort: spec.effort,
+            }),
+            EndpointKind::ClaudeCode { .. } => Backend::ClaudeCode(claude_code::ClaudeTarget {
+                model: spec.model.clone(),
+                effort: spec.effort,
+            }),
+        })
     }
 }
 

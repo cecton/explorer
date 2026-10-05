@@ -12,16 +12,31 @@ pub const NOTE_MAX_COMMITS: usize = 20;
 /// The system prompt of a turn: mode instructions, the project's own instructions,
 /// and the state of the repository when the prompt was sent.
 pub fn system_prompt(mode: Mode, root: &Utf8Path, head: Option<&str>, date: &str) -> String {
-    let instructions = match mode {
-        Mode::Feedback => FEEDBACK_PROMPT,
-        Mode::Commit => COMMIT_PROMPT,
-    };
-    let mut out = String::from(instructions.trim_end());
+    let mut out = String::from(mode_prompt(mode));
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         out.push_str("\n\n## Project instructions (AGENTS.md)\n\n");
         out.push_str(agents.trim());
     }
-    out.push_str("\n\n## Environment\n\n");
+    out.push_str(&environment(root, head, date));
+    out
+}
+
+/// What is appended to Claude Code's own system prompt: it loads the project's
+/// instructions itself, so only the mode and the environment are added.
+pub fn claude_system_prompt(mode: Mode, root: &Utf8Path, head: Option<&str>, date: &str) -> String {
+    format!("{}{}", mode_prompt(mode), environment(root, head, date))
+}
+
+fn mode_prompt(mode: Mode) -> &'static str {
+    match mode {
+        Mode::Feedback => FEEDBACK_PROMPT,
+        Mode::Commit => COMMIT_PROMPT,
+    }
+    .trim_end()
+}
+
+fn environment(root: &Utf8Path, head: Option<&str>, date: &str) -> String {
+    let mut out = String::from("\n\n## Environment\n\n");
     out.push_str(&format!("- Repository root: {root}\n- Date: {date}\n"));
     match head {
         Some(head) => out.push_str(&format!("- HEAD: {head}\n")),
@@ -63,6 +78,30 @@ pub fn ancestor_messages(dir: &Utf8Path) -> Vec<Message> {
         }
     }
     messages
+}
+
+/// The ancestors as plain text, opening the first message of a session that cannot
+/// replay them: a lossy handover from another backend, or from a session that is gone.
+/// `None` when no ancestor has anything to say.
+pub fn handover_preamble(ancestor_dirs: &[camino::Utf8PathBuf]) -> Option<String> {
+    let mut out = String::new();
+    for dir in ancestor_dirs {
+        let (prompt, reply) = crate::conversation::read_prompt_and_reply(dir);
+        if prompt.trim().is_empty() {
+            continue;
+        }
+        out.push_str(&format!("## User\n\n{}\n\n", prompt.trim()));
+        if !reply.trim().is_empty() {
+            out.push_str(&format!("## Assistant\n\n{}\n\n", reply.trim()));
+        }
+    }
+    (!out.is_empty()).then(|| {
+        format!(
+            "[Note from Explorer: this conversation started before this session. Its earlier \
+             messages follow as plain text, without the tool calls that were made.]\n\n\
+             {out}[End of the earlier messages. The new message follows.]"
+        )
+    })
 }
 
 /// Note telling the agent which commits happened since the node it continues from.
@@ -226,5 +265,36 @@ mod tests {
         };
         assert!(injected);
         assert!(content.contains(" M a.txt\n?? b.txt\n\nCommit them now."));
+    }
+
+    #[test]
+    fn claude_prompt_has_mode_and_environment_but_not_project_instructions() {
+        let (_tmp, root) = temp_dir();
+        std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
+        let prompt = claude_system_prompt(Mode::Commit, &root, Some("abc"), "2026-10-05");
+        assert!(prompt.contains("**commit mode**"));
+        assert!(!prompt.contains("Use tabs."));
+        assert!(prompt.ends_with("- HEAD: abc\n"));
+    }
+
+    #[test]
+    fn handover_preamble_replays_ancestors_as_text() {
+        let (_tmp, root) = temp_dir();
+        let first = root.join("a");
+        let second = root.join("b");
+        let empty = root.join("c");
+        for dir in [&first, &second, &empty] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        std::fs::write(first.join("prompt.md"), "question one\n").unwrap();
+        std::fs::write(first.join("reply.md"), "answer one\n").unwrap();
+        std::fs::write(second.join("prompt.md"), "question two").unwrap();
+
+        let preamble = handover_preamble(&[first, second, empty.clone()]).unwrap();
+        let body =
+            "## User\n\nquestion one\n\n## Assistant\n\nanswer one\n\n## User\n\nquestion two\n\n";
+        assert!(preamble.contains(body), "{preamble}");
+        assert!(preamble.starts_with("[Note from Explorer:"));
+        assert!(handover_preamble(&[empty]).is_none());
     }
 }

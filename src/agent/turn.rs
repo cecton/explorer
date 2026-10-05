@@ -1,5 +1,6 @@
+use super::claude_code::{self, ClaudeTarget, Invocation, Resume, RunError};
 use super::llm::{self, LlmTarget};
-use super::{Message, Mode, agent_loop, context};
+use super::{Backend, Message, Mode, agent_loop, context};
 use crate::conversation::{NodeId, NodeStatus, write_atomic};
 use crate::tui::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -26,6 +27,8 @@ pub struct LiveTurn {
     /// The tool call in progress, as shown on the status line.
     pub activity: Option<String>,
     pub tokens_in: Option<u64>,
+    /// Claude Code session holding this turn, once the CLI has announced it.
+    pub session_id: Option<String>,
 }
 
 /// Main-thread handle on a running turn.
@@ -54,6 +57,8 @@ pub struct TurnOutcome {
     pub commits: Vec<String>,
     /// Stash holding what the turn left uncommitted.
     pub stash: Option<String>,
+    /// Claude Code session of the turn; `None` for our own loop.
+    pub session_id: Option<String>,
 }
 
 pub struct TurnRequest {
@@ -71,13 +76,15 @@ pub struct TurnRequest {
     pub prompt: String,
     /// `YYYY-MM-DD`, for the system prompt.
     pub date: String,
-    pub target: LlmTarget,
+    pub backend: Backend,
+    /// Claude Code session of the parent node, to fork when the backend is the CLI.
+    pub parent_session: Option<String>,
 }
 
 /// Collects a turn's output: live reply for the UI, `reply.md` and `transcript.jsonl`
 /// on disk.
 pub struct Recorder {
-    live: Arc<Mutex<LiveTurn>>,
+    pub(super) live: Arc<Mutex<LiveTurn>>,
     node_dir: Utf8PathBuf,
     main_tx: MainTx,
     last_flush: Instant,
@@ -149,6 +156,10 @@ impl Recorder {
     pub fn tokens_in(&mut self, tokens: u64) {
         self.live.lock().tokens_in = Some(tokens);
     }
+
+    pub fn session(&mut self, session_id: String) {
+        self.live.lock().session_id = Some(session_id);
+    }
 }
 
 /// Starts the turn of a node already created on disk and returns its handle. The
@@ -194,13 +205,18 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
                 .unwrap_or_default()
             }
         };
+        let (tokens_in, session_id) = {
+            let live = live.lock();
+            (live.tokens_in, live.session_id.clone())
+        };
         let outcome = TurnOutcome {
             status,
             error,
             head_after,
-            tokens_in: live.lock().tokens_in,
+            tokens_in,
             commits,
             stash,
+            session_id,
         };
         let _ = main_tx
             .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
@@ -216,6 +232,127 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
 }
 
 async fn run(request: &TurnRequest, recorder: &mut Recorder) -> Result<(), String> {
+    match &request.backend {
+        Backend::OpenAi(target) => run_own_loop(request, target, recorder).await,
+        Backend::ClaudeCode(target) => run_claude_code(request, target, recorder).await,
+    }
+}
+
+/// The working tree status when a commit turn still has something to commit.
+async fn uncommitted(request: &TurnRequest) -> Result<Option<String>, String> {
+    let root = request.root.clone();
+    let status = tokio::task::spawn_blocking(move || crate::git::status_short(&root))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok((!status.trim().is_empty()).then_some(status))
+}
+
+async fn run_claude_code(
+    request: &TurnRequest,
+    target: &ClaudeTarget,
+    recorder: &mut Recorder,
+) -> Result<(), String> {
+    let (system, message, preamble) = {
+        let root = request.root.clone();
+        let ancestor_dirs = request.ancestor_dirs.clone();
+        let parent_head = request.parent_head.clone();
+        let head = request.head.clone();
+        let prompt = request.prompt.clone();
+        let date = request.date.clone();
+        let mode = request.mode;
+        tokio::task::spawn_blocking(move || {
+            let system = context::claude_system_prompt(mode, &root, head.as_deref(), &date);
+            let note = moved_note(&root, parent_head.as_deref(), head.as_deref());
+            let message = match note {
+                Some(note) => format!("{note}\n\n{prompt}"),
+                None => prompt,
+            };
+            (system, message, context::handover_preamble(&ancestor_dirs))
+        })
+        .await
+        .map_err(|e| e.to_string())?
+    };
+    // Fork the parent's session when there is one; otherwise, or when it is gone, start
+    // a fresh session that opens with the ancestors as plain text.
+    let forked = match request.parent_session.as_deref() {
+        Some(session) => {
+            match claude_code::run(
+                &invocation(request, target, &system, &message, Resume::Fork(session)),
+                recorder,
+            )
+            .await
+            {
+                Ok(()) => true,
+                Err(RunError::SessionGone) => false,
+                Err(RunError::Failed(error)) => return Err(error),
+            }
+        }
+        None => false,
+    };
+    if !forked {
+        let opening = match preamble {
+            Some(preamble) => format!("{preamble}\n\n{message}"),
+            None => message,
+        };
+        claude_code::run(
+            &invocation(request, target, &system, &opening, Resume::Fresh),
+            recorder,
+        )
+        .await
+        .map_err(run_error_text)?;
+    }
+    if request.mode == Mode::Feedback {
+        return Ok(());
+    }
+    for _ in 0..MAX_NUDGES {
+        let Some(status) = uncommitted(request).await? else {
+            break;
+        };
+        let Some(session) = recorder.live.lock().session_id.clone() else {
+            break;
+        };
+        let Message::User { content: nudge, .. } = context::commit_nudge(&status) else {
+            break;
+        };
+        claude_code::run(
+            &invocation(request, target, &system, &nudge, Resume::Continue(&session)),
+            recorder,
+        )
+        .await
+        .map_err(run_error_text)?;
+    }
+    Ok(())
+}
+
+fn invocation<'a>(
+    request: &'a TurnRequest,
+    target: &'a ClaudeTarget,
+    system: &'a str,
+    prompt: &'a str,
+    resume: Resume<'a>,
+) -> Invocation<'a> {
+    Invocation {
+        target,
+        mode: request.mode,
+        root: &request.root,
+        system,
+        prompt,
+        resume,
+    }
+}
+
+fn run_error_text(error: RunError) -> String {
+    match error {
+        RunError::SessionGone => "the Claude Code session of this turn is gone".to_string(),
+        RunError::Failed(error) => error,
+    }
+}
+
+async fn run_own_loop(
+    request: &TurnRequest,
+    target: &LlmTarget,
+    recorder: &mut Recorder,
+) -> Result<(), String> {
     let (system, mut messages) = {
         let root = request.root.clone();
         let ancestor_dirs = request.ancestor_dirs.clone();
@@ -242,7 +379,7 @@ async fn run(request: &TurnRequest, recorder: &mut Recorder) -> Result<(), Strin
     }
     agent_loop::run(
         request.mode,
-        &request.target,
+        target,
         &system,
         &mut messages,
         &request.root,
@@ -255,19 +392,15 @@ async fn run(request: &TurnRequest, recorder: &mut Recorder) -> Result<(), Strin
     // A commit turn is not over while the working tree is dirty: stay in the loop and
     // ask for the commit. The nudge goes in the transcript but is never shown.
     for _ in 0..MAX_NUDGES {
-        let root = request.root.clone();
-        let status = tokio::task::spawn_blocking(move || crate::git::status_short(&root))
-            .await
-            .map_err(|e| e.to_string())??;
-        if status.trim().is_empty() {
+        let Some(status) = uncommitted(request).await? else {
             break;
-        }
+        };
         let nudge = context::commit_nudge(&status);
         recorder.message(&nudge);
         messages.push(nudge);
         agent_loop::run(
             request.mode,
-            &request.target,
+            target,
             &system,
             &mut messages,
             &request.root,
@@ -336,11 +469,19 @@ fn clean_title(answer: &str) -> String {
     single_line(answer).chars().take(TITLE_MAX_CHARS).collect()
 }
 
-async fn title_for(prompt: &str, target: Option<&LlmTarget>) -> Option<String> {
+/// One answer without tools from the summary model.
+async fn complete(backend: &Backend, system: &str, user: &str) -> Result<String, String> {
+    match backend {
+        Backend::OpenAi(target) => llm::complete(target, system, user).await,
+        Backend::ClaudeCode(target) => claude_code::complete(target, system, user).await,
+    }
+}
+
+async fn title_for(prompt: &str, backend: Option<&Backend>) -> Option<String> {
     if let Some(title) = title_from_prompt(prompt) {
         return Some(title);
     }
-    match llm::complete(target?, context::TITLE_PROMPT, prompt).await {
+    match complete(backend?, context::TITLE_PROMPT, prompt).await {
         Ok(answer) => Some(clean_title(&answer)).filter(|title| !title.is_empty()),
         Err(e) => {
             tracing::warn!("title generation failed: {e}");
@@ -349,11 +490,11 @@ async fn title_for(prompt: &str, target: Option<&LlmTarget>) -> Option<String> {
     }
 }
 
-async fn summary_for(prompt: &str, target: Option<&LlmTarget>) -> Option<String> {
+async fn summary_for(prompt: &str, backend: Option<&Backend>) -> Option<String> {
     if let Some(summary) = summary_from_prompt(prompt) {
         return Some(summary);
     }
-    match llm::complete(target?, context::SUMMARY_PROMPT, prompt).await {
+    match complete(backend?, context::SUMMARY_PROMPT, prompt).await {
         Ok(answer) => Some(answer.trim().to_string()).filter(|summary| !summary.is_empty()),
         Err(e) => {
             tracing::warn!("summary generation failed: {e}");
@@ -363,19 +504,19 @@ async fn summary_for(prompt: &str, target: Option<&LlmTarget>) -> Option<String>
 }
 
 /// Produces `title.md` and `summary.md` of a node from its prompt. Short prompts are
-/// reused as they are; longer ones need `target`, and stay without when it is absent
+/// reused as they are; longer ones need `backend`, and stay without when it is absent
 /// or the call fails.
 pub fn spawn_title_and_summary(
     node: NodeId,
     node_dir: Utf8PathBuf,
     prompt: String,
-    target: Option<LlmTarget>,
+    backend: Option<Backend>,
     main_tx: MainTx,
 ) {
     tokio::spawn(async move {
         let (title, summary) = tokio::join!(
-            title_for(&prompt, target.as_ref()),
-            summary_for(&prompt, target.as_ref())
+            title_for(&prompt, backend.as_ref()),
+            summary_for(&prompt, backend.as_ref())
         );
         if let Some(title) = title {
             if let Err(e) = write_atomic(&node_dir.join("title.md"), &title) {

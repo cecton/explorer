@@ -1,4 +1,3 @@
-use super::Endpoint;
 use serde::Deserialize;
 use std::time::Duration;
 
@@ -12,16 +11,16 @@ struct ModelEntry {
     id: String,
 }
 
-/// Model ids served by `endpoint`, from `GET <url>/models`, sorted.
-pub async fn fetch(endpoint: &Endpoint) -> Result<Vec<String>, String> {
-    let url = format!("{}/models", endpoint.url.trim_end_matches('/'));
+/// Model ids served by an OpenAI-compatible server, from `GET <url>/models`, sorted.
+pub async fn fetch(url: &str, token: &str) -> Result<Vec<String>, String> {
+    let url = format!("{}/models", url.trim_end_matches('/'));
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
     let response = client
         .get(&url)
-        .bearer_auth(&endpoint.token)
+        .bearer_auth(token)
         .send()
         .await
         .map_err(|e| e.to_string())?;

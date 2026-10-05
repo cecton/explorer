@@ -631,7 +631,7 @@ impl App for AppMain {
         }
 
         for endpoint in &global_data.state.agent.endpoints {
-            crate::tui::model_picker::fetch_models(endpoint.clone(), notify_tx.clone());
+            crate::tui::model_picker::fetch_models(endpoint, notify_tx.clone());
         }
 
         // Request full tokens for session-restored file previews.
@@ -1471,6 +1471,7 @@ impl App for AppMain {
                         meta.tokens_in = outcome.tokens_in;
                         meta.commits = outcome.commits.clone();
                         meta.stash = outcome.stash.clone();
+                        meta.session_id = outcome.session_id.clone();
                     });
                     if let Err(e) = updated {
                         tracing::warn!("failed to save the outcome of {}: {e}", node.as_str());

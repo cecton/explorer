@@ -1,3 +1,4 @@
+use crate::agent::CLAUDE_CODE_KIND;
 use crate::conversation::{ConversationTree, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
@@ -101,18 +102,33 @@ struct Line {
     text: String,
 }
 
-fn state_marker(node: &Node) -> char {
+/// Whether `node` runs on the other side of the Claude Code boundary than its parent,
+/// which made it start from the ancestors' text only.
+fn is_handover(tree: &ConversationTree, node: &Node) -> bool {
+    let is_cli = |kind: &Option<String>| kind.as_deref() == Some(CLAUDE_CODE_KIND);
+    node.parent
+        .as_ref()
+        .and_then(|parent| tree.node(parent))
+        .is_some_and(|parent| {
+            parent.meta.kind.is_some()
+                && node.meta.kind.is_some()
+                && is_cli(&parent.meta.kind) != is_cli(&node.meta.kind)
+        })
+}
+
+fn state_marker(tree: &ConversationTree, node: &Node) -> char {
     match (node.meta.status, node.meta.node_type) {
         (Some(NodeStatus::Running), _) => '~',
         (Some(NodeStatus::Failed), _) => '!',
         (Some(NodeStatus::Cancelled), _) => 'x',
         _ if node.meta.stash.is_some() => '?',
         (_, Some(NodeType::Compact)) => '=',
+        _ if is_handover(tree, node) => '>',
         _ => ' ',
     }
 }
 
-fn row_prefix(row: &TreeRow, node: &Node) -> String {
+fn row_prefix(tree: &ConversationTree, row: &TreeRow, node: &Node) -> String {
     let fold = match row.fold {
         Fold::Leaf => ' ',
         Fold::Collapsed => '+',
@@ -123,7 +139,7 @@ fn row_prefix(row: &TreeRow, node: &Node) -> String {
         Branch::Start => format!("{}├ ", "  ".repeat(row.depth.saturating_sub(1))),
         Branch::LastStart => format!("{}└ ", "  ".repeat(row.depth.saturating_sub(1))),
     };
-    format!("{indent}{fold}{} ", state_marker(node))
+    format!("{indent}{fold}{} ", state_marker(tree, node))
 }
 
 fn commit_label(node: &Node) -> Option<String> {
@@ -537,7 +553,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let Some(node) = tree.node(&row.id) else {
                     continue;
                 };
-                let prefix_width = gutter_width + display_width(&row_prefix(row, node));
+                let prefix_width = gutter_width + display_width(&row_prefix(&tree, row, node));
                 let label_width = commit_label(node).map_or(0, |label| display_width(&label) + 1);
                 let text_width = pane_width.saturating_sub(prefix_width + label_width).max(1);
                 if row_idx != selected {
@@ -647,7 +663,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
                 };
 
-                let prefix = row_prefix(row_info, node);
+                let prefix = row_prefix(&tree, row_info, node);
                 let text_column = gutter_width + display_width(&prefix);
                 match line.kind {
                     LineKind::Head => {

@@ -1,3 +1,4 @@
+use crate::agent::EndpointKind;
 use crate::tui::*;
 use nucleo::Matcher;
 use nucleo::pattern::{CaseMatching, Normalization, Pattern};
@@ -28,7 +29,7 @@ impl ModelPickerComponent {
     ) {
         for endpoint in &state.agent.endpoints {
             if matches!(state.models.lists.get(&endpoint.name), Some(Err(_))) {
-                fetch_models(endpoint.clone(), main_tx.clone());
+                fetch_models(endpoint, main_tx.clone());
             }
         }
         state.model_picker_target = Some(target);
@@ -58,17 +59,23 @@ impl ModelPickerComponent {
     }
 }
 
-/// Fetches the model list of `endpoint` in the background.
+/// Gets the model list of `endpoint` in the background: fetched from an
+/// OpenAI-compatible server, taken from the configuration for the `claude` CLI.
 pub(crate) fn fetch_models(
-    endpoint: crate::agent::Endpoint,
+    endpoint: &crate::agent::Endpoint,
     main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
 ) {
+    let name = endpoint.name.clone();
+    let kind = endpoint.kind.clone();
     tokio::spawn(async move {
-        let result = crate::agent::models::fetch(&endpoint).await;
+        let result = match kind {
+            EndpointKind::OpenAi { url, token } => crate::agent::models::fetch(&url, &token).await,
+            EndpointKind::ClaudeCode { models } => Ok(models),
+        };
         let _ = main_tx
             .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
                 AppSignal::ModelsFetched {
-                    endpoint: endpoint.name,
+                    endpoint: name,
                     result,
                 },
             ))
