@@ -2,6 +2,7 @@ use crate::agent::commands::{self, Expansion};
 use crate::agent::turn::{self, TurnRequest};
 use crate::agent::{Mode, ModelSpec};
 use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
+use crate::tui::markdown;
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
 use std::sync::Arc;
@@ -21,7 +22,9 @@ enum DocKind {
 
 struct DocLine {
     kind: DocKind,
-    text: String,
+    spans: Vec<markdown::Span>,
+    /// Set on code block lines, painted instead of the surrounding background.
+    bg: Option<RgbValue>,
 }
 
 /// Wrapped prompt and reply of one window, reused until the text or the width changes.
@@ -244,6 +247,27 @@ fn node_mode(node: &Node) -> Mode {
 
 fn input_label(mode: Mode) -> String {
     format!("{}> ", mode.label())
+}
+
+/// Paint style for one markdown span: its fg over `bg`, with the span's attributes.
+fn span_style(span: &markdown::Span, bg: RgbValue) -> TuiStyle {
+    let mut style = new_style!(
+        color_fg: {TuiColor::from(span.fg)} color_bg: {TuiColor::from(bg)}
+    );
+    use r3bl_tui::tui_style_attrib;
+    if span.bold {
+        style.attribs.bold = Some(tui_style_attrib::Bold);
+    }
+    if span.italic {
+        style.attribs.italic = Some(tui_style_attrib::Italic);
+    }
+    if span.underline {
+        style.attribs.underline = Some(tui_style_attrib::Underline);
+    }
+    if span.strikethrough {
+        style.attribs.strikethrough = Some(tui_style_attrib::Strikethrough);
+    }
+    style
 }
 
 /// Why a prompt in `mode` cannot start while turns in the `running` modes are in
@@ -520,7 +544,12 @@ impl DiscussionComponent {
             .set_window_scroll(&Window::Discussion(id), 0);
     }
 
-    fn doc_lines(&mut self, discussion: &DiscussionState, width: usize) -> &[DocLine] {
+    fn doc_lines(
+        &mut self,
+        discussion: &DiscussionState,
+        theme: &HelixTheme,
+        width: usize,
+    ) -> &[DocLine] {
         let fresh = self.cache.as_ref().is_some_and(|cache| {
             cache.window_id == self.window_id
                 && cache.width == width
@@ -528,22 +557,28 @@ impl DiscussionComponent {
                 && cache.reply_len == discussion.reply.len()
         });
         if !fresh {
+            let text_fg = theme
+                .ui_fg("ui.text")
+                .unwrap_or(RgbValue::from_u8(170, 170, 200));
             let mut lines = Vec::new();
             if discussion.node.is_some() {
                 for text in wrap(&discussion.prompt, width) {
                     lines.push(DocLine {
                         kind: DocKind::Prompt,
-                        text,
+                        spans: vec![markdown::Span::plain(text, text_fg)],
+                        bg: None,
                     });
                 }
                 lines.push(DocLine {
                     kind: DocKind::Gap,
-                    text: String::new(),
+                    spans: Vec::new(),
+                    bg: None,
                 });
-                for text in wrap(&discussion.reply, width) {
+                for md in markdown::render(&discussion.reply, theme, width) {
                     lines.push(DocLine {
                         kind: DocKind::Reply,
-                        text,
+                        spans: md.spans,
+                        bg: md.bg,
                     });
                 }
             }
@@ -891,7 +926,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             input_ops +=
                 RenderOpIR::PaintTextWithAttributes(label.as_str().into(), Some(label_style));
 
-            let lines = self.doc_lines(discussion, pane_width);
+            let lines = self.doc_lines(discussion, theme, pane_width);
             let line_count = lines.len();
             let max_scroll = line_count.saturating_sub(doc_rows);
             let scroll = if follow {
@@ -903,39 +938,57 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let mut render_ops = RenderOpIRVec::new();
             let paint_row = |ops: &mut RenderOpIRVec,
                              row_offset: usize,
-                             text: &str,
+                             spans: &[markdown::Span],
                              fg: RgbValue,
                              bg: RgbValue| {
-                let style =
+                let strip_style =
                     new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
                 *ops += RenderOpCommon::MoveCursorPositionRelTo(
                     origin,
                     col(0) + row(row_offset as u16),
                 );
-                *ops += RenderOpCommon::ApplyColors(Some(style));
-                *ops +=
-                    RenderOpIR::PaintTextWithAttributes(" ".repeat(pane_width).into(), Some(style));
-                *ops += RenderOpCommon::MoveCursorPositionRelTo(
-                    origin,
-                    col(0) + row(row_offset as u16),
+                *ops += RenderOpCommon::ApplyColors(Some(strip_style));
+                *ops += RenderOpIR::PaintTextWithAttributes(
+                    " ".repeat(pane_width).into(),
+                    Some(strip_style),
                 );
-                *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+                let mut x = 0usize;
+                for (i, span) in spans.iter().enumerate() {
+                    let last = i + 1 == spans.len();
+                    let truncated;
+                    let text: &str = if last {
+                        truncated = truncate(&span.text, pane_width.saturating_sub(x));
+                        truncated.as_str()
+                    } else {
+                        span.text.as_str()
+                    };
+                    let style = span_style(span, bg);
+                    *ops += RenderOpCommon::MoveCursorPositionRelTo(
+                        origin,
+                        col(x as u16) + row(row_offset as u16),
+                    );
+                    *ops += RenderOpCommon::ApplyColors(Some(style));
+                    *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+                    x += display_width(text);
+                }
             };
             for row_offset in 0..doc_rows {
                 match lines.get(scroll + row_offset) {
                     Some(line) if line.kind == DocKind::Prompt => {
-                        paint_row(&mut render_ops, row_offset, &line.text, text_fg, prompt_bg);
+                        paint_row(&mut render_ops, row_offset, &line.spans, text_fg, prompt_bg);
                     }
                     Some(line) => {
-                        paint_row(&mut render_ops, row_offset, &line.text, text_fg, pane_bg);
+                        let bg = line.bg.unwrap_or(pane_bg);
+                        paint_row(&mut render_ops, row_offset, &line.spans, text_fg, bg);
                     }
-                    None => paint_row(&mut render_ops, row_offset, "", text_fg, pane_bg),
+                    None => paint_row(&mut render_ops, row_offset, &[], text_fg, pane_bg),
                 }
             }
             if status_rows > 0 {
                 let fg = if alert { error_fg } else { status_fg };
                 let text = truncate(&status, pane_width);
-                paint_row(&mut render_ops, doc_rows, &text, fg, pane_bg);
+                let span = [markdown::Span::plain(text, fg)];
+                paint_row(&mut render_ops, doc_rows, &span, fg, pane_bg);
             }
 
             state.pane_manager.set_window_page_size(&window, doc_rows);
