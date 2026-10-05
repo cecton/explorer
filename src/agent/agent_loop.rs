@@ -1,18 +1,19 @@
 use super::llm::{self, LlmTarget};
 use super::turn::Recorder;
-use super::{Message, tools};
+use super::{Message, Mode, tools};
 use camino::Utf8Path;
 
 /// Our own agent loop: ask the model, run the tools it asks for, feed the results
 /// back, and stop when an answer asks for none.
 pub async fn run(
+    mode: Mode,
     target: &LlmTarget,
     system: &str,
     messages: &mut Vec<Message>,
     root: &Utf8Path,
     recorder: &mut Recorder,
 ) -> Result<(), String> {
-    let tool_specs = tools::specs();
+    let tool_specs = tools::specs(mode);
     loop {
         recorder.begin_answer();
         let response = llm::stream_chat(target, system, messages, &tool_specs, |text| {
@@ -36,7 +37,7 @@ pub async fn run(
             let result = Message::Tool {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
-                content: tools::run(root, call).await,
+                content: tools::run(mode, root, call).await,
             };
             recorder.message(&result);
             messages.push(result);

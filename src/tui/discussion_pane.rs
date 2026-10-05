@@ -1,6 +1,6 @@
-use crate::agent::ModelSpec;
 use crate::agent::llm::LlmTarget;
 use crate::agent::turn::{self, TurnRequest};
+use crate::agent::{Mode, ModelSpec};
 use crate::conversation::{Metadata, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
@@ -8,7 +8,6 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 const SCROLL_STEP: usize = 3;
-const INPUT_PROMPT: &str = "> ";
 
 type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
 
@@ -49,6 +48,29 @@ pub(crate) fn node_model(node: &Node) -> Option<ModelSpec> {
         node.meta.model.as_deref()?,
         node.meta.effort.as_deref()?,
     )
+}
+
+/// The mode a node was sent in; a compact node counts as feedback.
+fn node_mode(node: &Node) -> Mode {
+    match node.meta.node_type {
+        Some(NodeType::Commit) => Mode::Commit,
+        _ => Mode::Feedback,
+    }
+}
+
+fn input_label(mode: Mode) -> String {
+    format!("{}> ", mode.label())
+}
+
+/// Why a prompt in `mode` cannot start while turns in the `running` modes are in
+/// progress, under the repository's read-write lock: a commit turn excludes every other
+/// turn, feedback turns only exclude commit turns.
+fn lock_refusal(running: &[Mode], mode: Mode) -> Option<&'static str> {
+    if running.contains(&Mode::Commit) {
+        return Some("a commit turn is running; wait for it to finish");
+    }
+    (mode == Mode::Commit && !running.is_empty())
+        .then_some("other turns are running; a commit turn must run alone")
 }
 
 fn now_secs() -> i64 {
@@ -97,12 +119,20 @@ impl DiscussionComponent {
         let id = existing.unwrap_or_else(|| {
             let id = state.next_discussion_id;
             state.next_discussion_id += 1;
-            let model = state.conversations.read().node(&node).and_then(node_model);
+            let (model, mode) = {
+                let tree = state.conversations.read();
+                let shown = tree.node(&node);
+                (
+                    shown.and_then(node_model),
+                    shown.map(node_mode).unwrap_or_default(),
+                )
+            };
             state.discussions.insert(
                 id,
                 DiscussionState {
                     node: Some(node),
                     model,
+                    mode,
                     ..Default::default()
                 },
             );
@@ -164,6 +194,7 @@ impl DiscussionComponent {
         };
         let parent = discussion.node.clone();
         let prompt = discussion.draft.clone();
+        let mode = discussion.mode;
 
         let refusal = |state: &mut AppState, reason: String| {
             if let Some(discussion) = state.discussions.get_mut(&id) {
@@ -189,11 +220,33 @@ impl DiscussionComponent {
             };
             return refusal(state, reason.to_string());
         }
+        let running: Vec<Mode> = state
+            .running_turns
+            .values()
+            .map(|handle| handle.mode)
+            .collect();
+        if let Some(reason) = lock_refusal(&running, mode) {
+            return refusal(state, reason.to_string());
+        }
+        if mode == Mode::Commit {
+            match crate::git::status_short(&state.root) {
+                Ok(status) if status.trim().is_empty() => {}
+                Ok(_) => {
+                    let reason =
+                        "the working tree has uncommitted changes; commit or stash them first";
+                    return refusal(state, reason.to_string());
+                }
+                Err(e) => return refusal(state, e),
+            }
+        }
 
         let head = state.repo.as_ref().and_then(crate::git::head_id);
         let now = now_secs();
         let meta = Metadata {
-            node_type: Some(NodeType::Feedback),
+            node_type: Some(match mode {
+                Mode::Feedback => NodeType::Feedback,
+                Mode::Commit => NodeType::Commit,
+            }),
             endpoint: Some(spec.endpoint.clone()),
             kind: Some("openai".to_string()),
             model: Some(spec.model.clone()),
@@ -253,6 +306,7 @@ impl DiscussionComponent {
             })
         });
         let request = TurnRequest {
+            mode,
             node: node.clone(),
             node_dir: node_dir.clone(),
             ancestor_dirs: dirs,
@@ -406,7 +460,10 @@ fn status_line(state: &AppState, discussion: &DiscussionState) -> (String, bool)
         return ("Loading…".to_string(), false);
     }
     let Some(node) = &discussion.node else {
-        return ("Enter:Send  Shift+Enter:New line".to_string(), false);
+        return (
+            "Enter:Send  Shift+Enter:New line  Shift+Tab:Mode".to_string(),
+            false,
+        );
     };
     if let Some(handle) = state.running_turns.get(node) {
         let live = handle.live.lock();
@@ -468,6 +525,14 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 key: Key::SpecialKey(SpecialKey::Enter),
             }) => {
                 Self::send(state, main_tx, id);
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::BackTab),
+            }) => {
+                discussion.mode = discussion.mode.toggled();
+                discussion.notice = None;
+                state.mark_session_dirty();
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -571,9 +636,11 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let (input_bg, input_fg) = title_bar_colors(focused, theme);
 
             let (status, alert) = status_line(state, discussion);
+            let mode = discussion.mode;
+            let label = input_label(mode);
             let input_rows = InputLine::height(
                 &discussion.draft,
-                INPUT_PROMPT,
+                &label,
                 pane_width as u16,
                 (total_rows / 2).max(1),
             )
@@ -605,13 +672,28 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             self.input.render(
                 &mut input_ops,
                 &discussion.draft,
-                INPUT_PROMPT,
+                &label,
                 input_origin,
                 pane_width as u16,
                 input_rows,
                 focused,
                 (TuiColor::from(input_bg), TuiColor::from(input_fg)),
             );
+
+            // The mode label is repainted in its own color over the input's prompt.
+            let mode_fg = match mode {
+                Mode::Feedback => theme.color_for_scope("function").unwrap_or(input_fg),
+                Mode::Commit => theme
+                    .color_for_scope("diff.plus")
+                    .unwrap_or(RgbValue::from_u8(150, 220, 120)),
+            };
+            let label_style = new_style!(
+                bold color_fg: {TuiColor::from(mode_fg)} color_bg: {TuiColor::from(input_bg)}
+            );
+            input_ops += RenderOpCommon::MoveCursorPositionRelTo(input_origin, col(0) + row(0));
+            input_ops += RenderOpCommon::ApplyColors(Some(label_style));
+            input_ops +=
+                RenderOpIR::PaintTextWithAttributes(label.as_str().into(), Some(label_style));
 
             let lines = self.doc_lines(discussion, pane_width);
             let line_count = lines.len();
@@ -721,5 +803,25 @@ mod tests {
     fn utc_date_formats_the_day_of_a_unix_time() {
         assert_eq!(utc_date(0), "1970-01-01");
         assert_eq!(utc_date(86_400 * 365 + 3600), "1971-01-01");
+    }
+
+    #[test]
+    fn node_mode_follows_the_node_type() {
+        let (_tmp, tree, id) = node_with_metadata("type: commit\n");
+        assert_eq!(node_mode(tree.node(&id).unwrap()), Mode::Commit);
+        let (_tmp, tree, id) = node_with_metadata("type: compact\n");
+        assert_eq!(node_mode(tree.node(&id).unwrap()), Mode::Feedback);
+        assert_eq!(input_label(Mode::Commit), "commit> ");
+    }
+
+    #[test]
+    fn lock_lets_feedback_turns_share_and_commit_turns_run_alone() {
+        use Mode::{Commit, Feedback};
+        assert!(lock_refusal(&[], Feedback).is_none());
+        assert!(lock_refusal(&[], Commit).is_none());
+        assert!(lock_refusal(&[Feedback, Feedback], Feedback).is_none());
+        assert!(lock_refusal(&[Feedback], Commit).is_some());
+        assert!(lock_refusal(&[Commit], Feedback).is_some());
+        assert!(lock_refusal(&[Commit], Commit).is_some());
     }
 }

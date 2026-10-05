@@ -1,5 +1,5 @@
-use super::ToolCall;
 use super::llm::ToolSpec;
+use super::{Mode, ToolCall};
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use serde_json::{Value, json};
 use std::process::Stdio;
@@ -13,8 +13,43 @@ const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 120;
 const SHELL_MAX_TIMEOUT_SECS: u64 = 600;
 const SHELL_MAX_OUTPUT_BYTES: usize = 30_000;
 
-/// The tools advertised to the model.
-pub fn specs() -> Vec<ToolSpec> {
+/// The tools advertised to the model. `write` and `edit` exist in commit mode only.
+pub fn specs(mode: Mode) -> Vec<ToolSpec> {
+    let mut specs = read_only_specs();
+    if mode == Mode::Commit {
+        specs.push(ToolSpec {
+            name: "write",
+            description: "Create a file or replace its whole content. Missing parent \
+                          directories are created.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to the repository root"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"]
+            }),
+        });
+        specs.push(ToolSpec {
+            name: "edit",
+            description: "Replace one exact occurrence of `old_string` in a file with \
+                          `new_string`. Fails when the text is absent or appears more \
+                          than once; include enough surrounding lines to make it unique.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to the repository root"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"}
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        });
+    }
+    specs
+}
+
+fn read_only_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "read",
@@ -83,20 +118,25 @@ pub fn describe(call: &ToolCall) -> String {
 }
 
 /// Runs one tool call. A failure is returned as text for the model, never raised.
-pub async fn run(root: &Utf8Path, call: &ToolCall) -> String {
+pub async fn run(mode: Mode, root: &Utf8Path, call: &ToolCall) -> String {
     let args = call.arguments.clone();
-    let result = match call.name.as_str() {
-        "read" => read(root, &args),
-        "glob" => {
+    let result = match (call.name.as_str(), mode) {
+        ("read", _) => read(root, &args),
+        ("write", Mode::Commit) => write(root, &args),
+        ("edit", Mode::Commit) => edit(root, &args),
+        ("write" | "edit", Mode::Feedback) => {
+            Err("files cannot be changed in feedback mode".to_string())
+        }
+        ("glob", _) => {
             let root = root.to_owned();
             blocking(move || glob(&root, &args)).await
         }
-        "grep" => {
+        ("grep", _) => {
             let root = root.to_owned();
             blocking(move || grep(&root, &args)).await
         }
-        "shell" => shell(root, &args).await,
-        other => Err(format!("unknown tool: {other}")),
+        ("shell", _) => shell(root, &args).await,
+        (other, _) => Err(format!("unknown tool: {other}")),
     };
     result.unwrap_or_else(|error| format!("error: {error}"))
 }
@@ -162,6 +202,37 @@ fn read(root: &Utf8Path, args: &Value) -> Result<String, String> {
         ));
     }
     Ok(out)
+}
+
+fn write(root: &Utf8Path, args: &Value) -> Result<String, String> {
+    let path = resolve(root, str_arg(args, "path")?)?;
+    let content = str_arg(args, "content")?;
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| format!("{parent}: {e}"))?;
+    }
+    std::fs::write(&path, content).map_err(|e| format!("{path}: {e}"))?;
+    Ok(format!("wrote {} bytes\n", content.len()))
+}
+
+fn edit(root: &Utf8Path, args: &Value) -> Result<String, String> {
+    let path = resolve(root, str_arg(args, "path")?)?;
+    let old = str_arg(args, "old_string")?;
+    let new = str_arg(args, "new_string")?;
+    if old.is_empty() {
+        return Err("old_string must not be empty".to_string());
+    }
+    let content = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+    match content.matches(old).count() {
+        0 => Err("old_string was not found in the file".to_string()),
+        1 => {
+            std::fs::write(&path, content.replacen(old, new, 1))
+                .map_err(|e| format!("{path}: {e}"))?;
+            Ok("edited\n".to_string())
+        }
+        count => Err(format!(
+            "old_string appears {count} times; add surrounding lines to make it unique"
+        )),
+    }
 }
 
 /// Translates a glob into an anchored regex: `**` crosses directories, `*` and `?`
@@ -407,9 +478,15 @@ mod tests {
     #[tokio::test]
     async fn read_numbers_lines_and_honors_offset_and_limit() {
         let (_tmp, root) = repo();
-        let all = run(&root, &call("read", json!({"path": "src/main.rs"}))).await;
+        let all = run(
+            Mode::Feedback,
+            &root,
+            &call("read", json!({"path": "src/main.rs"})),
+        )
+        .await;
         assert_eq!(all, "1\tfn main() {\n2\t    run();\n3\t}\n");
         let part = run(
+            Mode::Feedback,
             &root,
             &call(
                 "read",
@@ -421,22 +498,38 @@ mod tests {
             part,
             "2\t    run();\n[lines 2-2 of 3; use offset to read more]\n"
         );
-        let outside = run(&root, &call("read", json!({"path": "../x"}))).await;
+        let outside = run(
+            Mode::Feedback,
+            &root,
+            &call("read", json!({"path": "../x"})),
+        )
+        .await;
         assert!(outside.starts_with("error: "), "{outside}");
     }
 
     #[tokio::test]
     async fn glob_and_grep_skip_pruned_directories() {
         let (_tmp, root) = repo();
-        let listed = run(&root, &call("glob", json!({"pattern": "**/*.rs"}))).await;
+        let listed = run(
+            Mode::Feedback,
+            &root,
+            &call("glob", json!({"pattern": "**/*.rs"})),
+        )
+        .await;
         assert_eq!(listed, "src/main.rs\nsrc/tui/app.rs\n");
 
-        let found = run(&root, &call("grep", json!({"pattern": "run"}))).await;
+        let found = run(
+            Mode::Feedback,
+            &root,
+            &call("grep", json!({"pattern": "run"})),
+        )
+        .await;
         assert_eq!(
             found,
             "README.md:2: run it\nsrc/main.rs:2:     run();\nsrc/tui/app.rs:1: pub fn run() {}\n"
         );
         let scoped = run(
+            Mode::Feedback,
             &root,
             &call(
                 "grep",
@@ -445,22 +538,34 @@ mod tests {
         )
         .await;
         assert_eq!(scoped, "src/tui/app.rs:1: pub fn run() {}\n");
-        let none = run(&root, &call("grep", json!({"pattern": "zzz"}))).await;
+        let none = run(
+            Mode::Feedback,
+            &root,
+            &call("grep", json!({"pattern": "zzz"})),
+        )
+        .await;
         assert_eq!(none, "no matches\n");
     }
 
     #[tokio::test]
     async fn shell_reports_output_exit_code_and_timeout() {
         let (_tmp, root) = repo();
-        let ok = run(&root, &call("shell", json!({"command": "echo hi; pwd"}))).await;
+        let ok = run(
+            Mode::Feedback,
+            &root,
+            &call("shell", json!({"command": "echo hi; pwd"})),
+        )
+        .await;
         assert_eq!(ok, format!("hi\n{root}\n"));
         let failed = run(
+            Mode::Feedback,
             &root,
             &call("shell", json!({"command": "echo oops >&2; exit 3"})),
         )
         .await;
         assert_eq!(failed, "oops\nexit code: 3\n");
         let slow = run(
+            Mode::Feedback,
             &root,
             &call("shell", json!({"command": "sleep 5", "timeout": 1})),
         )
@@ -485,5 +590,63 @@ mod tests {
             "glob *.rs"
         );
         assert_eq!(describe(&call("odd", json!({}))), "odd");
+    }
+
+    #[tokio::test]
+    async fn write_and_edit_exist_in_commit_mode_only() {
+        let (_tmp, root) = repo();
+        let names = |mode| -> Vec<&str> { specs(mode).iter().map(|spec| spec.name).collect() };
+        assert_eq!(names(Mode::Feedback), ["read", "glob", "grep", "shell"]);
+        assert_eq!(
+            names(Mode::Commit),
+            ["read", "glob", "grep", "shell", "write", "edit"]
+        );
+
+        let write_call = call(
+            "write",
+            json!({"path": "docs/new.md", "content": "one\ntwo\n"}),
+        );
+        let refused = run(Mode::Feedback, &root, &write_call).await;
+        assert_eq!(refused, "error: files cannot be changed in feedback mode");
+        assert!(!root.join("docs/new.md").exists());
+
+        assert_eq!(
+            run(Mode::Commit, &root, &write_call).await,
+            "wrote 8 bytes\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/new.md")).unwrap(),
+            "one\ntwo\n"
+        );
+        let outside = call("write", json!({"path": "../evil", "content": "x"}));
+        assert!(
+            run(Mode::Commit, &root, &outside)
+                .await
+                .starts_with("error: ")
+        );
+    }
+
+    #[tokio::test]
+    async fn edit_replaces_exactly_one_occurrence() {
+        let (_tmp, root) = repo();
+        std::fs::write(root.join("a.txt"), "alpha beta alpha\n").unwrap();
+        let edit_call = |old: &str, new: &str| {
+            call(
+                "edit",
+                json!({"path": "a.txt", "old_string": old, "new_string": new}),
+            )
+        };
+        let ambiguous = run(Mode::Commit, &root, &edit_call("alpha", "x")).await;
+        assert!(ambiguous.contains("appears 2 times"), "{ambiguous}");
+        let missing = run(Mode::Commit, &root, &edit_call("gamma", "x")).await;
+        assert_eq!(missing, "error: old_string was not found in the file");
+        assert_eq!(
+            run(Mode::Commit, &root, &edit_call("beta", "gamma")).await,
+            "edited\n"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("a.txt")).unwrap(),
+            "alpha gamma alpha\n"
+        );
     }
 }

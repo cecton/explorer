@@ -64,7 +64,7 @@ fn chat_options(effort: Effort) -> ChatOptions {
 
 fn to_genai(message: &Message) -> ChatMessage {
     match message {
-        Message::User { content } => ChatMessage::user(content.as_str()),
+        Message::User { content, .. } => ChatMessage::user(content.as_str()),
         Message::Assistant {
             content,
             tool_calls,
@@ -176,6 +176,7 @@ pub async fn complete(target: &LlmTarget, system: &str, user: &str) -> Result<St
     let options = chat_options(target.effort);
     let messages = [Message::User {
         content: user.to_string(),
+        injected: false,
     }];
     let response = client()
         .exec_chat(

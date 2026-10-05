@@ -1,5 +1,5 @@
 use super::llm::{self, LlmTarget};
-use super::{Message, agent_loop, context};
+use super::{Message, Mode, agent_loop, context};
 use crate::conversation::{NodeId, NodeStatus, write_atomic};
 use crate::tui::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -14,6 +14,8 @@ const REPLY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const PROGRESS_SIGNAL_INTERVAL: Duration = Duration::from_millis(80);
 const TITLE_MAX_CHARS: usize = 100;
 const SUMMARY_MAX_WORDS: usize = 50;
+/// Times a commit turn is asked to commit what it left behind before Explorer stashes it.
+const MAX_NUDGES: usize = 2;
 
 type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
 
@@ -31,6 +33,7 @@ pub struct LiveTurn {
 pub struct TurnHandle {
     pub live: Arc<Mutex<LiveTurn>>,
     pub started: Instant,
+    pub mode: Mode,
     cancel: Arc<watch::Sender<bool>>,
 }
 
@@ -47,9 +50,14 @@ pub struct TurnOutcome {
     pub error: Option<String>,
     pub head_after: Option<String>,
     pub tokens_in: Option<u64>,
+    /// Commits the turn produced, oldest first.
+    pub commits: Vec<String>,
+    /// Stash holding what the turn left uncommitted.
+    pub stash: Option<String>,
 }
 
 pub struct TurnRequest {
+    pub mode: Mode,
     pub node: NodeId,
     pub node_dir: Utf8PathBuf,
     /// Directories of the ancestors to replay, root first.
@@ -151,6 +159,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
     let handle = TurnHandle {
         live: Arc::clone(&live),
         started: Instant::now(),
+        mode: request.mode,
         cancel: Arc::new(cancel_tx),
     };
 
@@ -170,11 +179,28 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             _ = cancel_rx.wait_for(|cancelled| *cancelled) => (NodeStatus::Cancelled, None),
         };
         recorder.flush_reply();
+        let head_after = request.repo.as_ref().and_then(crate::git::head_id);
+        let (commits, stash) = match request.mode {
+            Mode::Feedback => (Vec::new(), None),
+            Mode::Commit => {
+                let root = request.root.clone();
+                let node = request.node.clone();
+                let before = request.head.clone();
+                let after = head_after.clone();
+                tokio::task::spawn_blocking(move || {
+                    close_commit_turn(&root, node.as_str(), before.as_deref(), after.as_deref())
+                })
+                .await
+                .unwrap_or_default()
+            }
+        };
         let outcome = TurnOutcome {
             status,
             error,
-            head_after: request.repo.as_ref().and_then(crate::git::head_id),
+            head_after,
             tokens_in: live.lock().tokens_in,
+            commits,
+            stash,
         };
         let _ = main_tx
             .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
@@ -197,8 +223,9 @@ async fn run(request: &TurnRequest, recorder: &mut Recorder) -> Result<(), Strin
         let head = request.head.clone();
         let prompt = request.prompt.clone();
         let date = request.date.clone();
+        let mode = request.mode;
         tokio::task::spawn_blocking(move || {
-            let system = context::system_prompt(&root, head.as_deref(), &date);
+            let system = context::system_prompt(mode, &root, head.as_deref(), &date);
             let mut messages: Vec<Message> = ancestor_dirs
                 .iter()
                 .flat_map(|dir| context::ancestor_messages(dir))
@@ -214,13 +241,69 @@ async fn run(request: &TurnRequest, recorder: &mut Recorder) -> Result<(), Strin
         recorder.message(sent);
     }
     agent_loop::run(
+        request.mode,
         &request.target,
         &system,
         &mut messages,
         &request.root,
         recorder,
     )
-    .await
+    .await?;
+    if request.mode == Mode::Feedback {
+        return Ok(());
+    }
+    // A commit turn is not over while the working tree is dirty: stay in the loop and
+    // ask for the commit. The nudge goes in the transcript but is never shown.
+    for _ in 0..MAX_NUDGES {
+        let root = request.root.clone();
+        let status = tokio::task::spawn_blocking(move || crate::git::status_short(&root))
+            .await
+            .map_err(|e| e.to_string())??;
+        if status.trim().is_empty() {
+            break;
+        }
+        let nudge = context::commit_nudge(&status);
+        recorder.message(&nudge);
+        messages.push(nudge);
+        agent_loop::run(
+            request.mode,
+            &request.target,
+            &system,
+            &mut messages,
+            &request.root,
+            recorder,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// What a commit turn leaves in git once it has ended, however it ended: the commits
+/// it made, and a stash of anything still uncommitted.
+fn close_commit_turn(
+    root: &Utf8Path,
+    node: &str,
+    head_before: Option<&str>,
+    head_after: Option<&str>,
+) -> (Vec<String>, Option<String>) {
+    let commits = match head_after {
+        Some(after) if head_before != Some(after) => {
+            crate::git::commits_between(root, head_before, after).unwrap_or_else(|e| {
+                tracing::warn!("cannot list the commits of {node}: {e}");
+                vec![after.to_string()]
+            })
+        }
+        _ => Vec::new(),
+    };
+    let dirty = crate::git::status_short(root).is_ok_and(|status| !status.trim().is_empty());
+    let stash = dirty
+        .then(|| crate::git::stash_push(root, &format!("explorer: left uncommitted by {node}")))
+        .and_then(|stashed| {
+            stashed
+                .map_err(|e| tracing::warn!("cannot stash the leftovers of {node}: {e}"))
+                .ok()
+        });
+    (commits, stash)
 }
 
 /// The repository-moved note, when HEAD is no longer where the parent's turn left it.
@@ -321,6 +404,95 @@ pub fn spawn_title_and_summary(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn git(root: &Utf8Path, args: &[&str]) -> String {
+        let output = std::process::Command::new("git")
+            .current_dir(root)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git {args:?}: {output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_string()
+    }
+
+    fn temp_repo() -> (tempfile::TempDir, Utf8PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        git(&root, &["init", "-q"]);
+        git(&root, &["config", "user.name", "test"]);
+        git(&root, &["config", "user.email", "test@example.com"]);
+        git(&root, &["config", "commit.gpgsign", "false"]);
+        (tmp, root)
+    }
+
+    fn commit(root: &Utf8Path, file: &str, content: &str, message: &str) -> String {
+        std::fs::write(root.join(file), content).unwrap();
+        git(root, &["add", "-A"]);
+        git(root, &["commit", "-q", "-m", message]);
+        git(root, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn closing_a_clean_turn_lists_its_commits_oldest_first() {
+        let (_tmp, root) = temp_repo();
+        let before = commit(&root, "a.txt", "1", "init");
+        let first = commit(&root, "a.txt", "2", "feat: one");
+        let second = commit(&root, "b.txt", "x", "feat: two");
+
+        let (commits, stash) = close_commit_turn(&root, "node", Some(&before), Some(&second));
+        assert_eq!(commits, [first, second]);
+        assert!(stash.is_none());
+    }
+
+    #[test]
+    fn closing_a_turn_that_changed_nothing_records_nothing() {
+        let (_tmp, root) = temp_repo();
+        let head = commit(&root, "a.txt", "1", "init");
+        let (commits, stash) = close_commit_turn(&root, "node", Some(&head), Some(&head));
+        assert!(commits.is_empty());
+        assert!(stash.is_none());
+    }
+
+    #[test]
+    fn closing_records_the_new_commit_of_an_amend() {
+        let (_tmp, root) = temp_repo();
+        let base = commit(&root, "a.txt", "1", "init");
+        let before = commit(&root, "a.txt", "2", "feat: one");
+        std::fs::write(root.join("a.txt"), "3").unwrap();
+        git(
+            &root,
+            &["commit", "-q", "-a", "--amend", "-m", "feat: one, amended"],
+        );
+        let amended = git(&root, &["rev-parse", "HEAD"]);
+        assert_ne!(amended, before);
+
+        let (commits, _) = close_commit_turn(&root, "node", Some(&before), Some(&amended));
+        assert_eq!(commits, [amended]);
+        assert_eq!(git(&root, &["rev-parse", "HEAD~1"]), base);
+    }
+
+    #[test]
+    fn closing_a_dirty_turn_stashes_tracked_and_untracked_leftovers() {
+        let (_tmp, root) = temp_repo();
+        let before = commit(&root, "a.txt", "1", "init");
+        std::fs::write(root.join("a.txt"), "changed").unwrap();
+        std::fs::write(root.join("new.txt"), "untracked").unwrap();
+
+        let (commits, stash) = close_commit_turn(&root, "node-7", Some(&before), Some(&before));
+        assert!(commits.is_empty());
+        let stash = stash.expect("leftovers are stashed");
+        assert_eq!(stash, git(&root, &["rev-parse", "refs/stash"]));
+        assert_eq!(crate::git::status_short(&root).unwrap(), "");
+        assert!(git(&root, &["stash", "list"]).contains("left uncommitted by node-7"));
+    }
+
+    #[test]
+    fn closing_the_first_commit_of_a_repository_lists_it() {
+        let (_tmp, root) = temp_repo();
+        let first = commit(&root, "a.txt", "1", "init");
+        let (commits, _) = close_commit_turn(&root, "node", None, Some(&first));
+        assert_eq!(commits, [first]);
+    }
 
     #[test]
     fn short_single_line_prompt_is_its_own_title() {

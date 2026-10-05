@@ -1,7 +1,8 @@
-use super::Message;
+use super::{Message, Mode};
 use camino::Utf8Path;
 
 const FEEDBACK_PROMPT: &str = include_str!("../../prompts/feedback.md");
+const COMMIT_PROMPT: &str = include_str!("../../prompts/commit.md");
 pub const TITLE_PROMPT: &str = include_str!("../../prompts/title.md");
 pub const SUMMARY_PROMPT: &str = include_str!("../../prompts/summary.md");
 
@@ -10,8 +11,12 @@ pub const NOTE_MAX_COMMITS: usize = 20;
 
 /// The system prompt of a turn: mode instructions, the project's own instructions,
 /// and the state of the repository when the prompt was sent.
-pub fn system_prompt(root: &Utf8Path, head: Option<&str>, date: &str) -> String {
-    let mut out = String::from(FEEDBACK_PROMPT.trim_end());
+pub fn system_prompt(mode: Mode, root: &Utf8Path, head: Option<&str>, date: &str) -> String {
+    let instructions = match mode {
+        Mode::Feedback => FEEDBACK_PROMPT,
+        Mode::Commit => COMMIT_PROMPT,
+    };
+    let mut out = String::from(instructions.trim_end());
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         out.push_str("\n\n## Project instructions (AGENTS.md)\n\n");
         out.push_str(agents.trim());
@@ -46,7 +51,10 @@ pub fn ancestor_messages(dir: &Utf8Path) -> Vec<Message> {
     let (prompt, reply) = crate::conversation::read_prompt_and_reply(dir);
     let mut messages = Vec::new();
     if !prompt.trim().is_empty() {
-        messages.push(Message::User { content: prompt });
+        messages.push(Message::User {
+            content: prompt,
+            injected: false,
+        });
         if !reply.trim().is_empty() {
             messages.push(Message::Assistant {
                 content: reply,
@@ -84,7 +92,22 @@ pub fn user_message(note: Option<&str>, prompt: &str) -> Message {
         Some(note) => format!("{note}\n\n{prompt}"),
         None => prompt.to_string(),
     };
-    Message::User { content }
+    Message::User {
+        content,
+        injected: false,
+    }
+}
+
+/// Hidden message sent when a commit turn stops while the working tree is still dirty.
+/// `status` is the output of `git status --short`.
+pub fn commit_nudge(status: &str) -> Message {
+    Message::User {
+        content: format!(
+            "The working tree still has uncommitted changes:\n\n{}\n\nCommit them now.",
+            status.trim_end()
+        ),
+        injected: true,
+    }
 }
 
 #[cfg(test)]
@@ -112,7 +135,8 @@ mod tests {
             ancestor_messages(&dir),
             [
                 Message::User {
-                    content: "[note]\n\nhi".into()
+                    content: "[note]\n\nhi".into(),
+                    injected: false,
                 },
                 Message::Assistant {
                     content: "hello".into(),
@@ -131,7 +155,8 @@ mod tests {
             ancestor_messages(&dir),
             [
                 Message::User {
-                    content: "question".into()
+                    content: "question".into(),
+                    injected: false,
                 },
                 Message::Assistant {
                     content: "answer".into(),
@@ -167,13 +192,15 @@ mod tests {
         assert_eq!(
             user_message(Some("[note]"), "do it"),
             Message::User {
-                content: "[note]\n\ndo it".into()
+                content: "[note]\n\ndo it".into(),
+                injected: false,
             }
         );
         assert_eq!(
             user_message(None, "do it"),
             Message::User {
-                content: "do it".into()
+                content: "do it".into(),
+                injected: false,
             }
         );
     }
@@ -182,9 +209,22 @@ mod tests {
     fn system_prompt_includes_project_instructions_and_environment() {
         let (_tmp, root) = temp_dir();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = system_prompt(&root, Some("abc123"), "2026-10-05");
+        let prompt = system_prompt(Mode::Feedback, &root, Some("abc123"), "2026-10-05");
         assert!(prompt.starts_with("You are the coding agent inside Explorer"));
+        assert!(prompt.contains("**feedback mode**"));
+        let commit = system_prompt(Mode::Commit, &root, None, "2026-10-05");
+        assert!(commit.contains("**commit mode**"));
+        assert!(commit.ends_with("- HEAD: none yet (no commit)\n"));
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
         assert!(prompt.ends_with("- Date: 2026-10-05\n- HEAD: abc123\n"));
+    }
+
+    #[test]
+    fn commit_nudge_is_marked_as_injected() {
+        let Message::User { content, injected } = commit_nudge(" M a.txt\n?? b.txt\n") else {
+            panic!("a nudge is a user message");
+        };
+        assert!(injected);
+        assert!(content.contains(" M a.txt\n?? b.txt\n\nCommit them now."));
     }
 }

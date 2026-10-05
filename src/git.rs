@@ -299,6 +299,49 @@ pub fn log_oneline(root: &camino::Utf8Path, from: &str, to: &str, cap: usize) ->
     }
 }
 
+fn git_output(root: &camino::Utf8Path, args: &[&str]) -> Result<String, String> {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(args)
+        .output()
+        .map_err(|e| format!("git {}: {e}", args.join(" ")))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git {}: {}", args.join(" "), stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+/// `git status --short`, untracked files included. Empty means a clean working tree.
+pub fn status_short(root: &camino::Utf8Path) -> Result<String, String> {
+    git_output(root, &["status", "--short", "--untracked-files=all"])
+}
+
+/// Full ids of the commits reachable from `after` and not from `before`, oldest first.
+/// Covers amended and rebased history; with no `before`, everything up to `after`.
+pub fn commits_between(
+    root: &camino::Utf8Path,
+    before: Option<&str>,
+    after: &str,
+) -> Result<Vec<String>, String> {
+    let range = match before {
+        Some(before) => format!("{before}..{after}"),
+        None => after.to_string(),
+    };
+    let listed = git_output(root, &["rev-list", "--reverse", &range])?;
+    Ok(listed.lines().map(str::to_string).collect())
+}
+
+/// Stashes every change, untracked files included, and returns the stash commit id.
+pub fn stash_push(root: &camino::Utf8Path, message: &str) -> Result<String, String> {
+    git_output(
+        root,
+        &["stash", "push", "--include-untracked", "--message", message],
+    )?;
+    let id = git_output(root, &["rev-parse", "refs/stash"])?;
+    Ok(id.trim().to_string())
+}
+
 /// Whether the repository has uncommitted changes (staged or unstaged). Untracked
 /// files do not count, matching `gix::Repository::is_dirty`'s own definition.
 pub fn is_dirty(repo: &gix::ThreadSafeRepository) -> Result<bool, String> {

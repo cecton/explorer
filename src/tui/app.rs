@@ -854,13 +854,26 @@ impl App for AppMain {
             }
         }
 
+        // Shift+Tab toggles the prompt mode of a focused Discussion window instead of
+        // cycling focus; `<leader>Shift+Tab` above still does.
+        let mode_toggle = matches!(
+            global_data.state.pane_manager.focused_window,
+            Some(Window::Discussion(_))
+        ) && matches!(
+            input_event,
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::BackTab),
+            })
+        );
+
         // Global shortcuts: Tab/BackTab cycles focus; Ctrl+Up/Down resize; Ctrl+Left/Right reorder.
         // Skipped for Terminal panes so Tab reaches the PTY (e.g. shell completion).
         // When a terminal is ungrabbed Tab cycles focus.
-        if (!matches!(
-            global_data.state.pane_manager.focused_window,
-            Some(Window::Terminal(_))
-        ) || !global_data.state.terminal_grabbed)
+        if !mode_toggle
+            && (!matches!(
+                global_data.state.pane_manager.focused_window,
+                Some(Window::Terminal(_))
+            ) || !global_data.state.terminal_grabbed)
             && !global_data.state.mouse_drag_active
         {
             match keyboard.and_then(|kp| global_data.state.keymap.global_action(&kp)) {
@@ -1456,10 +1469,23 @@ impl App for AppMain {
                         meta.error = outcome.error.clone();
                         meta.head_after = outcome.head_after.clone();
                         meta.tokens_in = outcome.tokens_in;
+                        meta.commits = outcome.commits.clone();
+                        meta.stash = outcome.stash.clone();
                     });
                     if let Err(e) = updated {
                         tracing::warn!("failed to save the outcome of {}: {e}", node.as_str());
                     }
+                    // A turn may have moved HEAD or stashed: refresh what shows git state.
+                    let main_tx = global_data.main_thread_channel_sender.clone();
+                    for (id, win) in &state.git_logs {
+                        crate::tui::git_log_pane::GitLogPaneComponent::reload_log(
+                            state.repo.clone(),
+                            main_tx.clone(),
+                            *id,
+                            win.branch.clone(),
+                        );
+                    }
+                    self.dirty_check_ticks = 4;
                 }
                 AppSignal::NodeTitleReady { node, title } => {
                     state.conversations.write().set_title(node, title.clone());
@@ -1837,7 +1863,8 @@ fn render_status_bar(
                         .to_string()
                 }
                 Some(Window::Discussion(_)) => {
-                    "Enter:Send  Shift+Enter:New line  Ctrl+P:Model  PgUp/PgDn:scroll".to_string()
+                    "Enter:Send  Shift+Enter:New line  Shift+Tab:Mode  Ctrl+P:Model  PgUp/PgDn:scroll"
+                        .to_string()
                 }
                 Some(Window::ModelPicker) => model_picker_hint(state),
                 Some(Window::Terminal(_)) if !state.terminal_grabbed => {

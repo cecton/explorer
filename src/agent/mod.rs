@@ -8,6 +8,33 @@ pub mod turn;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
+/// How a prompt is sent: to the teacher, or to the executor.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    /// The agent explains and advises; the repository is left untouched.
+    #[default]
+    Feedback,
+    /// The agent carries out an instruction and commits the result.
+    Commit,
+}
+
+impl Mode {
+    pub fn toggled(self) -> Self {
+        match self {
+            Mode::Feedback => Mode::Commit,
+            Mode::Commit => Mode::Feedback,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Mode::Feedback => "feedback",
+            Mode::Commit => "commit",
+        }
+    }
+}
+
 /// Reasoning effort offered for every model. `Default` sends no effort parameter.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Effort {
@@ -106,6 +133,9 @@ impl AgentConfig {
 pub enum Message {
     User {
         content: String,
+        /// Written by Explorer, not by the user; never shown in a Discussion window.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        injected: bool,
     },
     Assistant {
         content: String,
@@ -153,6 +183,11 @@ mod tests {
         let messages = vec![
             Message::User {
                 content: "hi".into(),
+                injected: false,
+            },
+            Message::User {
+                content: "commit now".into(),
+                injected: true,
             },
             Message::Assistant {
                 content: String::new(),
@@ -178,8 +213,16 @@ mod tests {
             assert_eq!(&serde_json::from_str::<Message>(&line).unwrap(), message);
         }
         assert_eq!(
-            serde_json::to_string(&messages[3]).unwrap(),
+            serde_json::to_string(&messages[4]).unwrap(),
             r#"{"role":"assistant","content":"done"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&messages[0]).unwrap(),
+            r#"{"role":"user","content":"hi"}"#
+        );
+        assert_eq!(
+            serde_json::to_string(&messages[1]).unwrap(),
+            r#"{"role":"user","content":"commit now","injected":true}"#
         );
     }
 }
