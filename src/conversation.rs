@@ -423,15 +423,15 @@ impl ConversationTree {
         Ok(id)
     }
 
-    /// Prepares `id` for running its turn again in place: the previous attempt's reply
-    /// and transcript are removed, and `change` rewrites the metadata.
+    /// Prepares `id` for running its turn again in place: the previous attempt's reply,
+    /// work log and transcript are removed, and `change` rewrites the metadata.
     pub fn restart_node(
         &mut self,
         id: &NodeId,
         change: impl FnOnce(&mut Metadata),
     ) -> std::io::Result<()> {
         let dir = self.node_dir(id).ok_or_else(unknown_node)?;
-        for name in ["reply.md", "transcript.jsonl"] {
+        for name in ["reply.md", "activity.md", "transcript.jsonl"] {
             match std::fs::remove_file(dir.join(name)) {
                 Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
                 _ => {}
@@ -505,6 +505,15 @@ impl ConversationTree {
 pub fn read_prompt_and_reply(dir: &Utf8Path) -> (String, String) {
     let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
     (read("prompt.md"), read("reply.md"))
+}
+
+/// The lines of a node's `activity.md`, the work log of its turn; empty without one.
+pub fn read_work_log(dir: &Utf8Path) -> Vec<String> {
+    std::fs::read_to_string(dir.join("activity.md"))
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
 }
 
 /// Roots listed on one page of the table of contents.
@@ -924,6 +933,7 @@ mod tests {
                 ),
                 ("prompt.md", "do it"),
                 ("reply.md", "partial"),
+                ("activity.md", "- shell ls\n"),
                 ("transcript.jsonl", "{}\n"),
             ],
         );
@@ -936,6 +946,7 @@ mod tests {
         .unwrap();
 
         assert!(!dir.join("reply.md").exists());
+        assert!(!dir.join("activity.md").exists());
         assert!(!dir.join("transcript.jsonl").exists());
         assert_eq!(
             std::fs::read_to_string(dir.join("prompt.md")).unwrap(),

@@ -1422,12 +1422,14 @@ impl App for AppMain {
                     node,
                     prompt,
                     reply,
+                    work_log,
                 } => {
                     if let Some(discussion) = state.discussions.get_mut(window_id)
                         && discussion.node.as_ref() == Some(node)
                     {
                         discussion.prompt = prompt.clone();
                         discussion.reply = reply.clone();
+                        discussion.work_log = work_log.clone();
                         discussion.loaded = true;
                         if discussion.model.is_none() {
                             discussion.model = state
@@ -1457,10 +1459,14 @@ impl App for AppMain {
                 AppSignal::TurnProgress => {}
                 AppSignal::TurnFinished { node, outcome } => {
                     if let Some(handle) = state.running_turns.remove(node) {
-                        let reply = handle.live.lock().reply.clone();
+                        let (reply, work_log) = {
+                            let live = handle.live.lock();
+                            (live.reply.clone(), live.work_log.clone())
+                        };
                         for discussion in state.discussions.values_mut() {
                             if discussion.node.as_ref() == Some(node) {
                                 discussion.reply.clone_from(&reply);
+                                discussion.work_log.clone_from(&work_log);
                             }
                         }
                     }

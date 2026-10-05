@@ -50,8 +50,12 @@ enum StreamEvent {
     /// The model starts a new answer; its text follows.
     AnswerStart,
     Text(String),
-    /// The tool call in progress, or `None` once its result is back.
-    Activity(Option<String>),
+    /// The current answer starts a call to the named tool.
+    ToolStart(String),
+    /// A complete tool call, described for the work log.
+    ToolCall(String),
+    /// The results of the answer's tool calls are back.
+    ToolsDone,
     /// Size of the context of the request that just completed.
     TokensIn(u64),
     /// The run is over. `no_turn` is set when it ended before the model was called.
@@ -106,7 +110,8 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
             match event.get("type").and_then(Value::as_str).unwrap_or("") {
                 "message_start" => vec![StreamEvent::AnswerStart],
                 "content_block_start" if event["content_block"]["type"] == "tool_use" => {
-                    vec![StreamEvent::Activity(text(&event["content_block"], "name"))]
+                    let name = text(&event["content_block"], "name");
+                    vec![StreamEvent::ToolStart(name.unwrap_or_default())]
                 }
                 "content_block_delta" if event["delta"]["type"] == "text_delta" => {
                     text(&event["delta"], "text")
@@ -128,10 +133,10 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
             .filter(|block| block["type"] == "tool_use")
             .map(|block| {
                 let name = block["name"].as_str().unwrap_or("tool");
-                StreamEvent::Activity(Some(tool_activity(name, &block["input"])))
+                StreamEvent::ToolCall(tool_activity(name, &block["input"]))
             })
             .collect(),
-        "user" => vec![StreamEvent::Activity(None)],
+        "user" => vec![StreamEvent::ToolsDone],
         "result" => {
             let failed = message["is_error"].as_bool().unwrap_or(false);
             let error = failed.then(|| {
@@ -251,7 +256,12 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
                     StreamEvent::Session(session) => recorder.session(session),
                     StreamEvent::AnswerStart => recorder.begin_answer(),
                     StreamEvent::Text(text) => recorder.text(&text),
-                    StreamEvent::Activity(activity) => recorder.activity(activity),
+                    StreamEvent::ToolStart(name) => {
+                        recorder.answer_calls_tools();
+                        recorder.activity(Some(name));
+                    }
+                    StreamEvent::ToolCall(call) => recorder.tool_call(call),
+                    StreamEvent::ToolsDone => recorder.activity(None),
                     StreamEvent::TokensIn(tokens) => recorder.tokens_in(tokens),
                     StreamEvent::Result { error, no_turn } => outcome = Some((error, no_turn)),
                 }
@@ -336,9 +346,9 @@ mod tests {
             .collect();
         assert_eq!(text, "pong");
 
-        assert!(events.contains(&StreamEvent::Activity(Some("Bash".to_string()))));
-        assert!(events.contains(&StreamEvent::Activity(Some("Bash echo pong".to_string()))));
-        assert!(events.contains(&StreamEvent::Activity(None)));
+        assert!(events.contains(&StreamEvent::ToolStart("Bash".to_string())));
+        assert!(events.contains(&StreamEvent::ToolCall("Bash echo pong".to_string())));
+        assert!(events.contains(&StreamEvent::ToolsDone));
         assert_eq!(
             events
                 .iter()

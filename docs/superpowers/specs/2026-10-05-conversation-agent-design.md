@@ -127,6 +127,7 @@ conversations/3fa9c1d2e4b5a6f7/
     metadata.md
     prompt.md
     reply.md
+    activity.md
     title.md
     summary.md
     transcript.jsonl
@@ -140,7 +141,8 @@ conversations/3fa9c1d2e4b5a6f7/
 |---|---|---|
 | `prompt.md` | The exact prompt sent, after slash-command expansion. | Immediately on send, before any network call. |
 | `metadata.md` | Flat `key: value` lines, see below. | On send; rewritten when the turn ends and when favorite toggles. |
-| `reply.md` | All assistant text of the turn, in order, without tool calls. | Flushed about once per second while streaming, and at the end. |
+| `reply.md` | The text of the answers that called no tools, in order: the reply proper. | Flushed about once per second while streaming, when an answer turns out to call tools, and at the end. |
+| `activity.md` | The work log, in order: the text of each answer that called tools, and one `- <tool> <detail>` line per tool call. Display-only: never replayed and never sent to a model. Absent when the turn called no tools. | Appended as each answer calls its tools. |
 | `transcript.jsonl` | One message per line, exactly as replayed: the user message as sent, assistant messages with tool calls, tool results, and any message Explorer injected. Absent for `claude-code` nodes. | Appended as each message completes. |
 | `title.md` | One line like a commit subject, asked at 72 characters and cut at 100. | When the post-turn call returns. |
 | `summary.md` | About 50 words, like a commit body: what was asked and done. | When the post-turn call returns. |
@@ -386,7 +388,8 @@ claude -p --output-format stream-json --verbose --include-partial-messages \
 ```
 
 - The prompt is written to stdin. Text deltas, tool activity, usage and the final result
-  are parsed from the stream-json events. The new session id is read from the stream and
+  are parsed from the stream-json events. An answer is known to call tools when a
+  `tool_use` block starts; its text then moves to the work log (section 8). The new session id is read from the stream and
   stored in `metadata.md`.
 - Prompt snapshotting is turned off: by default a resumed session keeps the system
   prompt of its first request, so a commit turn forked from a feedback node would still
@@ -425,7 +428,12 @@ On `Enter` in a Discussion window:
    tree selection follows it.
 4. **Start**, in parallel: the title and summary calls, and the turn itself.
 5. **Stream.** Reply text is flushed to `reply.md`; transcript lines are appended as
-   messages complete.
+   messages complete. A turn is a series of model answers, and all but the last end by
+   calling tools. The text of an answer streams into the reply; when the answer calls
+   tools, that text was narration and moves out of the reply into the work log
+   (`activity.md`), followed by one line per tool call. The reply is thus what the
+   tool-free answers said, in both modes and for both backends, and
+   `transcript.jsonl` is unaffected.
 6. **Close**, by mode:
    - **feedback / compact**: record `head-after`; nothing else.
    - **commit**: see 8.1.
@@ -498,7 +506,7 @@ deal with them and with second opinions:
 - **`Enter` — open, and recover if incomplete.** Opens the node in a Discussion window.
   If the node is incomplete, its turn is run again **in place**: same directory, same
   prompt, same mode, and the endpoint, model and effort it was originally asked with.
-  `reply.md` and `transcript.jsonl` start over. The guards of section 8 apply; if one
+  `reply.md`, `activity.md` and `transcript.jsonl` start over. The guards of section 8 apply; if one
   fails (dirty tree, lock, endpoint or model no longer available) the window opens on
   the old partial reply and shows the reason.
 - **`m` — same prompt, another model.** Opens the Model Picker; on `Enter` Explorer
@@ -591,6 +599,10 @@ holds its node's prompt and reply in memory only while it is open.
   wheel and drag for free). Both are shown as plain wrapped text: Explorer has no
   Markdown or syntect highlighter of its own (preview colors come from LSP tokens).
   While streaming, the view follows the end unless the user scrolled up.
+- The work log is shown dimmed between the prompt and the reply while the turn runs,
+  and for any node that is not done or has an empty reply, so a failed or cancelled
+  turn still shows what it did. A done node with a reply hides it; `Ctrl+O` shows or
+  hides it either way, and the status line of a node that has one says so.
 - Status line: running (current tool, elapsed time), done (type, short hashes, tokens),
   failed (error), cancelled, or the reason a send was refused.
 - The input is always active, also while a turn runs: the next prompt can be drafted,
@@ -608,6 +620,7 @@ holds its node's prompt and reply in memory only while it is open.
     `<leader>Shift+Tab` still moves focus.
   - `Ctrl+P` — Model Picker.
   - `Ctrl+C` — cancel the running turn.
+  - `Ctrl+O` — show or hide the work log.
   - `PgUp` / `PgDn` — scroll the document.
   - All existing Emacs bindings of the input. `Esc` does nothing; the window closes with
     `<leader>x`.

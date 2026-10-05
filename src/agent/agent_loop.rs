@@ -32,8 +32,9 @@ pub async fn run(
         if response.tool_calls.is_empty() {
             return Ok(());
         }
+        recorder.answer_calls_tools();
         for call in &response.tool_calls {
-            recorder.activity(Some(tools::describe(call)));
+            recorder.tool_call(tools::describe(call));
             let result = Message::Tool {
                 call_id: call.id.clone(),
                 name: call.name.clone(),

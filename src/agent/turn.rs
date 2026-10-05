@@ -20,13 +20,19 @@ const REPLY_MAX_CHARS: usize = 8000;
 const COMMITS_MAX: usize = 20;
 /// Times a commit turn is asked to commit what it left behind before Explorer stashes it.
 const MAX_NUDGES: usize = 2;
+/// Opens the line of a tool call in the work log.
+pub const TOOL_LINE_PREFIX: &str = "- ";
 
 type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
 
 /// What a running turn has produced so far, read by Discussion windows at render time.
 #[derive(Default)]
 pub struct LiveTurn {
+    /// Text of the answers that called no tools.
     pub reply: String,
+    /// What led to the reply, in order: the text of answers that called tools, and
+    /// one [`TOOL_LINE_PREFIX`] line per tool call.
+    pub work_log: Vec<String>,
     /// The tool call in progress, as shown on the status line.
     pub activity: Option<String>,
     pub tokens_in: Option<u64>,
@@ -119,12 +125,14 @@ fn message_to_send(request: &TurnRequest) -> String {
     context::with_notes(&[summary, moved, workspace], &ask)
 }
 
-/// Collects a turn's output: live reply for the UI, `reply.md` and `transcript.jsonl`
-/// on disk.
+/// Collects a turn's output: live reply and work log for the UI, `reply.md`,
+/// `activity.md` and `transcript.jsonl` on disk.
 pub struct Recorder {
     pub(super) live: Arc<Mutex<LiveTurn>>,
     node_dir: Utf8PathBuf,
     main_tx: MainTx,
+    /// Where the text of the current answer starts in the live reply.
+    answer_start: usize,
     last_flush: Instant,
     last_signal: Instant,
 }
@@ -158,6 +166,41 @@ impl Recorder {
             };
             live.reply.push_str(missing);
         }
+        self.answer_start = live.reply.len();
+    }
+
+    /// The current answer calls tools: its text is not part of the reply, and moves
+    /// to the work log.
+    pub fn answer_calls_tools(&mut self) {
+        let text = {
+            let mut live = self.live.lock();
+            let start = self.answer_start.min(live.reply.len());
+            live.reply.split_off(start)
+        };
+        let text = text.trim();
+        if !text.is_empty() {
+            self.log(text.to_string());
+            self.flush_reply();
+        }
+    }
+
+    /// Adds a tool call to the work log and shows it as the activity in progress.
+    pub fn tool_call(&mut self, description: String) {
+        self.log(format!("{TOOL_LINE_PREFIX}{description}"));
+        self.activity(Some(description));
+    }
+
+    /// Appends one entry to the work log and to `activity.md`.
+    fn log(&mut self, entry: String) {
+        let appended = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.node_dir.join("activity.md"))
+            .and_then(|mut file| writeln!(file, "{entry}"));
+        if let Err(e) = appended {
+            tracing::warn!("failed to append to activity.md: {e}");
+        }
+        self.live.lock().work_log.push(entry);
     }
 
     pub fn text(&mut self, chunk: &str) {
@@ -217,6 +260,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             live: Arc::clone(&live),
             node_dir: request.node_dir.clone(),
             main_tx: main_tx.clone(),
+            answer_start: 0,
             last_flush: Instant::now(),
             last_signal: Instant::now(),
         };
@@ -688,6 +732,46 @@ mod tests {
         git(root, &["add", "-A"]);
         git(root, &["commit", "-q", "-m", message]);
         git(root, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn text_of_an_answer_that_calls_tools_moves_to_the_work_log() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let (main_tx, _main_rx) = mpsc::channel(8);
+        let mut recorder = Recorder {
+            live: Arc::new(Mutex::new(LiveTurn::default())),
+            node_dir: node_dir.clone(),
+            main_tx,
+            answer_start: 0,
+            last_flush: Instant::now(),
+            last_signal: Instant::now(),
+        };
+
+        recorder.begin_answer();
+        recorder.text("Let me look.\n");
+        recorder.answer_calls_tools();
+        recorder.tool_call("shell ls".to_string());
+        recorder.tool_call("read a.txt".to_string());
+        recorder.begin_answer();
+        recorder.text("First part.");
+        recorder.begin_answer();
+        recorder.answer_calls_tools();
+        recorder.tool_call("shell git commit".to_string());
+        recorder.begin_answer();
+        recorder.text("Committed.");
+        recorder.flush_reply();
+
+        let read = |name: &str| std::fs::read_to_string(node_dir.join(name)).unwrap();
+        assert_eq!(read("reply.md"), "First part.\n\nCommitted.");
+        assert_eq!(
+            read("activity.md"),
+            "Let me look.\n- shell ls\n- read a.txt\n- shell git commit\n"
+        );
+        let live = recorder.live.lock();
+        assert_eq!(live.reply, "First part.\n\nCommitted.");
+        assert_eq!(live.work_log.len(), 4);
+        assert_eq!(live.activity.as_deref(), Some("shell git commit"));
     }
 
     #[test]

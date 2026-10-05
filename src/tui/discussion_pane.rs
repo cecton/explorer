@@ -17,6 +17,7 @@ type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
 enum DocKind {
     Prompt,
     Gap,
+    WorkLog,
     Reply,
 }
 
@@ -27,12 +28,15 @@ struct DocLine {
     bg: Option<RgbValue>,
 }
 
-/// Wrapped prompt and reply of one window, reused until the text or the width changes.
+/// Wrapped prompt, work log and reply of one window, reused until the text or the
+/// width changes.
 struct DocCache {
     window_id: usize,
     width: usize,
     prompt_len: usize,
     reply_len: usize,
+    work_log_len: usize,
+    work_log_shown: bool,
     lines: Vec<DocLine>,
 }
 
@@ -344,6 +348,7 @@ impl DiscussionComponent {
             match &started {
                 Ok(_) => {
                     discussion.reply.clear();
+                    discussion.work_log.clear();
                     discussion.notice = None;
                     discussion.follow = true;
                 }
@@ -467,6 +472,7 @@ impl DiscussionComponent {
         };
         tokio::task::spawn_blocking(move || {
             let (prompt, reply) = crate::conversation::read_prompt_and_reply(&dir);
+            let work_log = crate::conversation::read_work_log(&dir);
             send_signal!(
                 main_tx,
                 TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::NodeContentLoaded {
@@ -474,6 +480,7 @@ impl DiscussionComponent {
                     node,
                     prompt,
                     reply,
+                    work_log,
                 })
             );
         });
@@ -524,6 +531,8 @@ impl DiscussionComponent {
         discussion.node = Some(node);
         discussion.prompt = prompt;
         discussion.reply.clear();
+        discussion.work_log.clear();
+        discussion.show_work_log = None;
         discussion.draft.clear();
         discussion.loaded = true;
         discussion.notice = None;
@@ -536,6 +545,7 @@ impl DiscussionComponent {
     fn doc_lines(
         &mut self,
         discussion: &DiscussionState,
+        work_log_shown: bool,
         theme: &HelixTheme,
         width: usize,
     ) -> &[DocLine] {
@@ -544,11 +554,14 @@ impl DiscussionComponent {
                 && cache.width == width
                 && cache.prompt_len == discussion.prompt.len()
                 && cache.reply_len == discussion.reply.len()
+                && cache.work_log_len == discussion.work_log.len()
+                && cache.work_log_shown == work_log_shown
         });
         if !fresh {
             let text_fg = theme
                 .ui_fg("ui.text")
                 .unwrap_or(RgbValue::from_u8(170, 170, 200));
+            let dim_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
             let mut lines = Vec::new();
             if discussion.node.is_some() {
                 for text in wrap(&discussion.prompt, width) {
@@ -563,6 +576,24 @@ impl DiscussionComponent {
                     spans: Vec::new(),
                     bg: None,
                 });
+                if work_log_shown && !discussion.work_log.is_empty() {
+                    for text in discussion
+                        .work_log
+                        .iter()
+                        .flat_map(|entry| wrap(entry, width))
+                    {
+                        lines.push(DocLine {
+                            kind: DocKind::WorkLog,
+                            spans: vec![markdown::Span::plain(text, dim_fg)],
+                            bg: None,
+                        });
+                    }
+                    lines.push(DocLine {
+                        kind: DocKind::Gap,
+                        spans: Vec::new(),
+                        bg: None,
+                    });
+                }
                 for md in markdown::render(&discussion.reply, theme, width) {
                     lines.push(DocLine {
                         kind: DocKind::Reply,
@@ -576,6 +607,8 @@ impl DiscussionComponent {
                 width,
                 prompt_len: discussion.prompt.len(),
                 reply_len: discussion.reply.len(),
+                work_log_len: discussion.work_log.len(),
+                work_log_shown,
                 lines,
             });
         }
@@ -673,6 +706,19 @@ fn status_text(node: &Node) -> (String, bool) {
     (text, failed)
 }
 
+/// Whether the work log of the node shown is displayed: as toggled, otherwise only
+/// until the node is done and has a reply.
+fn work_log_shown(tree: &ConversationTree, discussion: &DiscussionState) -> bool {
+    discussion.show_work_log.unwrap_or_else(|| {
+        let done = discussion
+            .node
+            .as_ref()
+            .and_then(|node| tree.node(node))
+            .is_some_and(|node| node.meta.status == Some(NodeStatus::Done));
+        !done || discussion.reply.trim().is_empty()
+    })
+}
+
 /// Status line of a window: a refusal, the progress of a running turn, or the outcome
 /// of the node shown. The flag asks for the error color.
 fn status_line(state: &AppState, discussion: &DiscussionState) -> (String, bool) {
@@ -701,12 +747,19 @@ fn status_line(state: &AppState, discussion: &DiscussionState) -> (String, bool)
         text.push_str(" · Ctrl+C:Cancel");
         return (text, false);
     }
-    state
+    let (mut text, failed) = state
         .conversations
         .read()
         .node(node)
         .map(status_text)
-        .unwrap_or_default()
+        .unwrap_or_default();
+    if !discussion.work_log.is_empty() {
+        if !text.is_empty() {
+            text.push_str(" · ");
+        }
+        text.push_str("Ctrl+O:Work log");
+    }
+    (text, failed)
 }
 
 impl Component<AppState, AppSignal> for DiscussionComponent {
@@ -784,6 +837,19 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 }
                 return Ok(EventPropagation::ConsumedRender);
             }
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('o'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) => {
+                let shown = work_log_shown(&state.conversations.read(), discussion);
+                discussion.show_work_log = Some(!shown);
+                return Ok(EventPropagation::ConsumedRender);
+            }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::PageUp),
             }) => scroll.saturating_sub(page),
@@ -837,8 +903,11 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                     .and_then(|node| state.running_turns.get(node))
             {
                 let live = handle.live.lock();
-                if live.reply.len() != discussion.reply.len() {
+                if live.reply.len() != discussion.reply.len()
+                    || live.work_log.len() != discussion.work_log.len()
+                {
                     discussion.reply.clone_from(&live.reply);
+                    discussion.work_log.clone_from(&live.work_log);
                 }
             }
             let Some(discussion) = state.discussions.get(&self.window_id) else {
@@ -918,7 +987,8 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             input_ops +=
                 RenderOpIR::PaintTextWithAttributes(label.as_str().into(), Some(label_style));
 
-            let lines = self.doc_lines(discussion, theme, pane_width);
+            let shown = work_log_shown(&state.conversations.read(), discussion);
+            let lines = self.doc_lines(discussion, shown, theme, pane_width);
             let line_count = lines.len();
             let max_scroll = line_count.saturating_sub(doc_rows);
             let scroll = if follow {

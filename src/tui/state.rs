@@ -284,6 +284,11 @@ pub struct DiscussionState {
     pub node: Option<NodeId>,
     pub prompt: String,
     pub reply: String,
+    /// Work log of the node's turn: narration and tool calls, never part of the reply.
+    pub work_log: Vec<String>,
+    /// Whether the work log is shown, once toggled with Ctrl+O; `None` shows it only
+    /// while the node has no finished reply.
+    pub show_work_log: Option<bool>,
     /// False until the node's prompt and reply have been read from disk.
     pub loaded: bool,
     /// The next prompt, as typed so far.
@@ -708,6 +713,7 @@ pub enum AppSignal {
         node: NodeId,
         prompt: String,
         reply: String,
+        work_log: Vec<String>,
     },
     #[default]
     Noop,
