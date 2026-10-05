@@ -149,7 +149,10 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                 r.code_bg = None;
                 r.push_blank();
             }
-            Event::Start(Tag::List(start)) => r.lists.push(start),
+            Event::Start(Tag::List(start)) => {
+                r.flush_content();
+                r.lists.push(start);
+            }
             Event::End(TagEnd::List(_)) => {
                 r.lists.pop();
                 if r.lists.is_empty() {
@@ -385,7 +388,11 @@ impl Renderer<'_> {
             cont.push(Span::of("> ", quote_style));
         }
         for item in &self.items {
-            first.extend(item.marker.iter().cloned());
+            if item.flushed {
+                first.push(Span::of(" ".repeat(item.marker_width), self.plain));
+            } else {
+                first.extend(item.marker.iter().cloned());
+            }
             cont.push(Span::of(" ".repeat(item.marker_width), self.plain));
         }
         (first, cont)
@@ -530,6 +537,25 @@ mod tests {
 
     fn text(line: &MdLine) -> String {
         line.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    #[test]
+    fn nested_list_in_a_tight_item_keeps_one_marker_per_line() {
+        let src = "4. Limits.\n   - Today\n   - Summary\n5. One call\n";
+        let lines: Vec<String> = render_md(src, 60).iter().map(text).collect();
+        assert_eq!(
+            lines,
+            ["4. Limits.", "   • Today", "   • Summary", "5. One call"]
+        );
+    }
+
+    #[test]
+    fn second_paragraph_of_a_loose_item_is_indented_not_renumbered() {
+        let lines: Vec<String> = render_md("1. first\n\n   second\n", 60)
+            .iter()
+            .map(text)
+            .collect();
+        assert_eq!(lines, ["1. first", "", "   second"]);
     }
 
     #[test]
