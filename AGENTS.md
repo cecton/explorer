@@ -267,6 +267,7 @@ Planned feature areas and their likely dependencies:
 - A running turn shares its `LiveTurn` behind a `parking_lot::Mutex` with the render path. Never lock it twice in one expression (two `live.lock()` in the same struct literal deadlock the turn task and then the UI); take what you need under a single guard.
 - `transcript.jsonl` is what child nodes replay. Anything sent to the model must be recorded there, including the notes and nudges Explorer injects, even when the user never sees them.
 - Never pass `--bare` to `claude`: it disables the subscription login.
+- Every prompt requires a clean working tree, and only one turn runs at a time. Feedback turns end with a hard reset of the tree, so a commit is the only change they can leave; commit turns end with the agent's leftovers stashed.
 
 ### Comments
 

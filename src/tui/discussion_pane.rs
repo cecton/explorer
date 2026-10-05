@@ -142,10 +142,10 @@ pub(crate) fn start_turn(
         .values()
         .map(|handle| handle.mode)
         .collect();
-    if let Some(reason) = lock_refusal(&running, mode) {
+    if let Some(reason) = lock_refusal(&running) {
         return Err(reason.to_string());
     }
-    if mode == Mode::Commit && !crate::git::status_short(&state.root)?.trim().is_empty() {
+    if crate::git::status_short(&state.root).is_ok_and(|status| !status.trim().is_empty()) {
         return Err(
             "the working tree has uncommitted changes; commit or stash them first".to_string(),
         );
@@ -270,15 +270,11 @@ fn span_style(span: &markdown::Span, bg: RgbValue) -> TuiStyle {
     style
 }
 
-/// Why a prompt in `mode` cannot start while turns in the `running` modes are in
-/// progress, under the repository's read-write lock: a commit turn excludes every other
-/// turn, feedback turns only exclude commit turns.
-fn lock_refusal(running: &[Mode], mode: Mode) -> Option<&'static str> {
-    if running.contains(&Mode::Commit) {
-        return Some("a commit turn is running; wait for it to finish");
-    }
-    (mode == Mode::Commit && !running.is_empty())
-        .then_some("other turns are running; a commit turn must run alone")
+/// Why a prompt in `mode` cannot start while `running` turns are in progress: turns
+/// run one at a time, since a feedback turn experiments freely in the working tree
+/// and a commit turn must have it clean and to itself.
+fn lock_refusal(running: &[Mode]) -> Option<&'static str> {
+    (!running.is_empty()).then_some("another turn is running; wait for it to finish")
 }
 
 fn now_secs() -> i64 {
@@ -675,6 +671,9 @@ fn status_text(node: &Node) -> (String, bool) {
     if node.meta.stash.is_some() {
         push("uncommitted changes stashed");
     }
+    if node.meta.scratch_reset {
+        push("scratch discarded");
+    }
     if let Some(tokens) = node.meta.tokens_in {
         push(&format!("{tokens} tokens in"));
     }
@@ -1063,14 +1062,12 @@ mod tests {
     }
 
     #[test]
-    fn lock_lets_feedback_turns_share_and_commit_turns_run_alone() {
+    fn lock_excludes_every_turn_while_one_is_running() {
         use Mode::{Commit, Feedback};
-        assert!(lock_refusal(&[], Feedback).is_none());
-        assert!(lock_refusal(&[], Commit).is_none());
-        assert!(lock_refusal(&[Feedback, Feedback], Feedback).is_none());
-        assert!(lock_refusal(&[Feedback], Commit).is_some());
-        assert!(lock_refusal(&[Commit], Feedback).is_some());
-        assert!(lock_refusal(&[Commit], Commit).is_some());
+        assert!(lock_refusal(&[]).is_none());
+        assert!(lock_refusal(&[Feedback]).is_some());
+        assert!(lock_refusal(&[Commit]).is_some());
+        assert!(lock_refusal(&[Feedback, Commit]).is_some());
     }
 
     #[test]

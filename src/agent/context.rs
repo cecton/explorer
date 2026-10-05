@@ -108,6 +108,13 @@ pub fn handover_preamble(ancestor_dirs: &[camino::Utf8PathBuf]) -> Option<String
     })
 }
 
+/// Note opening every prompt: the tree was clean at the start, so the turn is free to
+/// experiment, and everything it changes is reset when it ends.
+pub const WORKSPACE_NOTE: &str = "[Note from Explorer: the working tree was clean when \
+this turn started. Everything you change in it will be hard-reset when your turn ends, \
+so commit mode is the only way to keep a change and there is nothing to clean up or \
+revert at the end.]";
+
 /// Note telling the agent which commits happened since the node it continues from.
 /// `commits` are `<short hash> <title>` lines, newest first, possibly one more than
 /// [`NOTE_MAX_COMMITS`] to signal that older ones exist.
@@ -283,6 +290,13 @@ mod tests {
         assert!(commit.ends_with("- HEAD: none yet (no commit)\n"));
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
         assert!(prompt.ends_with("- Date: 2026-10-05\n- HEAD: abc123\n"));
+    }
+
+    #[test]
+    fn workspace_note_states_the_reset_contract() {
+        assert!(WORKSPACE_NOTE.contains("was clean when this turn started"));
+        assert!(WORKSPACE_NOTE.contains("hard-reset"));
+        assert!(WORKSPACE_NOTE.contains("nothing to clean up"));
     }
 
     #[test]

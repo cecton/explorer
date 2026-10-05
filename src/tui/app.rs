@@ -1471,6 +1471,7 @@ impl App for AppMain {
                         meta.tokens_in = outcome.tokens_in;
                         meta.commits = outcome.commits.clone();
                         meta.stash = outcome.stash.clone();
+                        meta.scratch_reset = outcome.reset;
                         meta.session_id = outcome.session_id.clone();
                     });
                     if let Err(e) = updated {

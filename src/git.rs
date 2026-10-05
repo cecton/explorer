@@ -342,6 +342,15 @@ pub fn stash_push(root: &camino::Utf8Path, message: &str) -> Result<String, Stri
     Ok(id.trim().to_string())
 }
 
+/// Hard-resets tracked files and removes untracked ones. Ignored files are kept.
+/// Works on a repository without commits, where there is nothing to reset.
+pub fn discard_worktree(root: &camino::Utf8Path) -> Result<(), String> {
+    if git_output(root, &["rev-parse", "--verify", "HEAD"]).is_ok() {
+        git_output(root, &["reset", "--hard", "HEAD"])?;
+    }
+    git_output(root, &["clean", "-fd"]).map(|_| ())
+}
+
 /// Whether the repository has uncommitted changes (staged or unstaged). Untracked
 /// files do not count, matching `gix::Repository::is_dirty`'s own definition.
 pub fn is_dirty(repo: &gix::ThreadSafeRepository) -> Result<bool, String> {
@@ -556,6 +565,71 @@ mod tests {
     fn short_id_is_seven_hex_chars() {
         let id = [0xabu8; 20];
         assert_eq!(short_id(&id), "abababa");
+    }
+
+    fn temp_repo() -> (tempfile::TempDir, camino::Utf8PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        git_output(&root, &["init", "-q"]).unwrap();
+        git_output(&root, &["config", "user.name", "test"]).unwrap();
+        git_output(&root, &["config", "user.email", "t@example.com"]).unwrap();
+        (tmp, root)
+    }
+
+    fn commit(root: &camino::Utf8Path, file: &str, content: &str, message: &str) -> String {
+        std::fs::write(root.join(file), content).unwrap();
+        git_output(root, &["add", "-A"]).unwrap();
+        git_output(root, &["commit", "-q", "-m", message]).unwrap();
+        git_output(root, &["rev-parse", "HEAD"])
+            .unwrap()
+            .trim()
+            .to_string()
+    }
+
+    #[test]
+    fn discard_worktree_restores_head_and_removes_untracked_but_not_ignored() {
+        let (_tmp, root) = temp_repo();
+        std::fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+        let head = commit(&root, "a.txt", "one", "init");
+        std::fs::write(root.join("a.txt"), "changed").unwrap();
+        std::fs::write(root.join("scratch.txt"), "untracked").unwrap();
+        std::fs::write(root.join("ignored.txt"), "build output").unwrap();
+
+        discard_worktree(&root).unwrap();
+
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "one");
+        assert!(!root.join("scratch.txt").exists());
+        assert!(root.join("ignored.txt").exists());
+        assert_eq!(
+            git_output(&root, &["rev-parse", "HEAD"]).unwrap().trim(),
+            head
+        );
+        assert_eq!(status_short(&root).unwrap(), "");
+    }
+
+    #[test]
+    fn discard_worktree_works_without_any_commit() {
+        let (_tmp, root) = temp_repo();
+        std::fs::write(root.join("a.txt"), "never committed").unwrap();
+
+        discard_worktree(&root).unwrap();
+
+        assert!(!root.join("a.txt").exists());
+        assert_eq!(status_short(&root).unwrap(), "");
+    }
+
+    #[test]
+    fn discard_worktree_leaves_a_clean_tree_alone() {
+        let (_tmp, root) = temp_repo();
+        let head = commit(&root, "a.txt", "one", "init");
+
+        discard_worktree(&root).unwrap();
+
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "one");
+        assert_eq!(
+            git_output(&root, &["rev-parse", "HEAD"]).unwrap().trim(),
+            head
+        );
     }
 
     #[test]

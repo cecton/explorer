@@ -3,6 +3,7 @@ use super::llm::{self, LlmTarget};
 use super::tools::ToolContext;
 use super::{Backend, Message, Mode, agent_loop, context};
 use crate::conversation::{ConversationTree, NodeId, NodeStatus, write_atomic};
+use crate::git::discard_worktree;
 use crate::tui::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
 use parking_lot::{Mutex, RwLock};
@@ -58,6 +59,8 @@ pub struct TurnOutcome {
     pub commits: Vec<String>,
     /// Stash holding what the turn left uncommitted.
     pub stash: Option<String>,
+    /// True when a feedback turn's scratch work was hard-reset at its end.
+    pub reset: bool,
     /// Claude Code session of the turn; `None` for our own loop.
     pub session_id: Option<String>,
 }
@@ -102,11 +105,12 @@ fn message_to_send(request: &TurnRequest) -> String {
         request.parent_head.as_deref(),
         request.head.as_deref(),
     );
+    let workspace = (request.mode == Mode::Feedback).then(|| context::WORKSPACE_NOTE.to_string());
     let ask = match &request.compact {
         Some(instructions) => context::compact_request(instructions),
         None => request.prompt.clone(),
     };
-    context::with_notes(&[summary, moved], &ask)
+    context::with_notes(&[summary, moved, workspace], &ask)
 }
 
 /// Collects a turn's output: live reply for the UI, `reply.md` and `transcript.jsonl`
@@ -219,18 +223,25 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
         };
         recorder.flush_reply();
         let head_after = request.repo.as_ref().and_then(crate::git::head_id);
-        let (commits, stash) = match request.mode {
-            Mode::Feedback => (Vec::new(), None),
+        let (commits, stash, reset) = match request.mode {
+            Mode::Feedback => {
+                let root = request.root.clone();
+                let reset = tokio::task::spawn_blocking(move || close_feedback_turn(&root))
+                    .await
+                    .unwrap_or(false);
+                (Vec::new(), None, reset)
+            }
             Mode::Commit => {
                 let root = request.root.clone();
                 let node = request.node.clone();
                 let before = request.head.clone();
                 let after = head_after.clone();
-                tokio::task::spawn_blocking(move || {
+                let (commits, stash) = tokio::task::spawn_blocking(move || {
                     close_commit_turn(&root, node.as_str(), before.as_deref(), after.as_deref())
                 })
                 .await
-                .unwrap_or_default()
+                .unwrap_or_default();
+                (commits, stash, false)
             }
         };
         let (tokens_in, session_id) = {
@@ -244,6 +255,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             tokens_in,
             commits,
             stash,
+            reset,
             session_id,
         };
         let _ = main_tx
@@ -470,6 +482,22 @@ fn close_commit_turn(
     (commits, stash)
 }
 
+/// What a feedback turn leaves behind: whether its scratch work was discarded. The
+/// tree is guaranteed clean at the start (prompts are refused otherwise), so the
+/// reset can only remove the turn's own changes.
+fn close_feedback_turn(root: &Utf8Path) -> bool {
+    match crate::git::status_short(root) {
+        Ok(status) if !status.trim().is_empty() => discard_worktree(root)
+            .map_err(|e| tracing::warn!("cannot reset the tree after the turn: {e}"))
+            .is_ok(),
+        Ok(_) => false,
+        Err(e) => {
+            tracing::warn!("cannot check the tree after the turn: {e}");
+            false
+        }
+    }
+}
+
 /// The repository-moved note, when HEAD is no longer where the parent's turn left it.
 fn moved_note(root: &Utf8Path, parent_head: Option<&str>, head: Option<&str>) -> Option<String> {
     let (parent_head, head) = (parent_head?, head?);
@@ -655,6 +683,30 @@ mod tests {
         let (commits, _) = close_commit_turn(&root, "node", Some(&before), Some(&amended));
         assert_eq!(commits, [amended]);
         assert_eq!(git(&root, &["rev-parse", "HEAD~1"]), base);
+    }
+
+    #[test]
+    fn closing_a_clean_feedback_turn_touches_nothing() {
+        let (_tmp, root) = temp_repo();
+        let head = commit(&root, "a.txt", "1", "init");
+
+        assert!(!close_feedback_turn(&root));
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "1");
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+    }
+
+    #[test]
+    fn closing_a_dirty_feedback_turn_discards_its_scratch() {
+        let (_tmp, root) = temp_repo();
+        let head = commit(&root, "a.txt", "1", "init");
+        std::fs::write(root.join("a.txt"), "scratch").unwrap();
+        std::fs::write(root.join("note.txt"), "untracked").unwrap();
+
+        assert!(close_feedback_turn(&root));
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "1");
+        assert!(!root.join("note.txt").exists());
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
+        assert_eq!(crate::git::status_short(&root).unwrap(), "");
     }
 
     #[test]
