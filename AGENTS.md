@@ -172,7 +172,7 @@ cargo test <module>::<test_name>
 
 Planned feature areas and their likely dependencies:
 - **Git tooling** (remaining: status, blame — intended to replace `tig`; log and diff have shipped). See `docs/superpowers/specs/2026-09-21-git-log-pane-design.md`
-- **AI tooling** integration (deeper assistant workflows inside the workspace): TBD
+- **AI tooling** integration (conversation-tree agent chat; planned dependency: `genai`). See `docs/superpowers/specs/2026-10-05-conversation-agent-design.md`
 
 ---
 
