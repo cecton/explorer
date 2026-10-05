@@ -15,6 +15,7 @@ pub struct PaneComponent {
     git_log: GitLogPaneComponent,
     commit_diff: CommitDiffPaneComponent,
     conversation_tree: ConversationTreeComponent,
+    discussion: DiscussionComponent,
     preview: FilePreviewComponent,
     terminal: TerminalPaneComponent,
     /// Origin row of the content area (below title bar), used for scrollbar mouse events.
@@ -50,6 +51,7 @@ impl PaneComponent {
             git_log: GitLogPaneComponent::new(id),
             commit_diff: CommitDiffPaneComponent::new(id),
             conversation_tree: ConversationTreeComponent::new(id),
+            discussion: DiscussionComponent::new(id),
             preview: FilePreviewComponent::new(id),
             terminal: TerminalPaneComponent::new(id, slot),
             content_origin_row: 0,
@@ -184,7 +186,10 @@ impl PaneComponent {
                 state.mark_session_dirty();
                 EventPropagation::ConsumedRender
             }
-            Window::GitLog(_) | Window::CommitDiff(_) | Window::ConversationTree => {
+            Window::GitLog(_)
+            | Window::CommitDiff(_)
+            | Window::ConversationTree
+            | Window::Discussion(_) => {
                 state.pane_manager.set_window_scroll(window, target);
                 state.pane_manager.clamp_scroll(window);
                 EventPropagation::ConsumedRender
@@ -263,6 +268,9 @@ impl TitleRow for PaneComponent {
             Window::ConversationTree => self
                 .conversation_tree
                 .render_title_row(ops, pane_box, focused, theme, state),
+            Window::Discussion(id) => self
+                .discussion
+                .render_title_row(ops, pane_box, focused, theme, state, id),
         }
     }
 }
@@ -319,6 +327,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
         self.git_log.reset();
         self.commit_diff.reset();
         self.conversation_tree.reset();
+        self.discussion.reset();
         self.preview.reset();
         self.terminal.reset();
         self.preview_drag_active = false;
@@ -933,6 +942,11 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 self.conversation_tree
                     .handle_event(global_data, input_event, has_focus)
             }
+            Some(Window::Discussion(id)) => {
+                self.discussion.set_window_id(id);
+                self.discussion
+                    .handle_event(global_data, input_event, has_focus)
+            }
             None => Ok(EventPropagation::Propagate),
         }
     }
@@ -1058,6 +1072,11 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     surface_bounds,
                     has_focus,
                 )?,
+                Some(Window::Discussion(id)) => {
+                    self.discussion.set_window_id(id);
+                    self.discussion
+                        .render(global_data, inner_bounds, surface_bounds, has_focus)?
+                }
                 None => {}
             };
 

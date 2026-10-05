@@ -1,12 +1,11 @@
 use crate::conversation::NodeId;
-use crate::loader::{FileKey, LoadedFile, file_key_for_path, path_for_file_key};
+use crate::loader::{LoadedFile, file_key_for_path, path_for_file_key};
 use crate::tui::AppState;
+use crate::tui::DiscussionState;
 use crate::tui::GitLogWindowState;
-use crate::tui::TerminalPane;
 use crate::tui::pane_manager::{PaneSize, Window, WindowState};
 use crate::tui::{RgbValue, SYMBOL_PALETTE, SymbolHighlightGroup};
 use camino::{Utf8Path, Utf8PathBuf};
-use parking_lot::Mutex;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
@@ -93,6 +92,12 @@ pub enum PaneEntry {
 
     #[serde(rename = "conversation_tree")]
     ConversationTree { pane_size: SerializablePaneSize },
+
+    #[serde(rename = "discussion")]
+    Discussion {
+        node: String,
+        pane_size: SerializablePaneSize,
+    },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -140,17 +145,7 @@ impl Session {
             .pane_manager
             .window_stack
             .iter()
-            .filter_map(|window| {
-                pane_entry_from_window(
-                    window,
-                    &snapshot,
-                    &state.root,
-                    &state.pane_manager.window_states,
-                    &state.terminal_panes,
-                    &state.terminal_to_preview,
-                    &state.git_logs,
-                )
-            })
+            .filter_map(|window| pane_entry_from_window(window, &snapshot, state))
             .collect();
 
         let mut highlight_ranges = HashMap::new();
@@ -357,6 +352,23 @@ impl Session {
                         },
                     );
                 }
+
+                PaneEntry::Discussion { node, pane_size } => {
+                    let id = state.next_discussion_id;
+                    state.next_discussion_id += 1;
+                    let window = Window::Discussion(id);
+                    new_stack.push(window);
+                    new_states.insert(
+                        window,
+                        WindowState {
+                            pane_size: pane_size.into(),
+                            ..Default::default()
+                        },
+                    );
+                    state
+                        .discussions
+                        .insert(id, DiscussionState::new(NodeId::new(&node)));
+                }
             }
         }
 
@@ -417,13 +429,15 @@ impl Session {
 fn pane_entry_from_window(
     window: &Window,
     files: &[Arc<LoadedFile>],
-    root: &Utf8Path,
-    window_states: &HashMap<Window, WindowState>,
-    terminal_panes: &HashMap<usize, Arc<Mutex<TerminalPane>>>,
-    terminal_to_preview: &HashMap<usize, FileKey>,
-    git_logs: &HashMap<usize, GitLogWindowState>,
+    state: &AppState,
 ) -> Option<PaneEntry> {
-    let window_state = window_states.get(window).cloned().unwrap_or_default();
+    let root = &state.root;
+    let window_state = state
+        .pane_manager
+        .window_states
+        .get(window)
+        .cloned()
+        .unwrap_or_default();
     match window {
         Window::FilePreview(key) => {
             let path = path_for_file_key(files, *key)?;
@@ -436,7 +450,7 @@ fn pane_entry_from_window(
         }
         Window::FileNamePicker | Window::ThemePicker => None,
         Window::GitLog(id) => {
-            let win = git_logs.get(id)?;
+            let win = state.git_logs.get(id)?;
             Some(PaneEntry::GitLog {
                 id: *id,
                 branch: win.branch.clone(),
@@ -452,9 +466,16 @@ fn pane_entry_from_window(
         Window::ConversationTree => Some(PaneEntry::ConversationTree {
             pane_size: window_state.pane_size.into(),
         }),
+        Window::Discussion(id) => {
+            let discussion = state.discussions.get(id)?;
+            Some(PaneEntry::Discussion {
+                node: discussion.node.as_str().to_string(),
+                pane_size: window_state.pane_size.into(),
+            })
+        }
         Window::Terminal(id) => {
             // Editor terminals save as FilePreview so restore brings back the preview.
-            if let Some(file_key) = terminal_to_preview.get(id)
+            if let Some(file_key) = state.terminal_to_preview.get(id)
                 && let Some(path) = path_for_file_key(files, *file_key)
                 && let Ok(rel) = path.strip_prefix(root)
             {
@@ -464,7 +485,7 @@ fn pane_entry_from_window(
                     pane_size: window_state.pane_size.into(),
                 });
             }
-            let pane = terminal_panes.get(id)?.lock();
+            let pane = state.terminal_panes.get(id)?.lock();
             if pane.exited {
                 return None;
             }
@@ -562,6 +583,7 @@ mod tests {
     use crate::keymap::Keymap;
     use crate::loader::FileKey;
     use crate::tui::HelixTheme;
+    use crate::tui::TerminalPane;
     use crate::tui::pane_manager::{PaneSize, Window, WindowState};
     use arc_swap::ArcSwap;
     use camino::Utf8PathBuf;
@@ -713,6 +735,7 @@ mod tests {
                 PaneEntry::GitLog { .. } => "git_log",
                 PaneEntry::CommitDiff { .. } => "commit_diff",
                 PaneEntry::ConversationTree { .. } => "conversation_tree",
+                PaneEntry::Discussion { .. } => "discussion",
             })
             .collect();
         assert_eq!(kinds, vec!["file_preview", "terminal"]);
@@ -1034,6 +1057,7 @@ mod tests {
                 PaneEntry::GitLog { .. } => "git_log",
                 PaneEntry::CommitDiff { .. } => "commit_diff",
                 PaneEntry::ConversationTree { .. } => "conversation_tree",
+                PaneEntry::Discussion { .. } => "discussion",
             })
             .collect();
         assert_eq!(kinds, vec!["commit_diff"]);

@@ -352,6 +352,12 @@ impl ConversationTree {
     }
 }
 
+/// A node's `prompt.md` and `reply.md`; a missing file reads as empty text.
+pub fn read_prompt_and_reply(dir: &Utf8Path) -> (String, String) {
+    let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
+    (read("prompt.md"), read("reply.md"))
+}
+
 fn unknown_node() -> std::io::Error {
     std::io::Error::other("unknown conversation node")
 }

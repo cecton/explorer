@@ -2,9 +2,12 @@ use crate::conversation::{ConversationTree, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc;
 
 const GUTTER_GAP: &str = "  ";
 const SCROLL_STEP: usize = 3;
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Fold {
@@ -139,6 +142,8 @@ pub struct ConversationTreeComponent {
     line_rows: Vec<usize>,
     /// Selection as of the last render; a change re-anchors the scroll onto it.
     shown_selection: Option<NodeId>,
+    /// Time and row of the last click, to recognize a double click.
+    last_click: Option<(Instant, usize)>,
 }
 
 impl ConversationTreeComponent {
@@ -148,6 +153,7 @@ impl ConversationTreeComponent {
             content_origin_row: 0,
             line_rows: Vec::new(),
             shown_selection: None,
+            last_click: None,
         }
     }
 
@@ -178,6 +184,29 @@ impl ConversationTreeComponent {
         None
     }
 
+    fn open_commits(
+        state: &mut AppState,
+        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+        id: &NodeId,
+    ) {
+        let commits: Vec<[u8; 20]> = state
+            .conversations
+            .read()
+            .node(id)
+            .map(|node| {
+                node.meta
+                    .commits
+                    .iter()
+                    .filter_map(|hash| hex::decode(hash).ok())
+                    .filter_map(|bytes| <[u8; 20]>::try_from(bytes.as_slice()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for commit in commits.into_iter().rev() {
+            GitLogPaneComponent::open_commit_diff(state, main_tx.clone(), commit);
+        }
+    }
+
     fn delete_selected(state: &mut AppState, rows: &[TreeRow], index: usize) {
         let Some(row) = rows.get(index) else {
             return;
@@ -192,6 +221,16 @@ impl ConversationTreeComponent {
         };
         for id in &removed {
             state.tree_view.expanded.remove(id);
+        }
+        let closed: Vec<usize> = state
+            .discussions
+            .iter()
+            .filter(|(_, discussion)| removed.contains(&discussion.node))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in closed {
+            state.discussions.remove(&id);
+            state.pane_manager.remove_window(&Window::Discussion(id));
         }
         let rows = layout_rows(&state.conversations.read(), &state.tree_view.expanded);
         state.tree_view.selected = None;
@@ -227,6 +266,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;
         let window = Window::ConversationTree;
         let rows = layout_rows(&state.conversations.read(), &state.tree_view.expanded);
@@ -296,6 +336,20 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Enter),
+            }) => {
+                if let Some(row) = rows.get(index) {
+                    DiscussionComponent::open(state, main_tx, row.id.clone());
+                }
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character('c'),
+            }) => {
+                if let Some(row) = rows.get(index) {
+                    Self::open_commits(state, main_tx, &row.id);
+                }
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('f'),
             }) => {
                 if let Some(row) = rows.get(index)
@@ -333,8 +387,17 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     .row_index
                     .as_usize()
                     .checked_sub(self.content_origin_row);
-                if let Some(row) = line.and_then(|line| self.line_rows.get(line)) {
-                    Self::select(state, &rows, *row);
+                let Some(row) = line.and_then(|line| self.line_rows.get(line)).copied() else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
+                let now = Instant::now();
+                let double = self
+                    .last_click
+                    .is_some_and(|(at, last)| last == row && now.duration_since(at) < DOUBLE_CLICK);
+                self.last_click = (!double).then_some((now, row));
+                Self::select(state, &rows, row);
+                if double && let Some(target) = rows.get(row) {
+                    DiscussionComponent::open(state, main_tx, target.id.clone());
                 }
             }
             InputEvent::Mouse(MouseInput {

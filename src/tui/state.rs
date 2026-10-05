@@ -275,6 +275,29 @@ pub struct TreeViewState {
     pub notice: Option<String>,
 }
 
+/// State of one Discussion window.
+#[derive(Clone)]
+pub struct DiscussionState {
+    pub node: NodeId,
+    pub prompt: String,
+    pub reply: String,
+    /// False until the node's prompt and reply have been read from disk.
+    pub loaded: bool,
+    pub error: Option<String>,
+}
+
+impl DiscussionState {
+    pub fn new(node: NodeId) -> Self {
+        Self {
+            node,
+            prompt: String::new(),
+            reply: String::new(),
+            loaded: false,
+            error: None,
+        }
+    }
+}
+
 #[derive(Clone, Default)]
 pub struct CommitDiffState {
     pub lines: Option<Arc<Vec<DiffLine>>>,
@@ -378,6 +401,10 @@ pub struct AppState {
     /// Agent conversation tree, shared with the background task that loads it.
     pub conversations: Arc<RwLock<ConversationTree>>,
     pub tree_view: TreeViewState,
+    /// Discussion windows keyed by their unique ID.
+    pub discussions: HashMap<usize, DiscussionState>,
+    /// Next available discussion window ID.
+    pub next_discussion_id: usize,
     pub mouse_drag_active: bool,
     pub terminal_grabbed: bool,
     pub text_selection: Option<TextSelection>,
@@ -479,6 +506,8 @@ impl AppState {
             terminal_to_preview: HashMap::new(),
             conversations: Arc::default(),
             tree_view: TreeViewState::default(),
+            discussions: HashMap::new(),
+            next_discussion_id: 0,
             mouse_drag_active: false,
             terminal_grabbed: false,
             text_selection: None,
@@ -579,6 +608,13 @@ pub enum AppSignal {
     DirtyStatusLoaded(Result<bool, String>),
     /// The startup load filled `AppState::conversations`.
     ConversationsLoaded,
+    /// Prompt and reply of `node`, read from disk for discussion window `window_id`.
+    NodeContentLoaded {
+        window_id: usize,
+        node: NodeId,
+        prompt: String,
+        reply: String,
+    },
     #[default]
     Noop,
 }

@@ -831,6 +831,9 @@ impl App for AppMain {
                     if let Window::CommitDiff(id) = old {
                         state.commit_diffs.remove(&id);
                     }
+                    if let Window::Discussion(id) = old {
+                        state.discussions.remove(&id);
+                    }
                     state.pane_manager.remove_window(&old);
                     notify_terminal_focus_change(
                         state,
@@ -1367,11 +1370,46 @@ impl App for AppMain {
                 }
                 AppSignal::ConversationsLoaded => {
                     state.tree_view.loaded = true;
-                    let tree = state.conversations.read();
+                    let tree = Arc::clone(&state.conversations);
+                    let tree = tree.read();
                     state
                         .tree_view
                         .expanded
                         .retain(|id| tree.node(id).is_some());
+                    // Session-restored discussion windows: load their node, or close
+                    // the ones whose node no longer exists.
+                    let restored: Vec<(usize, bool)> = state
+                        .discussions
+                        .iter()
+                        .map(|(id, discussion)| (*id, tree.node(&discussion.node).is_some()))
+                        .collect();
+                    for (id, exists) in restored {
+                        if exists {
+                            DiscussionComponent::load_content(
+                                state,
+                                global_data.main_thread_channel_sender.clone(),
+                                id,
+                            );
+                        } else {
+                            state.discussions.remove(&id);
+                            state.pane_manager.remove_window(&Window::Discussion(id));
+                            state.mark_session_dirty();
+                        }
+                    }
+                }
+                AppSignal::NodeContentLoaded {
+                    window_id,
+                    node,
+                    prompt,
+                    reply,
+                } => {
+                    if let Some(discussion) = state.discussions.get_mut(window_id)
+                        && &discussion.node == node
+                    {
+                        discussion.prompt = prompt.clone();
+                        discussion.reply = reply.clone();
+                        discussion.loaded = true;
+                    }
                 }
                 AppSignal::DirtyStatusLoaded(result) => {
                     // Errors are transient (e.g. a momentary git-lock during a commit);
@@ -1736,8 +1774,10 @@ fn render_status_bar(
                     "Backspace:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll".to_string()
                 }
                 Some(Window::ConversationTree) => {
-                    "↑↓:Select  ←→:Fold  f:Favorite  Ctrl+D:Delete".to_string()
+                    "↑↓:Select  ←→:Fold  Enter:Open  c:Commits  f:Favorite  Ctrl+D:Delete"
+                        .to_string()
                 }
+                Some(Window::Discussion(_)) => "PgUp/PgDn:scroll".to_string(),
                 Some(Window::Terminal(_)) if !state.terminal_grabbed => {
                     "Backspace:Send to back  Enter:grab  ↑↓PgUp/PgDn:scroll".to_string()
                 }

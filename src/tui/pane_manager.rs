@@ -27,6 +27,8 @@ pub enum Window {
     CommitDiff([u8; 20]),
     /// Tree of every agent conversation of the repository.
     ConversationTree,
+    /// One conversation node: its prompt and reply. Identified by a window id.
+    Discussion(usize),
 }
 
 /// A point in a window's content used as a text-selection anchor or endpoint.
