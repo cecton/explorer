@@ -21,6 +21,8 @@ pub struct Config {
 pub struct AgentSettings {
     pub endpoints: Vec<EndpointDecl>,
     pub summary_model: Option<ModelSpec>,
+    /// Custom slash commands: `(name, base prompt)`.
+    pub commands: Vec<(String, String)>,
 }
 
 /// Settings for the status-bar session/project time counters.
@@ -134,6 +136,7 @@ pub fn resolve_agent(settings: AgentSettings, tokens: &HashMap<String, String>) 
     AgentConfig {
         endpoints,
         summary_model: settings.summary_model,
+        commands: settings.commands,
     }
 }
 
@@ -203,6 +206,29 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                     format!("summary-model '{value}' is not of the form endpoint/model/effort")
                 })?;
                 settings.summary_model = Some(spec);
+            }
+            "command" => {
+                let name = string_arg(child).ok_or("agent.command must have a string name")?;
+                let valid = !name.is_empty()
+                    && name
+                        .chars()
+                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
+                if !valid {
+                    return Err(format!(
+                        "command name '{name}' must be made of lowercase letters, digits and dashes"
+                    ));
+                }
+                if name == crate::agent::commands::COMPACT {
+                    return Err("command 'compact' is built in and cannot be redefined".to_string());
+                }
+                let prompt = child
+                    .children()
+                    .and_then(|fields| fields.get("prompt"))
+                    .and_then(string_arg)
+                    .ok_or_else(|| format!("command '{name}' must have a prompt"))?;
+                settings
+                    .commands
+                    .push((name.to_string(), prompt.to_string()));
             }
             _ => {}
         }
@@ -432,6 +458,37 @@ mod config_tests {
     }
 
     #[test]
+    fn agent_block_parses_custom_commands() {
+        let config = parse(
+            r#"
+            agent {
+                command "review" {
+                    prompt "Review the change below."
+                }
+                command "plan-it" {
+                    prompt "Plan this."
+                }
+            }
+        "#,
+        )
+        .expect("valid config");
+        assert_eq!(
+            config.agent.commands,
+            [
+                ("review".to_string(), "Review the change below.".to_string()),
+                ("plan-it".to_string(), "Plan this.".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn agent_block_rejects_bad_commands() {
+        assert!(parse("agent {\n command \"compact\" {\n prompt \"x\"\n }\n}").is_err());
+        assert!(parse("agent {\n command \"Bad Name\" {\n prompt \"x\"\n }\n}").is_err());
+        assert!(parse("agent {\n command \"review\" {\n }\n}").is_err());
+    }
+
+    #[test]
     fn agent_block_is_empty_when_absent() {
         let config = parse("theme \"night_owl\"").expect("valid config");
         assert_eq!(config.agent, AgentSettings::default());
@@ -463,6 +520,7 @@ mod config_tests {
                 },
             ],
             summary_model: None,
+            commands: Vec::new(),
         };
         let tokens = parse_auth("router \"sk-or\"\nunused \"x\"").expect("valid auth");
         let agent = resolve_agent(settings, &tokens);

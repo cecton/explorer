@@ -1,5 +1,6 @@
 pub mod agent_loop;
 pub mod claude_code;
+pub mod commands;
 pub mod context;
 pub mod llm;
 pub mod models;
@@ -148,6 +149,8 @@ pub struct AgentConfig {
     pub endpoints: Vec<Endpoint>,
     /// Model used for titles and summaries; neither is generated without it.
     pub summary_model: Option<ModelSpec>,
+    /// Custom slash commands: `(name, base prompt)`.
+    pub commands: Vec<(String, String)>,
 }
 
 impl AgentConfig {

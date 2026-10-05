@@ -5,6 +5,7 @@ const FEEDBACK_PROMPT: &str = include_str!("../../prompts/feedback.md");
 const COMMIT_PROMPT: &str = include_str!("../../prompts/commit.md");
 pub const TITLE_PROMPT: &str = include_str!("../../prompts/title.md");
 pub const SUMMARY_PROMPT: &str = include_str!("../../prompts/summary.md");
+const COMPACT_PROMPT: &str = include_str!("../../prompts/compact.md");
 
 /// Commits listed in a repository-moved note before it says there are more.
 pub const NOTE_MAX_COMMITS: usize = 20;
@@ -125,16 +126,30 @@ pub fn repository_moved_note(commits: &[String]) -> String {
     note
 }
 
-/// The user message as sent: the prompt, preceded by a note when there is one.
-pub fn user_message(note: Option<&str>, prompt: &str) -> Message {
-    let content = match note {
-        Some(note) => format!("{note}\n\n{prompt}"),
-        None => prompt.to_string(),
-    };
-    Message::User {
-        content,
-        injected: false,
+/// Note opening the first message after a compact node: its summary stands in for
+/// everything said before.
+pub fn compaction_note(summary: &str) -> String {
+    format!(
+        "[Note from Explorer: the earlier part of this conversation was compacted. Its \
+         summary follows and replaces the earlier messages.]\n\n{}\n\n[End of the summary.]",
+        summary.trim()
+    )
+}
+
+/// What a `/compact` turn asks the model, with the instructions the user typed.
+pub fn compact_request(instructions: &str) -> String {
+    let base = COMPACT_PROMPT.trim_end();
+    match instructions.trim() {
+        "" => base.to_string(),
+        extra => format!("{base}\n\nAdditional instructions from the user: {extra}"),
     }
+}
+
+/// The text of a message as sent: the prompt, preceded by the notes Explorer adds.
+pub fn with_notes(notes: &[Option<String>], prompt: &str) -> String {
+    let mut parts: Vec<&str> = notes.iter().flatten().map(String::as_str).collect();
+    parts.push(prompt);
+    parts.join("\n\n")
 }
 
 /// Hidden message sent when a commit turn stops while the working tree is still dirty.
@@ -227,21 +242,29 @@ mod tests {
     }
 
     #[test]
-    fn user_message_puts_the_note_before_the_prompt() {
-        assert_eq!(
-            user_message(Some("[note]"), "do it"),
-            Message::User {
-                content: "[note]\n\ndo it".into(),
-                injected: false,
-            }
-        );
-        assert_eq!(
-            user_message(None, "do it"),
-            Message::User {
-                content: "do it".into(),
-                injected: false,
-            }
-        );
+    fn notes_come_before_the_prompt() {
+        let notes = [
+            Some("[summary]".to_string()),
+            None,
+            Some("[moved]".to_string()),
+        ];
+        assert_eq!(with_notes(&notes, "do it"), "[summary]\n\n[moved]\n\ndo it");
+        assert_eq!(with_notes(&[None], "do it"), "do it");
+    }
+
+    #[test]
+    fn compact_request_appends_typed_instructions() {
+        assert!(compact_request("  ").starts_with("Summarize this conversation"));
+        assert!(!compact_request("").contains("Additional instructions"));
+        let request = compact_request(" keep the API decisions ");
+        assert!(request.ends_with("Additional instructions from the user: keep the API decisions"));
+    }
+
+    #[test]
+    fn compaction_note_wraps_the_summary() {
+        let note = compaction_note("\nWe chose KDL.\n");
+        assert!(note.starts_with("[Note from Explorer:"));
+        assert!(note.ends_with("We chose KDL.\n\n[End of the summary.]"));
     }
 
     #[test]

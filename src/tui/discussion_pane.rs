@@ -1,5 +1,6 @@
+use crate::agent::commands::{self, Expansion};
 use crate::agent::turn::{self, TurnRequest};
-use crate::agent::{CLAUDE_CODE_KIND, Mode, ModelSpec};
+use crate::agent::{Mode, ModelSpec};
 use crate::conversation::{Metadata, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
@@ -38,6 +39,139 @@ pub struct DiscussionComponent {
     input: InputLine,
     /// Window the input cursor belongs to; another window's draft resets it.
     input_window: Option<usize>,
+}
+
+/// What a turn is asked to do.
+pub(crate) enum TurnKind {
+    /// A prompt sent in a mode.
+    Prompt(Mode),
+    /// The built-in `/compact`: summarize the branch so far.
+    Compact { instructions: String },
+}
+
+/// A turn to start: a new node under `parent`, or a new root.
+pub(crate) struct Launch {
+    pub parent: Option<NodeId>,
+    /// Text stored as the node's `prompt.md`.
+    pub prompt: String,
+    pub kind: TurnKind,
+    /// Custom slash command the prompt was expanded from.
+    pub command: Option<String>,
+    pub spec: ModelSpec,
+}
+
+/// Checks the guards, creates the node on disk and starts its turn. On refusal nothing
+/// is created and the reason is returned.
+pub(crate) fn start_turn(
+    state: &mut AppState,
+    main_tx: MainTx,
+    launch: Launch,
+) -> Result<NodeId, String> {
+    let Launch {
+        parent,
+        prompt,
+        kind,
+        command,
+        spec,
+    } = launch;
+    // A compact turn changes nothing, so it runs under the shared lock like feedback.
+    let (mode, node_type, compact) = match kind {
+        TurnKind::Prompt(Mode::Feedback) => (Mode::Feedback, NodeType::Feedback, None),
+        TurnKind::Prompt(Mode::Commit) => (Mode::Commit, NodeType::Commit, None),
+        TurnKind::Compact { instructions } => {
+            (Mode::Feedback, NodeType::Compact, Some(instructions))
+        }
+    };
+    let endpoint_kind = state
+        .agent
+        .endpoint(&spec.endpoint)
+        .map(|endpoint| endpoint.kind.label());
+    let (Some(endpoint_kind), Some(backend)) = (endpoint_kind, state.agent.backend(&spec)) else {
+        return Err(format!(
+            "endpoint '{}' is not configured or has no token",
+            spec.endpoint
+        ));
+    };
+    let parent_status = parent
+        .as_ref()
+        .and_then(|parent| state.conversations.read().node(parent)?.meta.status);
+    match parent_status {
+        Some(NodeStatus::Done) | None => {}
+        Some(NodeStatus::Running) => return Err("this node is still running".to_string()),
+        Some(_) => return Err("this node is not complete; continue from its parent".to_string()),
+    }
+    let running: Vec<Mode> = state
+        .running_turns
+        .values()
+        .map(|handle| handle.mode)
+        .collect();
+    if let Some(reason) = lock_refusal(&running, mode) {
+        return Err(reason.to_string());
+    }
+    if mode == Mode::Commit && !crate::git::status_short(&state.root)?.trim().is_empty() {
+        return Err(
+            "the working tree has uncommitted changes; commit or stash them first".to_string(),
+        );
+    }
+
+    let head = state.repo.as_ref().and_then(crate::git::head_id);
+    let now = now_secs();
+    let meta = Metadata {
+        node_type: Some(node_type),
+        endpoint: Some(spec.endpoint.clone()),
+        kind: Some(endpoint_kind.to_string()),
+        model: Some(spec.model.clone()),
+        effort: Some(spec.effort.as_str().to_string()),
+        status: Some(NodeStatus::Running),
+        head_before: head.clone(),
+        command,
+        ..Default::default()
+    };
+    let (node, lineage, context) = {
+        let mut tree = state.conversations.write();
+        let node = tree
+            .create_node(parent.as_ref(), now, meta, &prompt)
+            .map_err(|e| format!("could not create the node: {e}"))?;
+        let context = tree
+            .turn_context(&node)
+            .ok_or("the new node has no directory")?;
+        (node.clone(), tree.lineage(&node), context)
+    };
+    state.tree_view.expanded.extend(lineage);
+    state.tree_view.selected = Some(node.clone());
+
+    let summary_backend = state
+        .agent
+        .summary_model
+        .as_ref()
+        .and_then(|summary| state.agent.backend(summary));
+    let request = TurnRequest {
+        mode,
+        node: node.clone(),
+        node_dir: context.node_dir.clone(),
+        ancestor_dirs: context.ancestor_dirs,
+        parent_head: context.parent_head,
+        head,
+        root: state.root.clone(),
+        repo: state.repo.clone(),
+        prompt: prompt.clone(),
+        date: utc_date(now),
+        backend,
+        parent_session: context.parent_session,
+        compact,
+        compacted_parent: context.compacted_parent,
+    };
+    let handle = turn::spawn(request, main_tx.clone());
+    state.running_turns.insert(node.clone(), handle);
+    turn::spawn_title_and_summary(
+        node.clone(),
+        context.node_dir,
+        prompt,
+        summary_backend,
+        main_tx,
+    );
+    state.mark_session_dirty();
+    Ok(node)
 }
 
 /// The model a node was run with, when its metadata names one completely.
@@ -191,136 +325,44 @@ impl DiscussionComponent {
             ModelPickerComponent::open(state, main_tx, id);
             return;
         };
-        let parent = discussion.node.clone();
-        let prompt = discussion.draft.clone();
-        let mode = discussion.mode;
-
-        let refusal = |state: &mut AppState, reason: String| {
-            if let Some(discussion) = state.discussions.get_mut(&id) {
-                discussion.notice = Some(reason);
+        let typed = discussion.draft.clone();
+        let (prompt, kind, command) = match commands::expand(&typed, &state.agent.commands) {
+            Expansion::Compact { instructions } => {
+                (typed, TurnKind::Compact { instructions }, None)
+            }
+            Expansion::Prompt { text, command } => {
+                (text, TurnKind::Prompt(discussion.mode), command)
             }
         };
-        let kind = state
-            .agent
-            .endpoint(&spec.endpoint)
-            .map(|endpoint| endpoint.kind.label());
-        let (Some(kind), Some(backend)) = (kind, state.agent.backend(&spec)) else {
-            let reason = format!(
-                "endpoint '{}' is not configured or has no token",
-                spec.endpoint
-            );
-            return refusal(state, reason);
+        let launch = Launch {
+            parent: discussion.node.clone(),
+            prompt: prompt.clone(),
+            kind,
+            command,
+            spec,
         };
-        let parent_status = parent
-            .as_ref()
-            .and_then(|parent| state.conversations.read().node(parent)?.meta.status);
-        if let Some(status) = parent_status
-            && status != NodeStatus::Done
-        {
-            let reason = match status {
-                NodeStatus::Running => "this node is still running",
-                _ => "this node is not complete; continue from its parent",
-            };
-            return refusal(state, reason.to_string());
-        }
-        let running: Vec<Mode> = state
-            .running_turns
-            .values()
-            .map(|handle| handle.mode)
-            .collect();
-        if let Some(reason) = lock_refusal(&running, mode) {
-            return refusal(state, reason.to_string());
-        }
-        if mode == Mode::Commit {
-            match crate::git::status_short(&state.root) {
-                Ok(status) if status.trim().is_empty() => {}
-                Ok(_) => {
-                    let reason =
-                        "the working tree has uncommitted changes; commit or stash them first";
-                    return refusal(state, reason.to_string());
+        let node = match start_turn(state, main_tx, launch) {
+            Ok(node) => node,
+            Err(reason) => {
+                if let Some(discussion) = state.discussions.get_mut(&id) {
+                    discussion.notice = Some(reason);
                 }
-                Err(e) => return refusal(state, e),
+                return;
             }
-        }
-
-        let head = state.repo.as_ref().and_then(crate::git::head_id);
-        let now = now_secs();
-        let meta = Metadata {
-            node_type: Some(match mode {
-                Mode::Feedback => NodeType::Feedback,
-                Mode::Commit => NodeType::Commit,
-            }),
-            endpoint: Some(spec.endpoint.clone()),
-            kind: Some(kind.to_string()),
-            model: Some(spec.model.clone()),
-            effort: Some(spec.effort.as_str().to_string()),
-            status: Some(NodeStatus::Running),
-            head_before: head.clone(),
-            ..Default::default()
         };
-        let created = {
-            let mut tree = state.conversations.write();
-            tree.create_node(parent.as_ref(), now, meta, &prompt)
-                .map(|node| {
-                    let lineage = tree.lineage(&node);
-                    let dirs: Vec<_> = lineage.iter().filter_map(|id| tree.node_dir(id)).collect();
-                    let parent_meta = parent
-                        .as_ref()
-                        .and_then(|parent| tree.node(parent))
-                        .map(|parent| &parent.meta);
-                    let parent_head = parent_meta.and_then(|meta| meta.head_after.clone());
-                    let parent_session = parent_meta
-                        .filter(|meta| meta.kind.as_deref() == Some(CLAUDE_CODE_KIND))
-                        .and_then(|meta| meta.session_id.clone());
-                    (node, lineage, dirs, parent_head, parent_session)
-                })
-        };
-        let (node, lineage, mut dirs, parent_head, parent_session) = match created {
-            Ok(created) => created,
-            Err(e) => return refusal(state, format!("could not create the node: {e}")),
-        };
-        let Some(node_dir) = dirs.pop() else {
+        let Some(discussion) = state.discussions.get_mut(&id) else {
             return;
         };
-
-        if let Some(discussion) = state.discussions.get_mut(&id) {
-            discussion.node = Some(node.clone());
-            discussion.prompt = prompt.clone();
-            discussion.reply.clear();
-            discussion.draft.clear();
-            discussion.loaded = true;
-            discussion.notice = None;
-            discussion.follow = true;
-        }
+        discussion.node = Some(node);
+        discussion.prompt = prompt;
+        discussion.reply.clear();
+        discussion.draft.clear();
+        discussion.loaded = true;
+        discussion.notice = None;
+        discussion.follow = true;
         state
             .pane_manager
             .set_window_scroll(&Window::Discussion(id), 0);
-        state.tree_view.expanded.extend(lineage);
-        state.tree_view.selected = Some(node.clone());
-
-        let summary_backend = state
-            .agent
-            .summary_model
-            .as_ref()
-            .and_then(|summary| state.agent.backend(summary));
-        let request = TurnRequest {
-            mode,
-            node: node.clone(),
-            node_dir: node_dir.clone(),
-            ancestor_dirs: dirs,
-            parent_head,
-            head,
-            root: state.root.clone(),
-            repo: state.repo.clone(),
-            prompt: prompt.clone(),
-            date: utc_date(now),
-            backend,
-            parent_session,
-        };
-        let handle = turn::spawn(request, main_tx.clone());
-        state.running_turns.insert(node.clone(), handle);
-        turn::spawn_title_and_summary(node, node_dir, prompt, summary_backend, main_tx);
-        state.mark_session_dirty();
     }
 
     fn doc_lines(&mut self, discussion: &DiscussionState, width: usize) -> &[DocLine] {

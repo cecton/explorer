@@ -245,6 +245,21 @@ impl Node {
     }
 }
 
+/// Where a node's turn finds its context: what to replay and what its parent left.
+#[derive(Debug, PartialEq, Eq)]
+pub struct TurnContext {
+    pub node_dir: Utf8PathBuf,
+    /// Directories of the ancestors to replay, oldest first. Starts after the nearest
+    /// compact ancestor, whose summary stands in for everything before it.
+    pub ancestor_dirs: Vec<Utf8PathBuf>,
+    /// Directory of the parent when it is a compact node.
+    pub compacted_parent: Option<Utf8PathBuf>,
+    /// HEAD when the parent's turn ended.
+    pub parent_head: Option<String>,
+    /// Claude Code session of the parent, when it ran there and is not a compact node.
+    pub parent_session: Option<String>,
+}
+
 /// The conversation tree of one repository. Holds metadata, titles and summaries
 /// only; prompts, replies and transcripts stay on disk.
 #[derive(Clone, Debug, Default)]
@@ -322,6 +337,40 @@ impl ConversationTree {
         }
         chain.reverse();
         chain
+    }
+
+    pub fn turn_context(&self, id: &NodeId) -> Option<TurnContext> {
+        let lineage = self.lineage(id);
+        let (_, ancestors) = lineage.split_last()?;
+        let is_compact = |ancestor: &NodeId| {
+            self.nodes
+                .get(ancestor)
+                .is_some_and(|node| node.meta.node_type == Some(NodeType::Compact))
+        };
+        let cut = ancestors.iter().rposition(is_compact);
+        let replayed = &ancestors[cut.map_or(0, |index| index + 1)..];
+        let parent = ancestors.last();
+        let parent_is_compact = parent.is_some_and(is_compact);
+        let parent_meta = parent
+            .and_then(|parent| self.nodes.get(parent))
+            .map(|node| &node.meta);
+        Some(TurnContext {
+            node_dir: self.node_dir(id)?,
+            ancestor_dirs: replayed
+                .iter()
+                .filter_map(|ancestor| self.node_dir(ancestor))
+                .collect(),
+            compacted_parent: parent
+                .filter(|_| parent_is_compact)
+                .and_then(|parent| self.node_dir(parent)),
+            parent_head: parent_meta.and_then(|meta| meta.head_after.clone()),
+            parent_session: parent_meta
+                .filter(|meta| {
+                    !parent_is_compact
+                        && meta.kind.as_deref() == Some(crate::agent::CLAUDE_CODE_KIND)
+                })
+                .and_then(|meta| meta.session_id.clone()),
+        })
     }
 
     /// Creates a node under `parent` (or a new root): its directory, `prompt.md` and
@@ -663,6 +712,51 @@ mod tests {
         assert!(dir.join(child.as_str()).join("prompt.md").exists());
         assert_eq!(tree.lineage(&child), [first.clone(), child.clone()]);
         assert_eq!(tree.roots(), [first, twin]);
+    }
+
+    #[test]
+    fn turn_context_replays_ancestors_after_the_nearest_compact_node() {
+        let (_tmp, root) = temp_root();
+        let a = root.join("a1");
+        let b = a.join("a2");
+        let c = b.join("a3");
+        let d = c.join("a4");
+        write_node(&a, &[("metadata.md", "head-after: h1\n")]);
+        write_node(
+            &b,
+            &[(
+                "metadata.md",
+                "type: compact\nkind: claude-code\nsession-id: s2\n",
+            )],
+        );
+        write_node(
+            &c,
+            &[(
+                "metadata.md",
+                "kind: claude-code\nsession-id: s3\nhead-after: h3\n",
+            )],
+        );
+        write_node(&d, &[]);
+        let tree = ConversationTree::load(&root);
+
+        let after_compact = tree.turn_context(&NodeId::new("a3")).unwrap();
+        assert!(after_compact.ancestor_dirs.is_empty());
+        assert_eq!(after_compact.compacted_parent.as_ref(), Some(&b));
+        assert_eq!(after_compact.parent_session, None);
+
+        let later = tree.turn_context(&NodeId::new("a4")).unwrap();
+        assert_eq!(later.node_dir, d);
+        assert_eq!(later.ancestor_dirs, [c]);
+        assert_eq!(later.compacted_parent, None);
+        assert_eq!(later.parent_session.as_deref(), Some("s3"));
+        assert_eq!(later.parent_head.as_deref(), Some("h3"));
+
+        let compacting = tree.turn_context(&NodeId::new("a2")).unwrap();
+        assert_eq!(compacting.ancestor_dirs, [a]);
+        assert_eq!(compacting.parent_head.as_deref(), Some("h1"));
+        let first = tree.turn_context(&NodeId::new("a1")).unwrap();
+        assert!(first.ancestor_dirs.is_empty());
+        assert_eq!(first.parent_head, None);
     }
 
     #[test]

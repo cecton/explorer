@@ -61,6 +61,7 @@ pub struct TurnOutcome {
     pub session_id: Option<String>,
 }
 
+#[derive(Clone)]
 pub struct TurnRequest {
     pub mode: Mode,
     pub node: NodeId,
@@ -79,6 +80,30 @@ pub struct TurnRequest {
     pub backend: Backend,
     /// Claude Code session of the parent node, to fork when the backend is the CLI.
     pub parent_session: Option<String>,
+    /// Instructions of a `/compact` turn; such a turn asks for a summary instead of
+    /// sending `prompt`.
+    pub compact: Option<String>,
+    /// Directory of the parent when it is a compact node: its reply opens the context.
+    pub compacted_parent: Option<Utf8PathBuf>,
+}
+
+/// The text to send for `request`: what the turn asks, preceded by the summary of a
+/// compacted parent and by the repository-moved note. Reads files and runs git.
+fn message_to_send(request: &TurnRequest) -> String {
+    let summary = request.compacted_parent.as_ref().map(|dir| {
+        let (_, summary) = crate::conversation::read_prompt_and_reply(dir);
+        context::compaction_note(&summary)
+    });
+    let moved = moved_note(
+        &request.root,
+        request.parent_head.as_deref(),
+        request.head.as_deref(),
+    );
+    let ask = match &request.compact {
+        Some(instructions) => context::compact_request(instructions),
+        None => request.prompt.clone(),
+    };
+    context::with_notes(&[summary, moved], &ask)
 }
 
 /// Collects a turn's output: live reply for the UI, `reply.md` and `transcript.jsonl`
@@ -185,7 +210,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
         let (status, error) = tokio::select! {
             result = run(&request, &mut recorder) => match result {
                 Ok(()) => (NodeStatus::Done, None),
-                Err(error) => (NodeStatus::Failed, Some(error)),
+                Err(error) => (NodeStatus::Failed, Some(with_compact_hint(error))),
             },
             _ = cancel_rx.wait_for(|cancelled| *cancelled) => (NodeStatus::Cancelled, None),
         };
@@ -253,21 +278,16 @@ async fn run_claude_code(
     recorder: &mut Recorder,
 ) -> Result<(), String> {
     let (system, message, preamble) = {
-        let root = request.root.clone();
-        let ancestor_dirs = request.ancestor_dirs.clone();
-        let parent_head = request.parent_head.clone();
-        let head = request.head.clone();
-        let prompt = request.prompt.clone();
-        let date = request.date.clone();
-        let mode = request.mode;
+        let request = request.clone();
         tokio::task::spawn_blocking(move || {
-            let system = context::claude_system_prompt(mode, &root, head.as_deref(), &date);
-            let note = moved_note(&root, parent_head.as_deref(), head.as_deref());
-            let message = match note {
-                Some(note) => format!("{note}\n\n{prompt}"),
-                None => prompt,
-            };
-            (system, message, context::handover_preamble(&ancestor_dirs))
+            let system = context::claude_system_prompt(
+                request.mode,
+                &request.root,
+                request.head.as_deref(),
+                &request.date,
+            );
+            let preamble = context::handover_preamble(&request.ancestor_dirs);
+            (system, message_to_send(&request), preamble)
         })
         .await
         .map_err(|e| e.to_string())?
@@ -354,21 +374,23 @@ async fn run_own_loop(
     recorder: &mut Recorder,
 ) -> Result<(), String> {
     let (system, mut messages) = {
-        let root = request.root.clone();
-        let ancestor_dirs = request.ancestor_dirs.clone();
-        let parent_head = request.parent_head.clone();
-        let head = request.head.clone();
-        let prompt = request.prompt.clone();
-        let date = request.date.clone();
-        let mode = request.mode;
+        let request = request.clone();
         tokio::task::spawn_blocking(move || {
-            let system = context::system_prompt(mode, &root, head.as_deref(), &date);
-            let mut messages: Vec<Message> = ancestor_dirs
+            let system = context::system_prompt(
+                request.mode,
+                &request.root,
+                request.head.as_deref(),
+                &request.date,
+            );
+            let mut messages: Vec<Message> = request
+                .ancestor_dirs
                 .iter()
                 .flat_map(|dir| context::ancestor_messages(dir))
                 .collect();
-            let note = moved_note(&root, parent_head.as_deref(), head.as_deref());
-            messages.push(context::user_message(note.as_deref(), &prompt));
+            messages.push(Message::User {
+                content: message_to_send(&request),
+                injected: false,
+            });
             (system, messages)
         })
         .await
@@ -376,6 +398,22 @@ async fn run_own_loop(
     };
     if let Some(sent) = messages.last() {
         recorder.message(sent);
+    }
+    if request.compact.is_some() {
+        // A compact turn is a single answer, without tools.
+        recorder.begin_answer();
+        let response = llm::stream_chat(target, &system, &messages, &[], |text| {
+            recorder.text(text);
+        })
+        .await?;
+        if let Some(tokens) = response.tokens_in {
+            recorder.tokens_in(tokens);
+        }
+        recorder.message(&Message::Assistant {
+            content: response.text,
+            tool_calls: Vec::new(),
+        });
+        return Ok(());
     }
     agent_loop::run(
         request.mode,
@@ -447,6 +485,20 @@ fn moved_note(root: &Utf8Path, parent_head: Option<&str>, head: Option<&str>) ->
     }
     let commits = crate::git::log_oneline(root, parent_head, head, context::NOTE_MAX_COMMITS + 1);
     Some(context::repository_moved_note(&commits))
+}
+
+/// Points to `/compact` when an endpoint refuses a request for being too long.
+fn with_compact_hint(error: String) -> String {
+    let lower = error.to_lowercase();
+    let too_long = lower.contains("context")
+        && ["length", "window", "too long", "maximum", "exceed"]
+            .iter()
+            .any(|word| lower.contains(word));
+    if too_long {
+        format!("{error} — the conversation is too long: use /compact from the parent node")
+    } else {
+        error
+    }
 }
 
 fn single_line(text: &str) -> String {
@@ -633,6 +685,13 @@ mod tests {
         let first = commit(&root, "a.txt", "1", "init");
         let (commits, _) = close_commit_turn(&root, "node", None, Some(&first));
         assert_eq!(commits, [first]);
+    }
+
+    #[test]
+    fn context_length_errors_suggest_compacting() {
+        let hinted = with_compact_hint("This model's maximum context length is 128000".into());
+        assert!(hinted.ends_with("use /compact from the parent node"));
+        assert_eq!(with_compact_hint("rate limited".into()), "rate limited");
     }
 
     #[test]
