@@ -95,7 +95,10 @@ pub enum PaneEntry {
 
     #[serde(rename = "discussion")]
     Discussion {
-        node: String,
+        /// Node shown; `None` for a new conversation not sent yet.
+        node: Option<String>,
+        #[serde(default)]
+        draft: String,
         pane_size: SerializablePaneSize,
     },
 }
@@ -353,7 +356,11 @@ impl Session {
                     );
                 }
 
-                PaneEntry::Discussion { node, pane_size } => {
+                PaneEntry::Discussion {
+                    node,
+                    draft,
+                    pane_size,
+                } => {
                     let id = state.next_discussion_id;
                     state.next_discussion_id += 1;
                     let window = Window::Discussion(id);
@@ -365,9 +372,15 @@ impl Session {
                             ..Default::default()
                         },
                     );
-                    state
-                        .discussions
-                        .insert(id, DiscussionState::new(NodeId::new(&node)));
+                    state.discussions.insert(
+                        id,
+                        DiscussionState {
+                            loaded: node.is_none(),
+                            node: node.as_deref().map(NodeId::new),
+                            draft,
+                            ..Default::default()
+                        },
+                    );
                 }
             }
         }
@@ -448,7 +461,7 @@ fn pane_entry_from_window(
                 pane_size: window_state.pane_size.into(),
             })
         }
-        Window::FileNamePicker | Window::ThemePicker => None,
+        Window::FileNamePicker | Window::ThemePicker | Window::ModelPicker => None,
         Window::GitLog(id) => {
             let win = state.git_logs.get(id)?;
             Some(PaneEntry::GitLog {
@@ -469,7 +482,11 @@ fn pane_entry_from_window(
         Window::Discussion(id) => {
             let discussion = state.discussions.get(id)?;
             Some(PaneEntry::Discussion {
-                node: discussion.node.as_str().to_string(),
+                node: discussion
+                    .node
+                    .as_ref()
+                    .map(|node| node.as_str().to_string()),
+                draft: discussion.draft.clone(),
                 pane_size: window_state.pane_size.into(),
             })
         }

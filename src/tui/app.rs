@@ -630,6 +630,10 @@ impl App for AppMain {
             });
         }
 
+        for endpoint in &global_data.state.agent.endpoints {
+            crate::tui::model_picker::fetch_models(endpoint.clone(), notify_tx.clone());
+        }
+
         // Request full tokens for session-restored file previews.
         for window in global_data.state.pane_manager.window_stack.iter() {
             if let Window::FilePreview(key) = window {
@@ -1381,7 +1385,10 @@ impl App for AppMain {
                     let restored: Vec<(usize, bool)> = state
                         .discussions
                         .iter()
-                        .map(|(id, discussion)| (*id, tree.node(&discussion.node).is_some()))
+                        .filter_map(|(id, discussion)| {
+                            let node = discussion.node.as_ref()?;
+                            Some((*id, tree.node(node).is_some()))
+                        })
                         .collect();
                     for (id, exists) in restored {
                         if exists {
@@ -1404,12 +1411,64 @@ impl App for AppMain {
                     reply,
                 } => {
                     if let Some(discussion) = state.discussions.get_mut(window_id)
-                        && &discussion.node == node
+                        && discussion.node.as_ref() == Some(node)
                     {
                         discussion.prompt = prompt.clone();
                         discussion.reply = reply.clone();
                         discussion.loaded = true;
+                        if discussion.model.is_none() {
+                            discussion.model = state
+                                .conversations
+                                .read()
+                                .node(node)
+                                .and_then(crate::tui::discussion_pane::node_model);
+                        }
                     }
+                }
+                AppSignal::ModelsFetched { endpoint, result } => {
+                    if let Err(e) = result {
+                        tracing::warn!("model list of '{endpoint}' failed: {e}");
+                    }
+                    let agent = Arc::clone(&state.agent);
+                    state.models.set_list(&agent, endpoint, result.clone());
+                    if state
+                        .pane_manager
+                        .window_stack
+                        .contains(&Window::ModelPicker)
+                    {
+                        let query = state.model_picker.query.clone();
+                        state.model_picker.results =
+                            crate::tui::model_picker::run_model_match(&query, state);
+                    }
+                }
+                AppSignal::TurnProgress => {}
+                AppSignal::TurnFinished { node, outcome } => {
+                    if let Some(handle) = state.running_turns.remove(node) {
+                        let reply = handle.live.lock().reply.clone();
+                        for discussion in state.discussions.values_mut() {
+                            if discussion.node.as_ref() == Some(node) {
+                                discussion.reply.clone_from(&reply);
+                            }
+                        }
+                    }
+                    let updated = state.conversations.write().update_meta(node, |meta| {
+                        meta.status = Some(outcome.status);
+                        meta.error = outcome.error.clone();
+                        meta.head_after = outcome.head_after.clone();
+                        meta.tokens_in = outcome.tokens_in;
+                    });
+                    if let Err(e) = updated {
+                        tracing::warn!("failed to save the outcome of {}: {e}", node.as_str());
+                    }
+                }
+                AppSignal::NodeTitleReady { node, title } => {
+                    state.conversations.write().set_title(node, title.clone());
+                }
+                AppSignal::NodeSummaryReady { node, summary } => {
+                    state
+                        .conversations
+                        .write()
+                        .set_summary(node, summary.clone());
                 }
                 AppSignal::DirtyStatusLoaded(result) => {
                     // Errors are transient (e.g. a momentary git-lock during a commit);
@@ -1774,10 +1833,13 @@ fn render_status_bar(
                     "Backspace:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll".to_string()
                 }
                 Some(Window::ConversationTree) => {
-                    "↑↓:Select  ←→:Fold  Enter:Open  c:Commits  f:Favorite  Ctrl+D:Delete"
+                    "↑↓:Select  ←→:Fold  Enter:Open  n:New  c:Commits  f:Favorite  Ctrl+D:Delete"
                         .to_string()
                 }
-                Some(Window::Discussion(_)) => "PgUp/PgDn:scroll".to_string(),
+                Some(Window::Discussion(_)) => {
+                    "Enter:Send  Shift+Enter:New line  Ctrl+P:Model  PgUp/PgDn:scroll".to_string()
+                }
+                Some(Window::ModelPicker) => model_picker_hint(state),
                 Some(Window::Terminal(_)) if !state.terminal_grabbed => {
                     "Backspace:Send to back  Enter:grab  ↑↓PgUp/PgDn:scroll".to_string()
                 }
@@ -1882,6 +1944,17 @@ fn render_status_bar(
     pipeline.push(ZOrder::Normal, render_ops);
 }
 
+fn model_picker_hint(state: &AppState) -> String {
+    let errors = state.models.errors();
+    if !errors.is_empty() {
+        return errors.join("  ");
+    }
+    if state.agent.endpoints.is_empty() {
+        return "No endpoint: declare one in config.kdl and its token in auth.kdl".to_string();
+    }
+    "Esc:Cancel  Enter:Select".to_string()
+}
+
 /// A message that must not be cut off by the regular hints: a failure, or a pending
 /// delete confirmation.
 fn conversation_tree_alert(state: &AppState) -> Option<String> {
@@ -1977,6 +2050,19 @@ pub async fn run(
         let _ = w.write_all(b"\x1b[?1004l");
     });
     let _ = global_data.output_device.flush();
+
+    // Stop running turns: keep what they produced and record them as cancelled.
+    for (node, handle) in &global_data.state.running_turns {
+        handle.cancel();
+        let mut tree = global_data.state.conversations.write();
+        if let Some(dir) = tree.node_dir(node) {
+            let reply = handle.live.lock().reply.clone();
+            let _ = crate::conversation::write_atomic(&dir.join("reply.md"), &reply);
+        }
+        let _ = tree.update_meta(node, |meta| {
+            meta.status = Some(crate::conversation::NodeStatus::Cancelled);
+        });
+    }
 
     // Kill all terminal children gracefully.
     for pane in global_data.state.terminal_panes.values() {

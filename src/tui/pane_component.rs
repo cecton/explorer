@@ -16,6 +16,7 @@ pub struct PaneComponent {
     commit_diff: CommitDiffPaneComponent,
     conversation_tree: ConversationTreeComponent,
     discussion: DiscussionComponent,
+    model_picker: ModelPickerComponent,
     preview: FilePreviewComponent,
     terminal: TerminalPaneComponent,
     /// Origin row of the content area (below title bar), used for scrollbar mouse events.
@@ -52,6 +53,7 @@ impl PaneComponent {
             commit_diff: CommitDiffPaneComponent::new(id),
             conversation_tree: ConversationTreeComponent::new(id),
             discussion: DiscussionComponent::new(id),
+            model_picker: ModelPickerComponent::new(id),
             preview: FilePreviewComponent::new(id),
             terminal: TerminalPaneComponent::new(id, slot),
             content_origin_row: 0,
@@ -219,6 +221,17 @@ impl PaneComponent {
                 }
                 EventPropagation::ConsumedRender
             }
+            Window::ModelPicker => {
+                let scroll_max = state.pane_manager.window_scroll_max(window);
+                if scroll_max == 0 {
+                    return EventPropagation::ConsumedRender;
+                }
+                let idx = target.min(scroll_max.saturating_sub(1));
+                if let Some((key, _)) = state.model_picker.results.get(idx) {
+                    state.model_picker.selected = Some(*key);
+                }
+                EventPropagation::ConsumedRender
+            }
             Window::Terminal(id) => {
                 let Some(pane) = state.terminal_panes.get(id) else {
                     return EventPropagation::ConsumedRender;
@@ -271,6 +284,9 @@ impl TitleRow for PaneComponent {
             Window::Discussion(id) => self
                 .discussion
                 .render_title_row(ops, pane_box, focused, theme, state, id),
+            Window::ModelPicker => self
+                .model_picker
+                .render_title_row(ops, pane_box, focused, theme, state),
         }
     }
 }
@@ -328,6 +344,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
         self.commit_diff.reset();
         self.conversation_tree.reset();
         self.discussion.reset();
+        self.model_picker.reset();
         self.preview.reset();
         self.terminal.reset();
         self.preview_drag_active = false;
@@ -947,6 +964,10 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 self.discussion
                     .handle_event(global_data, input_event, has_focus)
             }
+            Some(Window::ModelPicker) => {
+                self.model_picker
+                    .handle_event(global_data, input_event, has_focus)
+            }
             None => Ok(EventPropagation::Propagate),
         }
     }
@@ -1077,6 +1098,12 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     self.discussion
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
+                Some(Window::ModelPicker) => self.model_picker.render(
+                    global_data,
+                    inner_bounds,
+                    surface_bounds,
+                    has_focus,
+                )?,
                 None => {}
             };
 

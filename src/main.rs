@@ -2,6 +2,7 @@ use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use std::sync::Arc;
 
+mod agent;
 mod cli;
 mod config;
 mod conversation;
@@ -52,9 +53,14 @@ async fn main() {
         }
     };
 
-    let (config_theme, keybindings, counters) = match config {
-        Some(c) => (c.theme, c.keybindings, c.counters),
-        None => (None, Vec::new(), config::CountersConfig::default()),
+    let (config_theme, keybindings, counters, agent_settings) = match config {
+        Some(c) => (c.theme, c.keybindings, c.counters, c.agent),
+        None => (
+            None,
+            Vec::new(),
+            config::CountersConfig::default(),
+            config::AgentSettings::default(),
+        ),
     };
 
     let theme_name = args.theme.clone().or(config_theme).unwrap_or_else(|| {
@@ -81,6 +87,7 @@ async fn main() {
         tui::build_state(Arc::clone(&files), root.clone(), theme.clone(), keymap);
     initial_state.show_timers = counters.show;
     initial_state.count_render_as_active = counters.render_counts_as_active;
+    initial_state.agent = Arc::new(config::resolve_agent(agent_settings, &config::load_auth()));
 
     if let Some(session) = session::load_session(&root) {
         // Seed the time counters with this project's cumulative totals before `apply`

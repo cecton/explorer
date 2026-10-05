@@ -123,7 +123,7 @@ pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
     era * 146_097 + doe - 719_468
 }
 
-fn civil_from_days(z: i64) -> (i64, u32, u32) {
+pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
     let z = z + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
     let doe = (z - era * 146_097) as u64;
@@ -271,6 +271,32 @@ pub fn load_refs(repo: &gix::ThreadSafeRepository) -> Result<Vec<GitRef>, String
     }
     refs.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
     Ok(refs)
+}
+
+/// Full hex id of the commit HEAD points at; `None` on an unborn branch.
+pub fn head_id(repo: &gix::ThreadSafeRepository) -> Option<String> {
+    repo.to_thread_local()
+        .head_id()
+        .ok()
+        .map(|id| id.to_string())
+}
+
+/// `<short hash> <title>` of the commits reachable from `to` and not from `from`,
+/// newest first, at most `cap`. Shells out to `git`; empty on any failure.
+pub fn log_oneline(root: &camino::Utf8Path, from: &str, to: &str, cap: usize) -> Vec<String> {
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["log", "--format=%h %s", "-n"])
+        .arg(cap.to_string())
+        .arg(format!("{from}..{to}"))
+        .output();
+    match output {
+        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
+            .lines()
+            .map(str::to_string)
+            .collect(),
+        _ => Vec::new(),
+    }
 }
 
 /// Whether the repository has uncommitted changes (staged or unstaged). Untracked

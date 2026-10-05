@@ -1,9 +1,16 @@
-use crate::conversation::{Node, NodeId, NodeStatus, NodeType};
-use crate::tui::text_layout::wrap;
+use crate::agent::ModelSpec;
+use crate::agent::llm::LlmTarget;
+use crate::agent::turn::{self, TurnRequest};
+use crate::conversation::{Metadata, Node, NodeId, NodeStatus, NodeType};
+use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
 const SCROLL_STEP: usize = 3;
+const INPUT_PROMPT: &str = "> ";
+
+type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum DocKind {
@@ -30,6 +37,29 @@ pub struct DiscussionComponent {
     id: FlexBoxId,
     window_id: usize,
     cache: Option<DocCache>,
+    input: InputLine,
+    /// Window the input cursor belongs to; another window's draft resets it.
+    input_window: Option<usize>,
+}
+
+/// The model a node was run with, when its metadata names one completely.
+pub(crate) fn node_model(node: &Node) -> Option<ModelSpec> {
+    ModelSpec::from_parts(
+        node.meta.endpoint.as_deref()?,
+        node.meta.model.as_deref()?,
+        node.meta.effort.as_deref()?,
+    )
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64)
+}
+
+fn utc_date(secs: i64) -> String {
+    let (year, month, day) = crate::git::civil_from_days(secs.div_euclid(86_400));
+    format!("{year:04}-{month:02}-{day:02}")
 }
 
 impl DiscussionComponent {
@@ -38,6 +68,8 @@ impl DiscussionComponent {
             id,
             window_id: 0,
             cache: None,
+            input: InputLine::new(),
+            input_window: None,
         }
     }
 
@@ -45,25 +77,7 @@ impl DiscussionComponent {
         self.window_id = window_id;
     }
 
-    /// Focuses the window already showing `node`, or opens a new one and loads the
-    /// node's prompt and reply from disk.
-    pub(crate) fn open(
-        state: &mut AppState,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-        node: NodeId,
-    ) {
-        let existing = state
-            .discussions
-            .iter()
-            .find(|(_, discussion)| discussion.node == node)
-            .map(|(id, _)| *id);
-        let id = existing.unwrap_or_else(|| {
-            let id = state.next_discussion_id;
-            state.next_discussion_id += 1;
-            state.discussions.insert(id, DiscussionState::new(node));
-            Self::load_content(state, main_tx, id);
-            id
-        });
+    fn show(state: &mut AppState, id: usize) {
         let window = Window::Discussion(id);
         let old = state.pane_manager.focused_window;
         state.pane_manager.push_window(window);
@@ -72,16 +86,52 @@ impl DiscussionComponent {
         state.mark_session_dirty();
     }
 
+    /// Focuses the window already showing `node`, or opens a new one and loads the
+    /// node's prompt and reply from disk. The window starts with the node's model.
+    pub(crate) fn open(state: &mut AppState, main_tx: MainTx, node: NodeId) {
+        let existing = state
+            .discussions
+            .iter()
+            .find(|(_, discussion)| discussion.node.as_ref() == Some(&node))
+            .map(|(id, _)| *id);
+        let id = existing.unwrap_or_else(|| {
+            let id = state.next_discussion_id;
+            state.next_discussion_id += 1;
+            let model = state.conversations.read().node(&node).and_then(node_model);
+            state.discussions.insert(
+                id,
+                DiscussionState {
+                    node: Some(node),
+                    model,
+                    ..Default::default()
+                },
+            );
+            Self::load_content(state, main_tx, id);
+            id
+        });
+        Self::show(state, id);
+    }
+
+    /// Opens a window for a new conversation, offering the model last picked.
+    pub(crate) fn open_new_root(state: &mut AppState) {
+        let id = state.next_discussion_id;
+        state.next_discussion_id += 1;
+        state.discussions.insert(
+            id,
+            DiscussionState {
+                loaded: true,
+                model: state.last_picked_model.clone(),
+                ..Default::default()
+            },
+        );
+        Self::show(state, id);
+    }
+
     /// Reads the prompt and reply of window `id`'s node off the UI thread.
-    pub(crate) fn load_content(
-        state: &AppState,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-        id: usize,
-    ) {
-        let Some(discussion) = state.discussions.get(&id) else {
+    pub(crate) fn load_content(state: &AppState, main_tx: MainTx, id: usize) {
+        let Some(node) = state.discussions.get(&id).and_then(|d| d.node.clone()) else {
             return;
         };
-        let node = discussion.node.clone();
         let Some(dir) = state.conversations.read().node_dir(&node) else {
             return;
         };
@@ -99,6 +149,127 @@ impl DiscussionComponent {
         });
     }
 
+    /// Sends the draft of window `id` as a new node below the node it shows. A refused
+    /// send keeps the draft and explains itself in the window's notice.
+    fn send(state: &mut AppState, main_tx: MainTx, id: usize) {
+        let Some(discussion) = state.discussions.get(&id) else {
+            return;
+        };
+        if discussion.draft.trim().is_empty() {
+            return;
+        }
+        let Some(spec) = discussion.model.clone() else {
+            ModelPickerComponent::open(state, main_tx, id);
+            return;
+        };
+        let parent = discussion.node.clone();
+        let prompt = discussion.draft.clone();
+
+        let refusal = |state: &mut AppState, reason: String| {
+            if let Some(discussion) = state.discussions.get_mut(&id) {
+                discussion.notice = Some(reason);
+            }
+        };
+        let Some(endpoint) = state.agent.endpoint(&spec.endpoint).cloned() else {
+            let reason = format!(
+                "endpoint '{}' is not configured or has no token",
+                spec.endpoint
+            );
+            return refusal(state, reason);
+        };
+        let parent_status = parent
+            .as_ref()
+            .and_then(|parent| state.conversations.read().node(parent)?.meta.status);
+        if let Some(status) = parent_status
+            && status != NodeStatus::Done
+        {
+            let reason = match status {
+                NodeStatus::Running => "this node is still running",
+                _ => "this node is not complete; continue from its parent",
+            };
+            return refusal(state, reason.to_string());
+        }
+
+        let head = state.repo.as_ref().and_then(crate::git::head_id);
+        let now = now_secs();
+        let meta = Metadata {
+            node_type: Some(NodeType::Feedback),
+            endpoint: Some(spec.endpoint.clone()),
+            kind: Some("openai".to_string()),
+            model: Some(spec.model.clone()),
+            effort: Some(spec.effort.as_str().to_string()),
+            status: Some(NodeStatus::Running),
+            head_before: head.clone(),
+            ..Default::default()
+        };
+        let created = {
+            let mut tree = state.conversations.write();
+            tree.create_node(parent.as_ref(), now, meta, &prompt)
+                .map(|node| {
+                    let lineage = tree.lineage(&node);
+                    let dirs: Vec<_> = lineage.iter().filter_map(|id| tree.node_dir(id)).collect();
+                    let parent_head = parent
+                        .as_ref()
+                        .and_then(|parent| tree.node(parent)?.meta.head_after.clone());
+                    (node, lineage, dirs, parent_head)
+                })
+        };
+        let (node, lineage, mut dirs, parent_head) = match created {
+            Ok(created) => created,
+            Err(e) => return refusal(state, format!("could not create the node: {e}")),
+        };
+        let Some(node_dir) = dirs.pop() else {
+            return;
+        };
+
+        if let Some(discussion) = state.discussions.get_mut(&id) {
+            discussion.node = Some(node.clone());
+            discussion.prompt = prompt.clone();
+            discussion.reply.clear();
+            discussion.draft.clear();
+            discussion.loaded = true;
+            discussion.notice = None;
+            discussion.follow = true;
+        }
+        state
+            .pane_manager
+            .set_window_scroll(&Window::Discussion(id), 0);
+        state.tree_view.expanded.extend(lineage);
+        state.tree_view.selected = Some(node.clone());
+
+        let target = LlmTarget {
+            url: endpoint.url,
+            token: endpoint.token,
+            model: spec.model,
+            effort: spec.effort,
+        };
+        let summary_target = state.agent.summary_model.as_ref().and_then(|summary| {
+            let endpoint = state.agent.endpoint(&summary.endpoint)?;
+            Some(LlmTarget {
+                url: endpoint.url.clone(),
+                token: endpoint.token.clone(),
+                model: summary.model.clone(),
+                effort: summary.effort,
+            })
+        });
+        let request = TurnRequest {
+            node: node.clone(),
+            node_dir: node_dir.clone(),
+            ancestor_dirs: dirs,
+            parent_head,
+            head,
+            root: state.root.clone(),
+            repo: state.repo.clone(),
+            prompt: prompt.clone(),
+            date: utc_date(now),
+            target,
+        };
+        let handle = turn::spawn(request, main_tx.clone());
+        state.running_turns.insert(node.clone(), handle);
+        turn::spawn_title_and_summary(node, node_dir, prompt, summary_target, main_tx);
+        state.mark_session_dirty();
+    }
+
     fn doc_lines(&mut self, discussion: &DiscussionState, width: usize) -> &[DocLine] {
         let fresh = self.cache.as_ref().is_some_and(|cache| {
             cache.window_id == self.window_id
@@ -108,21 +279,23 @@ impl DiscussionComponent {
         });
         if !fresh {
             let mut lines = Vec::new();
-            for text in wrap(&discussion.prompt, width) {
+            if discussion.node.is_some() {
+                for text in wrap(&discussion.prompt, width) {
+                    lines.push(DocLine {
+                        kind: DocKind::Prompt,
+                        text,
+                    });
+                }
                 lines.push(DocLine {
-                    kind: DocKind::Prompt,
-                    text,
+                    kind: DocKind::Gap,
+                    text: String::new(),
                 });
-            }
-            lines.push(DocLine {
-                kind: DocKind::Gap,
-                text: String::new(),
-            });
-            for text in wrap(&discussion.reply, width) {
-                lines.push(DocLine {
-                    kind: DocKind::Reply,
-                    text,
-                });
+                for text in wrap(&discussion.reply, width) {
+                    lines.push(DocLine {
+                        kind: DocKind::Reply,
+                        text,
+                    });
+                }
             }
             self.cache = Some(DocCache {
                 window_id: self.window_id,
@@ -144,16 +317,38 @@ impl DiscussionComponent {
         state: &AppState,
         window_id: usize,
     ) -> usize {
-        let title = state
-            .discussions
-            .get(&window_id)
-            .and_then(|discussion| {
+        let discussion = state.discussions.get(&window_id);
+        let title = discussion
+            .and_then(|discussion| discussion.node.as_ref())
+            .and_then(|node| {
                 let tree = state.conversations.read();
-                tree.node(&discussion.node)
-                    .map(|node| node.display_title().to_string())
+                tree.node(node).map(|node| node.display_title().to_string())
             })
-            .unwrap_or_else(|| "Discussion".to_string());
-        render_pane_title(ops, pane_box, &title, false, theme, focused);
+            .unwrap_or_else(|| "New conversation".to_string());
+        let model = discussion
+            .and_then(|discussion| discussion.model.as_ref())
+            .map_or_else(|| "no model (Ctrl+P)".to_string(), ToString::to_string);
+
+        let pane_width = pane_box.style_adjusted_bounds_size.col_width.as_usize();
+        let label = format!(" {model} ");
+        let label_width = display_width(&label);
+        let title_box = FlexBox {
+            style_adjusted_bounds_size: width(pane_width.saturating_sub(label_width) as u16)
+                + pane_box.style_adjusted_bounds_size.row_height,
+            ..*pane_box
+        };
+        render_pane_title(ops, pane_box, "", false, theme, focused);
+        render_pane_title(ops, &title_box, &title, false, theme, focused);
+        if label_width < pane_width {
+            let (bg, fg) = title_bar_colors(focused, theme);
+            let style = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
+            *ops += RenderOpCommon::MoveCursorPositionRelTo(
+                pane_box.style_adjusted_origin_pos,
+                col((pane_width - label_width) as u16) + row(0),
+            );
+            *ops += RenderOpCommon::ApplyColors(Some(style));
+            *ops += RenderOpIR::PaintTextWithAttributes(label.into(), Some(style));
+        }
         1
     }
 }
@@ -201,9 +396,43 @@ fn status_text(node: &Node) -> (String, bool) {
     (text, failed)
 }
 
+/// Status line of a window: a refusal, the progress of a running turn, or the outcome
+/// of the node shown. The flag asks for the error color.
+fn status_line(state: &AppState, discussion: &DiscussionState) -> (String, bool) {
+    if let Some(notice) = &discussion.notice {
+        return (notice.clone(), true);
+    }
+    if !discussion.loaded {
+        return ("Loading…".to_string(), false);
+    }
+    let Some(node) = &discussion.node else {
+        return ("Enter:Send  Shift+Enter:New line".to_string(), false);
+    };
+    if let Some(handle) = state.running_turns.get(node) {
+        let live = handle.live.lock();
+        let mut text = format!("running {}s", handle.started.elapsed().as_secs());
+        if let Some(activity) = &live.activity {
+            text.push_str(" · ");
+            text.push_str(activity);
+        }
+        if let Some(tokens) = live.tokens_in {
+            text.push_str(&format!(" · {tokens} tokens in"));
+        }
+        text.push_str(" · Ctrl+C:Cancel");
+        return (text, false);
+    }
+    state
+        .conversations
+        .read()
+        .node(node)
+        .map(status_text)
+        .unwrap_or_default()
+}
+
 impl Component<AppState, AppSignal> for DiscussionComponent {
     fn reset(&mut self) {
         self.cache = None;
+        self.input_window = None;
     }
 
     fn get_id(&self) -> FlexBoxId {
@@ -216,11 +445,57 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;
-        let window = Window::Discussion(self.window_id);
+        let id = self.window_id;
+        let window = Window::Discussion(id);
+        let Some(discussion) = state.discussions.get_mut(&id) else {
+            return Ok(EventPropagation::Propagate);
+        };
+        if self.input_window != Some(id) {
+            self.input.set_cursor_end(&discussion.draft);
+            self.input_window = Some(id);
+        }
+        let running = discussion
+            .node
+            .as_ref()
+            .and_then(|node| state.running_turns.get(node));
         let scroll = state.pane_manager.window_scroll(&window);
         let page = state.pane_manager.window_page_size(&window).max(1);
+
         let target = match &input_event {
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Enter),
+            }) => {
+                Self::send(state, main_tx, id);
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('p'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) => {
+                ModelPickerComponent::open(state, main_tx, id);
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('c'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) if running.is_some() => {
+                if let Some(handle) = running {
+                    handle.cancel();
+                }
+                return Ok(EventPropagation::ConsumedRender);
+            }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::PageUp),
             }) => scroll.saturating_sub(page),
@@ -235,8 +510,16 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 kind: MouseInputKind::ScrollDown,
                 ..
             }) => scroll + SCROLL_STEP,
-            _ => return Ok(EventPropagation::Propagate),
+            _ => {
+                if self.input.handle_key(&input_event, &mut discussion.draft) {
+                    discussion.notice = None;
+                    state.mark_session_dirty();
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                return Ok(EventPropagation::Propagate);
+            }
         };
+        discussion.follow = false;
         state.pane_manager.set_window_scroll(&window, target);
         state.pane_manager.clamp_scroll(&window);
         Ok(EventPropagation::ConsumedRender)
@@ -247,7 +530,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
         global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
         _surface_bounds: SurfaceBounds,
-        _has_focus: &mut HasFocus,
+        has_focus: &mut HasFocus,
     ) -> CommonResult {
         throws!({
             let origin = current_box.style_adjusted_origin_pos;
@@ -255,7 +538,21 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let total_rows = bounds.row_height.as_usize();
             let pane_width = bounds.col_width.as_usize();
             let window = Window::Discussion(self.window_id);
+            let focused = has_focus.get_id() == Some(self.id);
             let state = &mut global_data.state;
+
+            // A running turn's reply lives in its handle; mirror it while it grows.
+            if let Some(discussion) = state.discussions.get_mut(&self.window_id)
+                && let Some(handle) = discussion
+                    .node
+                    .as_ref()
+                    .and_then(|node| state.running_turns.get(node))
+            {
+                let live = handle.live.lock();
+                if live.reply.len() != discussion.reply.len() {
+                    discussion.reply.clone_from(&live.reply);
+                }
+            }
             let Some(discussion) = state.discussions.get(&self.window_id) else {
                 return Ok(());
             };
@@ -271,25 +568,59 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 .unwrap_or(RgbValue::from_u8(170, 170, 200));
             let status_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
             let error_fg = theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG);
+            let (input_bg, input_fg) = title_bar_colors(focused, theme);
 
-            let (status, failed) = match &discussion.error {
-                Some(error) => (format!("error: {error}"), true),
-                None if !discussion.loaded => ("Loading…".to_string(), false),
-                None => state
-                    .conversations
-                    .read()
-                    .node(&discussion.node)
-                    .map(status_text)
-                    .unwrap_or_default(),
-            };
+            let (status, alert) = status_line(state, discussion);
+            let input_rows = InputLine::height(
+                &discussion.draft,
+                INPUT_PROMPT,
+                pane_width as u16,
+                (total_rows / 2).max(1),
+            )
+            .min(total_rows);
+            let status_rows = usize::from(total_rows > input_rows);
+            let doc_rows = total_rows - input_rows - status_rows;
+            let follow = discussion.follow;
 
-            let doc_rows = total_rows.saturating_sub(1);
+            if self.input_window != Some(self.window_id) {
+                self.input.set_cursor_end(&discussion.draft);
+                self.input_window = Some(self.window_id);
+            }
+            let mut input_ops = RenderOpIRVec::new();
+            let input_origin = origin + height((doc_rows + status_rows) as u16);
+            let input_style = new_style!(
+                color_fg: {TuiColor::from(input_fg)} color_bg: {TuiColor::from(input_bg)}
+            );
+            for row_offset in 0..input_rows {
+                input_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                    input_origin,
+                    col(0) + row(row_offset as u16),
+                );
+                input_ops += RenderOpCommon::ApplyColors(Some(input_style));
+                input_ops += RenderOpIR::PaintTextWithAttributes(
+                    " ".repeat(pane_width).into(),
+                    Some(input_style),
+                );
+            }
+            self.input.render(
+                &mut input_ops,
+                &discussion.draft,
+                INPUT_PROMPT,
+                input_origin,
+                pane_width as u16,
+                input_rows,
+                focused,
+                (TuiColor::from(input_bg), TuiColor::from(input_fg)),
+            );
+
             let lines = self.doc_lines(discussion, pane_width);
             let line_count = lines.len();
-            let scroll = state
-                .pane_manager
-                .window_scroll(&window)
-                .min(line_count.saturating_sub(doc_rows));
+            let max_scroll = line_count.saturating_sub(doc_rows);
+            let scroll = if follow {
+                max_scroll
+            } else {
+                state.pane_manager.window_scroll(&window).min(max_scroll)
+            };
 
             let mut render_ops = RenderOpIRVec::new();
             let paint_row = |ops: &mut RenderOpIRVec,
@@ -323,9 +654,9 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                     None => paint_row(&mut render_ops, row_offset, "", text_fg, pane_bg),
                 }
             }
-            if total_rows > 0 {
-                let fg = if failed { error_fg } else { status_fg };
-                let text = crate::tui::text_layout::truncate(&status, pane_width);
+            if status_rows > 0 {
+                let fg = if alert { error_fg } else { status_fg };
+                let text = truncate(&status, pane_width);
                 paint_row(&mut render_ops, doc_rows, &text, fg, pane_bg);
             }
 
@@ -335,6 +666,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 .set_window_scroll_max(&window, line_count);
             state.pane_manager.set_window_scroll(&window, scroll);
             global_data.pipeline.push(ZOrder::Normal, render_ops);
+            global_data.pipeline.push(ZOrder::Normal, input_ops);
         });
     }
 }
@@ -372,5 +704,22 @@ mod tests {
         let (text, failed) = status_text(tree.node(&id).unwrap());
         assert_eq!(text, "failed: rate limited · feedback");
         assert!(failed);
+    }
+
+    #[test]
+    fn node_model_needs_endpoint_model_and_a_known_effort() {
+        let (_tmp, tree, id) =
+            node_with_metadata("endpoint: router\nmodel: org/model-x\neffort: high\n");
+        let spec = node_model(tree.node(&id).unwrap()).unwrap();
+        assert_eq!(spec.to_string(), "router/org/model-x/high");
+
+        let (_tmp, tree, id) = node_with_metadata("endpoint: router\nmodel: m\n");
+        assert!(node_model(tree.node(&id).unwrap()).is_none());
+    }
+
+    #[test]
+    fn utc_date_formats_the_day_of_a_unix_time() {
+        assert_eq!(utc_date(0), "1970-01-01");
+        assert_eq!(utc_date(86_400 * 365 + 3600), "1971-01-01");
     }
 }

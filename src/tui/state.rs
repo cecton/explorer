@@ -1,3 +1,5 @@
+use crate::agent::turn::{TurnHandle, TurnOutcome};
+use crate::agent::{AgentConfig, Effort, ModelSpec};
 use crate::conversation::{ConversationTree, NodeId};
 use crate::git::{DiffLine, GitRef, LogHistory};
 use crate::keymap::Keymap;
@@ -276,25 +278,67 @@ pub struct TreeViewState {
 }
 
 /// State of one Discussion window.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct DiscussionState {
-    pub node: NodeId,
+    /// Node shown; `None` for a new conversation whose first prompt is not sent yet.
+    pub node: Option<NodeId>,
     pub prompt: String,
     pub reply: String,
     /// False until the node's prompt and reply have been read from disk.
     pub loaded: bool,
-    pub error: Option<String>,
+    /// The next prompt, as typed so far.
+    pub draft: String,
+    /// Model the next prompt is sent to.
+    pub model: Option<ModelSpec>,
+    /// Why the last send was refused; cleared by the next edit.
+    pub notice: Option<String>,
+    /// Keep the end of the reply in view while it streams.
+    pub follow: bool,
 }
 
-impl DiscussionState {
-    pub fn new(node: NodeId) -> Self {
-        Self {
-            node,
-            prompt: String::new(),
-            reply: String::new(),
-            loaded: false,
-            error: None,
+/// Models offered by the Model Picker.
+#[derive(Clone, Default)]
+pub struct ModelCatalog {
+    /// Result of the last `/models` fetch of each endpoint, by endpoint name.
+    pub lists: HashMap<String, Result<Vec<String>, String>>,
+    /// Every `endpoint × model × effort` combination, in display order.
+    pub specs: Vec<ModelSpec>,
+}
+
+impl ModelCatalog {
+    pub fn set_list(
+        &mut self,
+        agent: &AgentConfig,
+        endpoint: &str,
+        result: Result<Vec<String>, String>,
+    ) {
+        self.lists.insert(endpoint.to_string(), result);
+        self.specs.clear();
+        for endpoint in &agent.endpoints {
+            let Some(Ok(models)) = self.lists.get(&endpoint.name) else {
+                continue;
+            };
+            for model in models {
+                for effort in Effort::ALL {
+                    self.specs.push(ModelSpec {
+                        endpoint: endpoint.name.clone(),
+                        model: model.clone(),
+                        effort,
+                    });
+                }
+            }
         }
+    }
+
+    /// The fetch failures, as `endpoint: reason`.
+    pub fn errors(&self) -> Vec<String> {
+        let mut errors: Vec<String> = self
+            .lists
+            .iter()
+            .filter_map(|(name, result)| result.as_ref().err().map(|e| format!("{name}: {e}")))
+            .collect();
+        errors.sort();
+        errors
     }
 }
 
@@ -405,6 +449,17 @@ pub struct AppState {
     pub discussions: HashMap<usize, DiscussionState>,
     /// Next available discussion window ID.
     pub next_discussion_id: usize,
+    /// Endpoints, tokens and agent settings from `config.kdl` and `auth.kdl`.
+    pub agent: Arc<AgentConfig>,
+    pub models: ModelCatalog,
+    /// Model last picked during this run, offered to new conversations.
+    pub last_picked_model: Option<ModelSpec>,
+    /// Model Picker entries are indexes into `models.specs`.
+    pub model_picker: FuzzyPickerState<usize>,
+    /// Discussion window the Model Picker was opened from.
+    pub model_picker_target: Option<usize>,
+    /// Turns in progress, by node.
+    pub running_turns: HashMap<NodeId, TurnHandle>,
     pub mouse_drag_active: bool,
     pub terminal_grabbed: bool,
     pub text_selection: Option<TextSelection>,
@@ -508,6 +563,12 @@ impl AppState {
             tree_view: TreeViewState::default(),
             discussions: HashMap::new(),
             next_discussion_id: 0,
+            agent: Arc::default(),
+            models: ModelCatalog::default(),
+            last_picked_model: None,
+            model_picker: FuzzyPickerState::default(),
+            model_picker_target: None,
+            running_turns: HashMap::new(),
             mouse_drag_active: false,
             terminal_grabbed: false,
             text_selection: None,
@@ -608,6 +669,28 @@ pub enum AppSignal {
     DirtyStatusLoaded(Result<bool, String>),
     /// The startup load filled `AppState::conversations`.
     ConversationsLoaded,
+    /// Result of fetching the model list of `endpoint`.
+    ModelsFetched {
+        endpoint: String,
+        result: Result<Vec<String>, String>,
+    },
+    /// A running turn produced output; nothing to apply, only a render.
+    TurnProgress,
+    /// The turn of `node` ended.
+    TurnFinished {
+        node: NodeId,
+        outcome: TurnOutcome,
+    },
+    /// `title.md` of `node` was written.
+    NodeTitleReady {
+        node: NodeId,
+        title: String,
+    },
+    /// `summary.md` of `node` was written.
+    NodeSummaryReady {
+        node: NodeId,
+        summary: String,
+    },
     /// Prompt and reply of `node`, read from disk for discussion window `window_id`.
     NodeContentLoaded {
         window_id: usize,

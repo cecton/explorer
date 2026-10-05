@@ -1,11 +1,12 @@
 mod app;
 mod commit_diff_pane;
 mod conversation_tree_pane;
-mod discussion_pane;
+pub(crate) mod discussion_pane;
 mod file_name_picker;
 mod fuzzy_picker;
 pub(crate) mod git_log_pane;
 mod input_line;
+pub(crate) mod model_picker;
 mod pane_component;
 pub(crate) mod pane_manager;
 mod panes_renderer;
@@ -34,6 +35,7 @@ use self::file_name_picker::*;
 use self::fuzzy_picker::*;
 use self::git_log_pane::*;
 use self::input_line::*;
+use self::model_picker::*;
 
 use self::pane_manager::*;
 use self::preview::*;

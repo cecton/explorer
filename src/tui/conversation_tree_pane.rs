@@ -211,6 +211,17 @@ impl ConversationTreeComponent {
         let Some(row) = rows.get(index) else {
             return;
         };
+        let running_below = {
+            let tree = state.conversations.read();
+            state
+                .running_turns
+                .keys()
+                .any(|running| tree.lineage(running).contains(&row.id))
+        };
+        if running_below {
+            state.tree_view.notice = Some("a turn is running in this branch".to_string());
+            return;
+        }
         let removed = match state.conversations.write().delete(&row.id) {
             Ok(removed) => removed,
             Err(e) => {
@@ -225,7 +236,12 @@ impl ConversationTreeComponent {
         let closed: Vec<usize> = state
             .discussions
             .iter()
-            .filter(|(_, discussion)| removed.contains(&discussion.node))
+            .filter(|(_, discussion)| {
+                discussion
+                    .node
+                    .as_ref()
+                    .is_some_and(|node| removed.contains(node))
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in closed {
@@ -342,6 +358,9 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     DiscussionComponent::open(state, main_tx, row.id.clone());
                 }
             }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character('n'),
+            }) => DiscussionComponent::open_new_root(state),
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('c'),
             }) => {
@@ -544,7 +563,9 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         text,
                     });
                 }
-                if let Some(summary) = node.summary.as_deref() {
+                if let Some(summary) = node.summary.as_deref()
+                    && summary != node.display_title()
+                {
                     for text in wrap(summary, text_width) {
                         lines.push(Line {
                             row: row_idx,

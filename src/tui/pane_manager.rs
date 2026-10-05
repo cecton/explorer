@@ -29,6 +29,8 @@ pub enum Window {
     ConversationTree,
     /// One conversation node: its prompt and reply. Identified by a window id.
     Discussion(usize),
+    /// Fuzzy picker of `endpoint/model/effort` entries.
+    ModelPicker,
 }
 
 /// A point in a window's content used as a text-selection anchor or endpoint.

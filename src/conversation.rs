@@ -312,6 +312,89 @@ impl ConversationTree {
         Some(dir)
     }
 
+    /// `id` preceded by all its ancestors, root first.
+    pub fn lineage(&self, id: &NodeId) -> Vec<NodeId> {
+        let mut chain = vec![id.clone()];
+        let mut current = self.nodes.get(id);
+        while let Some(parent) = current.and_then(|node| node.parent.as_ref()) {
+            chain.push(parent.clone());
+            current = self.nodes.get(parent);
+        }
+        chain.reverse();
+        chain
+    }
+
+    /// Creates a node under `parent` (or a new root): its directory, `prompt.md` and
+    /// `metadata.md` are on disk when this returns.
+    pub fn create_node(
+        &mut self,
+        parent: Option<&NodeId>,
+        now_secs: i64,
+        mut meta: Metadata,
+        prompt: &str,
+    ) -> std::io::Result<NodeId> {
+        let stamp = utc_stamp(now_secs);
+        let mut id = NodeId::new(&stamp.replace(':', "-"));
+        let mut suffix = 2;
+        while self.nodes.contains_key(&id) {
+            id = NodeId::new(&format!("{}-{suffix}", stamp.replace(':', "-")));
+            suffix += 1;
+        }
+        let dir = match parent {
+            Some(parent) => self.node_dir(parent).ok_or_else(unknown_node)?,
+            None => self.dir.clone(),
+        }
+        .join(id.as_str());
+        meta.created = Some(stamp);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("prompt.md"), prompt)?;
+        write_atomic(&dir.join("metadata.md"), &meta.to_text())?;
+
+        let node = Node {
+            parent: parent.cloned(),
+            children: Vec::new(),
+            meta,
+            title: None,
+            summary: None,
+            prompt_first_line: prompt
+                .lines()
+                .map(str::trim)
+                .find(|line| !line.is_empty())
+                .map(str::to_string),
+            created_display: crate::git::format_log_time(now_secs, local_offset_secs(now_secs)),
+        };
+        self.nodes.insert(id.clone(), node);
+        match parent.and_then(|parent| self.nodes.get_mut(parent)) {
+            Some(parent) => parent.children.push(id.clone()),
+            None => self.roots.push(id.clone()),
+        }
+        Ok(id)
+    }
+
+    /// Changes the metadata of `id` in memory and writes it through.
+    pub fn update_meta(
+        &mut self,
+        id: &NodeId,
+        change: impl FnOnce(&mut Metadata),
+    ) -> std::io::Result<()> {
+        let dir = self.node_dir(id).ok_or_else(unknown_node)?;
+        let node = self.nodes.get_mut(id).ok_or_else(unknown_node)?;
+        change(&mut node.meta);
+        write_atomic(&dir.join("metadata.md"), &node.meta.to_text())
+    }
+
+    pub fn set_title(&mut self, id: &NodeId, title: String) {
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.title = Some(title);
+        }
+    }
+
+    pub fn set_summary(&mut self, id: &NodeId, summary: String) {
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.summary = Some(summary);
+        }
+    }
+
     /// Number of nodes in the subtree rooted at `id`, itself included.
     pub fn subtree_len(&self, id: &NodeId) -> usize {
         self.nodes.get(id).map_or(0, |node| {
@@ -324,10 +407,7 @@ impl ConversationTree {
     }
 
     pub fn toggle_favorite(&mut self, id: &NodeId) -> std::io::Result<()> {
-        let dir = self.node_dir(id).ok_or_else(unknown_node)?;
-        let node = self.nodes.get_mut(id).ok_or_else(unknown_node)?;
-        node.meta.favorite = !node.meta.favorite;
-        write_atomic(&dir.join("metadata.md"), &node.meta.to_text())
+        self.update_meta(id, |meta| meta.favorite = !meta.favorite)
     }
 
     /// Removes `id` and its descendants from disk and memory; returns every removed id.
@@ -366,7 +446,19 @@ fn single_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-fn write_atomic(path: &Utf8Path, content: &str) -> std::io::Result<()> {
+/// `YYYY-MM-DDTHH:MM:SSZ` for a Unix time.
+fn utc_stamp(secs: i64) -> String {
+    let (year, month, day) = crate::git::civil_from_days(secs.div_euclid(86_400));
+    let of_day = secs.rem_euclid(86_400);
+    format!(
+        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
+        of_day / 3600,
+        (of_day % 3600) / 60,
+        of_day % 60
+    )
+}
+
+pub fn write_atomic(path: &Utf8Path, content: &str) -> std::io::Result<()> {
     let tmp: Utf8PathBuf = format!("{path}.tmp").into();
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, path)
@@ -537,6 +629,56 @@ mod tests {
         tree.delete(&NodeId::new("2026-10-05T14-32-07Z")).unwrap();
         assert!(tree.roots().is_empty());
         assert!(tree.node(&NodeId::new("2026-10-06T09-00-00Z")).is_none());
+    }
+
+    #[test]
+    fn create_node_persists_before_returning_and_keeps_ids_unique() {
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+        let meta = Metadata {
+            node_type: Some(NodeType::Feedback),
+            status: Some(NodeStatus::Running),
+            ..Default::default()
+        };
+
+        let first = tree
+            .create_node(None, 86_401, meta.clone(), "\n  hello there\nmore")
+            .unwrap();
+        assert_eq!(first.as_str(), "1970-01-02T00-00-01Z");
+        let dir = root.join(first.as_str());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prompt.md")).unwrap(),
+            "\n  hello there\nmore"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("metadata.md")).unwrap(),
+            "type: feedback\ncreated: 1970-01-02T00:00:01Z\nstatus: running\n"
+        );
+        assert_eq!(tree.node(&first).unwrap().display_title(), "hello there");
+
+        let twin = tree.create_node(None, 86_401, meta.clone(), "x").unwrap();
+        assert_eq!(twin.as_str(), "1970-01-02T00-00-01Z-2");
+        let child = tree.create_node(Some(&first), 86_401, meta, "y").unwrap();
+        assert_eq!(child.as_str(), "1970-01-02T00-00-01Z-3");
+        assert!(dir.join(child.as_str()).join("prompt.md").exists());
+        assert_eq!(tree.lineage(&child), [first.clone(), child.clone()]);
+        assert_eq!(tree.roots(), [first, twin]);
+    }
+
+    #[test]
+    fn update_meta_writes_through() {
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+        let id = tree
+            .create_node(None, 0, Metadata::default(), "prompt")
+            .unwrap();
+        tree.update_meta(&id, |meta| meta.status = Some(NodeStatus::Done))
+            .unwrap();
+        let reloaded = ConversationTree::load(&root);
+        assert_eq!(
+            reloaded.node(&id).unwrap().meta.status,
+            Some(NodeStatus::Done)
+        );
     }
 
     #[test]

@@ -1,3 +1,5 @@
+use crate::agent::{AgentConfig, Endpoint, ModelSpec};
+use std::collections::HashMap;
 use std::path::PathBuf;
 
 pub struct Config {
@@ -10,6 +12,16 @@ pub struct Config {
     pub keybindings: Vec<(String, String)>,
     /// Settings for the status-bar time counters, from the `counters { … }` block.
     pub counters: CountersConfig,
+    /// The `agent { … }` block.
+    pub agent: AgentSettings,
+}
+
+/// The `agent` block as written in `config.kdl`: endpoints still without their tokens.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub struct AgentSettings {
+    /// `(name, url)` of every declared endpoint.
+    pub endpoints: Vec<(String, String)>,
+    pub summary_model: Option<ModelSpec>,
 }
 
 /// Settings for the status-bar session/project time counters.
@@ -49,6 +61,120 @@ impl Config {
     }
 }
 
+fn auth_path() -> Option<PathBuf> {
+    directories::ProjectDirs::from("", "", "explorer").map(|dirs| dirs.data_dir().join("auth.kdl"))
+}
+
+/// Endpoint tokens from `<data_dir>/auth.kdl`, one `name "token"` node per endpoint.
+/// A missing or unreadable file yields no token.
+pub fn load_auth() -> HashMap<String, String> {
+    let Some(path) = auth_path() else {
+        return HashMap::new();
+    };
+    match std::fs::read_to_string(&path) {
+        Ok(content) => parse_auth(&content).unwrap_or_else(|e| {
+            tracing::warn!("ignoring {}: {e}", path.display());
+            HashMap::new()
+        }),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+        Err(e) => {
+            tracing::warn!("cannot read {}: {e}", path.display());
+            HashMap::new()
+        }
+    }
+}
+
+fn parse_auth(content: &str) -> Result<HashMap<String, String>, String> {
+    let doc: kdl::KdlDocument = content.parse().map_err(|e: kdl::KdlError| e.to_string())?;
+    let mut tokens = HashMap::new();
+    for node in doc.nodes() {
+        let name = node.name().value();
+        let token = string_arg(node)
+            .ok_or_else(|| format!("auth entry '{name}' must have a string token"))?;
+        tokens.insert(name.to_string(), token.to_string());
+    }
+    Ok(tokens)
+}
+
+/// Joins the declared endpoints with their tokens. An endpoint without a token is
+/// logged and left out, so none of its models is ever listed.
+pub fn resolve_agent(settings: AgentSettings, tokens: &HashMap<String, String>) -> AgentConfig {
+    let endpoints = settings
+        .endpoints
+        .into_iter()
+        .filter_map(|(name, url)| match tokens.get(&name) {
+            Some(token) => Some(Endpoint {
+                name,
+                url,
+                token: token.clone(),
+            }),
+            None => {
+                tracing::warn!("endpoint '{name}' has no token in auth.kdl; skipping it");
+                None
+            }
+        })
+        .collect();
+    AgentConfig {
+        endpoints,
+        summary_model: settings.summary_model,
+    }
+}
+
+fn string_arg(node: &kdl::KdlNode) -> Option<&str> {
+    node.entries()
+        .iter()
+        .find(|e| e.name().is_none())
+        .and_then(|e| e.value().as_string())
+}
+
+fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
+    let mut settings = AgentSettings::default();
+    let Some(children) = node.children() else {
+        return Ok(settings);
+    };
+    for child in children.nodes() {
+        match child.name().value() {
+            "endpoint" => {
+                let name = string_arg(child).ok_or("agent.endpoint must have a string name")?;
+                if name.is_empty() || name.contains('/') {
+                    return Err(format!(
+                        "endpoint name '{name}' must be non-empty and must not contain '/'"
+                    ));
+                }
+                let mut url = None;
+                for field in child.children().map_or(&[][..], |c| c.nodes()) {
+                    let value = string_arg(field).ok_or_else(|| {
+                        format!(
+                            "endpoint '{name}': {} must have a string argument",
+                            field.name().value()
+                        )
+                    })?;
+                    match field.name().value() {
+                        "url" => url = Some(value.to_string()),
+                        "kind" if value == "openai" => {}
+                        "kind" => {
+                            return Err(format!("endpoint '{name}': unknown kind '{value}'"));
+                        }
+                        _ => {}
+                    }
+                }
+                let url = url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?;
+                settings.endpoints.push((name.to_string(), url));
+            }
+            "summary-model" => {
+                let value =
+                    string_arg(child).ok_or("agent.summary-model must have a string argument")?;
+                let spec = ModelSpec::parse(value).ok_or_else(|| {
+                    format!("summary-model '{value}' is not of the form endpoint/model/effort")
+                })?;
+                settings.summary_model = Some(spec);
+            }
+            _ => {}
+        }
+    }
+    Ok(settings)
+}
+
 fn config_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "explorer").map(|dirs| {
         let mut path = dirs.config_dir().to_path_buf();
@@ -63,9 +189,11 @@ fn parse(content: &str) -> Result<Config, String> {
     let mut theme = None;
     let mut keybindings = Vec::new();
     let mut counters = CountersConfig::default();
+    let mut agent = AgentSettings::default();
 
     for node in doc.nodes() {
         match node.name().value() {
+            "agent" => agent = parse_agent(node)?,
             "counters" => {
                 let Some(children) = node.children() else {
                     continue;
@@ -121,6 +249,7 @@ fn parse(content: &str) -> Result<Config, String> {
         theme,
         keybindings,
         counters,
+        agent,
     })
 }
 
@@ -200,6 +329,74 @@ mod config_tests {
     fn keybindings_are_empty_when_absent() {
         let config = parse("theme \"night_owl\"").expect("valid config");
         assert!(config.keybindings.is_empty());
+    }
+
+    #[test]
+    fn agent_block_parses_endpoints_and_summary_model() {
+        let config = parse(
+            r#"
+            agent {
+                endpoint "kimi" {
+                    url "https://api.moonshot.ai/v1"
+                }
+                endpoint "router" {
+                    kind "openai"
+                    url "https://openrouter.ai/api/v1"
+                }
+                summary-model "router/openai/gpt-mini/low"
+            }
+        "#,
+        )
+        .expect("valid config");
+        assert_eq!(
+            config.agent.endpoints,
+            [
+                ("kimi".to_string(), "https://api.moonshot.ai/v1".to_string()),
+                (
+                    "router".to_string(),
+                    "https://openrouter.ai/api/v1".to_string()
+                ),
+            ]
+        );
+        let summary = config.agent.summary_model.expect("summary model");
+        assert_eq!(summary.to_string(), "router/openai/gpt-mini/low");
+    }
+
+    #[test]
+    fn agent_block_is_empty_when_absent() {
+        let config = parse("theme \"night_owl\"").expect("valid config");
+        assert_eq!(config.agent, AgentSettings::default());
+    }
+
+    #[test]
+    fn agent_block_rejects_malformed_entries() {
+        assert!(parse("agent {\n endpoint \"a\" {\n }\n}").is_err());
+        assert!(parse("agent {\n endpoint \"a/b\" {\n url \"u\"\n }\n}").is_err());
+        assert!(parse("agent {\n endpoint \"a\" {\n url \"u\"\n kind \"wat\"\n }\n}").is_err());
+        assert!(parse("agent {\n summary-model \"a/b\"\n}").is_err());
+    }
+
+    #[test]
+    fn endpoint_without_a_token_is_skipped() {
+        let settings = AgentSettings {
+            endpoints: vec![
+                ("kimi".to_string(), "https://k".to_string()),
+                ("router".to_string(), "https://r".to_string()),
+            ],
+            summary_model: None,
+        };
+        let tokens = parse_auth("router \"sk-or\"\nunused \"x\"").expect("valid auth");
+        let agent = resolve_agent(settings, &tokens);
+        assert_eq!(agent.endpoints.len(), 1);
+        assert_eq!(agent.endpoints[0].name, "router");
+        assert_eq!(agent.endpoints[0].token, "sk-or");
+        assert!(agent.endpoint("kimi").is_none());
+    }
+
+    #[test]
+    fn auth_entry_without_a_token_is_an_error() {
+        assert!(parse_auth("kimi").is_err());
+        assert!(parse_auth("kimi 3").is_err());
     }
 
     #[test]
