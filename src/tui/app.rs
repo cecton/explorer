@@ -618,6 +618,18 @@ impl App for AppMain {
             );
         }
 
+        if let Some(dir) = crate::conversation::conversations_dir(&global_data.state.root) {
+            let tree = Arc::clone(&global_data.state.conversations);
+            let main_tx = notify_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                *tree.write() = crate::conversation::ConversationTree::load(&dir);
+                send_signal!(
+                    main_tx,
+                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::ConversationsLoaded)
+                );
+            });
+        }
+
         // Request full tokens for session-restored file previews.
         for window in global_data.state.pane_manager.window_stack.iter() {
             if let Window::FilePreview(key) = window {
@@ -743,6 +755,16 @@ impl App for AppMain {
                         id,
                         None,
                     );
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                Some(Action::OpenConversations) => {
+                    let state = &mut global_data.state;
+                    let window = Window::ConversationTree;
+                    let old = state.pane_manager.focused_window;
+                    state.pane_manager.push_window(window);
+                    state.pane_manager.focused_window = Some(window);
+                    notify_terminal_focus_change(state, old, Some(window));
+                    state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Some(Action::Quit) => {
@@ -1343,6 +1365,14 @@ impl App for AppMain {
                         }
                     }
                 }
+                AppSignal::ConversationsLoaded => {
+                    state.tree_view.loaded = true;
+                    let tree = state.conversations.read();
+                    state
+                        .tree_view
+                        .expanded
+                        .retain(|id| tree.node(id).is_some());
+                }
                 AppSignal::DirtyStatusLoaded(result) => {
                     // Errors are transient (e.g. a momentary git-lock during a commit);
                     // leave the previous value rather than surfacing them.
@@ -1678,11 +1708,12 @@ fn render_status_bar(
         (
             " Leader ".to_string(),
             format!(
-                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
+                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Chat  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
                 leader_lbl(Action::OpenFilePicker),
                 leader_lbl(Action::OpenTerminal),
                 leader_lbl(Action::OpenThemePicker),
                 leader_lbl(Action::OpenGitLog),
+                leader_lbl(Action::OpenConversations),
                 leader_lbl(Action::ClosePane),
                 leader_lbl(Action::Quit),
                 leader_lbl(Action::FocusNext),
@@ -1693,22 +1724,33 @@ fn render_status_bar(
     } else {
         let pane = {
             let rest = match state.pane_manager.focused_window.as_ref() {
-                Some(Window::FileNamePicker) => "Esc:Close  Enter:Open",
-                Some(Window::ThemePicker) => "Esc:Cancel  Enter:Save",
-                Some(Window::FilePreview(_)) => "e:Edit  Backspace:Send to back  ::Command",
+                Some(Window::FileNamePicker) => "Esc:Close  Enter:Open".to_string(),
+                Some(Window::ThemePicker) => "Esc:Cancel  Enter:Save".to_string(),
+                Some(Window::FilePreview(_)) => {
+                    "e:Edit  Backspace:Send to back  ::Command".to_string()
+                }
                 Some(Window::GitLog(_)) => {
-                    "Backspace:Send to back  b:Branch  ↑↓:Select  /:Search  Enter:Diff  Esc:Clear search"
+                    "Backspace:Send to back  b:Branch  ↑↓:Select  /:Search  Enter:Diff  Esc:Clear search".to_string()
                 }
                 Some(Window::CommitDiff(_)) => {
-                    "Backspace:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll"
+                    "Backspace:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll".to_string()
+                }
+                Some(Window::ConversationTree) => {
+                    "↑↓:Select  ←→:Fold  f:Favorite  Ctrl+D:Delete".to_string()
                 }
                 Some(Window::Terminal(_)) if !state.terminal_grabbed => {
-                    "Backspace:Send to back  Enter:grab  ↑↓PgUp/PgDn:scroll"
+                    "Backspace:Send to back  Enter:grab  ↑↓PgUp/PgDn:scroll".to_string()
                 }
-                Some(Window::Terminal(_)) | None => "",
+                Some(Window::Terminal(_)) | None => String::new(),
+            };
+            let alert = match state.pane_manager.focused_window {
+                Some(Window::ConversationTree) => conversation_tree_alert(state),
+                _ => None,
             };
             // Global shortcuts.
-            if (!matches!(state.pane_manager.focused_window, Some(Window::Terminal(_)))
+            if let Some(alert) = alert {
+                alert
+            } else if (!matches!(state.pane_manager.focused_window, Some(Window::Terminal(_)))
                 || !state.terminal_grabbed)
                 && !state.mouse_drag_active
             {
@@ -1722,7 +1764,7 @@ fn render_status_bar(
                     global_lbl(Action::MovePaneBackward),
                 )
             } else {
-                rest.to_string()
+                rest
             }
         };
         (
@@ -1798,6 +1840,19 @@ fn render_status_bar(
     }
 
     pipeline.push(ZOrder::Normal, render_ops);
+}
+
+/// A message that must not be cut off by the regular hints: a failure, or a pending
+/// delete confirmation.
+fn conversation_tree_alert(state: &AppState) -> Option<String> {
+    if let Some(notice) = &state.tree_view.notice {
+        return Some(notice.clone());
+    }
+    let id = state.tree_view.armed_delete.as_ref()?;
+    let count = state.conversations.read().subtree_len(id);
+    Some(format!(
+        "Ctrl+D again: delete {count} node(s)  any other key: Cancel"
+    ))
 }
 
 /// Formats a duration compactly for the status bar: `5s`, `12m`, `1h20m`, `3h`.

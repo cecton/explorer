@@ -1,3 +1,4 @@
+use crate::conversation::NodeId;
 use crate::loader::{FileKey, LoadedFile, file_key_for_path, path_for_file_key};
 use crate::tui::AppState;
 use crate::tui::GitLogWindowState;
@@ -12,7 +13,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-pub const SESSION_VERSION: u32 = 3;
+pub const SESSION_VERSION: u32 = 4;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Session {
@@ -38,6 +39,9 @@ pub struct Session {
     /// Selected UI theme name for this project.
     #[serde(default)]
     pub theme: Option<String>,
+    /// Roots and forks expanded in the Conversation Tree window.
+    #[serde(default)]
+    pub conversation_expanded: Vec<String>,
 }
 
 /// Persisted symbol-highlight identity. Byte-offset locations are never saved —
@@ -86,6 +90,9 @@ pub enum PaneEntry {
         hash: String,
         pane_size: SerializablePaneSize,
     },
+
+    #[serde(rename = "conversation_tree")]
+    ConversationTree { pane_size: SerializablePaneSize },
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -172,6 +179,14 @@ impl Session {
             })
             .collect();
 
+        let mut conversation_expanded: Vec<String> = state
+            .tree_view
+            .expanded
+            .iter()
+            .map(|id| id.as_str().to_string())
+            .collect();
+        conversation_expanded.sort();
+
         Self {
             version: SESSION_VERSION,
             repo_root: state.root.clone(),
@@ -182,6 +197,7 @@ impl Session {
             time_total_secs: state.time.project_total().as_secs(),
             cargo_features: state.cargo_features.clone(),
             theme: Some(state.theme.name().to_string()),
+            conversation_expanded,
         }
     }
 
@@ -329,8 +345,26 @@ impl Session {
                     );
                     state.pending_diffs.push(id);
                 }
+
+                PaneEntry::ConversationTree { pane_size } => {
+                    let window = Window::ConversationTree;
+                    new_stack.push(window);
+                    new_states.insert(
+                        window,
+                        WindowState {
+                            pane_size: pane_size.into(),
+                            ..Default::default()
+                        },
+                    );
+                }
             }
         }
+
+        state.tree_view.expanded = self
+            .conversation_expanded
+            .iter()
+            .map(|id| NodeId::new(id))
+            .collect();
 
         if !new_stack.is_empty() {
             state.pane_manager.window_stack = new_stack;
@@ -413,6 +447,9 @@ fn pane_entry_from_window(
         }
         Window::CommitDiff(id) => Some(PaneEntry::CommitDiff {
             hash: hex::encode(id),
+            pane_size: window_state.pane_size.into(),
+        }),
+        Window::ConversationTree => Some(PaneEntry::ConversationTree {
             pane_size: window_state.pane_size.into(),
         }),
         Window::Terminal(id) => {
@@ -505,12 +542,17 @@ pub fn session_dir() -> Option<Utf8PathBuf> {
         .and_then(|dirs| Utf8PathBuf::from_path_buf(dirs.data_dir().join("sessions")).ok())
 }
 
-pub fn session_file_path(repo_root: &Utf8Path) -> Option<Utf8PathBuf> {
-    let dir = session_dir()?;
+/// Stable 16-hex identifier of a repository, derived from its canonical root path.
+pub fn repo_hash(repo_root: &Utf8Path) -> Option<String> {
     let canonical = std::fs::canonicalize(repo_root).ok()?;
     let canonical = Utf8PathBuf::from_path_buf(canonical).ok()?;
     let hash = Sha256::digest(canonical.as_str().as_bytes());
-    let prefix = hex::encode(&hash[..8]);
+    Some(hex::encode(&hash[..8]))
+}
+
+pub fn session_file_path(repo_root: &Utf8Path) -> Option<Utf8PathBuf> {
+    let dir = session_dir()?;
+    let prefix = repo_hash(repo_root)?;
     Some(dir.join(format!("{prefix}.json")))
 }
 
@@ -598,6 +640,7 @@ mod tests {
                 features: vec!["foo".to_string()],
             },
             theme: None,
+            conversation_expanded: Vec::new(),
         };
 
         let value = serde_json::to_value(&session).unwrap();
@@ -669,6 +712,7 @@ mod tests {
                 PaneEntry::Terminal { .. } => "terminal",
                 PaneEntry::GitLog { .. } => "git_log",
                 PaneEntry::CommitDiff { .. } => "commit_diff",
+                PaneEntry::ConversationTree { .. } => "conversation_tree",
             })
             .collect();
         assert_eq!(kinds, vec!["file_preview", "terminal"]);
@@ -713,6 +757,7 @@ mod tests {
             time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
+            conversation_expanded: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -772,6 +817,7 @@ mod tests {
             time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
+            conversation_expanded: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -817,6 +863,7 @@ mod tests {
             time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
+            conversation_expanded: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -848,6 +895,7 @@ mod tests {
             time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
+            conversation_expanded: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -912,6 +960,7 @@ mod tests {
             time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
+            conversation_expanded: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -932,6 +981,35 @@ mod tests {
     }
 
     #[test]
+    fn conversation_tree_pane_round_trips_with_expanded_set() {
+        let (_dir, root) = temp_root();
+        let mut state = empty_state(root.clone());
+        state.pane_manager.window_stack = vec![Window::ConversationTree];
+        state
+            .tree_view
+            .expanded
+            .insert(NodeId::new("2026-10-05T14-32-07Z"));
+
+        let session = Session::from_state(&state);
+        assert_eq!(session.conversation_expanded, ["2026-10-05T14-32-07Z"]);
+        let json = serde_json::to_string(&session).expect("serialize session");
+        let restored: Session = serde_json::from_str(&json).expect("deserialize session");
+
+        let mut fresh = empty_state(root);
+        restored.apply(&mut fresh);
+        assert_eq!(
+            fresh.pane_manager.window_stack,
+            vec![Window::ConversationTree]
+        );
+        assert!(
+            fresh
+                .tree_view
+                .expanded
+                .contains(&NodeId::new("2026-10-05T14-32-07Z"))
+        );
+    }
+
+    #[test]
     fn commit_diff_pane_round_trips_through_session() {
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
@@ -946,7 +1024,7 @@ mod tests {
         );
 
         let session = Session::from_state(&state);
-        assert_eq!(session.version, 3);
+        assert_eq!(session.version, SESSION_VERSION);
         let kinds: Vec<_> = session
             .panes
             .iter()
@@ -955,6 +1033,7 @@ mod tests {
                 PaneEntry::Terminal { .. } => "terminal",
                 PaneEntry::GitLog { .. } => "git_log",
                 PaneEntry::CommitDiff { .. } => "commit_diff",
+                PaneEntry::ConversationTree { .. } => "conversation_tree",
             })
             .collect();
         assert_eq!(kinds, vec!["commit_diff"]);

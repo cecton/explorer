@@ -1,3 +1,4 @@
+use crate::conversation::{ConversationTree, NodeId};
 use crate::git::{DiffLine, GitRef, LogHistory};
 use crate::keymap::Keymap;
 use crate::loader::{FileKey, LoadedFile};
@@ -9,10 +10,10 @@ use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use r3bl_tui::core::pty::{ControlledChildTerminationHandle, PtyInputEvent};
 use r3bl_tui::{OfsBufVT100, Size};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -260,6 +261,20 @@ pub struct GitLogWindowState {
     pub branch_picker: FuzzyPickerState<usize>,
 }
 
+/// View state of the Conversation Tree window.
+#[derive(Clone, Default)]
+pub struct TreeViewState {
+    pub selected: Option<NodeId>,
+    /// Roots and forks whose children are shown; everything else is collapsed.
+    pub expanded: HashSet<NodeId>,
+    /// Node a first `Ctrl+D` marked for deletion; a second one on it deletes.
+    pub armed_delete: Option<NodeId>,
+    /// False until the startup load of the tree has finished.
+    pub loaded: bool,
+    /// Last failure to report in the status bar, cleared by the next key.
+    pub notice: Option<String>,
+}
+
 #[derive(Clone, Default)]
 pub struct CommitDiffState {
     pub lines: Option<Arc<Vec<DiffLine>>>,
@@ -360,6 +375,9 @@ pub struct AppState {
     pub pending_diffs: Vec<[u8; 20]>,
     /// Maps editor terminal IDs back to the FileKey they should restore on exit.
     pub terminal_to_preview: HashMap<usize, FileKey>,
+    /// Agent conversation tree, shared with the background task that loads it.
+    pub conversations: Arc<RwLock<ConversationTree>>,
+    pub tree_view: TreeViewState,
     pub mouse_drag_active: bool,
     pub terminal_grabbed: bool,
     pub text_selection: Option<TextSelection>,
@@ -459,6 +477,8 @@ impl AppState {
             commit_diffs: HashMap::new(),
             pending_diffs: Vec::new(),
             terminal_to_preview: HashMap::new(),
+            conversations: Arc::default(),
+            tree_view: TreeViewState::default(),
             mouse_drag_active: false,
             terminal_grabbed: false,
             text_selection: None,
@@ -557,6 +577,8 @@ pub enum AppSignal {
     },
     /// Result of an async `git::is_dirty` check.
     DirtyStatusLoaded(Result<bool, String>),
+    /// The startup load filled `AppState::conversations`.
+    ConversationsLoaded,
     #[default]
     Noop,
 }

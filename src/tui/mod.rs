@@ -1,5 +1,6 @@
 mod app;
 mod commit_diff_pane;
+mod conversation_tree_pane;
 mod file_name_picker;
 mod fuzzy_picker;
 pub(crate) mod git_log_pane;
@@ -10,6 +11,7 @@ mod panes_renderer;
 mod preview;
 mod state;
 mod terminal_pane;
+mod text_layout;
 mod theme;
 mod theme_picker;
 mod title_row;
@@ -25,6 +27,7 @@ pub use theme::HelixTheme;
 
 use self::app::*;
 use self::commit_diff_pane::*;
+use self::conversation_tree_pane::*;
 use self::file_name_picker::*;
 use self::fuzzy_picker::*;
 use self::git_log_pane::*;

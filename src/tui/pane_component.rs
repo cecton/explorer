@@ -14,6 +14,7 @@ pub struct PaneComponent {
     theme_picker: ThemePickerComponent,
     git_log: GitLogPaneComponent,
     commit_diff: CommitDiffPaneComponent,
+    conversation_tree: ConversationTreeComponent,
     preview: FilePreviewComponent,
     terminal: TerminalPaneComponent,
     /// Origin row of the content area (below title bar), used for scrollbar mouse events.
@@ -48,6 +49,7 @@ impl PaneComponent {
             theme_picker: ThemePickerComponent::new(id),
             git_log: GitLogPaneComponent::new(id),
             commit_diff: CommitDiffPaneComponent::new(id),
+            conversation_tree: ConversationTreeComponent::new(id),
             preview: FilePreviewComponent::new(id),
             terminal: TerminalPaneComponent::new(id, slot),
             content_origin_row: 0,
@@ -182,7 +184,7 @@ impl PaneComponent {
                 state.mark_session_dirty();
                 EventPropagation::ConsumedRender
             }
-            Window::GitLog(_) | Window::CommitDiff(_) => {
+            Window::GitLog(_) | Window::CommitDiff(_) | Window::ConversationTree => {
                 state.pane_manager.set_window_scroll(window, target);
                 state.pane_manager.clamp_scroll(window);
                 EventPropagation::ConsumedRender
@@ -258,6 +260,9 @@ impl TitleRow for PaneComponent {
             Window::CommitDiff(_) => self
                 .commit_diff
                 .render_title_row(ops, pane_box, focused, theme, state),
+            Window::ConversationTree => self
+                .conversation_tree
+                .render_title_row(ops, pane_box, focused, theme, state),
         }
     }
 }
@@ -313,6 +318,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
         self.theme_picker.reset();
         self.git_log.reset();
         self.commit_diff.reset();
+        self.conversation_tree.reset();
         self.preview.reset();
         self.terminal.reset();
         self.preview_drag_active = false;
@@ -923,6 +929,10 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 self.commit_diff
                     .handle_event(global_data, input_event, has_focus)
             }
+            Some(Window::ConversationTree) => {
+                self.conversation_tree
+                    .handle_event(global_data, input_event, has_focus)
+            }
             None => Ok(EventPropagation::Propagate),
         }
     }
@@ -1042,6 +1052,12 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     self.commit_diff
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
+                Some(Window::ConversationTree) => self.conversation_tree.render(
+                    global_data,
+                    inner_bounds,
+                    surface_bounds,
+                    has_focus,
+                )?,
                 None => {}
             };
 

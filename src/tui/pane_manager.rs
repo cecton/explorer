@@ -8,8 +8,8 @@ pub const MAX_PANES: usize = 16;
 /// A pane that can appear in the window stack.
 ///
 /// Each variant is unique: there is at most one `FileNamePicker`, one `ThemePicker`, one
-/// `GitLog`, and at most one `FilePreview`/`CommitDiff` per key (file/commit id) in the
-/// stack at any time.
+/// `ConversationTree`, and at most one `FilePreview`/`CommitDiff` per key (file/commit id)
+/// in the stack at any time.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Window {
     /// Preview of the file identified by `FileKey`.
@@ -25,6 +25,8 @@ pub enum Window {
     GitLog(usize),
     /// Unified diff of a single commit, identified by its object id.
     CommitDiff([u8; 20]),
+    /// Tree of every agent conversation of the repository.
+    ConversationTree,
 }
 
 /// A point in a window's content used as a text-selection anchor or endpoint.

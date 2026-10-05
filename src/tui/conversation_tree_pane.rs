@@ -1,0 +1,678 @@
+use crate::conversation::{ConversationTree, Node, NodeId, NodeStatus, NodeType};
+use crate::tui::text_layout::{display_width, truncate, wrap};
+use crate::tui::*;
+use std::collections::HashSet;
+
+const GUTTER_GAP: &str = "  ";
+const SCROLL_STEP: usize = 3;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Fold {
+    /// Neither a root with children nor a fork: nothing to fold.
+    Leaf,
+    Collapsed,
+    Expanded,
+}
+
+/// Where a row sits among the children of an expanded fork.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Branch {
+    /// Not a direct child of a fork: a root, or the continuation of a straight line.
+    None,
+    Start,
+    LastStart,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct TreeRow {
+    pub id: NodeId,
+    pub depth: usize,
+    pub fold: Fold,
+    pub branch: Branch,
+}
+
+/// Flattens the tree into display rows: roots newest first, nodes of a conversation
+/// oldest first. A root's descendants sit one level below it; after that, indentation
+/// grows only below a fork, so a straight line of prompts stays a flat list.
+pub(crate) fn layout_rows(tree: &ConversationTree, expanded: &HashSet<NodeId>) -> Vec<TreeRow> {
+    let mut rows = Vec::new();
+    for root in tree.roots().iter().rev() {
+        push_rows(tree, expanded, root, 0, Branch::None, &mut rows);
+    }
+    rows
+}
+
+fn push_rows(
+    tree: &ConversationTree,
+    expanded: &HashSet<NodeId>,
+    id: &NodeId,
+    depth: usize,
+    branch: Branch,
+    rows: &mut Vec<TreeRow>,
+) {
+    let Some(node) = tree.node(id) else {
+        return;
+    };
+    let is_root = node.parent.is_none();
+    let foldable = node.children.len() > 1 || (is_root && !node.children.is_empty());
+    let fold = match (foldable, expanded.contains(id)) {
+        (false, _) => Fold::Leaf,
+        (true, true) => Fold::Expanded,
+        (true, false) => Fold::Collapsed,
+    };
+    rows.push(TreeRow {
+        id: id.clone(),
+        depth,
+        fold,
+        branch,
+    });
+    if fold == Fold::Collapsed {
+        return;
+    }
+    let child_depth = if fold == Fold::Expanded {
+        depth + 1
+    } else {
+        depth
+    };
+    let last = node.children.len().saturating_sub(1);
+    for (i, child) in node.children.iter().enumerate() {
+        let child_branch = match node.children.len() {
+            0 | 1 => Branch::None,
+            _ if i == last => Branch::LastStart,
+            _ => Branch::Start,
+        };
+        push_rows(tree, expanded, child, child_depth, child_branch, rows);
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LineKind {
+    Head,
+    TitleRest,
+    Summary,
+}
+
+struct Line {
+    row: usize,
+    kind: LineKind,
+    text: String,
+}
+
+fn state_marker(node: &Node) -> char {
+    match (node.meta.status, node.meta.node_type) {
+        (Some(NodeStatus::Running), _) => '~',
+        (Some(NodeStatus::Failed), _) => '!',
+        (Some(NodeStatus::Cancelled), _) => 'x',
+        _ if node.meta.stash.is_some() => '?',
+        (_, Some(NodeType::Compact)) => '=',
+        _ => ' ',
+    }
+}
+
+fn row_prefix(row: &TreeRow, node: &Node) -> String {
+    let fold = match row.fold {
+        Fold::Leaf => ' ',
+        Fold::Collapsed => '+',
+        Fold::Expanded => '-',
+    };
+    let indent = match row.branch {
+        Branch::None => "  ".repeat(row.depth),
+        Branch::Start => format!("{}├ ", "  ".repeat(row.depth.saturating_sub(1))),
+        Branch::LastStart => format!("{}└ ", "  ".repeat(row.depth.saturating_sub(1))),
+    };
+    format!("{indent}{fold}{} ", state_marker(node))
+}
+
+fn commit_label(node: &Node) -> Option<String> {
+    let first = node.meta.commits.first()?;
+    let short: String = first.chars().take(7).collect();
+    Some(match node.meta.commits.len() {
+        1 => short,
+        n => format!("{short} +{}", n - 1),
+    })
+}
+
+pub struct ConversationTreeComponent {
+    id: FlexBoxId,
+    content_origin_row: usize,
+    /// Row index shown on each visible content line, for mouse hit-testing.
+    line_rows: Vec<usize>,
+    /// Selection as of the last render; a change re-anchors the scroll onto it.
+    shown_selection: Option<NodeId>,
+}
+
+impl ConversationTreeComponent {
+    pub fn new(id: FlexBoxId) -> Self {
+        Self {
+            id,
+            content_origin_row: 0,
+            line_rows: Vec::new(),
+            shown_selection: None,
+        }
+    }
+
+    fn selected_index(rows: &[TreeRow], selected: Option<&NodeId>) -> usize {
+        selected
+            .and_then(|id| rows.iter().position(|row| &row.id == id))
+            .unwrap_or(0)
+    }
+
+    fn select(state: &mut AppState, rows: &[TreeRow], index: usize) {
+        if let Some(row) = rows.get(index.min(rows.len().saturating_sub(1))) {
+            state.tree_view.selected = Some(row.id.clone());
+        }
+    }
+
+    /// Nearest ancestor that can be folded: the fork or root a branch hangs from.
+    fn foldable_ancestor(rows: &[TreeRow], tree: &ConversationTree, id: &NodeId) -> Option<usize> {
+        let mut current = tree.node(id)?.parent.clone();
+        while let Some(ancestor) = current {
+            if let Some(index) = rows
+                .iter()
+                .position(|row| row.id == ancestor && row.fold != Fold::Leaf)
+            {
+                return Some(index);
+            }
+            current = tree.node(&ancestor)?.parent.clone();
+        }
+        None
+    }
+
+    fn delete_selected(state: &mut AppState, rows: &[TreeRow], index: usize) {
+        let Some(row) = rows.get(index) else {
+            return;
+        };
+        let removed = match state.conversations.write().delete(&row.id) {
+            Ok(removed) => removed,
+            Err(e) => {
+                tracing::warn!("failed to delete conversation node: {e}");
+                state.tree_view.notice = Some(format!("delete failed: {e}"));
+                return;
+            }
+        };
+        for id in &removed {
+            state.tree_view.expanded.remove(id);
+        }
+        let rows = layout_rows(&state.conversations.read(), &state.tree_view.expanded);
+        state.tree_view.selected = None;
+        Self::select(state, &rows, index);
+        state.mark_session_dirty();
+    }
+}
+
+impl TitleRow for ConversationTreeComponent {
+    fn render_title_row(
+        &self,
+        ops: &mut RenderOpIRVec,
+        pane_box: &FlexBox,
+        focused: bool,
+        theme: &HelixTheme,
+        _state: &AppState,
+    ) -> usize {
+        render_pane_title(ops, pane_box, "Conversations", false, theme, focused);
+        1
+    }
+}
+
+impl Component<AppState, AppSignal> for ConversationTreeComponent {
+    fn reset(&mut self) {}
+
+    fn get_id(&self) -> FlexBoxId {
+        self.id
+    }
+
+    fn handle_event(
+        &mut self,
+        global_data: &mut GlobalData<AppState, AppSignal>,
+        input_event: InputEvent,
+        _has_focus: &mut HasFocus,
+    ) -> CommonResult<EventPropagation> {
+        let state = &mut global_data.state;
+        let window = Window::ConversationTree;
+        let rows = layout_rows(&state.conversations.read(), &state.tree_view.expanded);
+        let index = Self::selected_index(&rows, state.tree_view.selected.as_ref());
+        let page = state
+            .pane_manager
+            .window_page_size(&window)
+            .saturating_sub(1)
+            .max(1);
+
+        let armed = match &input_event {
+            InputEvent::Keyboard(_)
+            | InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::MouseDown(_),
+                ..
+            }) => {
+                state.tree_view.notice = None;
+                state.tree_view.armed_delete.take()
+            }
+            _ => None,
+        };
+
+        match &input_event {
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Up),
+            }) => Self::select(state, &rows, index.saturating_sub(1)),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Down),
+            }) => Self::select(state, &rows, index + 1),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::PageUp),
+            }) => Self::select(state, &rows, index.saturating_sub(page)),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::PageDown),
+            }) => Self::select(state, &rows, index + page),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Home),
+            }) => Self::select(state, &rows, 0),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::End),
+            }) => Self::select(state, &rows, rows.len().saturating_sub(1)),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Right),
+            }) => {
+                if let Some(row) = rows.get(index)
+                    && row.fold == Fold::Collapsed
+                {
+                    state.tree_view.expanded.insert(row.id.clone());
+                    state.mark_session_dirty();
+                }
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Left),
+            }) => {
+                let Some(row) = rows.get(index) else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
+                if row.fold == Fold::Expanded {
+                    state.tree_view.expanded.remove(&row.id);
+                    state.mark_session_dirty();
+                } else {
+                    let ancestor =
+                        Self::foldable_ancestor(&rows, &state.conversations.read(), &row.id);
+                    if let Some(ancestor) = ancestor {
+                        Self::select(state, &rows, ancestor);
+                    }
+                }
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character('f'),
+            }) => {
+                if let Some(row) = rows.get(index)
+                    && let Err(e) = state.conversations.write().toggle_favorite(&row.id)
+                {
+                    tracing::warn!("failed to save favorite: {e}");
+                    state.tree_view.notice = Some(format!("favorite not saved: {e}"));
+                }
+            }
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('d'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) => {
+                let Some(row) = rows.get(index) else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
+                if armed.as_ref() == Some(&row.id) {
+                    Self::delete_selected(state, &rows, index);
+                } else {
+                    state.tree_view.selected = Some(row.id.clone());
+                    state.tree_view.armed_delete = Some(row.id.clone());
+                }
+            }
+            InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::MouseDown(Button::Left),
+                pos,
+                ..
+            }) => {
+                let line = pos
+                    .row_index
+                    .as_usize()
+                    .checked_sub(self.content_origin_row);
+                if let Some(row) = line.and_then(|line| self.line_rows.get(line)) {
+                    Self::select(state, &rows, *row);
+                }
+            }
+            InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::ScrollUp,
+                ..
+            }) => {
+                let scroll = state.pane_manager.window_scroll(&window);
+                state
+                    .pane_manager
+                    .set_window_scroll(&window, scroll.saturating_sub(SCROLL_STEP));
+            }
+            InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::ScrollDown,
+                ..
+            }) => {
+                let scroll = state.pane_manager.window_scroll(&window);
+                state
+                    .pane_manager
+                    .set_window_scroll(&window, scroll + SCROLL_STEP);
+                state.pane_manager.clamp_scroll(&window);
+            }
+            _ => return Ok(EventPropagation::Propagate),
+        }
+        Ok(EventPropagation::ConsumedRender)
+    }
+
+    fn render(
+        &mut self,
+        global_data: &mut GlobalData<AppState, AppSignal>,
+        current_box: FlexBox,
+        _surface_bounds: SurfaceBounds,
+        _has_focus: &mut HasFocus,
+    ) -> CommonResult {
+        throws!({
+            let origin = current_box.style_adjusted_origin_pos;
+            let bounds = current_box.style_adjusted_bounds_size;
+            let total_rows = bounds.row_height.as_usize();
+            let pane_width = bounds.col_width.as_usize();
+            self.content_origin_row = origin.row_index.as_usize();
+            self.line_rows.clear();
+
+            let window = Window::ConversationTree;
+            let state = &mut global_data.state;
+            state.pane_manager.set_window_page_size(&window, total_rows);
+
+            let tree_handle = state.conversations.clone();
+            let tree = tree_handle.read();
+            let rows = layout_rows(&tree, &state.tree_view.expanded);
+            let selected = Self::selected_index(&rows, state.tree_view.selected.as_ref());
+            let selected_id = rows.get(selected).map(|row| row.id.clone());
+            state.tree_view.selected = selected_id.clone();
+
+            let theme = &state.theme;
+            let pane_bg = theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
+            let selected_bg = theme.ui_bg("ui.selection").unwrap_or(DEFAULT_SELECTION_BG);
+            let text_fg = theme
+                .ui_fg("ui.text")
+                .unwrap_or(RgbValue::from_u8(170, 170, 200));
+            let dim_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
+            let gutter_fg = theme.ui_fg("ui.linenr").unwrap_or(dim_fg);
+            let commit_fg = theme
+                .color_for_scope("diff.plus")
+                .unwrap_or(RgbValue::from_u8(150, 220, 120));
+            let hash_fg = theme
+                .color_for_scope("constant")
+                .unwrap_or(RgbValue::from_u8(250, 200, 90));
+            let running_fg = theme
+                .color_for_scope("diff.delta")
+                .unwrap_or(RgbValue::from_u8(250, 200, 90));
+            let warning_fg = theme
+                .ui_fg("warning")
+                .unwrap_or(RgbValue::from_u8(250, 170, 80));
+            let error_fg = theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG);
+            let favorite_fg = theme
+                .ui_fg("ui.cursor.match")
+                .unwrap_or(RgbValue::from_u8(255, 200, 60));
+
+            let mut render_ops = RenderOpIRVec::new();
+
+            if rows.is_empty() {
+                let message = if state.tree_view.loaded {
+                    "(no conversations)"
+                } else {
+                    "Loading conversations…"
+                };
+                let bg_style = new_style!(color_bg: {TuiColor::from(pane_bg)});
+                let text_style = new_style!(color_fg: {TuiColor::from(text_fg)} color_bg: {TuiColor::from(pane_bg)});
+                for row_offset in 0..total_rows {
+                    render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                        origin,
+                        col(0) + row(row_offset as u16),
+                    );
+                    render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
+                    render_ops += RenderOpIR::PaintTextWithAttributes(
+                        " ".repeat(pane_width).into(),
+                        Some(bg_style),
+                    );
+                }
+                render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+                render_ops += RenderOpCommon::ApplyColors(Some(text_style));
+                render_ops += RenderOpIR::PaintTextWithAttributes(message.into(), Some(text_style));
+                state.pane_manager.set_window_scroll_max(&window, 0);
+                global_data.pipeline.push(ZOrder::Normal, render_ops);
+                return Ok(());
+            }
+
+            let gutter_width = rows
+                .iter()
+                .filter_map(|row| tree.node(&row.id))
+                .map(|node| display_width(&node.created_display))
+                .max()
+                .unwrap_or(0)
+                + GUTTER_GAP.len();
+
+            let mut lines: Vec<Line> = Vec::with_capacity(rows.len() + 8);
+            let mut selected_span = (0, 0);
+            for (row_idx, row) in rows.iter().enumerate() {
+                let Some(node) = tree.node(&row.id) else {
+                    continue;
+                };
+                let prefix_width = gutter_width + display_width(&row_prefix(row, node));
+                let label_width = commit_label(node).map_or(0, |label| display_width(&label) + 1);
+                let text_width = pane_width.saturating_sub(prefix_width + label_width).max(1);
+                if row_idx != selected {
+                    lines.push(Line {
+                        row: row_idx,
+                        kind: LineKind::Head,
+                        text: truncate(node.display_title(), text_width),
+                    });
+                    continue;
+                }
+                let start = lines.len();
+                for (i, text) in wrap(node.display_title(), text_width)
+                    .into_iter()
+                    .enumerate()
+                {
+                    lines.push(Line {
+                        row: row_idx,
+                        kind: if i == 0 {
+                            LineKind::Head
+                        } else {
+                            LineKind::TitleRest
+                        },
+                        text,
+                    });
+                }
+                if let Some(summary) = node.summary.as_deref() {
+                    for text in wrap(summary, text_width) {
+                        lines.push(Line {
+                            row: row_idx,
+                            kind: LineKind::Summary,
+                            text,
+                        });
+                    }
+                }
+                selected_span = (start, lines.len());
+            }
+
+            state
+                .pane_manager
+                .set_window_scroll_max(&window, lines.len());
+            state.pane_manager.clamp_scroll(&window);
+            let mut scroll = state.pane_manager.window_scroll(&window);
+            if self.shown_selection != selected_id && total_rows > 0 {
+                let (start, end) = selected_span;
+                if end > scroll + total_rows {
+                    scroll = end - total_rows;
+                }
+                if start < scroll {
+                    scroll = start;
+                }
+                state.pane_manager.set_window_scroll(&window, scroll);
+                self.shown_selection = selected_id;
+            }
+
+            for row_offset in 0..total_rows {
+                let line = lines.get(scroll + row_offset);
+                let is_selected = line.is_some_and(|line| line.row == selected);
+                let bg = TuiColor::from(if is_selected { selected_bg } else { pane_bg });
+                let bg_style = new_style!(color_bg: {bg});
+                render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                    origin,
+                    col(0) + row(row_offset as u16),
+                );
+                render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
+                render_ops += RenderOpIR::PaintTextWithAttributes(
+                    " ".repeat(pane_width).into(),
+                    Some(bg_style),
+                );
+                let Some(line) = line else {
+                    continue;
+                };
+                self.line_rows.push(line.row);
+                let row_info = &rows[line.row];
+                let Some(node) = tree.node(&row_info.id) else {
+                    continue;
+                };
+
+                let armed = state.tree_view.armed_delete.as_ref() == Some(&row_info.id);
+                let favorite = node.meta.favorite;
+                let type_fg = match (node.meta.status, node.meta.node_type) {
+                    _ if armed => error_fg,
+                    (Some(NodeStatus::Failed), _) => error_fg,
+                    (Some(NodeStatus::Cancelled), _) => warning_fg,
+                    (Some(NodeStatus::Running), _) => running_fg,
+                    _ if favorite => favorite_fg,
+                    (_, Some(NodeType::Commit)) => commit_fg,
+                    (_, Some(NodeType::Compact)) => dim_fg,
+                    _ => text_fg,
+                };
+                let styled = |fg: RgbValue| {
+                    let fg = TuiColor::from(fg);
+                    if favorite {
+                        new_style!(bold color_fg: {fg} color_bg: {bg})
+                    } else {
+                        new_style!(color_fg: {fg} color_bg: {bg})
+                    }
+                };
+                let paint = |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: RgbValue| {
+                    let style = styled(fg);
+                    *ops += RenderOpCommon::MoveCursorPositionRelTo(
+                        origin,
+                        col(column as u16) + row(row_offset as u16),
+                    );
+                    *ops += RenderOpCommon::ApplyColors(Some(style));
+                    *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+                };
+
+                let prefix = row_prefix(row_info, node);
+                let text_column = gutter_width + display_width(&prefix);
+                match line.kind {
+                    LineKind::Head => {
+                        paint(&mut render_ops, 0, &node.created_display, gutter_fg);
+                        paint(&mut render_ops, gutter_width, &prefix, type_fg);
+                        paint(&mut render_ops, text_column, &line.text, type_fg);
+                        if let Some(label) = commit_label(node) {
+                            let column = pane_width.saturating_sub(display_width(&label));
+                            paint(&mut render_ops, column, &label, hash_fg);
+                        }
+                    }
+                    LineKind::TitleRest => {
+                        paint(&mut render_ops, text_column, &line.text, type_fg);
+                    }
+                    LineKind::Summary => {
+                        let fg = if armed { error_fg } else { dim_fg };
+                        paint(&mut render_ops, text_column, &line.text, fg);
+                    }
+                }
+            }
+
+            global_data.pipeline.push(ZOrder::Normal, render_ops);
+        });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use camino::Utf8PathBuf;
+
+    fn tree_with(paths: &[&str]) -> (tempfile::TempDir, ConversationTree) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        for path in paths {
+            std::fs::create_dir_all(root.join(path)).unwrap();
+        }
+        let tree = ConversationTree::load(&root);
+        (tmp, tree)
+    }
+
+    fn shape(rows: &[TreeRow]) -> Vec<(&str, usize, Fold)> {
+        rows.iter()
+            .map(|row| (row.id.as_str(), row.depth, row.fold))
+            .collect()
+    }
+
+    fn branches(rows: &[TreeRow]) -> Vec<Branch> {
+        rows.iter().map(|row| row.branch).collect()
+    }
+
+    fn ids(names: &[&str]) -> HashSet<NodeId> {
+        names.iter().map(|name| NodeId::new(name)).collect()
+    }
+
+    #[test]
+    fn roots_are_newest_first_and_collapsed_by_default() {
+        let (_tmp, tree) = tree_with(&["a1/a2", "b1"]);
+        let rows = layout_rows(&tree, &HashSet::new());
+        assert_eq!(
+            shape(&rows),
+            [("b1", 0, Fold::Leaf), ("a1", 0, Fold::Collapsed)]
+        );
+    }
+
+    #[test]
+    fn straight_line_stays_at_one_level_below_its_root() {
+        let (_tmp, tree) = tree_with(&["a1/a2/a3/a4"]);
+        let rows = layout_rows(&tree, &ids(&["a1"]));
+        assert_eq!(
+            shape(&rows),
+            [
+                ("a1", 0, Fold::Expanded),
+                ("a2", 1, Fold::Leaf),
+                ("a3", 1, Fold::Leaf),
+                ("a4", 1, Fold::Leaf),
+            ]
+        );
+    }
+
+    #[test]
+    fn indentation_grows_only_below_an_expanded_fork() {
+        let (_tmp, tree) = tree_with(&["a1/a2/a3/a4", "a1/a2/b3"]);
+        let collapsed_fork = layout_rows(&tree, &ids(&["a1"]));
+        assert_eq!(
+            shape(&collapsed_fork),
+            [("a1", 0, Fold::Expanded), ("a2", 1, Fold::Collapsed)]
+        );
+
+        let rows = layout_rows(&tree, &ids(&["a1", "a2"]));
+        assert_eq!(
+            shape(&rows),
+            [
+                ("a1", 0, Fold::Expanded),
+                ("a2", 1, Fold::Expanded),
+                ("a3", 2, Fold::Leaf),
+                ("a4", 2, Fold::Leaf),
+                ("b3", 2, Fold::Leaf),
+            ]
+        );
+        assert_eq!(
+            branches(&rows),
+            [
+                Branch::None,
+                Branch::None,
+                Branch::Start,
+                Branch::None,
+                Branch::LastStart,
+            ]
+        );
+    }
+}
