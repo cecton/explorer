@@ -142,8 +142,8 @@ conversations/3fa9c1d2e4b5a6f7/
 | `metadata.md` | Flat `key: value` lines, see below. | On send; rewritten when the turn ends and when favorite toggles. |
 | `reply.md` | All assistant text of the turn, in order, without tool calls. | Flushed about once per second while streaming, and at the end. |
 | `transcript.jsonl` | One message per line, exactly as replayed: the user message as sent, assistant messages with tool calls, tool results, and any message Explorer injected. Absent for `claude-code` nodes. | Appended as each message completes. |
-| `title.md` | One line, at most 100 characters (a display limit). | When the title call returns. |
-| `summary.md` | About 50 words summarizing the prompt; shorter for short prompts. | When the summary call returns. |
+| `title.md` | One line like a commit subject, asked at 72 characters and cut at 100. | When the post-turn call returns. |
+| `summary.md` | About 50 words, like a commit body: what was asked and done. | When the post-turn call returns. |
 
 `metadata.md` keys:
 
@@ -472,13 +472,17 @@ kills the child process group (including a running `shell` command). Status beco
 **Quit.** Quitting Explorer cancels running turns the same way. A running turn is not
 resumable and is not part of session restore.
 
-**Title and summary.** Both describe the prompt, not the reply. Each is one non-streaming
-call to `summary-model` without tools (`prompts/title.md`, `prompts/summary.md`; on
-`claude-code`, `claude -p --tools ""`). A title is one line of at most 100 characters,
-a limit set for display; a longer answer is cut at 100. A summary is about 50 words. A
-single-line prompt of 100 characters or fewer is its own title, and a prompt of 50 words
-or fewer is its own summary; no call is made. Failures are silent: the files stay
-missing.
+**Title and summary.** Until a turn ends, a node has no title or summary files and the
+tree shows the first line of its prompt. When a turn ends `done` (new nodes, reruns and
+recovered nodes alike), one non-streaming call to `summary-model` without tools
+(`prompts/title_summary.md`; on `claude-code`, `claude -p --tools ""`) reads the prompt,
+the reply (cut at 8000 characters) and, in commit mode, the subjects of the commits made,
+and answers in the shape of a commit message: a title of at most 72 characters, a blank
+line, then a summary of about 50 words. The first line is the title (hard cut at 100
+characters), the rest the summary; they replace `title.md` and `summary.md`. The call
+starts after the turn's outcome is applied, so it never delays the node. Failed and
+cancelled turns keep the prompt-based display, and failures are silent: the files stay as
+they were.
 
 ## 9. Recovering, replaying and editing nodes
 

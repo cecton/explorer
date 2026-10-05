@@ -16,7 +16,8 @@ use tokio::sync::{mpsc, watch};
 const REPLY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const PROGRESS_SIGNAL_INTERVAL: Duration = Duration::from_millis(80);
 const TITLE_MAX_CHARS: usize = 100;
-const SUMMARY_MAX_WORDS: usize = 50;
+const REPLY_MAX_CHARS: usize = 8000;
+const COMMITS_MAX: usize = 20;
 /// Times a commit turn is asked to commit what it left behind before Explorer stashes it.
 const MAX_NUDGES: usize = 2;
 
@@ -82,6 +83,8 @@ pub struct TurnRequest {
     /// `YYYY-MM-DD`, for the system prompt.
     pub date: String,
     pub backend: Backend,
+    /// Model that titles and summarizes the node once its turn is done.
+    pub summary_backend: Option<Backend>,
     /// Claude Code session of the parent node, to fork when the backend is the CLI.
     pub parent_session: Option<String>,
     /// Instructions of a `/compact` turn; such a turn asks for a summary instead of
@@ -251,7 +254,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
         let outcome = TurnOutcome {
             status,
             error,
-            head_after,
+            head_after: head_after.clone(),
             tokens_in,
             commits,
             stash,
@@ -266,6 +269,23 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
                 },
             ))
             .await;
+        if status == NodeStatus::Done
+            && let Some(backend) = &request.summary_backend
+        {
+            let root = request.root.clone();
+            let (before, after) = (request.head.clone(), head_after.clone());
+            let commits = tokio::task::spawn_blocking(move || match (before, after) {
+                (Some(before), Some(after)) => {
+                    crate::git::log_oneline(&root, &before, &after, COMMITS_MAX)
+                }
+                _ => Vec::new(),
+            })
+            .await
+            .unwrap_or_default();
+            let (prompt, reply) = crate::conversation::read_prompt_and_reply(&request.node_dir);
+            let input = title_input(&prompt, &reply, &commits);
+            title_and_summarize(&request, backend, &input, &main_tx).await;
+        }
     });
 
     handle
@@ -526,20 +546,29 @@ fn single_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// A prompt short enough to be its own title: one line of at most 100 characters.
-fn title_from_prompt(prompt: &str) -> Option<String> {
-    let trimmed = prompt.trim();
-    (!trimmed.contains('\n') && trimmed.chars().count() <= TITLE_MAX_CHARS)
-        .then(|| trimmed.to_string())
+/// What the summary model reads: the prompt, the end of the reply and the commits made.
+fn title_input(prompt: &str, reply: &str, commits: &[String]) -> String {
+    let reply = match reply.char_indices().nth(REPLY_MAX_CHARS) {
+        Some((end, _)) => &reply[..end],
+        None => reply,
+    };
+    let mut input = format!("Prompt:\n{}\n\nReply:\n{}\n", prompt.trim(), reply.trim());
+    if !commits.is_empty() {
+        input.push_str("\nCommits:\n");
+        for commit in commits {
+            input.push_str(commit);
+            input.push('\n');
+        }
+    }
+    input
 }
 
-/// A prompt short enough to be its own summary: at most 50 words.
-fn summary_from_prompt(prompt: &str) -> Option<String> {
-    (prompt.split_whitespace().count() <= SUMMARY_MAX_WORDS).then(|| prompt.trim().to_string())
-}
-
-fn clean_title(answer: &str) -> String {
-    single_line(answer).chars().take(TITLE_MAX_CHARS).collect()
+/// Splits the model's answer into the title (first line) and the summary (the rest).
+fn parse_title_and_summary(answer: &str) -> Option<(String, String)> {
+    let answer = answer.trim();
+    let (first, rest) = answer.split_once('\n').unwrap_or((answer, ""));
+    let title: String = single_line(first).chars().take(TITLE_MAX_CHARS).collect();
+    (!title.is_empty()).then(|| (title, single_line(rest)))
 }
 
 /// One answer without tools from the summary model.
@@ -550,69 +579,48 @@ async fn complete(backend: &Backend, system: &str, user: &str) -> Result<String,
     }
 }
 
-async fn title_for(prompt: &str, backend: Option<&Backend>) -> Option<String> {
-    if let Some(title) = title_from_prompt(prompt) {
-        return Some(title);
-    }
-    match complete(backend?, context::TITLE_PROMPT, prompt).await {
-        Ok(answer) => Some(clean_title(&answer)).filter(|title| !title.is_empty()),
+/// Replaces `title.md` and `summary.md` of a finished node with what the model makes of
+/// its turn. Failures are logged and leave the prompt-based text in place.
+async fn title_and_summarize(
+    request: &TurnRequest,
+    backend: &Backend,
+    input: &str,
+    main_tx: &MainTx,
+) {
+    let answer = match complete(backend, context::TITLE_SUMMARY_PROMPT, input).await {
+        Ok(answer) => answer,
         Err(e) => {
             tracing::warn!("title generation failed: {e}");
-            None
+            return;
         }
+    };
+    let Some((title, summary)) = parse_title_and_summary(&answer) else {
+        tracing::warn!("title generation returned no title");
+        return;
+    };
+    if let Err(e) = write_atomic(&request.node_dir.join("title.md"), &title) {
+        tracing::warn!("failed to write title.md: {e}");
     }
-}
-
-async fn summary_for(prompt: &str, backend: Option<&Backend>) -> Option<String> {
-    if let Some(summary) = summary_from_prompt(prompt) {
-        return Some(summary);
+    let signal = AppSignal::NodeTitleReady {
+        node: request.node.clone(),
+        title,
+    };
+    let _ = main_tx
+        .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
+        .await;
+    if summary.is_empty() {
+        return;
     }
-    match complete(backend?, context::SUMMARY_PROMPT, prompt).await {
-        Ok(answer) => Some(answer.trim().to_string()).filter(|summary| !summary.is_empty()),
-        Err(e) => {
-            tracing::warn!("summary generation failed: {e}");
-            None
-        }
+    if let Err(e) = write_atomic(&request.node_dir.join("summary.md"), &summary) {
+        tracing::warn!("failed to write summary.md: {e}");
     }
-}
-
-/// Produces `title.md` and `summary.md` of a node from its prompt. Short prompts are
-/// reused as they are; longer ones need `backend`, and stay without when it is absent
-/// or the call fails.
-pub fn spawn_title_and_summary(
-    node: NodeId,
-    node_dir: Utf8PathBuf,
-    prompt: String,
-    backend: Option<Backend>,
-    main_tx: MainTx,
-) {
-    tokio::spawn(async move {
-        let (title, summary) = tokio::join!(
-            title_for(&prompt, backend.as_ref()),
-            summary_for(&prompt, backend.as_ref())
-        );
-        if let Some(title) = title {
-            if let Err(e) = write_atomic(&node_dir.join("title.md"), &title) {
-                tracing::warn!("failed to write title.md: {e}");
-            }
-            let signal = AppSignal::NodeTitleReady {
-                node: node.clone(),
-                title,
-            };
-            let _ = main_tx
-                .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
-                .await;
-        }
-        if let Some(summary) = summary {
-            if let Err(e) = write_atomic(&node_dir.join("summary.md"), &summary) {
-                tracing::warn!("failed to write summary.md: {e}");
-            }
-            let signal = AppSignal::NodeSummaryReady { node, summary };
-            let _ = main_tx
-                .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
-                .await;
-        }
-    });
+    let signal = AppSignal::NodeSummaryReady {
+        node: request.node.clone(),
+        summary,
+    };
+    let _ = main_tx
+        .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
+        .await;
 }
 
 #[cfg(test)]
@@ -740,30 +748,33 @@ mod tests {
     }
 
     #[test]
-    fn short_single_line_prompt_is_its_own_title() {
-        assert_eq!(
-            title_from_prompt("  fix the tests \n").as_deref(),
-            Some("fix the tests")
-        );
-        assert_eq!(
-            title_from_prompt(&"x".repeat(100)).map(|t| t.len()),
-            Some(100)
-        );
-        assert!(title_from_prompt(&"x".repeat(101)).is_none());
-        assert!(title_from_prompt("two\nlines").is_none());
+    fn parses_title_and_summary() {
+        let (title, summary) =
+            parse_title_and_summary("  Add a thing\n\nIt does this\nand that.\n").unwrap();
+        assert_eq!(title, "Add a thing");
+        assert_eq!(summary, "It does this and that.");
     }
 
     #[test]
-    fn prompt_of_fifty_words_or_fewer_is_its_own_summary() {
-        let fifty = vec!["word"; 50].join(" ");
-        assert_eq!(summary_from_prompt(&fifty).as_deref(), Some(fifty.as_str()));
-        let more = vec!["word"; 51].join(" ");
-        assert!(summary_from_prompt(&more).is_none());
+    fn title_only_answer_has_empty_summary() {
+        let (title, summary) = parse_title_and_summary("Just a title").unwrap();
+        assert_eq!(title, "Just a title");
+        assert_eq!(summary, "");
     }
 
     #[test]
-    fn model_title_is_flattened_and_cut_at_the_limit() {
-        assert_eq!(clean_title(" Fix\n the  tests "), "Fix the tests");
-        assert_eq!(clean_title(&"é".repeat(150)).chars().count(), 100);
+    fn title_is_capped_and_empty_answer_rejected() {
+        let (title, _) = parse_title_and_summary(&"x".repeat(300)).unwrap();
+        assert_eq!(title.chars().count(), TITLE_MAX_CHARS);
+        assert!(parse_title_and_summary("  \n ").is_none());
+    }
+
+    #[test]
+    fn title_input_truncates_reply_and_lists_commits() {
+        let reply = "é".repeat(REPLY_MAX_CHARS + 10);
+        let input = title_input("do it", &reply, &["abc1234 feat: x".to_string()]);
+        assert!(input.starts_with("Prompt:\ndo it\n\nReply:\n"));
+        assert_eq!(input.matches('é').count(), REPLY_MAX_CHARS);
+        assert!(input.ends_with("Commits:\nabc1234 feat: x\n"));
     }
 }

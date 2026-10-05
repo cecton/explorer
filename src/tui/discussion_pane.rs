@@ -164,7 +164,6 @@ pub(crate) fn start_turn(
         command,
         ..Default::default()
     };
-    let is_rerun = rerun.is_some();
     let (node, lineage, context) = {
         let mut tree = state.conversations.write();
         let node = match rerun {
@@ -208,6 +207,7 @@ pub(crate) fn start_turn(
         prompt: prompt.clone(),
         date: utc_date(now),
         backend,
+        summary_backend,
         parent_session: context.parent_session,
         compact,
         compacted_parent: context.compacted_parent,
@@ -215,15 +215,6 @@ pub(crate) fn start_turn(
     };
     let handle = turn::spawn(request, main_tx.clone());
     state.running_turns.insert(node.clone(), handle);
-    if !is_rerun {
-        turn::spawn_title_and_summary(
-            node.clone(),
-            context.node_dir,
-            prompt,
-            summary_backend,
-            main_tx,
-        );
-    }
     state.mark_session_dirty();
     Ok(node)
 }

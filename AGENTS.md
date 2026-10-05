@@ -57,7 +57,7 @@ Source is organized as:
 - `src/config.rs` — KDL configuration file parsing (theme, `keybindings` block, `counters` block, `agent` block with endpoints, `summary-model` and custom slash commands); `load_auth` reads endpoint tokens from `<data_dir>/auth.kdl` and `resolve_agent` joins them (an endpoint without a token is logged and skipped)
 - `src/conversation.rs` — the agent conversation tree: `NodeId` (a node's directory name), `Node`, `Metadata` (flat `key: value` `metadata.md`), `ConversationTree` (metadata, titles and summaries only; prompts, replies and transcripts stay on disk), node creation/restart/delete, `turn_context` (what a node's turn replays, with the compact cut-off), table-of-contents pages and commit lookup for the agent's `conversation` tool
 - `src/agent/mod.rs` — `Mode` (feedback/commit), `ModelSpec` (`endpoint/model/effort`), `Endpoint`/`EndpointKind`, `Backend`, transcript `Message`
-- `src/agent/turn.rs` — turn lifecycle off the UI thread: `spawn`, `Recorder` (live reply, `reply.md`, `transcript.jsonl`), commit-turn closing (commit range, hidden nudge, stash), titles and summaries
+- `src/agent/turn.rs` — turn lifecycle off the UI thread: `spawn`, `Recorder` (live reply, `reply.md`, `transcript.jsonl`), commit-turn closing (commit range, hidden nudge, stash), the post-turn title and summary (one commit-message-style call)
 - `src/agent/llm.rs` — the only file importing `genai`: streaming chat with tool calls, one-shot completion
 - `src/agent/agent_loop.rs` — our own agent loop for OpenAI-compatible endpoints
 - `src/agent/tools.rs` — agent tools (`conversation`, `read`, `glob`, `grep`, `shell`, plus `write`/`edit` in commit mode), confined to the repository root

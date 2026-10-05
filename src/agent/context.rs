@@ -4,8 +4,7 @@ use camino::Utf8Path;
 const FEEDBACK_PROMPT: &str = include_str!("../../prompts/feedback.md");
 const COMMIT_PROMPT: &str = include_str!("../../prompts/commit.md");
 const CONVERSATION_TOOL_PROMPT: &str = include_str!("../../prompts/conversation_tool.md");
-pub const TITLE_PROMPT: &str = include_str!("../../prompts/title.md");
-pub const SUMMARY_PROMPT: &str = include_str!("../../prompts/summary.md");
+pub const TITLE_SUMMARY_PROMPT: &str = include_str!("../../prompts/title_summary.md");
 const COMPACT_PROMPT: &str = include_str!("../../prompts/compact.md");
 
 /// Commits listed in a repository-moved note before it says there are more.
