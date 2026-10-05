@@ -185,6 +185,7 @@ impl GitLogPaneComponent {
                 prompt,
                 origin,
                 width,
+                1,
                 focused,
                 (color_bg, color_fg),
             );

@@ -31,7 +31,8 @@ impl TitleRow for ThemePickerComponent {
         let origin = pane_box.style_adjusted_origin_pos;
         let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
         let query = &state.theme_picker.query;
-        let height = InputLine::line_count(query);
+        let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
+        let height = InputLine::height(query, "", width, max_rows);
 
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
         let color_bg = TuiColor::from(bg_rgb);
@@ -47,8 +48,16 @@ impl TitleRow for ThemePickerComponent {
                 Some(bg_style),
             );
         }
-        self.input_line
-            .render(ops, query, "", origin, width, focused, (color_bg, color_fg));
+        self.input_line.render(
+            ops,
+            query,
+            "",
+            origin,
+            width,
+            height,
+            focused,
+            (color_bg, color_fg),
+        );
 
         height
     }

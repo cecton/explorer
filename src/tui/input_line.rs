@@ -1,13 +1,85 @@
 use crate::tui::*;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub struct InputLine {
     cursor: usize,
+    /// Graphemes that fit on one row, as of the last render; drives `Up`/`Down`.
+    row_capacity: AtomicUsize,
+    /// First visible row when the text is taller than the rows it is given.
+    scroll: AtomicUsize,
+}
+
+/// One screen row of a soft-wrapped input: a run of graphemes of the text.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct VisualRow {
+    start: usize,
+    len: usize,
+}
+
+/// Splits `text` into screen rows of at most `capacity` graphemes. A row that is exactly
+/// full is followed by another one, possibly empty, where the cursor can sit.
+fn visual_rows(text: &str, capacity: usize) -> Vec<VisualRow> {
+    let capacity = capacity.max(1);
+    let mut rows = Vec::new();
+    let mut offset = 0;
+    for line in text.split('\n') {
+        let count = line.graphemes(true).count();
+        let mut done = 0;
+        loop {
+            let len = (count - done).min(capacity);
+            rows.push(VisualRow {
+                start: offset + done,
+                len,
+            });
+            done += len;
+            if len < capacity {
+                break;
+            }
+        }
+        offset += count + 1;
+    }
+    rows
+}
+
+fn row_of_cursor(rows: &[VisualRow], cursor: usize) -> usize {
+    rows.iter()
+        .rposition(|row| row.start <= cursor)
+        .unwrap_or(0)
 }
 
 impl InputLine {
     pub fn new() -> Self {
-        Self { cursor: 0 }
+        Self {
+            cursor: 0,
+            row_capacity: AtomicUsize::new(0),
+            scroll: AtomicUsize::new(0),
+        }
+    }
+
+    /// Moves the cursor one screen row up or down, keeping its column. Returns false at
+    /// the first or last row so the caller can use the key for something else.
+    fn move_vertically(&mut self, query: &str, down: bool) -> bool {
+        let capacity = match self.row_capacity.load(Ordering::Relaxed) {
+            0 => usize::MAX,
+            capacity => capacity,
+        };
+        let rows = visual_rows(query, capacity);
+        let current = row_of_cursor(&rows, self.cursor);
+        let target = if down {
+            current + 1
+        } else {
+            match current.checked_sub(1) {
+                Some(target) => target,
+                None => return false,
+            }
+        };
+        let Some(row) = rows.get(target) else {
+            return false;
+        };
+        let column = self.cursor - rows[current].start;
+        self.cursor = row.start + column.min(row.len);
+        true
     }
 
     pub fn handle_key(&mut self, input_event: &InputEvent, query: &mut String) -> bool {
@@ -244,6 +316,12 @@ impl InputLine {
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Up),
+            }) => self.move_vertically(query, false),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Down),
+            }) => self.move_vertically(query, true),
+            InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Left),
             }) => {
                 if self.cursor == 0 {
@@ -446,8 +524,10 @@ impl InputLine {
         true
     }
 
-    pub fn line_count(query: &str) -> usize {
-        query.matches('\n').count() + 1
+    /// Rows the input occupies once soft-wrapped to `width`, at most `max_rows`.
+    pub fn height(query: &str, prompt: &str, width: u16, max_rows: usize) -> usize {
+        let capacity = (width as usize).saturating_sub(prompt.graphemes(true).count());
+        visual_rows(query, capacity).len().min(max_rows).max(1)
     }
 
     /// Places the cursor at the end of `query`. Used when opening an input prefilled with existing
@@ -456,6 +536,9 @@ impl InputLine {
         self.cursor = query.graphemes(true).count();
     }
 
+    /// Paints the input soft-wrapped to `width` on at most `max_rows` rows, scrolling
+    /// inside them so the cursor row stays visible. The prompt stays on the first row
+    /// shown and every row starts after it.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
@@ -464,11 +547,13 @@ impl InputLine {
         prompt: &str,
         origin: Pos,
         width: u16,
+        max_rows: usize,
         focused: bool,
         colors: (TuiColor, TuiColor),
     ) {
-        let width = width as usize;
         let prompt_width = prompt.graphemes(true).count();
+        let capacity = (width as usize).saturating_sub(prompt_width).max(1);
+        self.row_capacity.store(capacity, Ordering::Relaxed);
         let (color_bg, color_text) = colors;
         let text_style = new_style!(color_fg: {color_text} color_bg: {color_bg});
         // The compositor takes a painted cell's *colors* from the current pen
@@ -480,76 +565,59 @@ impl InputLine {
         let cursor_style = new_style!(color_fg: {color_bg} color_bg: {color_text});
         ops += RenderOpCommon::ApplyColors(Some(text_style));
 
-        let lines: Vec<&str> = query.split('\n').collect();
-        let line_grapheme_counts: Vec<usize> =
-            lines.iter().map(|l| l.graphemes(true).count()).collect();
-        let total_graphemes: usize =
-            line_grapheme_counts.iter().sum::<usize>() + lines.len().saturating_sub(1);
-        let cursor = self.cursor.min(total_graphemes);
+        let graphemes: Vec<&str> = query.graphemes(true).collect();
+        let cursor = self.cursor.min(graphemes.len());
+        let rows = visual_rows(query, capacity);
+        let cursor_row = row_of_cursor(&rows, cursor);
+        let max_rows = max_rows.max(1);
 
-        let mut cursor_line = 0usize;
-        let mut cursor_col = 0usize;
-        let mut remaining = cursor;
-        for (i, &count) in line_grapheme_counts.iter().enumerate() {
-            if remaining <= count {
-                cursor_line = i;
-                cursor_col = remaining;
-                break;
-            }
-            remaining = remaining.saturating_sub(count + 1);
+        let mut scroll = self
+            .scroll
+            .load(Ordering::Relaxed)
+            .min(rows.len().saturating_sub(max_rows));
+        if cursor_row < scroll {
+            scroll = cursor_row;
+        } else if cursor_row >= scroll + max_rows {
+            scroll = cursor_row + 1 - max_rows;
+        }
+        self.scroll.store(scroll, Ordering::Relaxed);
+
+        if prompt_width > 0 {
+            ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+            ops += RenderOpIR::PaintTextWithAttributes(prompt.into(), Some(text_style));
         }
 
-        for (line_idx, line_text) in lines.iter().enumerate() {
-            let line_graphemes: Vec<(usize, &str)> = line_text.grapheme_indices(true).collect();
-            let line_gr_count = line_graphemes.len();
-            let col_offset = if line_idx == 0 { prompt_width } else { 0 };
-            let line_width = width.saturating_sub(col_offset);
-
-            if line_idx == 0 && prompt_width > 0 {
-                ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
-                ops += RenderOpIR::PaintTextWithAttributes(prompt.into(), Some(text_style));
-            }
-
-            let scroll = if line_idx == cursor_line
-                && line_gr_count >= line_width
-                && cursor_col >= line_width
-            {
-                cursor_col - line_width + 1
-            } else {
-                0
-            };
-
+        for (screen_row, (row_idx, visual)) in rows
+            .iter()
+            .enumerate()
+            .skip(scroll)
+            .take(max_rows)
+            .enumerate()
+        {
             ops += RenderOpCommon::MoveCursorPositionRelTo(
                 origin,
-                col(col_offset as u16) + row(line_idx as u16),
+                col(prompt_width as u16) + row(screen_row as u16),
             );
-
-            for (vis_col, (gi, &(_, gr))) in
-                line_graphemes.iter().enumerate().skip(scroll).enumerate()
+            for (column, gr) in graphemes[visual.start..visual.start + visual.len]
+                .iter()
+                .enumerate()
             {
-                if vis_col >= line_width {
-                    break;
-                }
-                if line_idx == cursor_line && gi == cursor_col && focused {
+                if focused && row_idx == cursor_row && visual.start + column == cursor {
                     ops += RenderOpCommon::ApplyColors(Some(cursor_style));
-                    ops += RenderOpIR::PaintTextWithAttributes(gr.into(), Some(cursor_style));
+                    ops += RenderOpIR::PaintTextWithAttributes((*gr).into(), Some(cursor_style));
                     ops += RenderOpCommon::ApplyColors(Some(text_style));
                 } else {
-                    ops += RenderOpIR::PaintTextWithAttributes(gr.into(), Some(text_style));
+                    ops += RenderOpIR::PaintTextWithAttributes((*gr).into(), Some(text_style));
                 }
             }
-
-            if focused && line_idx == cursor_line && cursor_col >= line_gr_count {
-                let vis_cursor_col = col_offset + cursor_col.saturating_sub(scroll);
-                if vis_cursor_col < width {
-                    ops += RenderOpCommon::MoveCursorPositionRelTo(
-                        origin,
-                        col(vis_cursor_col as u16) + row(line_idx as u16),
-                    );
-                    ops += RenderOpCommon::ApplyColors(Some(cursor_style));
-                    ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(cursor_style));
-                    ops += RenderOpCommon::ApplyColors(Some(text_style));
-                }
+            if focused && row_idx == cursor_row && cursor == visual.start + visual.len {
+                ops += RenderOpCommon::MoveCursorPositionRelTo(
+                    origin,
+                    col((prompt_width + visual.len) as u16) + row(screen_row as u16),
+                );
+                ops += RenderOpCommon::ApplyColors(Some(cursor_style));
+                ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(cursor_style));
+                ops += RenderOpCommon::ApplyColors(Some(text_style));
             }
         }
     }
@@ -602,6 +670,7 @@ mod cursor_render_tests {
             "",
             col(0) + row(0),
             20,
+            1,
             true,
             (color_bg, color_text),
         );
@@ -623,6 +692,7 @@ mod cursor_render_tests {
             "",
             col(0) + row(0),
             20,
+            1,
             true,
             (color_bg, color_text),
         );
@@ -643,6 +713,7 @@ mod cursor_render_tests {
             "",
             col(0) + row(0),
             20,
+            1,
             false,
             (color_bg, color_text),
         );
@@ -654,5 +725,109 @@ mod cursor_render_tests {
             )),
             "an unfocused input must not paint a cursor cell",
         );
+    }
+}
+
+#[cfg(test)]
+mod wrap_tests {
+    use super::*;
+
+    fn down() -> InputEvent {
+        InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::SpecialKey(SpecialKey::Down),
+        })
+    }
+
+    fn up() -> InputEvent {
+        InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::SpecialKey(SpecialKey::Up),
+        })
+    }
+
+    fn spans(text: &str, capacity: usize) -> Vec<(usize, usize)> {
+        visual_rows(text, capacity)
+            .iter()
+            .map(|row| (row.start, row.len))
+            .collect()
+    }
+
+    #[test]
+    fn rows_wrap_at_capacity_and_follow_newlines() {
+        assert_eq!(spans("", 4), [(0, 0)]);
+        assert_eq!(spans("abcdef", 4), [(0, 4), (4, 2)]);
+        assert_eq!(spans("ab\ncd", 4), [(0, 2), (3, 2)]);
+    }
+
+    #[test]
+    fn a_full_row_is_followed_by_a_row_for_the_cursor() {
+        assert_eq!(spans("abcd", 4), [(0, 4), (4, 0)]);
+        assert_eq!(spans("abcd\nef", 4), [(0, 4), (4, 0), (5, 2)]);
+    }
+
+    #[test]
+    fn height_counts_wrapped_rows_and_respects_the_cap() {
+        assert_eq!(InputLine::height("", "> ", 10, 5), 1);
+        assert_eq!(InputLine::height("abcdefghij", "> ", 10, 5), 2);
+        assert_eq!(InputLine::height("a\nb\nc\nd", "", 10, 3), 3);
+    }
+
+    #[test]
+    fn vertical_keys_are_not_consumed_on_a_single_row() {
+        let mut input = InputLine::new();
+        let mut query = "abc".to_string();
+        assert!(!input.handle_key(&up(), &mut query));
+        assert!(!input.handle_key(&down(), &mut query));
+    }
+
+    #[test]
+    fn vertical_keys_move_between_rows_keeping_the_column() {
+        let mut input = InputLine::new();
+        let mut query = "abcdef\ngh\nijkl".to_string();
+        input.cursor = 5;
+        assert!(input.handle_key(&down(), &mut query));
+        assert_eq!(input.cursor, 9, "clamped to the end of the shorter row");
+        assert!(input.handle_key(&down(), &mut query));
+        assert_eq!(input.cursor, 12);
+        assert!(!input.handle_key(&down(), &mut query));
+        assert!(input.handle_key(&up(), &mut query));
+        assert!(input.handle_key(&up(), &mut query));
+        assert_eq!(input.cursor, 2);
+        assert!(!input.handle_key(&up(), &mut query));
+    }
+
+    #[test]
+    fn vertical_keys_follow_soft_wrapping_after_a_render() {
+        let mut input = InputLine::new();
+        let mut query = "abcdefgh".to_string();
+        let mut ops = RenderOpIRVec::new();
+        let colors = (
+            TuiColor::from(RgbValue::from_u8(0, 0, 0)),
+            TuiColor::from(RgbValue::from_u8(255, 255, 255)),
+        );
+        input.render(&mut ops, &query, "", col(0) + row(0), 4, 3, true, colors);
+        input.cursor = 1;
+        assert!(input.handle_key(&down(), &mut query));
+        assert_eq!(input.cursor, 5);
+    }
+
+    #[test]
+    fn render_scrolls_to_keep_the_cursor_row_visible() {
+        let mut input = InputLine::new();
+        let query = "a\nb\nc\nd";
+        input.set_cursor_end(query);
+        let mut ops = RenderOpIRVec::new();
+        let colors = (
+            TuiColor::from(RgbValue::from_u8(0, 0, 0)),
+            TuiColor::from(RgbValue::from_u8(255, 255, 255)),
+        );
+        input.render(&mut ops, query, "", col(0) + row(0), 10, 2, false, colors);
+        let painted: Vec<&str> = ops
+            .iter()
+            .filter_map(|op| match op {
+                RenderOpIR::PaintTextWithAttributes(text, _) => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(painted, ["c", "d"]);
     }
 }

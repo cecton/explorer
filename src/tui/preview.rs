@@ -251,8 +251,16 @@ impl FilePreviewComponent {
                 Some(label_style),
             );
         }
-        self.command_input
-            .render(ops, cmd, ":", origin, width, focused, (color_bg, color_fg));
+        self.command_input.render(
+            ops,
+            cmd,
+            ":",
+            origin,
+            width,
+            height,
+            focused,
+            (color_bg, color_fg),
+        );
     }
 
     fn render_search_title(
@@ -291,6 +299,7 @@ impl FilePreviewComponent {
             prompt,
             origin,
             width,
+            height,
             focused,
             (color_bg, color_fg),
         );
@@ -1243,13 +1252,15 @@ impl TitleRow for FilePreviewComponent {
         if let Some(cmd) = &self.command_mode {
             let origin = pane_box.style_adjusted_origin_pos;
             let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
-            let height = InputLine::line_count(cmd);
+            let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
+            let height = InputLine::height(cmd, ":", width, max_rows);
             self.render_command_title(ops, origin, width, height, focused, theme);
             height
         } else if let Some(pattern) = &self.search_mode {
             let origin = pane_box.style_adjusted_origin_pos;
             let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
-            let height = InputLine::line_count(pattern);
+            let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
+            let height = InputLine::height(pattern, "/", width, max_rows);
             self.render_search_title(ops, origin, width, height, focused, theme);
             height
         } else {
