@@ -298,6 +298,15 @@ pub struct DiscussionState {
     pub follow: bool,
 }
 
+/// What a pick in the Model Picker applies to.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ModelPickerPurpose {
+    /// The next prompt of a Discussion window.
+    Window(usize),
+    /// A new sibling of this node, running the same prompt with the picked model.
+    Duplicate(NodeId),
+}
+
 /// Models offered by the Model Picker.
 #[derive(Clone, Default)]
 pub struct ModelCatalog {
@@ -458,8 +467,8 @@ pub struct AppState {
     pub last_picked_model: Option<ModelSpec>,
     /// Model Picker entries are indexes into `models.specs`.
     pub model_picker: FuzzyPickerState<usize>,
-    /// Discussion window the Model Picker was opened from.
-    pub model_picker_target: Option<usize>,
+    /// What the open Model Picker is choosing a model for.
+    pub model_picker_purpose: Option<ModelPickerPurpose>,
     /// Turns in progress, by node.
     pub running_turns: HashMap<NodeId, TurnHandle>,
     pub mouse_drag_active: bool,
@@ -569,7 +578,7 @@ impl AppState {
             models: ModelCatalog::default(),
             last_picked_model: None,
             model_picker: FuzzyPickerState::default(),
-            model_picker_target: None,
+            model_picker_purpose: None,
             running_turns: HashMap::new(),
             mouse_drag_active: false,
             terminal_grabbed: false,

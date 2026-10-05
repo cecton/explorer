@@ -420,6 +420,23 @@ impl ConversationTree {
         Ok(id)
     }
 
+    /// Prepares `id` for running its turn again in place: the previous attempt's reply
+    /// and transcript are removed, and `change` rewrites the metadata.
+    pub fn restart_node(
+        &mut self,
+        id: &NodeId,
+        change: impl FnOnce(&mut Metadata),
+    ) -> std::io::Result<()> {
+        let dir = self.node_dir(id).ok_or_else(unknown_node)?;
+        for name in ["reply.md", "transcript.jsonl"] {
+            match std::fs::remove_file(dir.join(name)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
+        }
+        self.update_meta(id, change)
+    }
+
     /// Changes the metadata of `id` in memory and writes it through.
     pub fn update_meta(
         &mut self,
@@ -757,6 +774,42 @@ mod tests {
         let first = tree.turn_context(&NodeId::new("a1")).unwrap();
         assert!(first.ancestor_dirs.is_empty());
         assert_eq!(first.parent_head, None);
+    }
+
+    #[test]
+    fn restart_node_drops_the_previous_attempt_but_keeps_the_prompt() {
+        let (_tmp, root) = temp_root();
+        let dir = root.join("a1");
+        write_node(
+            &dir,
+            &[
+                (
+                    "metadata.md",
+                    "status: failed\nerror: boom\nfavorite: true\n",
+                ),
+                ("prompt.md", "do it"),
+                ("reply.md", "partial"),
+                ("transcript.jsonl", "{}\n"),
+            ],
+        );
+        let mut tree = ConversationTree::load(&root);
+        let id = NodeId::new("a1");
+        tree.restart_node(&id, |meta| {
+            meta.status = Some(NodeStatus::Running);
+            meta.error = None;
+        })
+        .unwrap();
+
+        assert!(!dir.join("reply.md").exists());
+        assert!(!dir.join("transcript.jsonl").exists());
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prompt.md")).unwrap(),
+            "do it"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("metadata.md")).unwrap(),
+            "status: running\nfavorite: true\n"
+        );
     }
 
     #[test]

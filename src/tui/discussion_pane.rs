@@ -1,7 +1,7 @@
 use crate::agent::commands::{self, Expansion};
 use crate::agent::turn::{self, TurnRequest};
 use crate::agent::{Mode, ModelSpec};
-use crate::conversation::{Metadata, Node, NodeId, NodeStatus, NodeType};
+use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -58,6 +58,38 @@ pub(crate) struct Launch {
     /// Custom slash command the prompt was expanded from.
     pub command: Option<String>,
     pub spec: ModelSpec,
+    /// An incomplete child of `parent` to run again in place, instead of a new node.
+    pub rerun: Option<NodeId>,
+}
+
+impl Launch {
+    /// The turn of an existing node, to run again as it was sent: same prompt, mode and
+    /// command. `prompt` is the node's `prompt.md`.
+    fn replay(
+        tree: &ConversationTree,
+        node: &NodeId,
+        prompt: String,
+        spec: ModelSpec,
+    ) -> Option<Self> {
+        let source = tree.node(node)?;
+        let kind = match source.meta.node_type {
+            Some(NodeType::Compact) => match commands::expand(&prompt, &[]) {
+                Expansion::Compact { instructions } => TurnKind::Compact { instructions },
+                Expansion::Prompt { .. } => TurnKind::Compact {
+                    instructions: String::new(),
+                },
+            },
+            _ => TurnKind::Prompt(node_mode(source)),
+        };
+        Some(Self {
+            parent: source.parent.clone(),
+            prompt,
+            kind,
+            command: source.meta.command.clone(),
+            spec,
+            rerun: None,
+        })
+    }
 }
 
 /// Checks the guards, creates the node on disk and starts its turn. On refusal nothing
@@ -73,6 +105,7 @@ pub(crate) fn start_turn(
         kind,
         command,
         spec,
+        rerun,
     } = launch;
     // A compact turn changes nothing, so it runs under the shared lock like feedback.
     let (mode, node_type, compact) = match kind {
@@ -127,11 +160,25 @@ pub(crate) fn start_turn(
         command,
         ..Default::default()
     };
+    let is_rerun = rerun.is_some();
     let (node, lineage, context) = {
         let mut tree = state.conversations.write();
-        let node = tree
-            .create_node(parent.as_ref(), now, meta, &prompt)
-            .map_err(|e| format!("could not create the node: {e}"))?;
+        let node = match rerun {
+            Some(node) => {
+                tree.restart_node(&node, |previous| {
+                    *previous = Metadata {
+                        created: previous.created.take(),
+                        favorite: previous.favorite,
+                        ..meta
+                    };
+                })
+                .map_err(|e| format!("could not restart the node: {e}"))?;
+                node
+            }
+            None => tree
+                .create_node(parent.as_ref(), now, meta, &prompt)
+                .map_err(|e| format!("could not create the node: {e}"))?,
+        };
         let context = tree
             .turn_context(&node)
             .ok_or("the new node has no directory")?;
@@ -163,13 +210,15 @@ pub(crate) fn start_turn(
     };
     let handle = turn::spawn(request, main_tx.clone());
     state.running_turns.insert(node.clone(), handle);
-    turn::spawn_title_and_summary(
-        node.clone(),
-        context.node_dir,
-        prompt,
-        summary_backend,
-        main_tx,
-    );
+    if !is_rerun {
+        turn::spawn_title_and_summary(
+            node.clone(),
+            context.node_dir,
+            prompt,
+            summary_backend,
+            main_tx,
+        );
+    }
     state.mark_session_dirty();
     Ok(node)
 }
@@ -239,6 +288,109 @@ impl DiscussionComponent {
         state.pane_manager.focused_window = Some(window);
         crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
         state.mark_session_dirty();
+    }
+
+    /// Opens `node` like [`Self::open`], then runs its turn again in place when it is
+    /// incomplete: failed, cancelled or interrupted. It is run as it was sent, with the
+    /// model it was sent to. A refusal is shown in the window, over the old reply.
+    pub(crate) fn open_and_recover(state: &mut AppState, main_tx: MainTx, node: NodeId) {
+        Self::open(state, main_tx.clone(), node.clone());
+        let launch = {
+            let tree = state.conversations.read();
+            let Some(shown) = tree.node(&node) else {
+                return;
+            };
+            let incomplete = matches!(
+                shown.meta.status,
+                Some(NodeStatus::Failed | NodeStatus::Cancelled)
+            );
+            if !incomplete || !shown.children.is_empty() {
+                return;
+            }
+            let prompt = tree
+                .node_dir(&node)
+                .map(|dir| crate::conversation::read_prompt_and_reply(&dir).0)
+                .unwrap_or_default();
+            node_model(shown)
+                .and_then(|spec| Launch::replay(&tree, &node, prompt, spec))
+                .map(|launch| Launch {
+                    rerun: Some(node.clone()),
+                    ..launch
+                })
+                .ok_or("this node does not record the model it was sent to")
+        };
+        let started = launch
+            .map_err(str::to_string)
+            .and_then(|launch| start_turn(state, main_tx, launch));
+        for discussion in state.discussions.values_mut() {
+            if discussion.node.as_ref() != Some(&node) {
+                continue;
+            }
+            match &started {
+                Ok(_) => {
+                    discussion.reply.clear();
+                    discussion.notice = None;
+                    discussion.follow = true;
+                }
+                Err(reason) => discussion.notice = Some(reason.clone()),
+            }
+        }
+    }
+
+    /// Runs the prompt of `node` again as a new sibling, with the model `spec`, and
+    /// opens it. A refusal is reported in the tree.
+    pub(crate) fn duplicate(state: &mut AppState, main_tx: MainTx, node: &NodeId, spec: ModelSpec) {
+        let launch = {
+            let tree = state.conversations.read();
+            let prompt = tree
+                .node_dir(node)
+                .map(|dir| crate::conversation::read_prompt_and_reply(&dir).0)
+                .unwrap_or_default();
+            Launch::replay(&tree, node, prompt, spec)
+        };
+        let Some(launch) = launch else {
+            return;
+        };
+        match start_turn(state, main_tx.clone(), launch) {
+            Ok(sibling) => Self::open(state, main_tx, sibling),
+            Err(reason) => state.tree_view.notice = Some(reason),
+        }
+    }
+
+    /// Opens a window on the parent of `node` with the input prefilled with the node's
+    /// prompt, so that an edited version can be sent as a new sibling.
+    pub(crate) fn open_edit(state: &mut AppState, main_tx: MainTx, node: &NodeId) {
+        let (parent, draft, model, mode) = {
+            let tree = state.conversations.read();
+            let Some(source) = tree.node(node) else {
+                return;
+            };
+            let draft = tree
+                .node_dir(node)
+                .map(|dir| crate::conversation::read_prompt_and_reply(&dir).0)
+                .unwrap_or_default();
+            (
+                source.parent.clone(),
+                draft,
+                node_model(source),
+                node_mode(source),
+            )
+        };
+        let id = state.next_discussion_id;
+        state.next_discussion_id += 1;
+        state.discussions.insert(
+            id,
+            DiscussionState {
+                loaded: parent.is_none(),
+                node: parent,
+                draft,
+                model,
+                mode,
+                ..Default::default()
+            },
+        );
+        Self::load_content(state, main_tx, id);
+        Self::show(state, id);
     }
 
     /// Focuses the window already showing `node`, or opens a new one and loads the
@@ -322,7 +474,7 @@ impl DiscussionComponent {
             return;
         }
         let Some(spec) = discussion.model.clone() else {
-            ModelPickerComponent::open(state, main_tx, id);
+            ModelPickerComponent::open(state, main_tx, ModelPickerPurpose::Window(id));
             return;
         };
         let typed = discussion.draft.clone();
@@ -340,6 +492,7 @@ impl DiscussionComponent {
             kind,
             command,
             spec,
+            rerun: None,
         };
         let node = match start_turn(state, main_tx, launch) {
             Ok(node) => node,
@@ -585,7 +738,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                         alt_key_state: KeyState::NotPressed,
                     },
             }) => {
-                ModelPickerComponent::open(state, main_tx, id);
+                ModelPickerComponent::open(state, main_tx, ModelPickerPurpose::Window(id));
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -797,7 +950,6 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::ConversationTree;
     use camino::Utf8PathBuf;
 
     fn node_with_metadata(metadata: &str) -> (tempfile::TempDir, ConversationTree, NodeId) {
@@ -864,5 +1016,43 @@ mod tests {
         assert!(lock_refusal(&[Feedback], Commit).is_some());
         assert!(lock_refusal(&[Commit], Feedback).is_some());
         assert!(lock_refusal(&[Commit], Commit).is_some());
+    }
+
+    #[test]
+    fn replay_keeps_parent_mode_and_command_of_the_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let parent = root.join("a1");
+        let commit = parent.join("a2");
+        let compact = parent.join("a3");
+        for (dir, metadata) in [
+            (&parent, "type: feedback\n"),
+            (&commit, "type: commit\ncommand: review\n"),
+            (&compact, "type: compact\n"),
+        ] {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(dir.join("metadata.md"), metadata).unwrap();
+        }
+        let tree = ConversationTree::load(&root);
+        let spec = ModelSpec::parse("mock/m/low").unwrap();
+
+        let launch =
+            Launch::replay(&tree, &NodeId::new("a2"), "do it".to_string(), spec.clone()).unwrap();
+        assert_eq!(launch.parent, Some(NodeId::new("a1")));
+        assert_eq!(launch.prompt, "do it");
+        assert!(matches!(launch.kind, TurnKind::Prompt(Mode::Commit)));
+        assert_eq!(launch.command.as_deref(), Some("review"));
+        assert!(launch.rerun.is_none());
+
+        let typed = "/compact keep names".to_string();
+        let launch = Launch::replay(&tree, &NodeId::new("a3"), typed, spec.clone()).unwrap();
+        assert!(
+            matches!(launch.kind, TurnKind::Compact { ref instructions } if instructions == "keep names")
+        );
+
+        let root_launch =
+            Launch::replay(&tree, &NodeId::new("a1"), "hi".to_string(), spec).unwrap();
+        assert_eq!(root_launch.parent, None);
+        assert!(matches!(root_launch.kind, TurnKind::Prompt(Mode::Feedback)));
     }
 }

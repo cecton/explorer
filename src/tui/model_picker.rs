@@ -20,42 +20,56 @@ impl ModelPickerComponent {
         }
     }
 
-    /// Opens the picker for discussion window `target`, preselecting its model, and
-    /// retries the model lists that failed to load.
+    /// Opens the picker for `purpose`, preselecting the model in use, and retries the
+    /// model lists that failed to load.
     pub(crate) fn open(
         state: &mut AppState,
         main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-        target: usize,
+        purpose: ModelPickerPurpose,
     ) {
         for endpoint in &state.agent.endpoints {
             if matches!(state.models.lists.get(&endpoint.name), Some(Err(_))) {
                 fetch_models(endpoint, main_tx.clone());
             }
         }
-        state.model_picker_target = Some(target);
         state.model_picker.query.clear();
         state.model_picker.results = run_model_match("", state);
-        let current = state
-            .discussions
-            .get(&target)
-            .and_then(|discussion| discussion.model.as_ref());
+        let current = match &purpose {
+            ModelPickerPurpose::Window(id) => state
+                .discussions
+                .get(id)
+                .and_then(|discussion| discussion.model.clone()),
+            ModelPickerPurpose::Duplicate(node) => state
+                .conversations
+                .read()
+                .node(node)
+                .and_then(crate::tui::discussion_pane::node_model),
+        };
         state.model_picker.selected =
-            current.and_then(|model| state.models.specs.iter().position(|spec| spec == model));
+            current.and_then(|model| state.models.specs.iter().position(|spec| *spec == model));
+        state.model_picker_purpose = Some(purpose);
         let old = state.pane_manager.focused_window;
         state.pane_manager.push_window(Window::ModelPicker);
         state.pane_manager.focused_window = Some(Window::ModelPicker);
         crate::tui::app::notify_terminal_focus_change(state, old, Some(Window::ModelPicker));
     }
 
-    fn close(state: &mut AppState) {
+    /// Closes the picker and gives the focus back to the window it was opened from.
+    fn close(state: &mut AppState) -> Option<ModelPickerPurpose> {
         state.pane_manager.remove_window(&Window::ModelPicker);
         state.model_picker.reset();
-        if let Some(target) = state.model_picker_target.take() {
-            let window = Window::Discussion(target);
-            if state.pane_manager.window_stack.contains(&window) {
-                state.pane_manager.focused_window = Some(window);
-            }
+        let purpose = state.model_picker_purpose.take();
+        let origin = match &purpose {
+            Some(ModelPickerPurpose::Window(id)) => Some(Window::Discussion(*id)),
+            Some(ModelPickerPurpose::Duplicate(_)) => Some(Window::ConversationTree),
+            None => None,
+        };
+        if let Some(window) = origin
+            && state.pane_manager.window_stack.contains(&window)
+        {
+            state.pane_manager.focused_window = Some(window);
         }
+        purpose
     }
 }
 
@@ -172,6 +186,7 @@ impl Component<AppState, AppSignal> for ModelPickerComponent {
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;
         match &input_event {
             InputEvent::Keyboard(KeyPress::Plain {
@@ -188,16 +203,21 @@ impl Component<AppState, AppSignal> for ModelPickerComponent {
                     .selected
                     .or_else(|| state.model_picker.results.first().map(|(idx, _)| *idx))
                     .and_then(|idx| state.models.specs.get(idx).cloned());
-                if let Some(spec) = picked {
-                    if let Some(discussion) = state
-                        .model_picker_target
-                        .and_then(|target| state.discussions.get_mut(&target))
-                    {
-                        discussion.model = Some(spec.clone());
-                        discussion.notice = None;
+                let Some(spec) = picked else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
+                match Self::close(state) {
+                    Some(ModelPickerPurpose::Window(id)) => {
+                        if let Some(discussion) = state.discussions.get_mut(&id) {
+                            discussion.model = Some(spec.clone());
+                            discussion.notice = None;
+                        }
+                        state.last_picked_model = Some(spec);
                     }
-                    state.last_picked_model = Some(spec);
-                    Self::close(state);
+                    Some(ModelPickerPurpose::Duplicate(node)) => {
+                        DiscussionComponent::duplicate(state, main_tx, &node, spec);
+                    }
+                    None => {}
                 }
                 return Ok(EventPropagation::ConsumedRender);
             }

@@ -371,12 +371,27 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 key: Key::SpecialKey(SpecialKey::Enter),
             }) => {
                 if let Some(row) = rows.get(index) {
-                    DiscussionComponent::open(state, main_tx, row.id.clone());
+                    DiscussionComponent::open_and_recover(state, main_tx, row.id.clone());
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('n'),
             }) => DiscussionComponent::open_new_root(state),
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character('m'),
+            }) => {
+                if let Some(row) = rows.get(index) {
+                    let purpose = ModelPickerPurpose::Duplicate(row.id.clone());
+                    ModelPickerComponent::open(state, main_tx, purpose);
+                }
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character('e'),
+            }) => {
+                if let Some(row) = rows.get(index) {
+                    DiscussionComponent::open_edit(state, main_tx, &row.id);
+                }
+            }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('c'),
             }) => {
@@ -432,7 +447,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 self.last_click = (!double).then_some((now, row));
                 Self::select(state, &rows, row);
                 if double && let Some(target) = rows.get(row) {
-                    DiscussionComponent::open(state, main_tx, target.id.clone());
+                    DiscussionComponent::open_and_recover(state, main_tx, target.id.clone());
                 }
             }
             InputEvent::Mouse(MouseInput {
