@@ -85,6 +85,9 @@ pub struct TurnRequest {
     pub backend: Backend,
     /// Model that titles and summarizes the node once its turn is done.
     pub summary_backend: Option<Backend>,
+    /// Id of the conversation's root node, sent to OpenAI-compatible servers as the
+    /// session of every request.
+    pub session: String,
     /// Claude Code session of the parent node, to fork when the backend is the CLI.
     pub parent_session: Option<String>,
     /// Instructions of a `/compact` turn; such a turn asks for a summary instead of
@@ -437,10 +440,11 @@ async fn run_own_loop(
     if request.compact.is_some() {
         // A compact turn is a single answer, without tools.
         recorder.begin_answer();
-        let response = llm::stream_chat(target, &system, &messages, &[], |text| {
-            recorder.text(text);
-        })
-        .await?;
+        let response =
+            llm::stream_chat(target, &request.session, &system, &messages, &[], |text| {
+                recorder.text(text);
+            })
+            .await?;
         if let Some(tokens) = response.tokens_in {
             recorder.tokens_in(tokens);
         }
@@ -456,7 +460,15 @@ async fn run_own_loop(
         tree: Arc::clone(&request.tree),
         node: request.node.clone(),
     };
-    agent_loop::run(&tool_context, target, &system, &mut messages, recorder).await?;
+    agent_loop::run(
+        &tool_context,
+        target,
+        &request.session,
+        &system,
+        &mut messages,
+        recorder,
+    )
+    .await?;
     if request.mode == Mode::Feedback {
         return Ok(());
     }
@@ -469,7 +481,15 @@ async fn run_own_loop(
         let nudge = context::commit_nudge(&status);
         recorder.message(&nudge);
         messages.push(nudge);
-        agent_loop::run(&tool_context, target, &system, &mut messages, recorder).await?;
+        agent_loop::run(
+            &tool_context,
+            target,
+            &request.session,
+            &system,
+            &mut messages,
+            recorder,
+        )
+        .await?;
     }
     Ok(())
 }
@@ -552,14 +572,18 @@ fn title_input(prompt: &str, reply: &str, commits: &[String]) -> String {
         Some((end, _)) => &reply[..end],
         None => reply,
     };
-    let mut input = format!("Prompt:\n{}\n\nReply:\n{}\n", prompt.trim(), reply.trim());
+    let mut input = format!(
+        "<prompt>\n{}\n</prompt>\n\n<reply>\n{}\n</reply>\n",
+        prompt.trim(),
+        reply.trim()
+    );
     if !commits.is_empty() {
-        input.push_str("\nCommits:\n");
-        for commit in commits {
-            input.push_str(commit);
-            input.push('\n');
-        }
+        input.push_str(&format!(
+            "\n<commits>\n{}\n</commits>\n",
+            commits.join("\n")
+        ));
     }
+    input.push_str("\nWrite the title and the summary of the turn recorded above.\n");
     input
 }
 
@@ -572,9 +596,14 @@ fn parse_title_and_summary(answer: &str) -> Option<(String, String)> {
 }
 
 /// One answer without tools from the summary model.
-async fn complete(backend: &Backend, system: &str, user: &str) -> Result<String, String> {
+async fn complete(
+    backend: &Backend,
+    session: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
     match backend {
-        Backend::OpenAi(target) => llm::complete(target, system, user).await,
+        Backend::OpenAi(target) => llm::complete(target, session, system, user).await,
         Backend::ClaudeCode(target) => claude_code::complete(target, system, user).await,
     }
 }
@@ -587,7 +616,14 @@ async fn title_and_summarize(
     input: &str,
     main_tx: &MainTx,
 ) {
-    let answer = match complete(backend, context::TITLE_SUMMARY_PROMPT, input).await {
+    let answer = match complete(
+        backend,
+        &request.session,
+        context::TITLE_SUMMARY_PROMPT,
+        input,
+    )
+    .await
+    {
         Ok(answer) => answer,
         Err(e) => {
             tracing::warn!("title generation failed: {e}");
@@ -773,8 +809,9 @@ mod tests {
     fn title_input_truncates_reply_and_lists_commits() {
         let reply = "é".repeat(REPLY_MAX_CHARS + 10);
         let input = title_input("do it", &reply, &["abc1234 feat: x".to_string()]);
-        assert!(input.starts_with("Prompt:\ndo it\n\nReply:\n"));
+        assert!(input.starts_with("<prompt>\ndo it\n</prompt>\n\n<reply>\n"));
         assert_eq!(input.matches('é').count(), REPLY_MAX_CHARS);
-        assert!(input.ends_with("Commits:\nabc1234 feat: x\n"));
+        assert!(input.contains("\n<commits>\nabc1234 feat: x\n</commits>\n"));
+        assert!(input.ends_with("recorded above.\n"));
     }
 }

@@ -187,6 +187,7 @@ pub(crate) fn start_turn(
             .ok_or("the new node has no directory")?;
         (node.clone(), tree.lineage(&node), context)
     };
+    let session = lineage.first().unwrap_or(&node).as_str().to_string();
     state.tree_view.expanded.extend(lineage);
     state.tree_view.selected = Some(node.clone());
 
@@ -208,6 +209,7 @@ pub(crate) fn start_turn(
         date: utc_date(now),
         backend,
         summary_backend,
+        session,
         parent_session: context.parent_session,
         compact,
         compacted_parent: context.compacted_parent,

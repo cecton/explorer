@@ -49,11 +49,13 @@ fn service_target(target: &LlmTarget) -> ServiceTarget {
     }
 }
 
-fn chat_options(effort: Effort) -> ChatOptions {
+fn chat_options(effort: Effort, session: &str) -> ChatOptions {
+    // opencode rejects requests without a session id; other servers ignore the header.
     let options = ChatOptions::default()
         .with_capture_usage(true)
         .with_capture_content(true)
-        .with_capture_tool_calls(true);
+        .with_capture_tool_calls(true)
+        .with_extra_headers([("x-opencode-session", session)]);
     match effort {
         Effort::Default => options,
         Effort::Low => options.with_reasoning_effort(ReasoningEffort::Low),
@@ -123,14 +125,16 @@ fn one_line(text: &str) -> String {
 }
 
 /// Runs one provider turn, calling `on_text` for every piece of text as it arrives.
+/// `session` names the conversation the request belongs to.
 pub async fn stream_chat(
     target: &LlmTarget,
+    session: &str,
     system: &str,
     messages: &[Message],
     tools: &[ToolSpec],
     mut on_text: impl FnMut(&str),
 ) -> Result<LlmResponse, String> {
-    let options = chat_options(target.effort);
+    let options = chat_options(target.effort, session);
     let mut stream = client()
         .exec_chat_stream(
             service_target(target),
@@ -172,8 +176,13 @@ pub async fn stream_chat(
 }
 
 /// One non-streaming call without tools; returns the answer text.
-pub async fn complete(target: &LlmTarget, system: &str, user: &str) -> Result<String, String> {
-    let options = chat_options(target.effort);
+pub async fn complete(
+    target: &LlmTarget,
+    session: &str,
+    system: &str,
+    user: &str,
+) -> Result<String, String> {
+    let options = chat_options(target.effort, session);
     let messages = [Message::User {
         content: user.to_string(),
         injected: false,

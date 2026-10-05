@@ -212,6 +212,9 @@ agent {
   - `kind` — `openai` (default) or `claude-code`.
   - `url` — `openai` only: base URL to which `/chat/completions` and `/models` are
     appended.
+    Every chat request carries an `x-opencode-session` header holding the id of the
+    conversation's root node: opencode refuses requests without it, and uses it for
+    routing and prompt caching; other servers ignore it.
   - `models` — `claude-code` only, since the CLI has no model-list route. Defaults to
     `opus`, `sonnet`, `haiku`.
 - `summary-model` — model spec used for both titles and summaries. If absent, neither is
@@ -475,9 +478,11 @@ resumable and is not part of session restore.
 **Title and summary.** Until a turn ends, a node has no title or summary files and the
 tree shows the first line of its prompt. When a turn ends `done` (new nodes, reruns and
 recovered nodes alike), one non-streaming call to `summary-model` without tools
-(`prompts/title_summary.md`; on `claude-code`, `claude -p --tools ""`) reads the prompt,
-the reply (cut at 8000 characters) and, in commit mode, the subjects of the commits made,
-and answers in the shape of a commit message: a title of at most 72 characters, a blank
+(`prompts/title_summary.md`; on `claude-code`, `claude -p --tools ""`) reads a record of
+the turn: the prompt in `<prompt>`, the reply (cut at 8000 characters) in `<reply>` and,
+in commit mode, the subjects of the commits made in `<commits>`, closed by one line asking
+for the title and the summary. The tags and that line keep the model from answering the
+prompt instead of describing it. It answers in the shape of a commit message: a title of at most 72 characters, a blank
 line, then a summary of about 50 words. The first line is the title (hard cut at 100
 characters), the rest the summary; they replace `title.md` and `summary.md`. The call
 starts after the turn's outcome is applied, so it never delays the node. Failed and

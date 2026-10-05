@@ -8,6 +8,7 @@ use super::turn::Recorder;
 pub async fn run(
     context: &ToolContext,
     target: &LlmTarget,
+    session: &str,
     system: &str,
     messages: &mut Vec<Message>,
     recorder: &mut Recorder,
@@ -15,7 +16,7 @@ pub async fn run(
     let tool_specs = tools::specs(context.mode);
     loop {
         recorder.begin_answer();
-        let response = llm::stream_chat(target, system, messages, &tool_specs, |text| {
+        let response = llm::stream_chat(target, session, system, messages, &tool_specs, |text| {
             recorder.text(text);
         })
         .await?;
