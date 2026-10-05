@@ -1,7 +1,7 @@
 # Conversation Agent — Design
 
 Date: 2026-10-05
-Status: draft
+Status: implemented
 
 ## Goal
 
@@ -172,7 +172,7 @@ error: <one line>             only for failed
 Rules:
 
 - **Startup** reads, once and off the UI thread, every node's `metadata.md`, `title.md`
-  and `summary.md`, and builds the tree plus a commit-hash → node index. `prompt.md`,
+  and `summary.md`, and builds the tree. `prompt.md`,
   `reply.md` and `transcript.jsonl` are **never** kept for the whole tree: they are read
   from disk when a Discussion window opens, when a context is assembled, or when the
   `conversation` tool asks, and dropped afterwards.
@@ -296,16 +296,21 @@ A refused send keeps the input and shows the reason on the status line.
 
 New module tree `src/agent/`:
 
-- `mod.rs` — `TurnRequest`, `TurnEvent`, dispatch on endpoint kind.
+- `mod.rs` — `Mode`, `ModelSpec`, `Endpoint`, `Backend`, the transcript `Message`.
+- `turn.rs` — the turn lifecycle off the UI thread, for both backends.
 - `llm.rs` — the only file that imports `genai`; converts between our message type and
   genai's, resolves endpoint URL and token per call.
 - `agent_loop.rs` — Explorer's own loop for `openai` endpoints.
 - `tools.rs` — tool definitions and execution.
 - `claude_code.rs` — `claude` subprocess driver.
-- `context.rs` — builds the message list for a node from its ancestors.
+- `context.rs` — system prompts, ancestor replay, and the notes Explorer adds.
+- `commands.rs` — slash command expansion.
+- `models.rs` — model list fetch.
 
-A turn emits `TurnEvent`s to the UI through `AppSignal`: `TextDelta`, `ToolStarted`,
-`ToolFinished`, `Usage`, `Finished`, `Failed`.
+A running turn shares a `LiveTurn` (reply so far, current tool, token count, session id)
+with the UI through its `TurnHandle`, the same way a terminal pane shares its buffer.
+Discussion windows read it at render time; the task only sends `TurnProgress` to ask
+for a render and `TurnFinished` with the outcome.
 
 ### 7.1 Own loop (`openai`)
 
@@ -370,6 +375,7 @@ Explorer spawns the local CLI in the repository root:
 claude -p --output-format stream-json --verbose --include-partial-messages \
        --model <model> --effort <effort> \
        --append-system-prompt <mode prompt + Environment> \
+       --system-prompt-snapshot off \
        --permission-mode bypassPermissions \
        --settings '{"attribution":{"commit":"","pr":""}}' \
        [--disallowedTools "Edit Write NotebookEdit"]        feedback mode
@@ -379,6 +385,9 @@ claude -p --output-format stream-json --verbose --include-partial-messages \
 - The prompt is written to stdin. Text deltas, tool activity, usage and the final result
   are parsed from the stream-json events. The new session id is read from the stream and
   stored in `metadata.md`.
+- Prompt snapshotting is turned off: by default a resumed session keeps the system
+  prompt of its first request, so a commit turn forked from a feedback node would still
+  be told it is in feedback mode.
 - Claude Code runs its own loop and its own tools, and keeps its own transcript; no
   `transcript.jsonl` is written. Its default system prompt is kept; ours is appended.
 - The attribution setting removes Claude Code's own commit trailer, in line with the
@@ -532,18 +541,23 @@ suggests `/compact` from the parent node.
   Moving the selection collapses the previous node and expands the new one, so browsing
   the tree with the arrows reads like a preview of each prompt.
 - **Layout of the tree**: roots are listed newest first; inside a conversation, nodes run
-  oldest first. A node with a single child keeps that child at the **same** indentation,
-  so a straight line of prompts reads as a flat list. Indentation grows only below a node
-  with several children, one level per fork. Without this rule a 50-prompt conversation
-  would be indented 50 levels.
+  oldest first. The descendants of a root sit one level below it, which sets
+  conversations apart. After that, a node with a single child keeps that child at the
+  **same** indentation, so a straight line of prompts reads as a flat list. Indentation
+  grows only below a node with several children, one level per fork, and each child of a
+  fork carries a branch marker (`├`, `└`) so that the start of a branch is not mistaken
+  for the continuation of a line. Without this rule a 50-prompt conversation would be
+  indented 50 levels.
+- Roots and forks are collapsed until expanded; a `+` or `-` marks them. Sending a
+  prompt expands the way to the new node.
 - Feedback and commit nodes have distinct colors. Other states get a color and a
   one-character ASCII marker: running, failed, cancelled, uncommitted (stashed), compact,
   handover. Favorites are highlighted across the whole row.
 - Keys:
   - `Up` `Down` `PgUp` `PgDn` `Home` `End` — move the selection.
   - Mouse click — moves the selection only. Double click — same as `Enter`.
-  - `Left` / `Right` — collapse / expand a root or a fork. The expanded set is saved in
-    the session.
+  - `Left` / `Right` — collapse / expand a root or a fork; `Left` elsewhere jumps to the
+    root or fork the branch hangs from. The expanded set is saved in the session.
   - `Enter` — open the node; recover it if incomplete (section 9).
   - `m` — same prompt with another model (section 9).
   - `e` — edit as a new sibling (section 9).
@@ -565,9 +579,9 @@ holds its node's prompt and reply in memory only while it is open.
 - Top to bottom: title row (node title, the window's model spec on the right); the node's
   prompt, visually set apart; the reply; a status line; the input with its mode label.
 - Prompt and reply form one scrollable document owned by the PaneManager (scrollbar,
-  wheel and drag for free). The reply is highlighted as Markdown with the existing
-  syntect machinery. While streaming, the view follows the end unless the user scrolled
-  up.
+  wheel and drag for free). Both are shown as plain wrapped text: Explorer has no
+  Markdown or syntect highlighter of its own (preview colors come from LSP tokens).
+  While streaming, the view follows the end unless the user scrolled up.
 - Status line: running (current tool, elapsed time), done (type, short hashes, tokens),
   failed (error), cancelled, or the reason a send was refused.
 - The input is always active, also while a turn runs: the next prompt can be drafted,
@@ -609,8 +623,10 @@ picker was opened:
 
 ## 12. State, session, keymap
 
-- `src/conversation.rs` — tree model (`Node`, `NodeId`, commit index), disk format,
-  startup load, on-demand reads, write-through mutations, delete.
+- `src/conversation.rs` — tree model (`Node`, `NodeId`), disk format, startup load,
+  on-demand reads, write-through mutations, delete, table-of-contents pages. The node
+  of a commit is found by scanning the nodes' metadata, which is fast enough not to
+  need an index.
 - `src/config.rs` — `agent` block; new `auth.kdl` loader.
 - `AppState` gains the tree, `discussions` (each with its model spec), the model list,
   the model last picked in this run, the repository lock and the running-turn handles.
@@ -620,8 +636,8 @@ picker was opened:
 - Session: `PaneEntry::ConversationTree`; `PaneEntry::Discussion { node, draft, mode }`;
   expanded set. No model is saved. The Model Picker is not saved. `SESSION_VERSION`
   3 → 4.
-- New dependency: `genai`. `reqwest` directly only if genai does not expose what the
-  model-list fetch needs.
+- New dependencies: `genai`; `reqwest` for the model-list fetch, which genai only does
+  against a provider's default endpoint; `futures-util` to read genai's stream.
 
 ## 13. Error handling
 
@@ -675,13 +691,18 @@ Real endpoints and the `claude` CLI are verified manually.
 - `$ARGUMENTS` placeholders and autocomplete for slash commands.
 - Permission rules for `shell`.
 
-## 16. To verify during planning
+## 16. Verified during implementation
 
-- genai's support for custom endpoints, effort and streamed tool calls was read from its
-  README, not exercised.
-- The exact `claude` flag combination in 7.4: reading the forked session id from the
-  stream, the attribution setting, the tool names to disallow in feedback mode, and
-  resuming a node's own session for a nudge.
+- genai 0.6: a `ServiceTarget` (endpoint URL, token, `AdapterKind::OpenAI`, model) is
+  passed directly to each call, tool calls and usage are captured at the end of the
+  stream, and the effort is sent as `reasoning_effort`. With effort `default` genai
+  still infers one from a model name ending in `-low`, `-high` and the like.
+- The `claude` CLI (2.1): the forked session id arrives in the `system/init` event;
+  `--resume` of an unknown session ends with an error result and no turn, which
+  triggers the lossy handover; the attribution setting removes the commit trailer;
+  `--disallowedTools` removes the editing tools; `--tools ""` and
+  `--no-session-persistence` serve titles and summaries. `--bare` must not be used: it
+  disables the subscription login.
 
 ## 17. Open points
 
@@ -706,5 +727,8 @@ Defaults chosen without an explicit answer; change freely.
 13. Untracked files count as a dirty tree.
 14. `AGENTS.md` is injected into the system prompt of the own loop.
 15. `claude-code` runs with `--permission-mode bypassPermissions`.
-16. Key choices: `<leader>c`, `n`, `f`, `c`, `Ctrl+C`; `Esc` inert in the Discussion
+16. A turn found dirty after a commit turn is stashed with
+    `git stash push --include-untracked`; the stash of an earlier attempt of the same
+    node is no longer referenced by its metadata once the node is run again.
+17. Key choices: `<leader>c`, `n`, `f`, `c`, `Ctrl+C`; `Esc` inert in the Discussion
     window.

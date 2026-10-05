@@ -36,9 +36,9 @@ Guiding principles:
 - **Personal tool.** Decisions are shaped by the owner's workflow, not by
   general-purpose adoption. Prefer the direct solution over configurable generality.
 
-Direction (partly built — log and diff panes shipped; status and blame are
-not — do not scaffold ahead of need): deeper **AI tooling** integration, and
-native **git tooling** to replace `tig` (status, blame).
+Direction (partly built — log and diff panes and the conversation agent shipped;
+status and blame are not — do not scaffold ahead of need): deeper **AI tooling**
+integration, and native **git tooling** to replace `tig` (status, blame).
 
 ---
 
@@ -54,7 +54,17 @@ core:
 Source is organized as:
 - `src/main.rs` — async entry point, wires CLI → loader → TUI
 - `src/cli.rs` — CLI argument parsing via `pico-args`
-- `src/config.rs` — KDL configuration file parsing (theme, `keybindings` block, `counters` block); saving a theme re-serializes the document so bindings survive
+- `src/config.rs` — KDL configuration file parsing (theme, `keybindings` block, `counters` block, `agent` block with endpoints, `summary-model` and custom slash commands); `load_auth` reads endpoint tokens from `<data_dir>/auth.kdl` and `resolve_agent` joins them (an endpoint without a token is logged and skipped)
+- `src/conversation.rs` — the agent conversation tree: `NodeId` (a node's directory name), `Node`, `Metadata` (flat `key: value` `metadata.md`), `ConversationTree` (metadata, titles and summaries only; prompts, replies and transcripts stay on disk), node creation/restart/delete, `turn_context` (what a node's turn replays, with the compact cut-off), table-of-contents pages and commit lookup for the agent's `conversation` tool
+- `src/agent/mod.rs` — `Mode` (feedback/commit), `ModelSpec` (`endpoint/model/effort`), `Endpoint`/`EndpointKind`, `Backend`, transcript `Message`
+- `src/agent/turn.rs` — turn lifecycle off the UI thread: `spawn`, `Recorder` (live reply, `reply.md`, `transcript.jsonl`), commit-turn closing (commit range, hidden nudge, stash), titles and summaries
+- `src/agent/llm.rs` — the only file importing `genai`: streaming chat with tool calls, one-shot completion
+- `src/agent/agent_loop.rs` — our own agent loop for OpenAI-compatible endpoints
+- `src/agent/tools.rs` — agent tools (`conversation`, `read`, `glob`, `grep`, `shell`, plus `write`/`edit` in commit mode), confined to the repository root
+- `src/agent/claude_code.rs` — `claude -p` driver: arguments, `stream-json` parser, session forking
+- `src/agent/context.rs` — system prompts (from `prompts/*.md`), ancestor replay, handover preamble, the notes Explorer injects
+- `src/agent/commands.rs` — slash command expansion (`/compact` built in)
+- `src/agent/models.rs` — `GET <url>/models`
 - `src/git.rs` — gix-backed git data: `load_log` (first-parent walk of HEAD or a resolved branch/tag ref, capped at `MAX_LOG_ENTRIES` entries in a `LogHistory`, plus `refs`: commit → branches/remote branches/tags map built by peeling every ref), `load_refs` (flat branch/tag list for the branch picker), `load_commit_diff` (unified text), `LogEntry`, `GitRef`/`RefKind`, `DiffLine`/`DiffKind`, `commit_type_prefix` (conventional-commit parsing), datetime + short-id helpers
 - `src/keymap.rs` — configurable top-level shortcuts: `Action` enum, `Keymap` mapping `KeyPress` → action per leader/global context, key-spec parsing, status-bar hint rendering
 - `src/loader.rs` — parallel file walking and `LoadedFile` construction
@@ -71,11 +81,15 @@ Source is organized as:
 - `src/tui/fuzzy_picker.rs` — shared fuzzy list picker component; navigation via flat `match` on `InputEvent`
 - `src/tui/git_log_pane.rs` — git log pane component; multiple windows (`Window::GitLog(id)`, state in `AppState.git_logs`); renders async-loaded log entries for HEAD or the window's chosen branch, arrow/page/home/end/mouse selection, `/` live filter via nucleo (`run_log_match`/`apply_filter`; ENTER validates, Esc clears search, Esc outside search is a noop), `b` in-window branch picker (fuzzy `run_ref_match` over all branches and tags, prompt `Show branch:`; ENTER loads that branch, Esc returns to HEAD), conventional-commit type coloring, 3-space date gap, right-aligned ref decoration per row (`layout_refs`: branches then tags, drop from the right with `...` in the dropped group's color), `Logs` title with `(branch)` segment, `(10000+)` when truncated, ` — <query>` suffix while a filter is validated), Enter opens a `CommitDiff` window (seeding `state.commit_diffs` and spawning `load_commit_diff` if absent)
 - `src/tui/commit_diff_pane.rs` — commit diff pane component; renders a colored unified diff for one commit (`+` green, `-` red, `@@` yellow, headers cyan); Backspace sends the window to back, Esc closes it
+- `src/tui/conversation_tree_pane.rs` — Conversation Tree window (`Window::ConversationTree`, `<leader>c`): `layout_rows` (fork-only indentation, branch markers, folding), selected node expanded with title and summary, `f` favorite, `Ctrl+D` twice to delete, `Enter`/double click open-and-recover, `n` new root, `m` replay with another model, `e` edit as sibling, `c` commit diffs
+- `src/tui/discussion_pane.rs` — Discussion window (`Window::Discussion(id)`, state in `AppState.discussions`): prompt and reply as plain wrapped text, status line, multi-row input, `Shift+Tab` mode toggle, `Ctrl+P` model, `Ctrl+C` cancel; `start_turn` checks the guards (read-write lock, clean tree for commit mode), creates the node and spawns the turn
+- `src/tui/model_picker.rs` — Model Picker window (`Window::ModelPicker`): fuzzy list of `endpoint/model/effort`, for a window's next prompt or to duplicate a node; `fetch_models`
+- `src/tui/text_layout.rs` — `wrap`, `truncate`, `display_width`
 - `src/tui/theme.rs` — `HelixTheme` type; loads bundled TOML files via `include!("../../themes/themes.rs")`
 - `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview (exceptions → input → navigation)
 - `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane); text selection uses global `AppState`
 - `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation; `render_ofs_buf_to_ir()` emits `ResetColor` for `Spacer` runs to prevent stale SGR inheritance; supports mouse selection, word/line text extraction, and clipboard copy; synchronized output (DEC private mode 2026) is buffered natively by `OfsBufVT100` in r3bl-open-core
-- `src/tui/input_line.rs` — query input with Emacs-style key bindings; single flat `match` on `InputEvent`
+- `src/tui/input_line.rs` — query input with Emacs-style key bindings; single flat `match` on `InputEvent`; soft-wraps over several rows, `Up`/`Down` between rows, height cap with internal scroll
 
 ---
 
@@ -148,6 +162,8 @@ cargo test <module>::<test_name>
 | `arc-swap`             | 1.x     | Lock-free atomic swap for the shared file list (`Arc<ArcSwap<Vec<Arc<LoadedFile>>>>`) |
 | `camino`               | 1.x     | UTF-8–typed path types (`Utf8PathBuf`, etc.)                   |
 | `directories`          | 5.x     | XDG Base Directory resolution for config and session storage   |
+| `futures-util`         | 0.3.x   | Reading `genai`'s chat stream                                  |
+| `genai`                | 0.6.x   | LLM wire client for OpenAI-compatible endpoints (only in `src/agent/llm.rs`) |
 | `gix`                  | 0.87.x  | Git data (log walk, tree diff, blob unified diff); pure Rust   |
 | `hex`                  | 0.4.x   | Hex encoding for session filename hashes                       |
 | `jwalk`                | 0.8.x   | Parallel directory traversal (uses rayon)                      |
@@ -160,6 +176,7 @@ cargo test <module>::<test_name>
 | `parking_lot`          | 0.12.x  | Poison-free `Mutex`/`RwLock` primitives (used for shared panes, file data) |
 | `pico-args`            | 0.5.x   | Lightweight CLI argument parsing (no proc macros)              |
 | `r3bl_tui`             | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
+| `reqwest`              | 0.12.x  | Model list fetch from OpenAI-compatible endpoints              |
 | `serde`                | 1.x     | Derive macros for serialization (`derive` feature)             |
 | `serde_json`           | 1.x     | JSON-RPC message serialization for LSP protocol                |
 | `sha2`                 | 0.10.x  | Stable repo-root hashing for session filenames                 |
@@ -172,7 +189,7 @@ cargo test <module>::<test_name>
 
 Planned feature areas and their likely dependencies:
 - **Git tooling** (remaining: status, blame — intended to replace `tig`; log and diff have shipped). See `docs/superpowers/specs/2026-09-21-git-log-pane-design.md`
-- **AI tooling** integration (conversation-tree agent chat; planned dependency: `genai`). See `docs/superpowers/specs/2026-10-05-conversation-agent-design.md`
+- **AI tooling** integration: the conversation-tree agent chat has shipped (see `docs/superpowers/specs/2026-10-05-conversation-agent-design.md`); its Future work section lists what remains (architecture-walking tool, tree filter, in-repo export)
 
 ---
 
@@ -244,6 +261,12 @@ Planned feature areas and their likely dependencies:
 - `AppState::terminal_grabbed` is a single global flag: when `true`, keyboard events go to the focused PTY; when `false`, they propagate to app-level shortcuts.
 - Scrolling a terminal pane ungrabs it. Clicking the pane or pressing Enter or `q` re-grabs.
 - When removing a terminal window via `remove_window`, only reset `terminal_grabbed` if the window being removed is the currently focused one — otherwise a background pane exit silently ungrabs an active terminal.
+
+### Conversation Agent
+
+- A running turn shares its `LiveTurn` behind a `parking_lot::Mutex` with the render path. Never lock it twice in one expression (two `live.lock()` in the same struct literal deadlock the turn task and then the UI); take what you need under a single guard.
+- `transcript.jsonl` is what child nodes replay. Anything sent to the model must be recorded there, including the notes and nudges Explorer injects, even when the user never sees them.
+- Never pass `--bare` to `claude`: it disables the subscription login.
 
 ### Comments
 

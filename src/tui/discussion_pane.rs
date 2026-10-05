@@ -4,6 +4,7 @@ use crate::agent::{Mode, ModelSpec};
 use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 
@@ -207,6 +208,7 @@ pub(crate) fn start_turn(
         parent_session: context.parent_session,
         compact,
         compacted_parent: context.compacted_parent,
+        tree: Arc::clone(&state.conversations),
     };
     let handle = turn::spawn(request, main_tx.clone());
     state.running_turns.insert(node.clone(), handle);

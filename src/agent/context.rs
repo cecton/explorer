@@ -3,6 +3,7 @@ use camino::Utf8Path;
 
 const FEEDBACK_PROMPT: &str = include_str!("../../prompts/feedback.md");
 const COMMIT_PROMPT: &str = include_str!("../../prompts/commit.md");
+const CONVERSATION_TOOL_PROMPT: &str = include_str!("../../prompts/conversation_tool.md");
 pub const TITLE_PROMPT: &str = include_str!("../../prompts/title.md");
 pub const SUMMARY_PROMPT: &str = include_str!("../../prompts/summary.md");
 const COMPACT_PROMPT: &str = include_str!("../../prompts/compact.md");
@@ -14,6 +15,8 @@ pub const NOTE_MAX_COMMITS: usize = 20;
 /// and the state of the repository when the prompt was sent.
 pub fn system_prompt(mode: Mode, root: &Utf8Path, head: Option<&str>, date: &str) -> String {
     let mut out = String::from(mode_prompt(mode));
+    out.push_str("\n\n");
+    out.push_str(CONVERSATION_TOOL_PROMPT.trim_end());
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         out.push_str("\n\n## Project instructions (AGENTS.md)\n\n");
         out.push_str(agents.trim());
@@ -274,6 +277,7 @@ mod tests {
         let prompt = system_prompt(Mode::Feedback, &root, Some("abc123"), "2026-10-05");
         assert!(prompt.starts_with("You are the coding agent inside Explorer"));
         assert!(prompt.contains("**feedback mode**"));
+        assert!(prompt.contains("## The conversation tree"));
         let commit = system_prompt(Mode::Commit, &root, None, "2026-10-05");
         assert!(commit.contains("**commit mode**"));
         assert!(commit.ends_with("- HEAD: none yet (no commit)\n"));
@@ -297,6 +301,7 @@ mod tests {
         let prompt = claude_system_prompt(Mode::Commit, &root, Some("abc"), "2026-10-05");
         assert!(prompt.contains("**commit mode**"));
         assert!(!prompt.contains("Use tabs."));
+        assert!(!prompt.contains("## The conversation tree"));
         assert!(prompt.ends_with("- HEAD: abc\n"));
     }
 

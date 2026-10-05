@@ -1,10 +1,11 @@
 use super::claude_code::{self, ClaudeTarget, Invocation, Resume, RunError};
 use super::llm::{self, LlmTarget};
+use super::tools::ToolContext;
 use super::{Backend, Message, Mode, agent_loop, context};
-use crate::conversation::{NodeId, NodeStatus, write_atomic};
+use crate::conversation::{ConversationTree, NodeId, NodeStatus, write_atomic};
 use crate::tui::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
-use parking_lot::Mutex;
+use parking_lot::{Mutex, RwLock};
 use r3bl_tui::TerminalWindowMainThreadSignal;
 use std::io::Write;
 use std::sync::Arc;
@@ -85,6 +86,8 @@ pub struct TurnRequest {
     pub compact: Option<String>,
     /// Directory of the parent when it is a compact node: its reply opens the context.
     pub compacted_parent: Option<Utf8PathBuf>,
+    /// The conversation tree, for the `conversation` tool.
+    pub tree: Arc<RwLock<ConversationTree>>,
 }
 
 /// The text to send for `request`: what the turn asks, preceded by the summary of a
@@ -415,15 +418,13 @@ async fn run_own_loop(
         });
         return Ok(());
     }
-    agent_loop::run(
-        request.mode,
-        target,
-        &system,
-        &mut messages,
-        &request.root,
-        recorder,
-    )
-    .await?;
+    let tool_context = ToolContext {
+        mode: request.mode,
+        root: request.root.clone(),
+        tree: Arc::clone(&request.tree),
+        node: request.node.clone(),
+    };
+    agent_loop::run(&tool_context, target, &system, &mut messages, recorder).await?;
     if request.mode == Mode::Feedback {
         return Ok(());
     }
@@ -436,15 +437,7 @@ async fn run_own_loop(
         let nudge = context::commit_nudge(&status);
         recorder.message(&nudge);
         messages.push(nudge);
-        agent_loop::run(
-            request.mode,
-            target,
-            &system,
-            &mut messages,
-            &request.root,
-            recorder,
-        )
-        .await?;
+        agent_loop::run(&tool_context, target, &system, &mut messages, recorder).await?;
     }
     Ok(())
 }

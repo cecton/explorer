@@ -1,8 +1,11 @@
 use super::llm::ToolSpec;
 use super::{Mode, ToolCall};
+use crate::conversation::{ConversationTree, NodeId};
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
+use parking_lot::RwLock;
 use serde_json::{Value, json};
 use std::process::Stdio;
+use std::sync::Arc;
 use std::time::Duration;
 
 const READ_DEFAULT_LINES: usize = 2000;
@@ -12,6 +15,15 @@ const GREP_MAX_LINE_CHARS: usize = 300;
 const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 120;
 const SHELL_MAX_TIMEOUT_SECS: u64 = 600;
 const SHELL_MAX_OUTPUT_BYTES: usize = 30_000;
+
+/// What the tools of one turn act on.
+pub struct ToolContext {
+    pub mode: Mode,
+    pub root: Utf8PathBuf,
+    pub tree: Arc<RwLock<ConversationTree>>,
+    /// The node whose turn is running.
+    pub node: NodeId,
+}
 
 /// The tools advertised to the model. `write` and `edit` exist in commit mode only.
 pub fn specs(mode: Mode) -> Vec<ToolSpec> {
@@ -51,6 +63,25 @@ pub fn specs(mode: Mode) -> Vec<ToolSpec> {
 
 fn read_only_specs() -> Vec<ToolSpec> {
     vec![
+        ToolSpec {
+            name: "conversation",
+            description: "Consult the conversation tree of this repository: every \
+                          message the user ever sent here, with the agent's replies. \
+                          `toc` lists conversations, or with `node` shows one page of \
+                          the tree around that node; `read` returns a node's full \
+                          prompt and reply; `commit` finds the node that produced a \
+                          commit.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["toc", "read", "commit"]},
+                    "node": {"type": "string", "description": "Node id, for `toc` and `read`"},
+                    "page": {"type": "integer", "description": "Page of the list of conversations, for `toc` without a node"},
+                    "hash": {"type": "string", "description": "Commit hash, for `commit`"}
+                },
+                "required": ["action"]
+            }),
+        },
         ToolSpec {
             name: "read",
             description: "Read a text file of the repository. Lines are returned prefixed \
@@ -118,9 +149,15 @@ pub fn describe(call: &ToolCall) -> String {
 }
 
 /// Runs one tool call. A failure is returned as text for the model, never raised.
-pub async fn run(mode: Mode, root: &Utf8Path, call: &ToolCall) -> String {
+pub async fn run(context: &ToolContext, call: &ToolCall) -> String {
     let args = call.arguments.clone();
-    let result = match (call.name.as_str(), mode) {
+    let root = context.root.as_path();
+    let result = match (call.name.as_str(), context.mode) {
+        ("conversation", _) => {
+            let tree = Arc::clone(&context.tree);
+            let node = context.node.clone();
+            blocking(move || conversation(&tree, &node, &args)).await
+        }
         ("read", _) => read(root, &args),
         ("write", Mode::Commit) => write(root, &args),
         ("edit", Mode::Commit) => edit(root, &args),
@@ -202,6 +239,47 @@ fn read(root: &Utf8Path, args: &Value) -> Result<String, String> {
         ));
     }
     Ok(out)
+}
+
+fn conversation(
+    tree: &RwLock<ConversationTree>,
+    current: &NodeId,
+    args: &Value,
+) -> Result<String, String> {
+    let node_arg = || str_arg(args, "node").map(NodeId::new);
+    let unknown = |node: &NodeId| format!("unknown node: {}", node.as_str());
+    match str_arg(args, "action")? {
+        "toc" => match args.get("node").and_then(Value::as_str) {
+            Some(node) => {
+                let node = NodeId::new(node);
+                tree.read()
+                    .toc_node(&node, current)
+                    .ok_or_else(|| unknown(&node))
+            }
+            None => Ok(tree
+                .read()
+                .toc_roots(usize_arg(args, "page").unwrap_or(1), current)),
+        },
+        "read" => {
+            let node = node_arg()?;
+            let dir = tree.read().node_dir(&node).ok_or_else(|| unknown(&node))?;
+            let (prompt, reply) = crate::conversation::read_prompt_and_reply(&dir);
+            Ok(format!(
+                "# Prompt\n\n{}\n\n# Reply\n\n{}\n",
+                prompt.trim(),
+                reply.trim()
+            ))
+        }
+        "commit" => {
+            let hash = str_arg(args, "hash")?;
+            let tree = tree.read();
+            let owner = tree
+                .node_of_commit(hash)
+                .ok_or_else(|| format!("no node recorded commit {hash}"))?;
+            tree.toc_node(owner, current).ok_or_else(|| unknown(owner))
+        }
+        other => Err(format!("unknown action: {other}")),
+    }
 }
 
 fn write(root: &Utf8Path, args: &Value) -> Result<String, String> {
@@ -444,6 +522,15 @@ mod tests {
         (tmp, root)
     }
 
+    fn context(mode: Mode, root: &Utf8Path) -> ToolContext {
+        ToolContext {
+            mode,
+            root: root.to_owned(),
+            tree: Arc::default(),
+            node: NodeId::new("current"),
+        }
+    }
+
     fn call(name: &str, arguments: Value) -> ToolCall {
         ToolCall {
             id: "c1".into(),
@@ -479,15 +566,13 @@ mod tests {
     async fn read_numbers_lines_and_honors_offset_and_limit() {
         let (_tmp, root) = repo();
         let all = run(
-            Mode::Feedback,
-            &root,
+            &context(Mode::Feedback, &root),
             &call("read", json!({"path": "src/main.rs"})),
         )
         .await;
         assert_eq!(all, "1\tfn main() {\n2\t    run();\n3\t}\n");
         let part = run(
-            Mode::Feedback,
-            &root,
+            &context(Mode::Feedback, &root),
             &call(
                 "read",
                 json!({"path": "src/main.rs", "offset": 2, "limit": 1}),
@@ -499,8 +584,7 @@ mod tests {
             "2\t    run();\n[lines 2-2 of 3; use offset to read more]\n"
         );
         let outside = run(
-            Mode::Feedback,
-            &root,
+            &context(Mode::Feedback, &root),
             &call("read", json!({"path": "../x"})),
         )
         .await;
@@ -511,16 +595,14 @@ mod tests {
     async fn glob_and_grep_skip_pruned_directories() {
         let (_tmp, root) = repo();
         let listed = run(
-            Mode::Feedback,
-            &root,
+            &context(Mode::Feedback, &root),
             &call("glob", json!({"pattern": "**/*.rs"})),
         )
         .await;
         assert_eq!(listed, "src/main.rs\nsrc/tui/app.rs\n");
 
         let found = run(
-            Mode::Feedback,
-            &root,
+            &context(Mode::Feedback, &root),
             &call("grep", json!({"pattern": "run"})),
         )
         .await;
@@ -529,8 +611,7 @@ mod tests {
             "README.md:2: run it\nsrc/main.rs:2:     run();\nsrc/tui/app.rs:1: pub fn run() {}\n"
         );
         let scoped = run(
-            Mode::Feedback,
-            &root,
+            &context(Mode::Feedback, &root),
             &call(
                 "grep",
                 json!({"pattern": "run", "path": "src", "glob": "**/app.rs"}),
@@ -539,8 +620,7 @@ mod tests {
         .await;
         assert_eq!(scoped, "src/tui/app.rs:1: pub fn run() {}\n");
         let none = run(
-            Mode::Feedback,
-            &root,
+            &context(Mode::Feedback, &root),
             &call("grep", json!({"pattern": "zzz"})),
         )
         .await;
@@ -551,22 +631,19 @@ mod tests {
     async fn shell_reports_output_exit_code_and_timeout() {
         let (_tmp, root) = repo();
         let ok = run(
-            Mode::Feedback,
-            &root,
+            &context(Mode::Feedback, &root),
             &call("shell", json!({"command": "echo hi; pwd"})),
         )
         .await;
         assert_eq!(ok, format!("hi\n{root}\n"));
         let failed = run(
-            Mode::Feedback,
-            &root,
+            &context(Mode::Feedback, &root),
             &call("shell", json!({"command": "echo oops >&2; exit 3"})),
         )
         .await;
         assert_eq!(failed, "oops\nexit code: 3\n");
         let slow = run(
-            Mode::Feedback,
-            &root,
+            &context(Mode::Feedback, &root),
             &call("shell", json!({"command": "sleep 5", "timeout": 1})),
         )
         .await;
@@ -596,22 +673,33 @@ mod tests {
     async fn write_and_edit_exist_in_commit_mode_only() {
         let (_tmp, root) = repo();
         let names = |mode| -> Vec<&str> { specs(mode).iter().map(|spec| spec.name).collect() };
-        assert_eq!(names(Mode::Feedback), ["read", "glob", "grep", "shell"]);
+        assert_eq!(
+            names(Mode::Feedback),
+            ["conversation", "read", "glob", "grep", "shell"]
+        );
         assert_eq!(
             names(Mode::Commit),
-            ["read", "glob", "grep", "shell", "write", "edit"]
+            [
+                "conversation",
+                "read",
+                "glob",
+                "grep",
+                "shell",
+                "write",
+                "edit"
+            ]
         );
 
         let write_call = call(
             "write",
             json!({"path": "docs/new.md", "content": "one\ntwo\n"}),
         );
-        let refused = run(Mode::Feedback, &root, &write_call).await;
+        let refused = run(&context(Mode::Feedback, &root), &write_call).await;
         assert_eq!(refused, "error: files cannot be changed in feedback mode");
         assert!(!root.join("docs/new.md").exists());
 
         assert_eq!(
-            run(Mode::Commit, &root, &write_call).await,
+            run(&context(Mode::Commit, &root), &write_call).await,
             "wrote 8 bytes\n"
         );
         assert_eq!(
@@ -620,7 +708,7 @@ mod tests {
         );
         let outside = call("write", json!({"path": "../evil", "content": "x"}));
         assert!(
-            run(Mode::Commit, &root, &outside)
+            run(&context(Mode::Commit, &root), &outside)
                 .await
                 .starts_with("error: ")
         );
@@ -636,17 +724,68 @@ mod tests {
                 json!({"path": "a.txt", "old_string": old, "new_string": new}),
             )
         };
-        let ambiguous = run(Mode::Commit, &root, &edit_call("alpha", "x")).await;
+        let ambiguous = run(&context(Mode::Commit, &root), &edit_call("alpha", "x")).await;
         assert!(ambiguous.contains("appears 2 times"), "{ambiguous}");
-        let missing = run(Mode::Commit, &root, &edit_call("gamma", "x")).await;
+        let missing = run(&context(Mode::Commit, &root), &edit_call("gamma", "x")).await;
         assert_eq!(missing, "error: old_string was not found in the file");
         assert_eq!(
-            run(Mode::Commit, &root, &edit_call("beta", "gamma")).await,
+            run(&context(Mode::Commit, &root), &edit_call("beta", "gamma")).await,
             "edited\n"
         );
         assert_eq!(
             std::fs::read_to_string(root.join("a.txt")).unwrap(),
             "alpha gamma alpha\n"
         );
+    }
+
+    #[tokio::test]
+    async fn conversation_tool_serves_pages_nodes_and_commit_lookups() {
+        let (_tmp, root) = repo();
+        let store = root.join("store");
+        let node_dir = store.join("n1");
+        std::fs::create_dir_all(node_dir.join("n2")).unwrap();
+        std::fs::write(
+            node_dir.join("metadata.md"),
+            "type: commit\ncommits: abcdef0123\n",
+        )
+        .unwrap();
+        std::fs::write(node_dir.join("title.md"), "First").unwrap();
+        std::fs::write(node_dir.join("prompt.md"), "do it\n").unwrap();
+        std::fs::write(node_dir.join("reply.md"), "done\n").unwrap();
+        let context = ToolContext {
+            mode: Mode::Feedback,
+            root: root.clone(),
+            tree: Arc::new(RwLock::new(ConversationTree::load(&store))),
+            node: NodeId::new("n2"),
+        };
+        let ask = |arguments| call("conversation", arguments);
+
+        let roots = run(&context, &ask(json!({"action": "toc"}))).await;
+        assert!(
+            roots.contains("- n1 [commit] abcdef0 First (2 nodes) <- your branch"),
+            "{roots}"
+        );
+        let page = run(&context, &ask(json!({"action": "toc", "node": "n1"}))).await;
+        assert!(
+            page.contains("Continues with:\n- n2 [?] (no prompt) <- this turn"),
+            "{page}"
+        );
+        let read = run(&context, &ask(json!({"action": "read", "node": "n1"}))).await;
+        assert_eq!(read, "# Prompt\n\ndo it\n\n# Reply\n\ndone\n");
+        let owner = run(
+            &context,
+            &ask(json!({"action": "commit", "hash": "abcdef0"})),
+        )
+        .await;
+        assert!(owner.starts_with("Node:\n- n1 [commit]"), "{owner}");
+
+        let missing = run(&context, &ask(json!({"action": "read", "node": "zz"}))).await;
+        assert_eq!(missing, "error: unknown node: zz");
+        let unknown = run(
+            &context,
+            &ask(json!({"action": "commit", "hash": "1234567"})),
+        )
+        .await;
+        assert_eq!(unknown, "error: no node recorded commit 1234567");
     }
 }
