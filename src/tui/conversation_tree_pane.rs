@@ -163,6 +163,8 @@ pub struct ConversationTreeComponent {
 }
 
 impl ConversationTreeComponent {
+    pub(crate) const TITLE: &str = "Conversations";
+
     pub fn new(id: FlexBoxId) -> Self {
         Self {
             id,
@@ -281,7 +283,7 @@ impl TitleRow for ConversationTreeComponent {
         theme: &HelixTheme,
         _state: &AppState,
     ) -> usize {
-        render_pane_title(ops, pane_box, "Conversations", false, theme, focused);
+        render_pane_title(ops, pane_box, Self::TITLE, false, theme, focused);
         1
     }
 }

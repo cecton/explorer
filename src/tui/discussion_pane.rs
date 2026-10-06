@@ -1003,6 +1003,18 @@ impl DiscussionComponent {
         self.cache.as_ref().map_or(&[], |cache| &cache.lines)
     }
 
+    pub(crate) fn title(state: &AppState, window_id: usize) -> String {
+        state
+            .discussions
+            .get(&window_id)
+            .and_then(|discussion| discussion.node.as_ref())
+            .and_then(|node| {
+                let tree = state.conversations.read();
+                tree.node(node).map(|node| node.display_title().to_string())
+            })
+            .unwrap_or_else(|| "New conversation".to_string())
+    }
+
     pub fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
@@ -1012,15 +1024,10 @@ impl DiscussionComponent {
         state: &AppState,
         window_id: usize,
     ) -> usize {
-        let discussion = state.discussions.get(&window_id);
-        let title = discussion
-            .and_then(|discussion| discussion.node.as_ref())
-            .and_then(|node| {
-                let tree = state.conversations.read();
-                tree.node(node).map(|node| node.display_title().to_string())
-            })
-            .unwrap_or_else(|| "New conversation".to_string());
-        let model = discussion
+        let title = Self::title(state, window_id);
+        let model = state
+            .discussions
+            .get(&window_id)
             .and_then(|discussion| discussion.model.as_ref())
             .map_or_else(|| "no model (Ctrl+P)".to_string(), ToString::to_string);
 

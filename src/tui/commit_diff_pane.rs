@@ -29,6 +29,14 @@ impl CommitDiffPaneComponent {
             .map(|entry| entry.summary.clone())
     }
 
+    pub(crate) fn title(state: &AppState, id: [u8; 20]) -> String {
+        let short = short_id(&id);
+        match Self::commit_summary(state, id) {
+            Some(summary) => format!("commit {short} {summary}"),
+            None => format!("commit {short}"),
+        }
+    }
+
     fn kind_color(theme: &HelixTheme, kind: DiffKind) -> RgbValue {
         let fallback = |r: u8, g: u8, b: u8| RgbValue::from_u8(r, g, b);
         match kind {
@@ -64,12 +72,14 @@ impl TitleRow for CommitDiffPaneComponent {
         let Some(id) = self.active_commit(state) else {
             return 0;
         };
-        let short = short_id(&id);
-        let title = match Self::commit_summary(state, id) {
-            Some(summary) => format!("commit {short} {summary}"),
-            None => format!("commit {short}"),
-        };
-        render_pane_title(ops, pane_box, &title, false, theme, focused);
+        render_pane_title(
+            ops,
+            pane_box,
+            &Self::title(state, id),
+            false,
+            theme,
+            focused,
+        );
         1
     }
 }

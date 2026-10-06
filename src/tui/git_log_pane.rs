@@ -143,6 +143,25 @@ impl GitLogPaneComponent {
 }
 
 impl GitLogPaneComponent {
+    pub(crate) fn title(win: &GitLogWindowState) -> String {
+        let mut title = match win.branch.as_deref() {
+            Some(branch) => format!("Logs ({branch})"),
+            None => "Logs".to_string(),
+        };
+        if win
+            .entries
+            .as_ref()
+            .is_some_and(|history| history.truncated)
+        {
+            title.push_str(&format!(" ({})", crate::git::MAX_LOG_ENTRIES));
+            title.push('+');
+        }
+        if !win.query.is_empty() {
+            title.push_str(&format!(" — {}", win.query));
+        }
+        title
+    }
+
     pub fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
@@ -191,22 +210,7 @@ impl GitLogPaneComponent {
             );
             1
         } else {
-            let mut title = match win.branch.as_deref() {
-                Some(branch) => format!("Logs ({branch})"),
-                None => "Logs".to_string(),
-            };
-            if win
-                .entries
-                .as_ref()
-                .is_some_and(|history| history.truncated)
-            {
-                title.push_str(&format!(" ({})", crate::git::MAX_LOG_ENTRIES));
-                title.push('+');
-            }
-            if !win.query.is_empty() {
-                title.push_str(&format!(" — {}", win.query));
-            }
-            render_pane_title(ops, pane_box, &title, false, theme, focused);
+            render_pane_title(ops, pane_box, &Self::title(win), false, theme, focused);
             1
         }
     }

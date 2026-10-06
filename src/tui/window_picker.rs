@@ -78,33 +78,20 @@ impl WindowPickerComponent {
         let mut seen: HashSet<Window> = HashSet::new();
         let mut results = Vec::new();
         for window in window_stack {
-            match window {
-                Window::FilePreview(key)
-                    if !files[key.0].removed.load(Ordering::Relaxed) && seen.insert(*window) =>
-                {
-                    results.push((*window, vec![]));
-                }
-                Window::Terminal(_) if seen.insert(*window) => {
-                    results.push((*window, vec![]));
-                }
-                _ => {}
+            let listed = match window {
+                Window::FilePreview(key) => !files[key.0].removed.load(Ordering::Relaxed),
+                Window::Terminal(_)
+                | Window::GitLog(_)
+                | Window::CommitDiff(_)
+                | Window::ConversationTree
+                | Window::Discussion(_) => true,
+                Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => false,
+            };
+            if listed && seen.insert(*window) {
+                results.push((*window, vec![]));
             }
         }
         results
-    }
-
-    pub(crate) fn compute_results(state: &AppState) -> Vec<(Window, Vec<u32>)> {
-        let snapshot = state.files.load();
-        if state.window_picker.query.is_empty() {
-            Self::open_windows_results(&snapshot, &state.pane_manager.window_stack)
-        } else {
-            run_file_name_match(
-                &state.window_picker.query,
-                &snapshot,
-                &state.root,
-                &state.pane_manager.window_stack,
-            )
-        }
     }
 }
 
@@ -164,16 +151,22 @@ mod tests {
     }
 
     #[test]
-    fn open_list_includes_terminals_and_files_in_stack_order() {
+    fn open_list_includes_every_window_but_pickers_in_stack_order() {
         // index 0: live file, index 1: removed file.
         let removed = LoadedFile::stub("gone.rs".into()); // stub() marks removed = true
         let files = vec![live_file("src/main.rs"), removed];
 
-        // Stack front-to-back, with a duplicate terminal and the picker itself.
+        // Stack front-to-back, with a duplicate terminal and the pickers.
         let stack = vec![
+            Window::Discussion(2),
             Window::FilePreview(FileKey(0)),
             Window::Terminal(3),
             Window::WindowPicker,
+            Window::ConversationTree,
+            Window::ThemePicker,
+            Window::GitLog(1),
+            Window::ModelPicker,
+            Window::CommitDiff([7; 20]),
             Window::FilePreview(FileKey(1)), // removed -> excluded
             Window::Terminal(3),             // duplicate -> deduped
         ];
@@ -182,37 +175,73 @@ mod tests {
         let windows: Vec<Window> = results.into_iter().map(|(w, _)| w).collect();
         assert_eq!(
             windows,
-            vec![Window::FilePreview(FileKey(0)), Window::Terminal(3)],
+            vec![
+                Window::Discussion(2),
+                Window::FilePreview(FileKey(0)),
+                Window::Terminal(3),
+                Window::ConversationTree,
+                Window::GitLog(1),
+                Window::CommitDiff([7; 20]),
+            ],
         );
     }
 
     #[test]
-    fn terminal_accent_is_distinct_and_theme_sourced() {
+    fn row_accents_are_distinct_and_theme_sourced() {
         let theme = HelixTheme::default();
-        let accent = terminal_accent(&theme);
-        // Never identical to the file-row (ui.text) color.
-        assert_ne!(Some(accent), theme.ui_fg("ui.text"));
-        // On the default theme it resolves to the `function` scope color.
-        assert_eq!(Some(accent), theme.color_for_scope("function"));
+        let accents = row_accents(&theme);
+        // Never identical to the file-row (ui.text) color, nor to each other.
+        for accent in [accents.terminal, accents.agent, accents.git] {
+            assert_ne!(Some(accent), theme.ui_fg("ui.text"));
+        }
+        assert_ne!(accents.terminal, accents.agent);
+        assert_ne!(accents.terminal, accents.git);
+        assert_ne!(accents.agent, accents.git);
+        // On the default theme terminals keep the `function` scope color.
+        assert_eq!(Some(accents.terminal), theme.color_for_scope("function"));
     }
 }
 
-/// Foreground color for terminal rows in the picker.
+/// Foreground colors of the rows that are not files, by kind of window.
+#[derive(Clone, Copy, Debug, PartialEq)]
+struct RowAccents {
+    terminal: RgbValue,
+    agent: RgbValue,
+    git: RgbValue,
+}
+
+/// Accent colors for terminal, agent and git rows in the picker.
 ///
-/// Pulls a vivid, theme-defined syntax color (preferring `function`) via
+/// Pulls vivid, theme-defined syntax colors (preferring `function`) via
 /// [`HelixTheme::color_for_scope`], which walks each scope's fallback chain and
-/// always resolves to a real color. Picks the first candidate whose color
-/// differs from `ui.text` so terminal rows are never identical to file rows;
-/// falls back to the default `function` blue if the theme somehow lacks all of
-/// them. `constant` is intentionally excluded — it maps to the same color the
-/// picker uses for fuzzy-match highlights.
-fn terminal_accent(theme: &HelixTheme) -> RgbValue {
+/// always resolves to a real color. Keeps the candidates that differ from
+/// `ui.text` and from each other, so these rows are never identical to file rows
+/// or to another kind; the default blue, green and mauve stand in for what the
+/// theme lacks. `constant` is intentionally excluded — it maps to the same color
+/// the picker uses for fuzzy-match highlights.
+fn row_accents(theme: &HelixTheme) -> RowAccents {
     let text = theme.ui_fg("ui.text");
-    ["function", "string", "keyword", "type"]
+    let defaults = [
+        RgbValue::from_u8(137, 180, 250),
+        RgbValue::from_u8(166, 227, 161),
+        RgbValue::from_u8(203, 166, 247),
+    ];
+    let mut distinct: Vec<RgbValue> = Vec::with_capacity(3);
+    for color in ["function", "string", "keyword", "type"]
         .into_iter()
         .filter_map(|scope| theme.color_for_scope(scope))
-        .find(|color| Some(*color) != text)
-        .unwrap_or(RgbValue::from_u8(137, 180, 250))
+        .chain(defaults)
+    {
+        if Some(color) != text && !distinct.contains(&color) {
+            distinct.push(color);
+        }
+    }
+    let pick = |index: usize| distinct.get(index).copied().unwrap_or(defaults[index]);
+    RowAccents {
+        terminal: pick(0),
+        agent: pick(1),
+        git: pick(2),
+    }
 }
 
 fn run_file_name_match(
@@ -305,7 +334,14 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
                             state.terminal_grabbed = !scrolled;
                             crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
                         }
-                        _ => {}
+                        Window::GitLog(_)
+                        | Window::CommitDiff(_)
+                        | Window::ConversationTree
+                        | Window::Discussion(_) => {
+                            state.pane_manager.push_window(window);
+                            state.pane_manager.focused_window = Some(window);
+                        }
+                        Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => {}
                     }
                 }
                 state.pane_manager.remove_window(&Window::WindowPicker);
@@ -320,16 +356,9 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
             .input_line
             .handle_key(&input_event, &mut global_data.state.window_picker.query)
         {
-            let state = &mut global_data.state;
-            if state.window_picker.query.is_empty() {
-                let snapshot = state.files.load();
-                state.window_picker.results = WindowPickerComponent::open_windows_results(
-                    &snapshot,
-                    &state.pane_manager.window_stack,
-                );
-            } else {
+            if !global_data.state.window_picker.query.is_empty() {
                 let main_tx = global_data.main_thread_channel_sender.clone();
-                self.on_query_changed(&*state, main_tx);
+                self.on_query_changed(&global_data.state, main_tx);
             }
             return Ok(EventPropagation::ConsumedRender);
         }
@@ -366,6 +395,15 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
                 return Ok(());
             }
 
+            // Windows open and close while the picker stays up; an empty query lists them.
+            let state = &mut global_data.state;
+            if state.window_picker.query.is_empty() {
+                let snapshot = state.files.load();
+                state.window_picker.results =
+                    Self::open_windows_results(&snapshot, &state.pane_manager.window_stack);
+            }
+
+            let accents = row_accents(&global_data.state.theme);
             let result_ops = self.picker.render_results(
                 &global_data.state,
                 &global_data.state.window_picker,
@@ -384,11 +422,30 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
                             .with_terminal(*id, |p| p.title.clone())
                             .flatten()
                             .unwrap_or_else(|| format!("Terminal {id}"));
-                        // Render terminals in a distinct theme color (+ bold) so
-                        // they stand out from file paths.
-                        (title, Some(terminal_accent(&state.theme)))
+                        (title, Some(accents.terminal))
                     }
-                    _ => (String::new(), None),
+                    Window::GitLog(id) => {
+                        let title = state
+                            .git_logs
+                            .get(id)
+                            .map(GitLogPaneComponent::title)
+                            .unwrap_or_default();
+                        (title, Some(accents.git))
+                    }
+                    Window::CommitDiff(id) => (
+                        CommitDiffPaneComponent::title(state, *id),
+                        Some(accents.git),
+                    ),
+                    Window::ConversationTree => (
+                        ConversationTreeComponent::TITLE.to_string(),
+                        Some(accents.agent),
+                    ),
+                    Window::Discussion(id) => {
+                        (DiscussionComponent::title(state, *id), Some(accents.agent))
+                    }
+                    Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => {
+                        (String::new(), None)
+                    }
                 },
             );
             let result_count = global_data.state.window_picker.results.len();

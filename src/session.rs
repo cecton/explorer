@@ -448,14 +448,6 @@ impl Session {
             }
         }
         state.next_palette_index = state.symbol_highlights.len() % SYMBOL_PALETTE.len();
-
-        if state
-            .pane_manager
-            .window_stack
-            .contains(&Window::WindowPicker)
-        {
-            state.recompute_window_picker_results();
-        }
     }
 }
 

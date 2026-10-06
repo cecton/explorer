@@ -8,7 +8,6 @@ use crate::session::TerminalRestoreInfo;
 use crate::tui::RgbValue;
 use crate::tui::pane_manager::{DocPart, PaneManager, TextSelection, Window};
 use crate::tui::theme::HelixTheme;
-use crate::tui::window_picker::WindowPickerComponent;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
@@ -547,10 +546,6 @@ impl AppState {
         self.session_dirty_at = Some(Instant::now());
     }
 
-    pub fn recompute_window_picker_results(&mut self) {
-        self.window_picker.results = WindowPickerComponent::compute_results(self);
-    }
-
     pub fn with_terminal<R>(&self, id: usize, f: impl FnOnce(&TerminalPane) -> R) -> Option<R> {
         self.terminal_panes.get(&id).map(|p| f(&p.lock()))
     }
@@ -635,7 +630,6 @@ impl AppState {
             keymap,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
         };
-        state.recompute_window_picker_results();
 
         let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
             .map(|n| (n.to_string(), Vec::new()))

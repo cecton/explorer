@@ -707,11 +707,6 @@ impl App for AppMain {
                     state.pane_manager.focused_window = Some(Window::WindowPicker);
                     notify_terminal_focus_change(state, old, Some(Window::WindowPicker));
                     state.window_picker.selected = None;
-                    let snapshot = state.files.load();
-                    state.window_picker.results = WindowPickerComponent::open_windows_results(
-                        &snapshot,
-                        &state.pane_manager.window_stack,
-                    );
                     state.window_picker.query = String::new();
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -1138,17 +1133,14 @@ impl App for AppMain {
                         .pane_manager
                         .window_stack
                         .contains(&Window::WindowPicker)
+                        && !state.window_picker.query.is_empty()
                     {
-                        if state.window_picker.query.is_empty() {
-                            state.recompute_window_picker_results();
-                        } else {
-                            WindowPickerComponent::spawn_match(
-                                &*state,
-                                Arc::clone(&self.picker_generation),
-                                self.picker_results_tx.clone(),
-                                global_data.main_thread_channel_sender.clone(),
-                            );
-                        }
+                        WindowPickerComponent::spawn_match(
+                            &*state,
+                            Arc::clone(&self.picker_generation),
+                            self.picker_results_tx.clone(),
+                            global_data.main_thread_channel_sender.clone(),
+                        );
                     }
 
                     // Invalidate symbol highlight groups when files change.
