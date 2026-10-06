@@ -12,6 +12,9 @@ pub struct Span {
     pub italic: bool,
     pub underline: bool,
     pub strikethrough: bool,
+    /// Byte offset in the source where `text` is found as is; `None` for what the
+    /// renderer adds (markers, padding, borders) or rewrites (entities).
+    pub src: Option<usize>,
 }
 
 impl Span {
@@ -23,6 +26,7 @@ impl Span {
             italic: false,
             underline: false,
             strikethrough: false,
+            src: None,
         }
     }
 
@@ -34,6 +38,16 @@ impl Span {
             italic: style.italic,
             underline: style.underline,
             strikethrough: style.strikethrough,
+            src: None,
+        }
+    }
+
+    /// Whether text found at `src` directly follows this span's text in the source.
+    fn continued_by(&self, src: Option<usize>) -> bool {
+        match (self.src, src) {
+            (Some(start), Some(next)) => start + self.text.len() == next,
+            (None, None) => true,
+            _ => false,
         }
     }
 
@@ -80,11 +94,25 @@ impl InlineStyle {
     }
 }
 
-fn push_run(line: &mut Vec<Span>, text: &str, style: InlineStyle) {
+fn push_run(line: &mut Vec<Span>, text: &str, style: InlineStyle, src: Option<usize>) {
     match line.last_mut() {
-        Some(last) if last.same_style(style) => last.text.push_str(text),
-        _ => line.push(Span::of(text, style)),
+        Some(last) if last.same_style(style) && last.continued_by(src) => last.text.push_str(text),
+        _ => line.push(Span {
+            src,
+            ..Span::of(text, style)
+        }),
     }
+}
+
+/// The lines of `text`, each with its byte offset in `text`.
+fn lines_with_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
+    let mut offset = 0;
+    text.split_inclusive('\n').map(move |raw| {
+        let start = offset;
+        offset += raw.len();
+        let line = raw.strip_suffix('\n').unwrap_or(raw);
+        (start, line.strip_suffix('\r').unwrap_or(line))
+    })
 }
 
 struct ItemCtx {
@@ -126,7 +154,9 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
     let mut r = Renderer::new(theme, width);
     let options =
         Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
-    for event in Parser::new_ext(source, options) {
+    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+        let verbatim =
+            |text: &str| (source.get(range.clone()) == Some(text)).then_some(range.start);
         match event {
             Event::Start(Tag::Paragraph) => {}
             Event::End(TagEnd::Paragraph) => {
@@ -237,16 +267,20 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
             // The alt text of an image renders inline as plain text.
             Event::Start(Tag::Image { .. }) => r.start_style(r.style),
             Event::End(TagEnd::Image) => r.end_style(),
-            Event::Text(text) if r.code_bg.is_some() => r.push_code_lines(&text),
-            Event::Text(text) => r.push_content(&text, r.style),
+            Event::Text(text) if r.code_bg.is_some() => r.push_code_lines(&text, verbatim(&text)),
+            Event::Text(text) => r.push_content(&text, r.style, verbatim(&text)),
             Event::Code(text) => r.push_content(
                 &text,
                 InlineStyle {
                     fg: r.fg("markup.raw"),
                     ..r.style
                 },
+                source
+                    .get(range.clone())
+                    .and_then(|code| code.find(&*text))
+                    .map(|at| range.start + at),
             ),
-            Event::SoftBreak => r.push_content(" ", r.style),
+            Event::SoftBreak => r.push_content(" ", r.style, None),
             Event::HardBreak => r.flush_content(),
             Event::Rule => {
                 let style = InlineStyle {
@@ -261,9 +295,9 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
             }
             Event::InlineHtml(text) if r.table.is_some() => {
                 if is_line_break_tag(&text) {
-                    r.push_content(" ", r.style);
+                    r.push_content(" ", r.style, None);
                 } else {
-                    r.push_content(&text, r.style);
+                    r.push_content(&text, r.style, verbatim(&text));
                 }
             }
             Event::Html(text) | Event::InlineHtml(text) => {
@@ -271,9 +305,13 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                     fg: r.fg("comment"),
                     ..r.plain
                 };
-                for line in text.lines() {
+                let src = verbatim(&text);
+                for (at, line) in lines_with_offsets(&text) {
                     r.lines.push(MdLine {
-                        spans: vec![Span::of(line, style)],
+                        spans: vec![Span {
+                            src: src.map(|start| start + at),
+                            ..Span::of(line, style)
+                        }],
                         bg: None,
                     });
                 }
@@ -283,7 +321,7 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                     fg: r.fg("comment"),
                     ..r.plain
                 };
-                r.push_content(&format!("[{name}]"), style);
+                r.push_content(&format!("[{name}]"), style, None);
             }
             _ => {}
         }
@@ -397,11 +435,11 @@ impl Renderer<'_> {
         item.marker_width = display_width(glyph);
     }
 
-    fn push_content(&mut self, text: &str, style: InlineStyle) {
-        push_run(&mut self.content, text, style);
+    fn push_content(&mut self, text: &str, style: InlineStyle, src: Option<usize>) {
+        push_run(&mut self.content, text, style, src);
     }
 
-    fn push_code_lines(&mut self, text: &str) {
+    fn push_code_lines(&mut self, text: &str, src: Option<usize>) {
         let Some(bg) = self.code_bg else {
             return;
         };
@@ -409,9 +447,12 @@ impl Renderer<'_> {
             fg: self.fg("markup.raw"),
             ..self.plain
         };
-        for line in text.lines() {
+        for (at, line) in lines_with_offsets(text) {
             self.lines.push(MdLine {
-                spans: vec![Span::of(truncate(line, self.width), style)],
+                spans: vec![Span {
+                    src: src.map(|start| start + at),
+                    ..Span::of(truncate(line, self.width), style)
+                }],
                 bg: Some(bg),
             });
         }
@@ -608,9 +649,16 @@ impl Renderer<'_> {
                 out.push(vec![Span::of("─".repeat(width), rule_style)]);
             }
             for (label, cell) in head.iter().zip(row) {
-                let mut content = label.clone();
+                // A header repeated on every record is no longer one place in the source.
+                let mut content: Vec<Span> = label
+                    .iter()
+                    .map(|span| Span {
+                        src: None,
+                        ..span.clone()
+                    })
+                    .collect();
                 if !label.is_empty() {
-                    push_run(&mut content, ": ", label_style);
+                    push_run(&mut content, ": ", label_style, None);
                 }
                 content.extend(cell.iter().cloned());
                 if content.is_empty() {
@@ -664,20 +712,18 @@ fn wrap_spans(
         let word_width: usize = word.iter().map(|s| display_width(&s.text)).sum();
         let sep = usize::from(!line.is_empty());
         if used + sep + word_width <= eff {
-            if sep == 1 {
-                let next_style = InlineStyle::of(&word[0]);
-                let merge = line.last().is_some_and(|last| last.same_style(next_style));
-                if merge {
-                    if let Some(last) = line.last_mut() {
-                        last.text.push(' ');
-                    }
-                } else if let Some(last) = line.last() {
-                    let sep_style = InlineStyle::of(last);
-                    line.push(Span::of(" ", sep_style));
-                }
+            if sep == 1
+                && let Some(last) = line.last()
+            {
+                // The space stands for the source byte between two words one byte apart.
+                let style = InlineStyle::of(last);
+                let end = last.src.map(|start| start + last.text.len());
+                let adjoining = end.is_some_and(|end| word[0].src == Some(end + 1));
+                let src = end.filter(|_| adjoining && last.same_style(InlineStyle::of(&word[0])));
+                push_run(&mut line, " ", style, src);
             }
             for run in word {
-                push_run(&mut line, &run.text, InlineStyle::of(run));
+                push_run(&mut line, &run.text, InlineStyle::of(run), run.src);
             }
             used += sep + word_width;
         } else if word_width > eff {
@@ -686,20 +732,21 @@ fn wrap_spans(
                 used = 0;
             }
             for run in word {
-                for grapheme in run.text.graphemes(true) {
+                for (at, grapheme) in run.text.grapheme_indices(true) {
                     let w = display_width(grapheme);
                     if used + w > eff && used > 0 {
                         lines.push(std::mem::take(&mut line));
                         used = 0;
                     }
-                    push_run(&mut line, grapheme, InlineStyle::of(run));
+                    let src = run.src.map(|start| start + at);
+                    push_run(&mut line, grapheme, InlineStyle::of(run), src);
                     used += w;
                 }
             }
         } else {
             lines.push(std::mem::take(&mut line));
             for run in word {
-                push_run(&mut line, &run.text, InlineStyle::of(run));
+                push_run(&mut line, &run.text, InlineStyle::of(run), run.src);
             }
             used = word_width;
         }
@@ -728,13 +775,14 @@ fn split_words(content: &[Span]) -> Vec<Vec<Span>> {
     let mut words: Vec<Vec<Span>> = Vec::new();
     let mut word: Vec<Span> = Vec::new();
     for span in content {
-        for grapheme in span.text.graphemes(true) {
+        for (at, grapheme) in span.text.grapheme_indices(true) {
             if grapheme.chars().all(char::is_whitespace) {
                 if !word.is_empty() {
                     words.push(std::mem::take(&mut word));
                 }
             } else {
-                push_run(&mut word, grapheme, InlineStyle::of(span));
+                let src = span.src.map(|start| start + at);
+                push_run(&mut word, grapheme, InlineStyle::of(span), src);
             }
         }
     }
@@ -1008,6 +1056,75 @@ mod tests {
         let lines = render_md("one\n\ntwo", 10);
         let texts: Vec<String> = lines.iter().map(text).collect();
         assert_eq!(texts, ["one", "", "two"]);
+    }
+
+    fn anchors(line: &MdLine) -> Vec<(&str, Option<usize>)> {
+        line.spans
+            .iter()
+            .map(|span| (span.text.as_str(), span.src))
+            .collect()
+    }
+
+    #[test]
+    fn anchored_spans_are_found_in_the_source_at_their_offset() {
+        let src = "# Title with `code`\n\nSome **bold** and *it* text, a [link](http://x.y/z) and\nsoft break. AT&amp;T a\\*b.\n\n- item `one`\n- item two\n  continued\n\n> quote line\n> more\n\n```rust\nfn main() {\n    let x = 1;\n}\n```\n\n1. first\n   ```sh\n   cargo fmt\n   ```\n\n| A | B |\n|---|---|\n| `x` | y **z** |\n";
+        for width in 1..=60 {
+            let mut anchored = String::new();
+            for line in render_md(src, width) {
+                for span in &line.spans {
+                    let Some(at) = span.src else {
+                        continue;
+                    };
+                    let found = &src[at..at + span.text.len()];
+                    assert_eq!(found.replace('\n', " "), span.text, "width {width}");
+                    anchored.push_str(&span.text);
+                }
+            }
+            // Code lines are cut to the width, so a narrow pane drops the end of them.
+            let words = ["Title", "code", "bold", "link", "continued", "quote"];
+            for word in words.iter().chain((width >= 12).then_some(&"cargo")) {
+                assert!(
+                    anchored.contains(word),
+                    "width {width}: {word} lost its offset"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn words_one_byte_apart_stay_one_span_until_they_wrap() {
+        assert_eq!(
+            anchors(&render_md("alpha beta", 40)[0]),
+            [("alpha beta", Some(0))]
+        );
+        let lines = render_md("alpha beta", 5);
+        assert_eq!(anchors(&lines[0]), [("alpha", Some(0))]);
+        assert_eq!(anchors(&lines[1]), [("beta", Some(6))]);
+    }
+
+    #[test]
+    fn markers_separators_and_entities_have_no_source_offset() {
+        assert_eq!(
+            anchors(&render_md("- one **two**", 40)[0]),
+            [
+                ("• ", None),
+                ("one", Some(2)),
+                (" ", None),
+                ("two", Some(8))
+            ]
+        );
+        assert_eq!(
+            anchors(&render_md("AT&amp;T", 40)[0]),
+            [("AT", Some(0)), ("&", None), ("T", Some(7))]
+        );
+    }
+
+    #[test]
+    fn code_block_lines_keep_the_offset_of_each_line() {
+        let lines = render_md("```\none\n\n  two\n```", 40);
+        assert_eq!(anchors(&lines[0]), [("one", Some(4))]);
+        assert_eq!(anchors(&lines[1]), [("", Some(8))]);
+        assert_eq!(anchors(&lines[2]), [("  two", Some(9))]);
     }
 
     #[test]

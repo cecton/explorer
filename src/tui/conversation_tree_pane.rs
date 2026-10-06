@@ -248,6 +248,7 @@ impl ConversationTreeComponent {
         };
         for id in &removed {
             state.tree_view.expanded.remove(id);
+            state.discussion_highlights.remove(id);
         }
         let closed: Vec<usize> = state
             .discussions
@@ -580,7 +581,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     continue;
                 }
                 let start = lines.len();
-                for (i, text) in wrap(node.display_title(), text_width)
+                for (i, (_, text)) in wrap(node.display_title(), text_width)
                     .into_iter()
                     .enumerate()
                 {
@@ -597,7 +598,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 if let Some(summary) = node.summary.as_deref()
                     && summary != node.display_title()
                 {
-                    for text in wrap(summary, text_width) {
+                    for (_, text) in wrap(summary, text_width) {
                         lines.push(Line {
                             row: row_idx,
                             kind: LineKind::Summary,

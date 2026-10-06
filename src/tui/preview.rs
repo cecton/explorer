@@ -1349,7 +1349,7 @@ const MIN_FG_BG_CONTRAST: f32 = 100.0;
 /// every span so it transparently covers symbol-highlight and selection overlay
 /// backgrounds (`overlay_interval` in `render()`) as well as the normal pane
 /// background, without either call site needing to know which case it is.
-fn ensure_readable_fg(fg: RgbValue, bg: RgbValue) -> RgbValue {
+pub(super) fn ensure_readable_fg(fg: RgbValue, bg: RgbValue) -> RgbValue {
     if (luminance(fg) - luminance(bg)).abs() >= MIN_FG_BG_CONTRAST {
         return fg;
     }

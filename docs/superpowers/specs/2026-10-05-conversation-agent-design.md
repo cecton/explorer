@@ -614,7 +614,7 @@ suggests `/compact` from the parent node.
     bar shows the count; a second `Ctrl+D` on the same node deletes. Any other key or a
     selection change disarms.
 - **Deletion** removes the directories and closes Discussion windows showing deleted
-  nodes. Commits and stashes are not touched. A running node and its ancestors cannot be
+  nodes; their highlights go with them. Commits and stashes are not touched. A running node and its ancestors cannot be
   deleted.
 
 ### 11.2 Discussion window
@@ -652,6 +652,18 @@ window holds its node's prompt, reply and work log in memory only while it is op
   streams below, the input is empty. The previous node is reachable through the tree
   only.
 - Sending from a node that already has children forks silently.
+- Mouse, over the prompt, the work log and the reply, with the gestures of the file
+  preview. A drag starts on the word under the click and extends to the word under the
+  cursor, across rows too: it never takes whole lines. It stays in the text it started
+  in.
+  - Drag — select; on release the selection is copied to the clipboard and cleared. What
+    is copied is the source text (`prompt.md`, `reply.md`), so a wrapped paragraph is one
+    line and Markdown markup inside the selection comes along.
+  - `Shift`+drag — add a highlight. `Ctrl`+drag — remove what it covers.
+  - Highlights are byte ranges of the node's prompt and reply, kept per node and saved
+    in the session, so they survive a resize, closing the window and a restart. They
+    are refused while the node's turn runs (its reply is still changing) and on the work
+    log, and dropped when the node is deleted or run again in place.
 - Keys:
   - `Enter` — send.
   - `Shift+Enter` — insert a newline.
@@ -698,7 +710,7 @@ picker was opened:
   variants.
 - `Action::OpenConversations`, slug `open-conversations`, default `<leader>c`.
 - Session: `PaneEntry::ConversationTree`; `PaneEntry::Discussion { node, draft, mode }`;
-  expanded set. No model is saved. The Model Picker is not saved. `SESSION_VERSION`
+  expanded set; the highlights of nodes, by node id. No model is saved. The Model Picker is not saved. `SESSION_VERSION`
   3 → 4.
 - New dependencies: `genai`; `reqwest` for the model-list fetch, which genai only does
   against a provider's default endpoint; `futures-util` to read genai's stream;

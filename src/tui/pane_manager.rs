@@ -33,6 +33,14 @@ pub enum Window {
     ModelPicker,
 }
 
+/// One of the texts a Discussion window shows, in the order it shows them.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DocPart {
+    Prompt,
+    WorkLog,
+    Reply,
+}
+
 /// A point in a window's content used as a text-selection anchor or endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SelPoint {
@@ -49,6 +57,13 @@ pub enum SelPoint {
         viewport_row: usize,
         /// Zero-based column within that row.
         col: usize,
+    },
+    /// Point inside a Discussion window.
+    Discussion {
+        /// Text the point lies in.
+        part: DocPart,
+        /// Byte offset within that text.
+        offset: usize,
     },
 }
 

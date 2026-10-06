@@ -2,27 +2,25 @@ use crate::agent::commands::{self, Expansion};
 use crate::agent::turn::{self, TurnRequest};
 use crate::agent::{Mode, ModelSpec};
 use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
+use crate::loader::word_bounds;
 use crate::tui::markdown;
+use crate::tui::pane_component::drag_modifier_from_mouse;
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
+use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
+use unicode_segmentation::UnicodeSegmentation;
 
 const SCROLL_STEP: usize = 3;
 
 type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DocKind {
-    Prompt,
-    Gap,
-    WorkLog,
-    Reply,
-}
-
 struct DocLine {
-    kind: DocKind,
+    /// Text the line shows a piece of; `None` for the blank line between two of them.
+    part: Option<DocPart>,
+    /// Each span's `src` is a byte offset in the text of `part`.
     spans: Vec<markdown::Span>,
     /// Set on code block lines, painted instead of the surrounding background.
     bg: Option<RgbValue>,
@@ -40,6 +38,38 @@ struct DocCache {
     lines: Vec<DocLine>,
 }
 
+impl DocCache {
+    /// Whether the lines were laid out from the texts `discussion` holds now.
+    fn shows(&self, window_id: usize, discussion: &DiscussionState) -> bool {
+        self.window_id == window_id
+            && self.prompt_len == discussion.prompt.len()
+            && self.reply_len == discussion.reply.len()
+            && self.work_log_len == discussion.work_log.len()
+    }
+}
+
+enum DragKind {
+    /// A plain drag: a selection, copied when the button is released.
+    Select,
+    /// A Shift or Ctrl drag: adds to or removes from the highlights `node` had when the
+    /// drag began.
+    Highlight {
+        modifier: DragModifier,
+        node: NodeId,
+        snapshot: Vec<(usize, usize)>,
+    },
+}
+
+/// A mouse drag over the document, from the word under the first click.
+struct Drag {
+    window_id: usize,
+    kind: DragKind,
+    part: DocPart,
+    /// Byte offset under the click, and the word around it.
+    anchor: usize,
+    word: (usize, usize),
+}
+
 pub struct DiscussionComponent {
     id: FlexBoxId,
     window_id: usize,
@@ -47,6 +77,12 @@ pub struct DiscussionComponent {
     input: InputLine,
     /// Window the input cursor belongs to; another window's draft resets it.
     input_window: Option<usize>,
+    /// Screen row and column of the document area at last render, and its height, used
+    /// for mouse event handling.
+    doc_origin: (usize, usize),
+    doc_rows: usize,
+    doc_width: usize,
+    drag: Option<Drag>,
 }
 
 /// What a turn is asked to do.
@@ -180,6 +216,7 @@ pub(crate) fn start_turn(
                     };
                 })
                 .map_err(|e| format!("could not restart the node: {e}"))?;
+                state.discussion_highlights.remove(&node);
                 node
             }
             None => tree
@@ -274,6 +311,144 @@ fn lock_refusal(running: &[Mode]) -> Option<&'static str> {
     (!running.is_empty()).then_some("another turn is running; wait for it to finish")
 }
 
+/// The text of `part`, as the offsets of a [`DocLine`] index it. The work log entries
+/// are joined by a newline.
+fn part_text(discussion: &DiscussionState, part: DocPart) -> Cow<'_, str> {
+    match part {
+        DocPart::Prompt => Cow::Borrowed(&discussion.prompt),
+        DocPart::WorkLog => Cow::Owned(discussion.work_log.join("\n")),
+        DocPart::Reply => Cow::Borrowed(&discussion.reply),
+    }
+}
+
+/// Source offset of the cell at `col` of a row. A cell the source has no place for
+/// (marker, padding, border) or a column past the text stands for the nearest cell
+/// before it, or else after it.
+fn offset_at(spans: &[markdown::Span], col: usize) -> Option<usize> {
+    let mut found = None;
+    let mut x = 0;
+    for span in spans {
+        for (at, grapheme) in span.text.grapheme_indices(true) {
+            if let Some(src) = span.src {
+                if x > col {
+                    return found.or(Some(src + at));
+                }
+                found = Some(src + at);
+            }
+            x += display_width(grapheme);
+        }
+    }
+    found
+}
+
+/// The text and source offset under `row` and `col` of the document. A row without
+/// text (blank line, rule) stands for the end of the text above it, or else the start
+/// of the text below.
+fn locate(lines: &[DocLine], row: usize, col: usize) -> Option<(DocPart, usize)> {
+    let last = lines.len().checked_sub(1)?;
+    let (row, col) = if row > last {
+        (last, usize::MAX)
+    } else {
+        (row, col)
+    };
+    let on = |line: &DocLine, col: usize| Some((line.part?, offset_at(&line.spans, col)?));
+    on(&lines[row], col)
+        .or_else(|| {
+            lines[..row]
+                .iter()
+                .rev()
+                .find_map(|line| on(line, usize::MAX))
+        })
+        .or_else(|| lines[row + 1..].iter().find_map(|line| on(line, 0)))
+}
+
+/// Range covered by a drag from `word`, clicked at `anchor`, to the word under
+/// `cursor`: whole words at both ends, whatever the rows they are on.
+fn drag_range(text: &str, anchor: usize, word: (usize, usize), cursor: usize) -> (usize, usize) {
+    let (start, end) = word_bounds(text, cursor);
+    if cursor >= anchor {
+        (word.0, end.max(word.1))
+    } else {
+        (start.min(word.0), word.1)
+    }
+}
+
+/// `ranges` with `lo..hi` added, overlapping and touching ranges merged.
+fn add_range(ranges: &[(usize, usize)], lo: usize, hi: usize) -> Vec<(usize, usize)> {
+    let mut all = ranges.to_vec();
+    all.push((lo, hi));
+    all.sort_unstable();
+    let mut merged: Vec<(usize, usize)> = Vec::with_capacity(all.len());
+    for (start, end) in all {
+        match merged.last_mut() {
+            Some(last) if start <= last.1 => last.1 = last.1.max(end),
+            _ => merged.push((start, end)),
+        }
+    }
+    merged
+}
+
+/// `ranges` with `lo..hi` removed, splitting the ranges it cuts through.
+fn remove_range(ranges: &[(usize, usize)], lo: usize, hi: usize) -> Vec<(usize, usize)> {
+    let mut kept = Vec::with_capacity(ranges.len() + 1);
+    for &(start, end) in ranges {
+        if start < lo.min(end) {
+            kept.push((start, lo.min(end)));
+        }
+        if hi.max(start) < end {
+            kept.push((hi.max(start), end));
+        }
+    }
+    kept
+}
+
+/// A run of cells of one span that are all marked (selected or highlighted) or all not.
+struct Piece<'a> {
+    text: &'a str,
+    span: &'a markdown::Span,
+    marked: bool,
+}
+
+/// Cuts the spans of a row where `marked` source ranges begin and end. Cells the source
+/// has no place for are marked when the text on both sides of them is.
+fn row_pieces<'a>(spans: &'a [markdown::Span], marked: &[(usize, usize)]) -> Vec<Piece<'a>> {
+    let mut runs: Vec<(&str, &markdown::Span, Option<bool>)> = Vec::with_capacity(spans.len());
+    for span in spans {
+        let Some(src) = span.src.filter(|_| !marked.is_empty()) else {
+            runs.push((&span.text, span, span.src.map(|_| false)));
+            continue;
+        };
+        let mut start = 0;
+        let mut state = None;
+        for (at, _) in span.text.grapheme_indices(true) {
+            let hit = marked
+                .iter()
+                .any(|&(lo, hi)| (lo..hi).contains(&(src + at)));
+            if state.is_some_and(|state| state != hit) {
+                runs.push((&span.text[start..at], span, state));
+                start = at;
+            }
+            state = Some(hit);
+        }
+        if start < span.text.len() {
+            runs.push((&span.text[start..], span, state));
+        }
+    }
+    let states: Vec<Option<bool>> = runs.iter().map(|run| run.2).collect();
+    runs.into_iter()
+        .enumerate()
+        .map(|(i, (text, span, state))| Piece {
+            text,
+            span,
+            marked: state.unwrap_or_else(|| {
+                let before = states[..i].iter().rev().find_map(|state| *state);
+                let after = states[i + 1..].iter().find_map(|state| *state);
+                before == Some(true) && after == Some(true)
+            }),
+        })
+        .collect()
+}
+
 fn now_secs() -> i64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -293,11 +468,199 @@ impl DiscussionComponent {
             cache: None,
             input: InputLine::new(),
             input_window: None,
+            doc_origin: (0, 0),
+            doc_rows: 0,
+            doc_width: 0,
+            drag: None,
         }
     }
 
     pub fn set_window_id(&mut self, window_id: usize) {
         self.window_id = window_id;
+    }
+
+    fn in_doc(&self, pos: Pos) -> bool {
+        let (origin_row, origin_col) = self.doc_origin;
+        let row = pos.row_index.as_usize();
+        let col = pos.col_index.as_usize();
+        (origin_row..origin_row + self.doc_rows).contains(&row)
+            && (origin_col..origin_col + self.doc_width).contains(&col)
+    }
+
+    /// The text and source offset under a screen position, clamped to the document area.
+    fn locate(
+        &self,
+        state: &AppState,
+        discussion: &DiscussionState,
+        window_id: usize,
+        pos: Pos,
+    ) -> Option<(DocPart, usize)> {
+        let cache = self
+            .cache
+            .as_ref()
+            .filter(|cache| cache.shows(window_id, discussion))?;
+        let (origin_row, origin_col) = self.doc_origin;
+        let row = pos
+            .row_index
+            .as_usize()
+            .saturating_sub(origin_row)
+            .min(self.doc_rows.saturating_sub(1));
+        let col = pos.col_index.as_usize().saturating_sub(origin_col);
+        let scroll = state
+            .pane_manager
+            .window_scroll(&Window::Discussion(window_id));
+        locate(&cache.lines, scroll + row, col)
+    }
+
+    /// Starts a drag on the word under the mouse: a selection, or with Shift or Ctrl a
+    /// change to the highlights of the node shown.
+    fn begin_drag(&mut self, state: &mut AppState, mouse: &MouseInput) {
+        let id = self.window_id;
+        let Some(discussion) = state.discussions.get(&id) else {
+            return;
+        };
+        let Some((part, anchor)) = self.locate(state, discussion, id, mouse.pos) else {
+            return;
+        };
+        let text = part_text(discussion, part);
+        if anchor >= text.len() || !text.is_char_boundary(anchor) {
+            return;
+        }
+        let word = word_bounds(&text, anchor);
+        let kind = match (drag_modifier_from_mouse(mouse), &discussion.node) {
+            (Some(modifier), Some(node)) => {
+                let refusal = if part == DocPart::WorkLog {
+                    Some("the work log cannot be highlighted")
+                } else if state.running_turns.contains_key(node) {
+                    Some("highlights are available once the turn is done")
+                } else {
+                    None
+                };
+                if let Some(reason) = refusal {
+                    if let Some(discussion) = state.discussions.get_mut(&id) {
+                        discussion.notice = Some(reason.to_string());
+                    }
+                    return;
+                }
+                DragKind::Highlight {
+                    modifier,
+                    node: node.clone(),
+                    snapshot: state
+                        .discussion_highlights
+                        .get(node)
+                        .map(|highlights| highlights.part(part).to_vec())
+                        .unwrap_or_default(),
+                }
+            }
+            _ => {
+                let point = |offset| SelPoint::Discussion { part, offset };
+                state.text_selection = Some(TextSelection {
+                    window: Window::Discussion(id),
+                    start: point(word.0),
+                    end: point(word.0),
+                    click_anchor: Some(point(anchor)),
+                    click_word: Some((point(word.0), point(word.1))),
+                    active: true,
+                });
+                DragKind::Select
+            }
+        };
+        self.drag = Some(Drag {
+            window_id: id,
+            kind,
+            part,
+            anchor,
+            word,
+        });
+        state.mouse_drag_active = true;
+    }
+
+    /// Extends the drag to the word under the mouse. A drag never leaves the text it
+    /// began in: past it, it reaches that text's start or end.
+    fn update_drag(&mut self, state: &mut AppState, pos: Pos) {
+        let Some(drag) = &self.drag else {
+            return;
+        };
+        let Some(discussion) = state.discussions.get(&drag.window_id) else {
+            return;
+        };
+        let text = part_text(discussion, drag.part);
+        let (lo, hi) = match self.locate(state, discussion, drag.window_id, pos) {
+            Some((part, cursor)) if part == drag.part => {
+                if cursor >= text.len() || !text.is_char_boundary(cursor) {
+                    return;
+                }
+                drag_range(&text, drag.anchor, drag.word, cursor)
+            }
+            Some((part, _)) if part < drag.part => (0, drag.word.1),
+            Some(_) => (drag.word.0, text.len()),
+            None => return,
+        };
+        match &drag.kind {
+            DragKind::Select => {
+                if let Some(selection) = &mut state.text_selection {
+                    let part = drag.part;
+                    selection.start = SelPoint::Discussion { part, offset: lo };
+                    selection.end = SelPoint::Discussion { part, offset: hi };
+                }
+            }
+            DragKind::Highlight {
+                modifier,
+                node,
+                snapshot,
+            } => {
+                let ranges = match modifier {
+                    DragModifier::Shift => add_range(snapshot, lo, hi),
+                    DragModifier::Ctrl => remove_range(snapshot, lo, hi),
+                };
+                let highlights = state.discussion_highlights.entry(node.clone()).or_default();
+                let changed = highlights
+                    .part_mut(drag.part)
+                    .filter(|current| **current != ranges)
+                    .map(|current| *current = ranges)
+                    .is_some();
+                if highlights.is_empty() {
+                    state.discussion_highlights.remove(node);
+                }
+                if changed {
+                    state.mark_session_dirty();
+                }
+            }
+        }
+    }
+
+    /// Ends the drag; a selection is copied to the clipboard as its source text.
+    fn end_drag(&mut self, state: &mut AppState) {
+        if let Some(Drag {
+            window_id,
+            kind: DragKind::Select,
+            ..
+        }) = &self.drag
+            && let Some(TextSelection {
+                start: SelPoint::Discussion { part, offset: lo },
+                end: SelPoint::Discussion { offset: hi, .. },
+                ..
+            }) = &state.text_selection
+            && let Some(discussion) = state.discussions.get(window_id)
+        {
+            let text = part_text(discussion, *part);
+            if let Some(selected) = text.get(*lo..*hi).filter(|selected| !selected.is_empty()) {
+                let mut clipboard = r3bl_tui::SystemClipboard;
+                let _ = clipboard.try_to_put_content_into_clipboard(selected.to_string());
+            }
+        }
+        self.cancel_drag(state);
+    }
+
+    /// Drops the drag in progress, if any, and its selection.
+    pub(crate) fn cancel_drag(&mut self, state: &mut AppState) {
+        let Some(drag) = self.drag.take() else {
+            return;
+        };
+        if matches!(drag.kind, DragKind::Select) {
+            state.text_selection = None;
+        }
+        state.mouse_drag_active = false;
     }
 
     fn show(state: &mut AppState, id: usize) {
@@ -564,39 +927,45 @@ impl DiscussionComponent {
             let dim_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
             let mut lines = Vec::new();
             if discussion.node.is_some() {
-                for text in wrap(&discussion.prompt, width) {
+                for (start, text) in wrap(&discussion.prompt, width) {
                     lines.push(DocLine {
-                        kind: DocKind::Prompt,
-                        spans: vec![markdown::Span::plain(text, text_fg)],
+                        part: Some(DocPart::Prompt),
+                        spans: vec![markdown::Span {
+                            src: Some(start),
+                            ..markdown::Span::plain(text, text_fg)
+                        }],
                         bg: None,
                     });
                 }
                 lines.push(DocLine {
-                    kind: DocKind::Gap,
+                    part: None,
                     spans: Vec::new(),
                     bg: None,
                 });
                 if work_log_shown && !discussion.work_log.is_empty() {
-                    for text in discussion
-                        .work_log
-                        .iter()
-                        .flat_map(|entry| wrap(entry, width))
-                    {
-                        lines.push(DocLine {
-                            kind: DocKind::WorkLog,
-                            spans: vec![markdown::Span::plain(text, dim_fg)],
-                            bg: None,
-                        });
+                    let mut base = 0;
+                    for entry in &discussion.work_log {
+                        for (start, text) in wrap(entry, width) {
+                            lines.push(DocLine {
+                                part: Some(DocPart::WorkLog),
+                                spans: vec![markdown::Span {
+                                    src: Some(base + start),
+                                    ..markdown::Span::plain(text, dim_fg)
+                                }],
+                                bg: None,
+                            });
+                        }
+                        base += entry.len() + 1;
                     }
                     lines.push(DocLine {
-                        kind: DocKind::Gap,
+                        part: None,
                         spans: Vec::new(),
                         bg: None,
                     });
                 }
                 for md in markdown::render(&discussion.reply, theme, width) {
                     lines.push(DocLine {
-                        kind: DocKind::Reply,
+                        part: Some(DocPart::Reply),
                         spans: md.spans,
                         bg: md.bg,
                     });
@@ -766,6 +1135,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
     fn reset(&mut self) {
         self.cache = None;
         self.input_window = None;
+        self.drag = None;
     }
 
     fn get_id(&self) -> FlexBoxId {
@@ -782,6 +1152,9 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
         let state = &mut global_data.state;
         let id = self.window_id;
         let window = Window::Discussion(id);
+        if self.drag.as_ref().is_some_and(|drag| drag.window_id != id) {
+            self.cancel_drag(state);
+        }
         let Some(discussion) = state.discussions.get_mut(&id) else {
             return Ok(EventPropagation::Propagate);
         };
@@ -856,6 +1229,30 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::PageDown),
             }) => scroll + page,
+            InputEvent::Mouse(
+                mouse @ MouseInput {
+                    kind: MouseInputKind::MouseDown(Button::Left),
+                    ..
+                },
+            ) if self.in_doc(mouse.pos) => {
+                self.begin_drag(state, mouse);
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::MouseDrag(Button::Left),
+                pos,
+                ..
+            }) if self.drag.is_some() => {
+                self.update_drag(state, *pos);
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::MouseUp(Button::Left),
+                ..
+            }) if self.drag.is_some() => {
+                self.end_drag(state);
+                return Ok(EventPropagation::ConsumedRender);
+            }
             InputEvent::Mouse(MouseInput {
                 kind: MouseInputKind::ScrollUp,
                 ..
@@ -926,6 +1323,9 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let status_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
             let error_fg = theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG);
             let (input_bg, input_fg) = title_bar_colors(focused, theme);
+            let marked_bg = theme
+                .ui_bg("ui.selection")
+                .unwrap_or(RgbValue::from_u8(50, 50, 90));
 
             let (status, alert) = status_line(state, discussion);
             let mode = discussion.mode;
@@ -987,6 +1387,50 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             input_ops +=
                 RenderOpIR::PaintTextWithAttributes(label.as_str().into(), Some(label_style));
 
+            self.doc_origin = (origin.row_index.as_usize(), origin.col_index.as_usize());
+            self.doc_rows = doc_rows;
+            self.doc_width = pane_width;
+
+            // As in the file preview, a selection in progress hides the highlights.
+            let selection = match &state.text_selection {
+                Some(TextSelection {
+                    window: selected,
+                    start:
+                        SelPoint::Discussion {
+                            part,
+                            offset: start,
+                        },
+                    end: SelPoint::Discussion { offset: end, .. },
+                    active: true,
+                    ..
+                }) if *selected == window => Some((*part, (*start.min(end), *start.max(end)))),
+                _ => None,
+            };
+            let highlights = discussion
+                .node
+                .as_ref()
+                .and_then(|node| state.discussion_highlights.get(node));
+            let marked = |part: DocPart| -> Vec<(usize, usize)> {
+                match (selection, highlights) {
+                    (Some((selected, range)), _) if selected == part => vec![range],
+                    (None, Some(highlights)) => highlights.part(part).to_vec(),
+                    _ => Vec::new(),
+                }
+            };
+            let marks = [
+                marked(DocPart::Prompt),
+                marked(DocPart::WorkLog),
+                marked(DocPart::Reply),
+            ];
+            let marks_of = |part: Option<DocPart>| -> &[(usize, usize)] {
+                match part {
+                    Some(DocPart::Prompt) => &marks[0],
+                    Some(DocPart::WorkLog) => &marks[1],
+                    Some(DocPart::Reply) => &marks[2],
+                    None => &[],
+                }
+            };
+
             let shown = work_log_shown(&state.conversations.read(), discussion);
             let lines = self.doc_lines(discussion, shown, theme, pane_width);
             let line_count = lines.len();
@@ -1002,7 +1446,8 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                              row_offset: usize,
                              spans: &[markdown::Span],
                              fg: RgbValue,
-                             bg: RgbValue| {
+                             bg: RgbValue,
+                             marked: &[(usize, usize)]| {
                 let strip_style =
                     new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
                 *ops += RenderOpCommon::MoveCursorPositionRelTo(
@@ -1015,16 +1460,20 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                     Some(strip_style),
                 );
                 let mut x = 0usize;
-                for (i, span) in spans.iter().enumerate() {
-                    let last = i + 1 == spans.len();
+                for piece in row_pieces(spans, marked) {
                     let truncated;
-                    let text: &str = if last {
-                        truncated = truncate(&span.text, pane_width.saturating_sub(x));
+                    let text: &str = if x + display_width(piece.text) > pane_width {
+                        truncated = truncate(piece.text, pane_width.saturating_sub(x));
                         truncated.as_str()
                     } else {
-                        span.text.as_str()
+                        piece.text
                     };
-                    let style = span_style(span, bg);
+                    let mut style = span_style(piece.span, bg);
+                    if piece.marked {
+                        let fg = ensure_readable_fg(piece.span.fg, marked_bg);
+                        style.color_fg = Some(TuiColor::from(fg));
+                        style.color_bg = Some(TuiColor::from(marked_bg));
+                    }
                     *ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
                         col(x as u16) + row(row_offset as u16),
@@ -1036,21 +1485,29 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             };
             for row_offset in 0..doc_rows {
                 match lines.get(scroll + row_offset) {
-                    Some(line) if line.kind == DocKind::Prompt => {
-                        paint_row(&mut render_ops, row_offset, &line.spans, text_fg, prompt_bg);
-                    }
                     Some(line) => {
-                        let bg = line.bg.unwrap_or(pane_bg);
-                        paint_row(&mut render_ops, row_offset, &line.spans, text_fg, bg);
+                        let bg = match line.part {
+                            Some(DocPart::Prompt) => prompt_bg,
+                            _ => line.bg.unwrap_or(pane_bg),
+                        };
+                        let marked = marks_of(line.part);
+                        paint_row(
+                            &mut render_ops,
+                            row_offset,
+                            &line.spans,
+                            text_fg,
+                            bg,
+                            marked,
+                        );
                     }
-                    None => paint_row(&mut render_ops, row_offset, &[], text_fg, pane_bg),
+                    None => paint_row(&mut render_ops, row_offset, &[], text_fg, pane_bg, &[]),
                 }
             }
             if status_rows > 0 {
                 let fg = if alert { error_fg } else { status_fg };
                 let text = truncate(&status, pane_width);
                 let span = [markdown::Span::plain(text, fg)];
-                paint_row(&mut render_ops, doc_rows, &span, fg, pane_bg);
+                paint_row(&mut render_ops, doc_rows, &span, fg, pane_bg, &[]);
             }
 
             state.pane_manager.set_window_page_size(&window, doc_rows);
@@ -1077,6 +1534,113 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("metadata.md"), metadata).unwrap();
         (tmp, ConversationTree::load(&root), id)
+    }
+
+    fn span(text: &str, src: Option<usize>) -> markdown::Span {
+        markdown::Span {
+            src,
+            ..markdown::Span::plain(text, RgbValue::from_u8(0, 0, 0))
+        }
+    }
+
+    fn doc_line(part: Option<DocPart>, spans: Vec<markdown::Span>) -> DocLine {
+        DocLine {
+            part,
+            spans,
+            bg: None,
+        }
+    }
+
+    #[test]
+    fn offset_at_maps_a_column_to_the_nearest_source_cell() {
+        let spans = [
+            span("• ", None),
+            span("héllo", Some(2)),
+            span(" ", None),
+            span("wörld", Some(10)),
+        ];
+        assert_eq!(offset_at(&spans, 0), Some(2));
+        assert_eq!(offset_at(&spans, 2), Some(2));
+        assert_eq!(offset_at(&spans, 4), Some(5));
+        assert_eq!(offset_at(&spans, 7), Some(7));
+        assert_eq!(offset_at(&spans, 8), Some(10));
+        assert_eq!(offset_at(&spans, 100), Some(15));
+        assert_eq!(offset_at(&[span("───", None)], 1), None);
+    }
+
+    #[test]
+    fn locate_sends_a_row_without_text_to_the_text_around_it() {
+        let lines = [
+            doc_line(Some(DocPart::Prompt), vec![span("hi", Some(0))]),
+            doc_line(None, Vec::new()),
+            doc_line(Some(DocPart::Reply), vec![span("one", Some(0))]),
+            doc_line(Some(DocPart::Reply), Vec::new()),
+            doc_line(Some(DocPart::Reply), vec![span("two", Some(5))]),
+        ];
+        assert_eq!(locate(&lines, 0, 1), Some((DocPart::Prompt, 1)));
+        assert_eq!(locate(&lines, 1, 0), Some((DocPart::Prompt, 1)));
+        assert_eq!(locate(&lines, 3, 0), Some((DocPart::Reply, 2)));
+        assert_eq!(locate(&lines, 4, 1), Some((DocPart::Reply, 6)));
+        assert_eq!(locate(&lines, 99, 0), Some((DocPart::Reply, 7)));
+        assert_eq!(locate(&lines[1..2], 0, 0), None);
+        assert_eq!(locate(&[], 0, 0), None);
+    }
+
+    #[test]
+    fn drag_range_takes_whole_words_across_lines_in_both_directions() {
+        let text = "one two\nthree four";
+        let word = word_bounds(text, 5);
+        assert_eq!(word, (4, 7));
+        assert_eq!(drag_range(text, 5, word, 5), (4, 7));
+        assert_eq!(drag_range(text, 5, word, 15), (4, 18));
+        assert_eq!(&text[4..18], "two\nthree four");
+        assert_eq!(drag_range(text, 5, word, 1), (0, 7));
+    }
+
+    #[test]
+    fn add_range_merges_overlapping_and_touching_ranges() {
+        assert_eq!(add_range(&[], 3, 6), [(3, 6)]);
+        assert_eq!(add_range(&[(0, 3), (10, 12)], 3, 6), [(0, 6), (10, 12)]);
+        assert_eq!(add_range(&[(0, 3), (10, 12)], 2, 11), [(0, 12)]);
+        assert_eq!(add_range(&[(8, 9)], 0, 2), [(0, 2), (8, 9)]);
+    }
+
+    #[test]
+    fn remove_range_trims_splits_and_drops_ranges() {
+        assert_eq!(remove_range(&[(0, 10)], 3, 6), [(0, 3), (6, 10)]);
+        assert_eq!(remove_range(&[(0, 5), (8, 12)], 4, 9), [(0, 4), (9, 12)]);
+        assert_eq!(remove_range(&[(2, 4), (6, 8)], 0, 5), [(6, 8)]);
+        assert_eq!(remove_range(&[(2, 4)], 4, 9), [(2, 4)]);
+        assert_eq!(remove_range(&[(2, 4)], 0, 2), [(2, 4)]);
+    }
+
+    #[test]
+    fn row_pieces_cut_spans_at_the_marks_and_fill_the_gaps_between_them() {
+        let spans = [span("one", Some(0)), span(" ", None), span("two", Some(8))];
+        let pieces = |marked: &[(usize, usize)]| -> Vec<(String, bool)> {
+            row_pieces(&spans, marked)
+                .iter()
+                .map(|piece| (piece.text.to_string(), piece.marked))
+                .collect()
+        };
+        let piece = |text: &str, marked: bool| (text.to_string(), marked);
+        assert_eq!(
+            pieces(&[]),
+            [piece("one", false), piece(" ", false), piece("two", false)]
+        );
+        assert_eq!(
+            pieces(&[(1, 11)]),
+            [
+                piece("o", false),
+                piece("ne", true),
+                piece(" ", true),
+                piece("two", true)
+            ]
+        );
+        assert_eq!(
+            pieces(&[(0, 3)]),
+            [piece("one", true), piece(" ", false), piece("two", false)]
+        );
     }
 
     #[test]

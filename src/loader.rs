@@ -58,94 +58,98 @@ impl FileData {
             .unwrap_or(s.len())
     }
 
-    /// Returns the byte range `(start, end)` of the "word" under `cursor_byte`.
-    ///
-    /// The definition of "word" depends on what the cursor is sitting on:
-    ///
-    /// 1. **Whitespace** — the entire contiguous run of whitespace characters
-    ///    (spaces, tabs, newlines, etc.).
-    /// 2. **URL** — if the non-whitespace span parses as a `url::Url`, the full
-    ///    URL is returned. URL boundaries are whitespace and the characters
-    ///    `"`, `)`, `]`, `}`.
-    /// 3. **Alphanumeric word** — otherwise, a run of `[A-Za-z0-9_]` characters.
-    ///
-    /// # Panics
-    ///
-    /// Panics in debug builds if `cursor_byte` is not a valid byte index into
-    /// `self.content` (i.e. `cursor_byte > self.content.len()`). Callers are
-    /// expected to keep the cursor aligned to character boundaries.
-    ///
-    /// # Edge cases
-    ///
-    /// * Empty content → `(0, 0)`.
-    /// * Cursor on punctuation that is not part of a URL → returns the single
-    ///   character at that position.
+    /// The [`word_bounds`] of the file's content under `cursor_byte`.
     pub fn word_bounds(&self, cursor_byte: usize) -> (usize, usize) {
-        let content = &self.content;
-        if content.is_empty() {
-            return (0, 0);
-        }
-        debug_assert!(
-            cursor_byte <= content.len(),
-            "cursor_byte {cursor_byte} out of bounds for content of length {}",
-            content.len()
-        );
-        let cursor_byte = cursor_byte.min(content.len() - 1);
-        let c = content[cursor_byte..].chars().next().unwrap_or('\0');
-
-        macro_rules! scan_backward {
-            ($i:ident, $char:ident => $take_while:expr) => {{
-                content[..(cursor_byte + c.len_utf8())]
-                    .char_indices()
-                    .rev()
-                    .take_while(|&($i, $char)| $take_while)
-                    .last()
-                    .map(|(i, _)| i)
-                    .unwrap_or(cursor_byte)
-            }};
-        }
-
-        macro_rules! scan_forward {
-            ($i:ident, $char:ident => $take_while:expr) => {{
-                content[cursor_byte..]
-                    .char_indices()
-                    .take_while(|&($i, $char)| $take_while)
-                    .last()
-                    .map(|(i, c)| cursor_byte + i + c.len_utf8())
-                    .unwrap_or(cursor_byte + c.len_utf8())
-            }};
-        }
-
-        if c.is_whitespace() {
-            let start = scan_backward!(_i, c => c.is_whitespace());
-            let end = scan_forward!(_i, c => c.is_whitespace());
-            (start, end)
-        } else {
-            let is_url_boundary = |c: char| c.is_whitespace() || matches!(c, '"' | ')' | ']' | '}');
-            let end = scan_forward!(_i, c => !is_url_boundary(c));
-            let mut url = None;
-            let _start = scan_backward!(i, c => {
-                let res = !is_url_boundary(c);
-                if res && content[i..end].contains("://") && url::Url::parse(&content[i..end]).is_ok() {
-                    url = Some((i, end));
-                }
-                res
-            });
-            if let Some((start, end)) = url {
-                (start, end)
-            } else {
-                let is_word = |c: char| c.is_alphanumeric() || c == '_';
-                let start = scan_backward!(_i, c => is_word(c));
-                let end = scan_forward!(_i, c => is_word(c));
-                (start, end)
-            }
-        }
+        word_bounds(&self.content, cursor_byte)
     }
 
     pub fn line_bounds(&self, line_idx: usize) -> (usize, usize) {
         let line_byte_start = self.line_starts[line_idx];
         let line = self.line(line_idx);
         (line_byte_start, line_byte_start + line.len())
+    }
+}
+
+/// Returns the byte range `(start, end)` of the "word" under `cursor_byte`.
+///
+/// The definition of "word" depends on what the cursor is sitting on:
+///
+/// 1. **Whitespace** — the entire contiguous run of whitespace characters
+///    (spaces, tabs, newlines, etc.).
+/// 2. **URL** — if the non-whitespace span parses as a `url::Url`, the full
+///    URL is returned. URL boundaries are whitespace and the characters
+///    `"`, `)`, `]`, `}`.
+/// 3. **Alphanumeric word** — otherwise, a run of `[A-Za-z0-9_]` characters.
+///
+/// # Panics
+///
+/// Panics in debug builds if `cursor_byte` is not a valid byte index into
+/// `content` (i.e. `cursor_byte > content.len()`). Callers are
+/// expected to keep the cursor aligned to character boundaries.
+///
+/// # Edge cases
+///
+/// * Empty content → `(0, 0)`.
+/// * Cursor on punctuation that is not part of a URL → returns the single
+///   character at that position.
+pub fn word_bounds(content: &str, cursor_byte: usize) -> (usize, usize) {
+    if content.is_empty() {
+        return (0, 0);
+    }
+    debug_assert!(
+        cursor_byte <= content.len(),
+        "cursor_byte {cursor_byte} out of bounds for content of length {}",
+        content.len()
+    );
+    let cursor_byte = cursor_byte.min(content.len() - 1);
+    let c = content[cursor_byte..].chars().next().unwrap_or('\0');
+
+    macro_rules! scan_backward {
+        ($i:ident, $char:ident => $take_while:expr) => {{
+            content[..(cursor_byte + c.len_utf8())]
+                .char_indices()
+                .rev()
+                .take_while(|&($i, $char)| $take_while)
+                .last()
+                .map(|(i, _)| i)
+                .unwrap_or(cursor_byte)
+        }};
+    }
+
+    macro_rules! scan_forward {
+        ($i:ident, $char:ident => $take_while:expr) => {{
+            content[cursor_byte..]
+                .char_indices()
+                .take_while(|&($i, $char)| $take_while)
+                .last()
+                .map(|(i, c)| cursor_byte + i + c.len_utf8())
+                .unwrap_or(cursor_byte + c.len_utf8())
+        }};
+    }
+
+    if c.is_whitespace() {
+        let start = scan_backward!(_i, c => c.is_whitespace());
+        let end = scan_forward!(_i, c => c.is_whitespace());
+        (start, end)
+    } else {
+        let is_url_boundary = |c: char| c.is_whitespace() || matches!(c, '"' | ')' | ']' | '}');
+        let end = scan_forward!(_i, c => !is_url_boundary(c));
+        let mut url = None;
+        let _start = scan_backward!(i, c => {
+            let res = !is_url_boundary(c);
+            if res && content[i..end].contains("://") && url::Url::parse(&content[i..end]).is_ok() {
+                url = Some((i, end));
+            }
+            res
+        });
+        if let Some((start, end)) = url {
+            (start, end)
+        } else {
+            let is_word = |c: char| c.is_alphanumeric() || c == '_';
+            let start = scan_backward!(_i, c => is_word(c));
+            let end = scan_forward!(_i, c => is_word(c));
+            (start, end)
+        }
     }
 }
 

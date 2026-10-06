@@ -1393,6 +1393,9 @@ impl App for AppMain {
                         .tree_view
                         .expanded
                         .retain(|id| tree.node(id).is_some());
+                    state
+                        .discussion_highlights
+                        .retain(|id, _| tree.node(id).is_some());
                     // Session-restored discussion windows: load their node, or close
                     // the ones whose node no longer exists.
                     let restored: Vec<(usize, bool)> = state

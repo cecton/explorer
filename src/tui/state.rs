@@ -7,7 +7,7 @@ use crate::loader::{FileKey, LoadedFile};
 use crate::session::TerminalRestoreInfo;
 use crate::tui::RgbValue;
 use crate::tui::file_name_picker::FileNamePickerComponent;
-use crate::tui::pane_manager::{PaneManager, TextSelection, Window};
+use crate::tui::pane_manager::{DocPart, PaneManager, TextSelection, Window};
 use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
@@ -303,6 +303,39 @@ pub struct DiscussionState {
     pub follow: bool,
 }
 
+/// Highlighted byte ranges (start inclusive, end exclusive) in the prompt and the reply
+/// of one node.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NodeHighlights {
+    #[serde(default)]
+    pub prompt: Vec<(usize, usize)>,
+    #[serde(default)]
+    pub reply: Vec<(usize, usize)>,
+}
+
+impl NodeHighlights {
+    pub fn part(&self, part: DocPart) -> &[(usize, usize)] {
+        match part {
+            DocPart::Prompt => &self.prompt,
+            DocPart::Reply => &self.reply,
+            DocPart::WorkLog => &[],
+        }
+    }
+
+    /// The ranges of `part`; the work log has none, it is not kept on screen.
+    pub fn part_mut(&mut self, part: DocPart) -> Option<&mut Vec<(usize, usize)>> {
+        match part {
+            DocPart::Prompt => Some(&mut self.prompt),
+            DocPart::Reply => Some(&mut self.reply),
+            DocPart::WorkLog => None,
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.prompt.is_empty() && self.reply.is_empty()
+    }
+}
+
 /// What a pick in the Model Picker applies to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ModelPickerPurpose {
@@ -465,6 +498,8 @@ pub struct AppState {
     pub discussions: HashMap<usize, DiscussionState>,
     /// Next available discussion window ID.
     pub next_discussion_id: usize,
+    /// Highlights of the nodes shown in Discussion windows, by node.
+    pub discussion_highlights: HashMap<NodeId, NodeHighlights>,
     /// Endpoints, tokens and agent settings from `config.kdl` and `auth.kdl`.
     pub agent: Arc<AgentConfig>,
     pub models: ModelCatalog,
@@ -579,6 +614,7 @@ impl AppState {
             tree_view: TreeViewState::default(),
             discussions: HashMap::new(),
             next_discussion_id: 0,
+            discussion_highlights: HashMap::new(),
             agent: Arc::default(),
             models: ModelCatalog::default(),
             last_picked_model: None,

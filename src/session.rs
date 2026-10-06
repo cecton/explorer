@@ -3,6 +3,7 @@ use crate::loader::{LoadedFile, file_key_for_path, path_for_file_key};
 use crate::tui::AppState;
 use crate::tui::DiscussionState;
 use crate::tui::GitLogWindowState;
+use crate::tui::NodeHighlights;
 use crate::tui::pane_manager::{PaneSize, Window, WindowState};
 use crate::tui::{RgbValue, SYMBOL_PALETTE, SymbolHighlightGroup};
 use camino::{Utf8Path, Utf8PathBuf};
@@ -41,6 +42,9 @@ pub struct Session {
     /// Roots and forks expanded in the Conversation Tree window.
     #[serde(default)]
     pub conversation_expanded: Vec<String>,
+    /// Highlights in the prompts and replies of conversation nodes, by node id.
+    #[serde(default)]
+    pub discussion_highlights: HashMap<String, NodeHighlights>,
 }
 
 /// Persisted symbol-highlight identity. Byte-offset locations are never saved —
@@ -187,6 +191,12 @@ impl Session {
             .collect();
         conversation_expanded.sort();
 
+        let discussion_highlights = state
+            .discussion_highlights
+            .iter()
+            .map(|(node, highlights)| (node.as_str().to_string(), highlights.clone()))
+            .collect();
+
         Self {
             version: SESSION_VERSION,
             repo_root: state.root.clone(),
@@ -198,6 +208,7 @@ impl Session {
             cargo_features: state.cargo_features.clone(),
             theme: Some(state.theme.name().to_string()),
             conversation_expanded,
+            discussion_highlights,
         }
     }
 
@@ -393,6 +404,11 @@ impl Session {
             .conversation_expanded
             .iter()
             .map(|id| NodeId::new(id))
+            .collect();
+        state.discussion_highlights = self
+            .discussion_highlights
+            .into_iter()
+            .map(|(node, highlights)| (NodeId::new(&node), highlights))
             .collect();
 
         if !new_stack.is_empty() {
@@ -685,6 +701,7 @@ mod tests {
             },
             theme: None,
             conversation_expanded: Vec::new(),
+            discussion_highlights: HashMap::new(),
         };
 
         let value = serde_json::to_value(&session).unwrap();
@@ -803,6 +820,7 @@ mod tests {
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
+            discussion_highlights: HashMap::new(),
         };
 
         session.apply(&mut state);
@@ -863,6 +881,7 @@ mod tests {
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
+            discussion_highlights: HashMap::new(),
         };
 
         session.apply(&mut state);
@@ -909,6 +928,7 @@ mod tests {
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
+            discussion_highlights: HashMap::new(),
         };
 
         session.apply(&mut state);
@@ -941,6 +961,7 @@ mod tests {
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
+            discussion_highlights: HashMap::new(),
         };
 
         session.apply(&mut state);
@@ -1006,6 +1027,7 @@ mod tests {
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
+            discussion_highlights: HashMap::new(),
         };
 
         session.apply(&mut state);
@@ -1052,6 +1074,29 @@ mod tests {
                 .expanded
                 .contains(&NodeId::new("2026-10-05T14-32-07Z"))
         );
+    }
+
+    #[test]
+    fn discussion_highlights_round_trip_through_session() {
+        let (_dir, root) = temp_root();
+        let mut state = empty_state(root.clone());
+        let node = NodeId::new("2026-10-05T14-32-07Z");
+        let highlights = NodeHighlights {
+            prompt: vec![(0, 4)],
+            reply: vec![(3, 9), (20, 31)],
+        };
+        state
+            .discussion_highlights
+            .insert(node.clone(), highlights.clone());
+
+        let session = Session::from_state(&state);
+        let json = serde_json::to_string(&session).expect("serialize session");
+        let restored: Session = serde_json::from_str(&json).expect("deserialize session");
+
+        let mut fresh = empty_state(root);
+        restored.apply(&mut fresh);
+        assert_eq!(fresh.discussion_highlights.len(), 1);
+        assert_eq!(fresh.discussion_highlights.get(&node), Some(&highlights));
     }
 
     #[test]

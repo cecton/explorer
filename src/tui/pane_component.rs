@@ -321,7 +321,7 @@ fn scroll_from_y(
     (rel_y * (scroll_max - page_size)) / (scrollbar_height.saturating_sub(1).max(1))
 }
 
-fn drag_modifier_from_mouse(mouse: &MouseInput) -> Option<DragModifier> {
+pub(super) fn drag_modifier_from_mouse(mouse: &MouseInput) -> Option<DragModifier> {
     let mask = mouse.maybe_modifier_keys?;
     let shift = mask.shift_key_state == KeyState::Pressed;
     let ctrl = mask.ctrl_key_state == KeyState::Pressed;
@@ -387,9 +387,14 @@ impl Component<AppState, AppSignal> for PaneComponent {
             self.consecutive_clicks = 0;
         }
 
+        if !matches!(active_window.as_ref(), Some(Window::Discussion(_))) {
+            self.discussion.cancel_drag(&mut global_data.state);
+        }
+
         // Check for scrollbar mouse interaction first.
         if !self.preview_drag_active
             && !self.text_drag_active
+            && !global_data.state.mouse_drag_active
             && let InputEvent::Mouse(mouse) = input_event
         {
             let col = mouse.pos.col_index.as_usize();
