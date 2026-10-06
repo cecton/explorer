@@ -283,11 +283,11 @@ fn input_label(mode: Mode) -> String {
     format!("{}> ", mode.label())
 }
 
-/// Share of the theme's warning color in the background of selected and highlighted text.
+/// Share of the theme's warning color in the background of highlighted text.
 const MARKER_STRENGTH: f32 = 0.4;
 
-/// Background of selected and highlighted text: the theme's warning color laid over the
-/// pane background, since `ui.selection` barely differs from it in many themes.
+/// Background of highlighted text: the theme's warning color laid over the pane
+/// background, since `ui.selection` barely differs from it in many themes.
 fn marker_bg(theme: &HelixTheme, pane_bg: RgbValue) -> RgbValue {
     let Some(accent) = theme.color_for_scope("warning") else {
         return theme.ui_bg("ui.selection").unwrap_or(pane_bg);
@@ -1342,7 +1342,11 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let status_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
             let error_fg = theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG);
             let (input_bg, input_fg) = title_bar_colors(focused, theme);
-            let marked_bg = marker_bg(theme, pane_bg);
+            // `ui.selection`, the regular color of the file preview.
+            let selection_bg = theme
+                .ui_bg("ui.selection")
+                .unwrap_or(RgbValue::from_u8(50, 50, 90));
+            let marker = marker_bg(theme, pane_bg);
 
             let (status, alert) = status_line(state, discussion);
             let mode = discussion.mode;
@@ -1427,11 +1431,17 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 .node
                 .as_ref()
                 .and_then(|node| state.discussion_highlights.get(node));
-            let marked = |part: DocPart| -> Vec<(usize, usize)> {
+            // Each part carries either the selection in progress or the node's highlights,
+            // never both: a selection hides the highlights, as in the file preview. A
+            // selection is painted on the regular selection color with its foreground
+            // auto-contrasted, a highlight on the marker color with the markdown colors.
+            let marked = |part: DocPart| -> (Vec<(usize, usize)>, RgbValue, bool) {
                 match (selection, highlights) {
-                    (Some((selected, range)), _) if selected == part => vec![range],
-                    (None, Some(highlights)) => highlights.part(part).to_vec(),
-                    _ => Vec::new(),
+                    (Some((selected, range)), _) if selected == part => {
+                        (vec![range], selection_bg, false)
+                    }
+                    (None, Some(highlights)) => (highlights.part(part).to_vec(), marker, true),
+                    _ => (Vec::new(), pane_bg, true),
                 }
             };
             let marks = [
@@ -1439,12 +1449,12 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 marked(DocPart::WorkLog),
                 marked(DocPart::Reply),
             ];
-            let marks_of = |part: Option<DocPart>| -> &[(usize, usize)] {
+            let marks_of = |part: Option<DocPart>| -> (&[(usize, usize)], RgbValue, bool) {
                 match part {
-                    Some(DocPart::Prompt) => &marks[0],
-                    Some(DocPart::WorkLog) => &marks[1],
-                    Some(DocPart::Reply) => &marks[2],
-                    None => &[],
+                    Some(DocPart::Prompt) => (&marks[0].0, marks[0].1, marks[0].2),
+                    Some(DocPart::WorkLog) => (&marks[1].0, marks[1].1, marks[1].2),
+                    Some(DocPart::Reply) => (&marks[2].0, marks[2].1, marks[2].2),
+                    None => (&[], pane_bg, true),
                 }
             };
 
@@ -1464,7 +1474,9 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                              spans: &[markdown::Span],
                              fg: RgbValue,
                              bg: RgbValue,
-                             marked: &[(usize, usize)]| {
+                             marked: &[(usize, usize)],
+                             marked_bg: RgbValue,
+                             keep_fg: bool| {
                 let strip_style =
                     new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
                 *ops += RenderOpCommon::MoveCursorPositionRelTo(
@@ -1487,9 +1499,11 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                     };
                     let mut style = span_style(piece.span, bg);
                     if piece.marked {
-                        let fg = ensure_readable_fg(piece.span.fg, marked_bg);
-                        style.color_fg = Some(TuiColor::from(fg));
                         style.color_bg = Some(TuiColor::from(marked_bg));
+                        if !keep_fg {
+                            style.color_fg =
+                                Some(TuiColor::from(ensure_readable_fg(piece.span.fg, marked_bg)));
+                        }
                     }
                     *ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
@@ -1507,7 +1521,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                             Some(DocPart::Prompt) => prompt_bg,
                             _ => line.bg.unwrap_or(pane_bg),
                         };
-                        let marked = marks_of(line.part);
+                        let (marked, marked_bg, keep_fg) = marks_of(line.part);
                         paint_row(
                             &mut render_ops,
                             row_offset,
@@ -1515,16 +1529,36 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                             text_fg,
                             bg,
                             marked,
+                            marked_bg,
+                            keep_fg,
                         );
                     }
-                    None => paint_row(&mut render_ops, row_offset, &[], text_fg, pane_bg, &[]),
+                    None => paint_row(
+                        &mut render_ops,
+                        row_offset,
+                        &[],
+                        text_fg,
+                        pane_bg,
+                        &[],
+                        pane_bg,
+                        false,
+                    ),
                 }
             }
             if status_rows > 0 {
                 let fg = if alert { error_fg } else { status_fg };
                 let text = truncate(&status, pane_width);
                 let span = [markdown::Span::plain(text, fg)];
-                paint_row(&mut render_ops, doc_rows, &span, fg, pane_bg, &[]);
+                paint_row(
+                    &mut render_ops,
+                    doc_rows,
+                    &span,
+                    fg,
+                    pane_bg,
+                    &[],
+                    pane_bg,
+                    false,
+                );
             }
 
             state.pane_manager.set_window_page_size(&window, doc_rows);
