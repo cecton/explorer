@@ -80,35 +80,21 @@ impl GitLogPaneComponent {
         state.mark_session_dirty();
     }
 
-    /// Shows the history starting at `hash` in the topmost open git log window,
-    /// opening one when none is open.
+    /// Opens a new git log window showing the history starting at `hash`.
     pub(crate) fn open_log_at_commit(
         state: &mut AppState,
         main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
         hash: String,
     ) {
-        let id = state
-            .pane_manager
-            .window_stack
-            .iter()
-            .find_map(|window| match window {
-                Window::GitLog(id) => Some(*id),
-                _ => None,
-            })
-            .unwrap_or_else(|| {
-                let id = state.next_git_log_id;
-                state.next_git_log_id += 1;
-                state.git_logs.insert(id, GitLogWindowState::default());
-                id
-            });
+        let id = state.next_git_log_id;
+        state.next_git_log_id += 1;
+        state.git_logs.insert(id, GitLogWindowState::default());
         let source = LogSource::Commit(hash);
-        {
-            let win = state.git_logs.get_mut(&id).expect("minted or found above");
-            win.source = source.clone();
-            win.query.clear();
-            win.filtered = None;
-            win.selected = 0;
-        }
+        let win = state.git_logs.get_mut(&id).expect("inserted above");
+        win.source = source.clone();
+        win.query.clear();
+        win.filtered = None;
+        win.selected = 0;
         let window = Window::GitLog(id);
         let old = state.pane_manager.focused_window;
         state.pane_manager.push_window(window);
