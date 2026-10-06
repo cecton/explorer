@@ -630,10 +630,14 @@ window holds its node's prompt, reply and work log in memory only while it is op
   the user scrolled up.
 - The prompt is plain wrapped text. The reply is rendered as Markdown by
   `src/tui/markdown.rs` (`pulldown-cmark`): headings, emphasis, strikethrough, inline
-  and fenced code, block quotes, nested and task lists, links (text only, underlined)
-  and rules, wrapped to the pane width. Colors come from the theme's `markup.*` scopes
-  and attributes from the Markdown element; code blocks get a background and no syntax
-  highlighting. Tables are not rendered as such.
+  and fenced code, block quotes, nested and task lists, links (text only, underlined),
+  rules and tables, wrapped to the pane width. Colors come from the theme's `markup.*`
+  scopes and attributes from the Markdown element; code blocks get a background and no
+  syntax highlighting.
+- A table is laid out as aligned columns under a bold, ruled header. Columns too wide
+  for the pane shrink, widest first, and their cells wrap; no column shrinks below its
+  longest word (capped at 12 columns). When even that does not fit, the table is
+  stacked instead: one `Header: value` line per cell, with a rule between rows.
 - The work log is shown dimmed between the prompt and the reply while the turn runs,
   and for any node that is not done or has an empty reply, so a failed or cancelled
   turn still shows what it did. A done node with a reply hides it; `Ctrl+O` shows or

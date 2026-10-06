@@ -1,6 +1,6 @@
 use crate::tui::text_layout::{display_width, truncate};
 use crate::tui::{HelixTheme, RgbValue};
-use pulldown_cmark::{Event, HeadingLevel, Options, Parser, Tag, TagEnd};
+use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_segmentation::UnicodeSegmentation;
 
 /// One styled run of text on a rendered line.
@@ -93,6 +93,15 @@ struct ItemCtx {
     flushed: bool,
 }
 
+/// Longest word a table column refuses to split when columns shrink to fit.
+const MAX_WORD_FLOOR: usize = 12;
+
+struct TableCtx {
+    alignments: Vec<Alignment>,
+    rows: Vec<Vec<Vec<Span>>>,
+    row: Vec<Vec<Span>>,
+}
+
 struct Renderer<'a> {
     theme: &'a HelixTheme,
     width: usize,
@@ -107,6 +116,7 @@ struct Renderer<'a> {
     items: Vec<ItemCtx>,
     lists: Vec<Option<u64>>,
     code_bg: Option<RgbValue>,
+    table: Option<TableCtx>,
 }
 
 /// Renders markdown to styled lines fitted to `width`, colored from the theme's
@@ -114,7 +124,8 @@ struct Renderer<'a> {
 /// colors come from the theme.
 pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLine> {
     let mut r = Renderer::new(theme, width);
-    let options = Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS;
+    let options =
+        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
     for event in Parser::new_ext(source, options) {
         match event {
             Event::Start(Tag::Paragraph) => {}
@@ -165,6 +176,28 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                 r.items.pop();
             }
             Event::TaskListMarker(checked) => r.task_marker(checked),
+            Event::Start(Tag::Table(alignments)) => {
+                r.flush_content();
+                r.table = Some(TableCtx {
+                    alignments,
+                    rows: Vec::new(),
+                    row: Vec::new(),
+                });
+            }
+            Event::Start(Tag::TableHead) => r.start_style(InlineStyle {
+                bold: true,
+                ..r.style
+            }),
+            Event::End(TagEnd::TableHead) => {
+                r.end_style();
+                r.end_table_row();
+            }
+            Event::End(TagEnd::TableRow) => r.end_table_row(),
+            Event::End(TagEnd::TableCell) => r.end_table_cell(),
+            Event::End(TagEnd::Table) => {
+                r.flush_table();
+                r.push_blank();
+            }
             Event::Start(Tag::Emphasis) => {
                 let mut style = r.style;
                 if let Some(fg) = r.exact_fg("markup.italic") {
@@ -226,6 +259,13 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                 });
                 r.push_blank();
             }
+            Event::InlineHtml(text) if r.table.is_some() => {
+                if is_line_break_tag(&text) {
+                    r.push_content(" ", r.style);
+                } else {
+                    r.push_content(&text, r.style);
+                }
+            }
             Event::Html(text) | Event::InlineHtml(text) => {
                 let style = InlineStyle {
                     fg: r.fg("comment"),
@@ -280,6 +320,7 @@ impl Renderer<'_> {
             items: Vec::new(),
             lists: Vec::new(),
             code_bg: None,
+            table: None,
         }
     }
 
@@ -413,6 +454,174 @@ impl Renderer<'_> {
         self.content.clear();
     }
 
+    fn end_table_cell(&mut self) {
+        let cell = std::mem::take(&mut self.content);
+        if let Some(table) = self.table.as_mut() {
+            table.row.push(cell);
+        }
+    }
+
+    fn end_table_row(&mut self) {
+        if let Some(table) = self.table.as_mut() {
+            let row = std::mem::take(&mut table.row);
+            table.rows.push(row);
+        }
+    }
+
+    fn flush_table(&mut self) {
+        let Some(table) = self.table.take() else {
+            return;
+        };
+        let (first, cont) = self.prefixes();
+        let width = self.width.saturating_sub(spans_width(&cont)).max(1);
+        let lines = self
+            .table_grid(&table, width)
+            .unwrap_or_else(|| self.table_stacked(&table, width));
+        for (i, spans) in lines.into_iter().enumerate() {
+            let mut line = if i == 0 { first.clone() } else { cont.clone() };
+            line.extend(spans);
+            self.lines.push(MdLine {
+                spans: line,
+                bg: None,
+            });
+        }
+        if let Some(item) = self.items.last_mut() {
+            item.flushed = true;
+        }
+    }
+
+    /// Lays the table out as aligned columns, or `None` when they cannot fit `width`.
+    fn table_grid(&self, table: &TableCtx, width: usize) -> Option<Vec<Vec<Span>>> {
+        let columns = table.alignments.len();
+        let avail = width.checked_sub(3 * columns.saturating_sub(1))?;
+        let mut widths = vec![1usize; columns];
+        let mut floors = vec![1usize; columns];
+        for row in &table.rows {
+            for ((cell, width), floor) in row.iter().zip(&mut widths).zip(&mut floors) {
+                let word_widths: Vec<usize> = split_words(cell)
+                    .iter()
+                    .map(|word| spans_width(word))
+                    .collect();
+                let natural =
+                    word_widths.iter().sum::<usize>() + word_widths.len().saturating_sub(1);
+                let longest = word_widths.iter().copied().max().unwrap_or(0);
+                *width = (*width).max(natural);
+                *floor = (*floor).max(longest.min(MAX_WORD_FLOOR));
+            }
+        }
+        if floors.iter().sum::<usize>() > avail {
+            return None;
+        }
+        while widths.iter().sum::<usize>() > avail {
+            let widest = widths
+                .iter_mut()
+                .zip(&floors)
+                .filter(|(width, floor)| **width > **floor)
+                .map(|(width, _)| width)
+                .max_by_key(|width| **width)?;
+            *widest -= 1;
+        }
+
+        let rule_style = InlineStyle {
+            fg: self.fg("comment"),
+            ..self.plain
+        };
+        let rule = widths
+            .iter()
+            .map(|width| "─".repeat(*width))
+            .collect::<Vec<_>>()
+            .join("─┼─");
+        let rows: Vec<Vec<_>> = table
+            .rows
+            .iter()
+            .map(|row| {
+                row.iter()
+                    .zip(&widths)
+                    .map(|(cell, width)| wrap_spans(cell, *width, Vec::new(), Vec::new()))
+                    .collect()
+            })
+            .collect();
+        let body_wraps = rows.iter().skip(1).flatten().any(|cell| cell.len() > 1);
+        let mut out = Vec::new();
+        for (r, row) in rows.iter().enumerate() {
+            if r > 1 && body_wraps {
+                out.push(vec![Span::of(rule.clone(), rule_style)]);
+            }
+            let height = row.iter().map(Vec::len).max().unwrap_or(1);
+            for k in 0..height {
+                let mut line = Vec::new();
+                let cells = row.iter().zip(&widths).zip(&table.alignments);
+                for (c, ((cell, width), alignment)) in cells.enumerate() {
+                    if c > 0 {
+                        line.push(Span::of(" │ ", rule_style));
+                    }
+                    let spans = cell.get(k).map_or(&[][..], Vec::as_slice);
+                    let pad = width.saturating_sub(spans_width(spans));
+                    let (left, right) = match alignment {
+                        Alignment::Right => (pad, 0),
+                        Alignment::Center => (pad / 2, pad - pad / 2),
+                        Alignment::Left | Alignment::None => (0, pad),
+                    };
+                    if left > 0 {
+                        line.push(Span::of(" ".repeat(left), self.plain));
+                    }
+                    line.extend(spans.iter().cloned());
+                    if right > 0 && c + 1 < columns {
+                        line.push(Span::of(" ".repeat(right), self.plain));
+                    }
+                }
+                out.push(line);
+            }
+            if r == 0 {
+                out.push(vec![Span::of(rule.clone(), rule_style)]);
+            }
+        }
+        Some(out)
+    }
+
+    /// Lays the table out as one `Header: value` record per body row.
+    fn table_stacked(&self, table: &TableCtx, width: usize) -> Vec<Vec<Span>> {
+        let rule_style = InlineStyle {
+            fg: self.fg("comment"),
+            ..self.plain
+        };
+        let label_style = InlineStyle {
+            bold: true,
+            ..self.style
+        };
+        let Some((head, body)) = table.rows.split_first() else {
+            return Vec::new();
+        };
+        if body.is_empty() {
+            let mut content = Vec::new();
+            for (c, cell) in head.iter().enumerate() {
+                if c > 0 {
+                    content.push(Span::of(" │ ", rule_style));
+                }
+                content.extend(cell.iter().cloned());
+            }
+            return wrap_spans(&content, width, Vec::new(), Vec::new());
+        }
+        let mut out = Vec::new();
+        for (r, row) in body.iter().enumerate() {
+            if r > 0 {
+                out.push(vec![Span::of("─".repeat(width), rule_style)]);
+            }
+            for (label, cell) in head.iter().zip(row) {
+                let mut content = label.clone();
+                if !label.is_empty() {
+                    push_run(&mut content, ": ", label_style);
+                }
+                content.extend(cell.iter().cloned());
+                if content.is_empty() {
+                    continue;
+                }
+                out.extend(wrap_spans(&content, width, Vec::new(), Vec::new()));
+            }
+        }
+        out
+    }
+
     fn push_blank(&mut self) {
         if self.lines.is_empty() || self.lines.last().is_some_and(MdLine::is_blank) {
             return;
@@ -422,6 +631,18 @@ impl Renderer<'_> {
             bg: None,
         });
     }
+}
+
+fn spans_width(spans: &[Span]) -> usize {
+    spans.iter().map(|s| display_width(&s.text)).sum()
+}
+
+fn is_line_break_tag(html: &str) -> bool {
+    html.trim_start_matches('<')
+        .trim_end_matches('>')
+        .trim_end_matches('/')
+        .trim()
+        .eq_ignore_ascii_case("br")
 }
 
 /// Word-wraps styled runs to `width` columns, prepending `first_prefix` to the first
@@ -537,6 +758,110 @@ mod tests {
 
     fn text(line: &MdLine) -> String {
         line.spans.iter().map(|s| s.text.as_str()).collect()
+    }
+
+    fn texts(src: &str, width: usize) -> Vec<String> {
+        render_md(src, width).iter().map(text).collect()
+    }
+
+    const TABLE: &str = "\
+| Option | Cost | Notes |
+|:--|--:|:-:|
+| `wrap` cells | 12 | Rows grow **taller**; nothing is lost |
+| truncate | 3 | Loses text, stays one row |
+";
+
+    #[test]
+    fn table_columns_line_up_under_a_ruled_bold_header() {
+        let lines = render_md("| a | b |\n|---|---|\n| one | two |\n| three | 4 |", 40);
+        let texts: Vec<String> = lines.iter().map(text).collect();
+        assert_eq!(
+            texts,
+            ["a     │ b", "──────┼────", "one   │ two", "three │ 4"]
+        );
+        assert!(lines[0].spans[0].bold);
+        assert!(!lines[2].spans[0].bold);
+        assert_eq!(
+            lines[1].spans[0].fg,
+            theme().color_for_scope("comment").unwrap()
+        );
+    }
+
+    #[test]
+    fn table_cells_follow_the_column_alignment() {
+        assert_eq!(
+            texts(TABLE, 80),
+            [
+                "Option     │ Cost │               Notes",
+                "───────────┼──────┼──────────────────────────────────",
+                "wrap cells │   12 │ Rows grow taller; nothing is lost",
+                "truncate   │    3 │     Loses text, stays one row",
+            ]
+        );
+    }
+
+    #[test]
+    fn table_cells_wrap_in_their_column_with_rules_between_rows() {
+        assert_eq!(
+            texts(TABLE, 44),
+            [
+                "Option     │ Cost │          Notes",
+                "───────────┼──────┼─────────────────────────",
+                "wrap cells │   12 │    Rows grow taller;",
+                "           │      │     nothing is lost",
+                "───────────┼──────┼─────────────────────────",
+                "truncate   │    3 │  Loses text, stays one",
+                "           │      │           row",
+            ]
+        );
+    }
+
+    #[test]
+    fn table_too_wide_for_the_pane_stacks_one_record_per_row() {
+        assert_eq!(
+            texts(TABLE, 24),
+            [
+                "Option: wrap cells",
+                "Cost: 12",
+                "Notes: Rows grow taller;",
+                "nothing is lost",
+                "────────────────────────",
+                "Option: truncate",
+                "Cost: 3",
+                "Notes: Loses text, stays",
+                "one row",
+            ]
+        );
+    }
+
+    #[test]
+    fn stacked_table_with_only_a_header_shows_its_cells_on_one_line() {
+        let src = "| alpha | beta | gamma |\n|---|---|---|";
+        assert_eq!(texts(src, 12), ["alpha │ beta", "│ gamma"]);
+    }
+
+    #[test]
+    fn table_in_a_list_item_is_indented_under_the_marker() {
+        let src = "- item:\n\n  | a | b |\n  |---|--:|\n  | 1 | 22 |\n";
+        assert_eq!(
+            texts(src, 30),
+            ["• item:", "", "  a │  b", "  ──┼───", "  1 │ 22"]
+        );
+    }
+
+    #[test]
+    fn line_break_tag_in_a_table_cell_becomes_a_space() {
+        let src = "| a | b |\n|---|---|\n| one<br>two | x |";
+        assert_eq!(texts(src, 30)[2], "one two │ x");
+    }
+
+    #[test]
+    fn table_lines_never_exceed_the_width() {
+        for width in 1..=100 {
+            for line in texts(TABLE, width) {
+                assert!(display_width(&line) <= width, "{width}: {line:?}");
+            }
+        }
     }
 
     #[test]
