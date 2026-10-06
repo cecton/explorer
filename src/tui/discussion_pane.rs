@@ -283,6 +283,25 @@ fn input_label(mode: Mode) -> String {
     format!("{}> ", mode.label())
 }
 
+/// Share of the theme's warning color in the background of selected and highlighted text.
+const MARKER_STRENGTH: f32 = 0.4;
+
+/// Background of selected and highlighted text: the theme's warning color laid over the
+/// pane background, since `ui.selection` barely differs from it in many themes.
+fn marker_bg(theme: &HelixTheme, pane_bg: RgbValue) -> RgbValue {
+    let Some(accent) = theme.color_for_scope("warning") else {
+        return theme.ui_bg("ui.selection").unwrap_or(pane_bg);
+    };
+    let mix = |bg: u8, accent: u8| {
+        (f32::from(bg) + (f32::from(accent) - f32::from(bg)) * MARKER_STRENGTH).round() as u8
+    };
+    RgbValue::from_u8(
+        mix(pane_bg.red, accent.red),
+        mix(pane_bg.green, accent.green),
+        mix(pane_bg.blue, accent.blue),
+    )
+}
+
 /// Paint style for one markdown span: its fg over `bg`, with the span's attributes.
 fn span_style(span: &markdown::Span, bg: RgbValue) -> TuiStyle {
     let mut style = new_style!(
@@ -1323,9 +1342,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let status_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
             let error_fg = theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG);
             let (input_bg, input_fg) = title_bar_colors(focused, theme);
-            let marked_bg = theme
-                .ui_bg("ui.selection")
-                .unwrap_or(RgbValue::from_u8(50, 50, 90));
+            let marked_bg = marker_bg(theme, pane_bg);
 
             let (status, alert) = status_line(state, discussion);
             let mode = discussion.mode;
@@ -1534,6 +1551,16 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("metadata.md"), metadata).unwrap();
         (tmp, ConversationTree::load(&root), id)
+    }
+
+    #[test]
+    fn marker_bg_lays_the_warning_color_over_the_pane_background() {
+        let theme = HelixTheme::default();
+        let pane_bg = theme.ui_bg("ui.background").unwrap();
+        let marker = marker_bg(&theme, pane_bg);
+        assert_ne!(marker, pane_bg);
+        assert_ne!(Some(marker), theme.ui_bg("ui.selection"));
+        assert_eq!(marker, RgbValue::from_u8(0x76, 0x6c, 0x62));
     }
 
     fn span(text: &str, src: Option<usize>) -> markdown::Span {

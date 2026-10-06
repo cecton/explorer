@@ -664,6 +664,10 @@ window holds its node's prompt, reply and work log in memory only while it is op
     in the session, so they survive a resize, closing the window and a restart. They
     are refused while the node's turn runs (its reply is still changing) and on the work
     log, and dropped when the node is deleted or run again in place.
+  - Selected and highlighted text is painted on a marker color: the theme's `warning`
+    color mixed at 40% over the pane background (`marker_bg`). Helix themes have no
+    search or highlight color, and their `ui.selection` is too close to the background
+    in about half of them to mark a few words. The file preview keeps `ui.selection`.
 - Keys:
   - `Enter` — send.
   - `Shift+Enter` — insert a newline.
