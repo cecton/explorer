@@ -231,6 +231,7 @@ pub(crate) fn start_turn(
     let session = lineage.first().unwrap_or(&node).as_str().to_string();
     state.tree_view.expanded.extend(lineage);
     state.tree_view.selected = Some(node.clone());
+    state.mark_session_dirty();
 
     let summary_backend = state
         .agent

@@ -30,7 +30,8 @@ pub(crate) enum Branch {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TreeRow {
     pub id: NodeId,
-    pub depth: usize,
+    /// One entry per level: whether the fork above still has branches below this row.
+    pub rails: Vec<bool>,
     pub fold: Fold,
     pub branch: Branch,
 }
@@ -40,8 +41,9 @@ pub(crate) struct TreeRow {
 /// grows only below a fork, so a straight line of prompts stays a flat list.
 pub(crate) fn layout_rows(tree: &ConversationTree, expanded: &HashSet<NodeId>) -> Vec<TreeRow> {
     let mut rows = Vec::new();
+    let mut rails = Vec::new();
     for root in tree.roots().iter().rev() {
-        push_rows(tree, expanded, root, 0, Branch::None, &mut rows);
+        push_rows(tree, expanded, root, Branch::None, &mut rails, &mut rows);
     }
     rows
 }
@@ -50,8 +52,8 @@ fn push_rows(
     tree: &ConversationTree,
     expanded: &HashSet<NodeId>,
     id: &NodeId,
-    depth: usize,
     branch: Branch,
+    rails: &mut Vec<bool>,
     rows: &mut Vec<TreeRow>,
 ) {
     let Some(node) = tree.node(id) else {
@@ -66,18 +68,16 @@ fn push_rows(
     };
     rows.push(TreeRow {
         id: id.clone(),
-        depth,
+        rails: rails.clone(),
         fold,
         branch,
     });
     if fold == Fold::Collapsed {
         return;
     }
-    let child_depth = if fold == Fold::Expanded {
-        depth + 1
-    } else {
-        depth
-    };
+    if fold == Fold::Expanded {
+        rails.push(true);
+    }
     let last = node.children.len().saturating_sub(1);
     for (i, child) in node.children.iter().enumerate() {
         let child_branch = match node.children.len() {
@@ -85,7 +85,13 @@ fn push_rows(
             _ if i == last => Branch::LastStart,
             _ => Branch::Start,
         };
-        push_rows(tree, expanded, child, child_depth, child_branch, rows);
+        if fold == Fold::Expanded {
+            *rails.last_mut().unwrap() = i != last;
+        }
+        push_rows(tree, expanded, child, child_branch, rails, rows);
+    }
+    if fold == Fold::Expanded {
+        rails.pop();
     }
 }
 
@@ -128,18 +134,47 @@ fn state_marker(tree: &ConversationTree, node: &Node) -> char {
     }
 }
 
-fn row_prefix(tree: &ConversationTree, row: &TreeRow, node: &Node) -> String {
-    let fold = match row.fold {
-        Fold::Leaf => ' ',
-        Fold::Collapsed => '+',
-        Fold::Expanded => '-',
+/// The tree prefix of a row's head line, split where the color changes: the rails
+/// and arm (gutter color) and the fold column (`+`/`-` in the row's type color,
+/// but a leaf's `─` stays gutter color as part of the arm).
+fn row_prefix_parts(row: &TreeRow) -> (String, &'static str) {
+    let mut prefix = String::new();
+    for rail in &row.rails {
+        prefix.push_str(if *rail { "│ " } else { "  " });
+    }
+    match row.branch {
+        Branch::None => prefix.push_str("  "),
+        Branch::Start => prefix.push_str("├─"),
+        Branch::LastStart => prefix.push_str("└─"),
+    }
+    let fold = match (row.branch, row.fold) {
+        (_, Fold::Collapsed) => "+ ",
+        (_, Fold::Expanded) => "- ",
+        (Branch::None, Fold::Leaf) => "  ",
+        (_, Fold::Leaf) => "─ ",
     };
-    let indent = match row.branch {
-        Branch::None => "  ".repeat(row.depth),
-        Branch::Start => format!("{}├ ", "  ".repeat(row.depth.saturating_sub(1))),
-        Branch::LastStart => format!("{}└ ", "  ".repeat(row.depth.saturating_sub(1))),
-    };
-    format!("{indent}{fold}{} ", state_marker(tree, node))
+    (prefix, fold)
+}
+
+fn row_prefix(row: &TreeRow) -> String {
+    let (mut prefix, fold) = row_prefix_parts(row);
+    prefix.push_str(fold);
+    prefix
+}
+
+/// The prefix of the wrapped title and summary lines under a selected row's head:
+/// rails only, plus a `│` under an expanded fold so the drop connects to its children.
+fn row_continuation_prefix(row: &TreeRow) -> String {
+    let mut prefix = String::new();
+    for rail in &row.rails {
+        prefix.push_str(if *rail { "│ " } else { "  " });
+    }
+    if row.fold == Fold::Expanded {
+        prefix.push_str("│ ");
+    } else {
+        prefix.push_str("  ");
+    }
+    prefix
 }
 
 fn commit_label(node: &Node) -> Option<String> {
@@ -511,6 +546,10 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 .unwrap_or(RgbValue::from_u8(170, 170, 200));
             let dim_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
             let gutter_fg = theme.ui_fg("ui.linenr").unwrap_or(dim_fg);
+            let selected_gutter_fg = theme
+                .ui_fg("ui.linenr.selected")
+                .or_else(|| theme.ui_fg("ui.text"))
+                .unwrap_or(dim_fg);
             let commit_fg = theme
                 .color_for_scope("diff.plus")
                 .unwrap_or(RgbValue::from_u8(150, 220, 120));
@@ -571,7 +610,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let Some(node) = tree.node(&row.id) else {
                     continue;
                 };
-                let prefix_width = gutter_width + display_width(&row_prefix(&tree, row, node));
+                let prefix_width = gutter_width + display_width(&row_prefix(row));
                 let label_width = commit_label(node).map_or(0, |label| display_width(&label) + 1);
                 let text_width = pane_width.saturating_sub(prefix_width + label_width).max(1);
                 if row_idx != selected {
@@ -671,6 +710,8 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         new_style!(color_fg: {fg} color_bg: {bg})
                     }
                 };
+                let plain =
+                    |fg: RgbValue| new_style!(color_fg: {TuiColor::from(fg)} color_bg: {bg});
                 let paint = |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: RgbValue| {
                     let style = styled(fg);
                     *ops += RenderOpCommon::MoveCursorPositionRelTo(
@@ -680,24 +721,53 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     *ops += RenderOpCommon::ApplyColors(Some(style));
                     *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
                 };
+                let paint_plain =
+                    |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: RgbValue| {
+                        let style = plain(fg);
+                        *ops += RenderOpCommon::MoveCursorPositionRelTo(
+                            origin,
+                            col(column as u16) + row(row_offset as u16),
+                        );
+                        *ops += RenderOpCommon::ApplyColors(Some(style));
+                        *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+                    };
 
-                let prefix = row_prefix(&tree, row_info, node);
-                let text_column = gutter_width + display_width(&prefix);
+                let (rail_prefix, fold_text) = row_prefix_parts(row_info);
+                let fold_column = gutter_width + display_width(&rail_prefix);
+                let text_column = fold_column + display_width(fold_text);
+                let marker = state_marker(&tree, node);
                 match line.kind {
                     LineKind::Head => {
-                        paint(&mut render_ops, 0, &node.created_display, gutter_fg);
-                        paint(&mut render_ops, gutter_width, &prefix, type_fg);
+                        let gutter = if is_selected {
+                            selected_gutter_fg
+                        } else {
+                            gutter_fg
+                        };
+                        paint_plain(&mut render_ops, 0, &node.created_display, gutter);
+                        paint_plain(&mut render_ops, gutter_width, &rail_prefix, gutter);
+                        let fold_fg = if row_info.fold == Fold::Leaf {
+                            gutter
+                        } else {
+                            type_fg
+                        };
+                        paint(&mut render_ops, fold_column, fold_text, fold_fg);
+                        if marker != ' ' {
+                            paint(&mut render_ops, gutter_width, &marker.to_string(), type_fg);
+                        }
                         paint(&mut render_ops, text_column, &line.text, type_fg);
                         if let Some(label) = commit_label(node) {
                             let column = pane_width.saturating_sub(display_width(&label));
                             paint(&mut render_ops, column, &label, hash_fg);
                         }
                     }
-                    LineKind::TitleRest => {
-                        paint(&mut render_ops, text_column, &line.text, type_fg);
-                    }
-                    LineKind::Summary => {
-                        let fg = if armed { error_fg } else { dim_fg };
+                    LineKind::TitleRest | LineKind::Summary => {
+                        let continuation = row_continuation_prefix(row_info);
+                        paint_plain(&mut render_ops, gutter_width, &continuation, gutter_fg);
+                        let fg = match line.kind {
+                            LineKind::Summary if armed => error_fg,
+                            LineKind::Summary => dim_fg,
+                            _ => type_fg,
+                        };
                         paint(&mut render_ops, text_column, &line.text, fg);
                     }
                 }
@@ -723,14 +793,18 @@ mod tests {
         (tmp, tree)
     }
 
-    fn shape(rows: &[TreeRow]) -> Vec<(&str, usize, Fold)> {
+    fn shape(rows: &[TreeRow]) -> Vec<(&str, Vec<bool>, Fold)> {
         rows.iter()
-            .map(|row| (row.id.as_str(), row.depth, row.fold))
+            .map(|row| (row.id.as_str(), row.rails.clone(), row.fold))
             .collect()
     }
 
     fn branches(rows: &[TreeRow]) -> Vec<Branch> {
         rows.iter().map(|row| row.branch).collect()
+    }
+
+    fn prefixes(rows: &[TreeRow]) -> Vec<String> {
+        rows.iter().map(row_prefix).collect()
     }
 
     fn ids(names: &[&str]) -> HashSet<NodeId> {
@@ -743,7 +817,7 @@ mod tests {
         let rows = layout_rows(&tree, &HashSet::new());
         assert_eq!(
             shape(&rows),
-            [("b1", 0, Fold::Leaf), ("a1", 0, Fold::Collapsed)]
+            [("b1", vec![], Fold::Leaf), ("a1", vec![], Fold::Collapsed)]
         );
     }
 
@@ -754,10 +828,10 @@ mod tests {
         assert_eq!(
             shape(&rows),
             [
-                ("a1", 0, Fold::Expanded),
-                ("a2", 1, Fold::Leaf),
-                ("a3", 1, Fold::Leaf),
-                ("a4", 1, Fold::Leaf),
+                ("a1", vec![], Fold::Expanded),
+                ("a2", vec![false], Fold::Leaf),
+                ("a3", vec![false], Fold::Leaf),
+                ("a4", vec![false], Fold::Leaf),
             ]
         );
     }
@@ -768,18 +842,21 @@ mod tests {
         let collapsed_fork = layout_rows(&tree, &ids(&["a1"]));
         assert_eq!(
             shape(&collapsed_fork),
-            [("a1", 0, Fold::Expanded), ("a2", 1, Fold::Collapsed)]
+            [
+                ("a1", vec![], Fold::Expanded),
+                ("a2", vec![false], Fold::Collapsed)
+            ]
         );
 
         let rows = layout_rows(&tree, &ids(&["a1", "a2"]));
         assert_eq!(
             shape(&rows),
             [
-                ("a1", 0, Fold::Expanded),
-                ("a2", 1, Fold::Expanded),
-                ("a3", 2, Fold::Leaf),
-                ("a4", 2, Fold::Leaf),
-                ("b3", 2, Fold::Leaf),
+                ("a1", vec![], Fold::Expanded),
+                ("a2", vec![false], Fold::Expanded),
+                ("a3", vec![false, true], Fold::Leaf),
+                ("a4", vec![false, true], Fold::Leaf),
+                ("b3", vec![false, false], Fold::Leaf),
             ]
         );
         assert_eq!(
@@ -792,5 +869,62 @@ mod tests {
                 Branch::LastStart,
             ]
         );
+    }
+
+    #[test]
+    fn rails_run_only_while_a_fork_has_branches_below() {
+        let (_tmp, tree) = tree_with(&["a1/a2", "a1/b2", "a1/c2"]);
+        let rows = layout_rows(&tree, &ids(&["a1"]));
+        assert_eq!(
+            shape(&rows),
+            [
+                ("a1", vec![], Fold::Expanded),
+                ("a2", vec![true], Fold::Leaf),
+                ("b2", vec![true], Fold::Leaf),
+                ("c2", vec![false], Fold::Leaf),
+            ]
+        );
+    }
+
+    #[test]
+    fn head_prefix_draws_rails_arms_and_fold_column() {
+        let (_tmp, tree) = tree_with(&["a1/a2", "a1/b2", "c1/c2/d3", "c1/c2/e3"]);
+        let rows = layout_rows(&tree, &ids(&["a1", "c1", "c2"]));
+        assert_eq!(
+            prefixes(&rows),
+            [
+                "  - ",     // c1: expanded root
+                "    - ",   // c2: expanded fork, only child of c1 → no rail
+                "  │ ├── ", // d3: first branch of c2, rail hangs from c2
+                "    └── ", // e3: last branch of c2
+                "  - ",     // a1: expanded root
+                "│ ├── ",   // a2: first branch of a1
+                "  └── ",   // b2: last branch of a1
+            ]
+        );
+    }
+
+    #[test]
+    fn collapsed_fork_leaf_and_last_branch_leaf_markers() {
+        let (_tmp, tree) = tree_with(&["a1/a2/a3", "a1/a2/b3", "a1/b2"]);
+        let rows = layout_rows(&tree, &ids(&["a1"]));
+        assert_eq!(
+            prefixes(&rows),
+            [
+                "  - ",   // a1: expanded root
+                "│ ├─+ ", // a2: collapsed fork starting a branch
+                "  └── ", // b2: last branch, leaf
+            ]
+        );
+        let continuation = row_continuation_prefix(&rows[1]);
+        assert_eq!(continuation, "│   ");
+    }
+
+    #[test]
+    fn continuation_prefix_hangs_under_an_expanded_fork() {
+        let (_tmp, tree) = tree_with(&["a1/a2/b3", "a1/a2/c3"]);
+        let rows = layout_rows(&tree, &ids(&["a1", "a2"]));
+        let continuation = row_continuation_prefix(&rows[1]);
+        assert_eq!(continuation, "  │ ");
     }
 }

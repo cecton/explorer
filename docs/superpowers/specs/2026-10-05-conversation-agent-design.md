@@ -590,15 +590,23 @@ suggests `/compact` from the parent node.
   oldest first. The descendants of a root sit one level below it, which sets
   conversations apart. After that, a node with a single child keeps that child at the
   **same** indentation, so a straight line of prompts reads as a flat list. Indentation
-  grows only below a node with several children, one level per fork, and each child of a
-  fork carries a branch marker (`├`, `└`) so that the start of a branch is not mistaken
-  for the continuation of a line. Without this rule a 50-prompt conversation would be
-  indented 50 levels.
-- Roots and forks are collapsed until expanded; a `+` or `-` marks them. Sending a
-  prompt expands the way to the new node.
+  grows only below a node with several children, one level per fork. Each row draws a
+  box-drawing prefix: one `│` rail per fork above whose later branches still follow, an
+  arm (`├─`, or `└─` for a fork's last branch) at the start of a branch, and the fold
+  column (`+` collapsed, `-` expanded, `─` for a leaf that starts a branch). The wrapped
+  title and summary lines of the selected row repeat the rails, with a `│` under an
+  expanded fold. Without the flat rule a 50-prompt conversation would be indented 50
+  levels.
+- Roots and forks are collapsed until expanded, marked `+` or `-` in the fold column.
+  Sending a prompt expands the way to the new node. The expanded set is saved in the
+  session.
 - Feedback and commit nodes have distinct colors. Other states get a color and a
-  one-character ASCII marker: running, failed, cancelled, uncommitted (stashed), compact,
-  handover. Favorites are highlighted across the whole row.
+  one-character ASCII marker in a fixed gutter column right after the date: running,
+  failed, cancelled, uncommitted (stashed), compact, handover. Favorites are
+  highlighted across the whole row. Rails and arms are drawn in `ui.linenr`, never
+  bold; on the selected row the date and rails use `ui.linenr.selected`, falling back
+  to `ui.text`, since in ayu-derived themes `ui.linenr` equals the selection
+  background.
 - Keys:
   - `Up` `Down` `PgUp` `PgDn` `Home` `End` — move the selection.
   - Mouse click — moves the selection only. Double click — same as `Enter`.
