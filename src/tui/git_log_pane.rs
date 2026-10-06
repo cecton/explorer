@@ -80,27 +80,42 @@ impl GitLogPaneComponent {
         state.mark_session_dirty();
     }
 
-    /// Opens a new git log window showing the history starting at `hash`.
+    /// Opens a git log window showing the history starting at `hash`: a new one,
+    /// unless a window already sits on that exact commit, which comes to the front
+    /// with its state untouched.
     pub(crate) fn open_log_at_commit(
         state: &mut AppState,
         main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
         hash: String,
     ) {
-        let id = state.next_git_log_id;
-        state.next_git_log_id += 1;
-        state.git_logs.insert(id, GitLogWindowState::default());
-        let source = LogSource::Commit(hash);
-        let win = state.git_logs.get_mut(&id).expect("inserted above");
-        win.source = source.clone();
-        win.query.clear();
-        win.filtered = None;
-        win.selected = 0;
+        let existing = state
+            .git_logs
+            .iter()
+            .find(
+                |(_, win)| matches!(&win.source, LogSource::Commit(existing) if existing == &hash),
+            )
+            .map(|(id, _)| *id);
+        let mut fresh = None;
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                let id = state.next_git_log_id;
+                state.next_git_log_id += 1;
+                state.git_logs.insert(id, GitLogWindowState::default());
+                let source = LogSource::Commit(hash);
+                state.git_logs.get_mut(&id).expect("inserted above").source = source.clone();
+                fresh = Some(source);
+                id
+            }
+        };
         let window = Window::GitLog(id);
         let old = state.pane_manager.focused_window;
         state.pane_manager.push_window(window);
         state.pane_manager.focused_window = Some(window);
         crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
-        Self::reload_log(state.repo.clone(), main_tx, id, &source);
+        if let Some(source) = fresh {
+            Self::reload_log(state.repo.clone(), main_tx, id, &source);
+        }
         state.mark_session_dirty();
     }
 
