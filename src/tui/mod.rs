@@ -2,7 +2,6 @@ mod app;
 mod commit_diff_pane;
 mod conversation_tree_pane;
 pub(crate) mod discussion_pane;
-mod file_name_picker;
 mod fuzzy_picker;
 pub(crate) mod git_log_pane;
 mod input_line;
@@ -18,6 +17,7 @@ mod text_layout;
 mod theme;
 mod theme_picker;
 mod title_row;
+mod window_picker;
 
 pub use app::{build_state, run};
 pub use r3bl_tui::core::ansi::RgbValue;
@@ -32,11 +32,11 @@ use self::app::*;
 use self::commit_diff_pane::*;
 use self::conversation_tree_pane::*;
 use self::discussion_pane::*;
-use self::file_name_picker::*;
 use self::fuzzy_picker::*;
 use self::git_log_pane::*;
 use self::input_line::*;
 use self::model_picker::*;
+use self::window_picker::*;
 
 use self::pane_manager::*;
 use self::preview::*;

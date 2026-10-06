@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 pub struct PaneComponent {
     pub id: FlexBoxId,
     pub slot: usize,
-    picker: FileNamePickerComponent,
+    picker: WindowPickerComponent,
     theme_picker: ThemePickerComponent,
     git_log: GitLogPaneComponent,
     commit_diff: CommitDiffPaneComponent,
@@ -47,7 +47,7 @@ impl PaneComponent {
         Box::new(Self {
             id,
             slot,
-            picker: FileNamePickerComponent::new(id, picker_results_tx, picker_generation),
+            picker: WindowPickerComponent::new(id, picker_results_tx, picker_generation),
             theme_picker: ThemePickerComponent::new(id),
             git_log: GitLogPaneComponent::new(id),
             commit_diff: CommitDiffPaneComponent::new(id),
@@ -196,14 +196,14 @@ impl PaneComponent {
                 state.pane_manager.clamp_scroll(window);
                 EventPropagation::ConsumedRender
             }
-            Window::FileNamePicker => {
+            Window::WindowPicker => {
                 let scroll_max = state.pane_manager.window_scroll_max(window);
                 if scroll_max == 0 {
                     return EventPropagation::ConsumedRender;
                 }
                 let idx = target.min(scroll_max.saturating_sub(1));
-                if let Some((key, _)) = state.file_name_picker.results.get(idx) {
-                    state.file_name_picker.selected = Some(*key);
+                if let Some((key, _)) = state.window_picker.results.get(idx) {
+                    state.window_picker.selected = Some(*key);
                 }
                 EventPropagation::ConsumedRender
             }
@@ -260,7 +260,7 @@ impl TitleRow for PaneComponent {
             return 0;
         };
         match window {
-            Window::FileNamePicker => self
+            Window::WindowPicker => self
                 .picker
                 .render_title_row(ops, pane_box, focused, theme, state),
             Window::ThemePicker => self
@@ -935,7 +935,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
         }
 
         match active_window {
-            Some(Window::FileNamePicker) => {
+            Some(Window::WindowPicker) => {
                 self.picker
                     .handle_event(global_data, input_event, has_focus)
             }
@@ -1065,7 +1065,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
 
             // Render active child component (pushes into global_data.pipeline).
             match active_window {
-                Some(Window::FileNamePicker) => {
+                Some(Window::WindowPicker) => {
                     self.picker
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }

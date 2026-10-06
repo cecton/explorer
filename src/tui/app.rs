@@ -700,19 +700,19 @@ impl App for AppMain {
                         global_data.state.terminal_grabbed = true;
                     }
                 }
-                Some(Action::OpenFilePicker) => {
+                Some(Action::OpenWindowPicker) => {
                     let state = &mut global_data.state;
                     let old = state.pane_manager.focused_window;
-                    state.pane_manager.push_window(Window::FileNamePicker);
-                    state.pane_manager.focused_window = Some(Window::FileNamePicker);
-                    notify_terminal_focus_change(state, old, Some(Window::FileNamePicker));
-                    state.file_name_picker.selected = None;
+                    state.pane_manager.push_window(Window::WindowPicker);
+                    state.pane_manager.focused_window = Some(Window::WindowPicker);
+                    notify_terminal_focus_change(state, old, Some(Window::WindowPicker));
+                    state.window_picker.selected = None;
                     let snapshot = state.files.load();
-                    state.file_name_picker.results = FileNamePickerComponent::open_previews_results(
+                    state.window_picker.results = WindowPickerComponent::open_windows_results(
                         &snapshot,
                         &state.pane_manager.window_stack,
                     );
-                    state.file_name_picker.query = String::new();
+                    state.window_picker.query = String::new();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Some(Action::OpenTerminal) => {
@@ -1137,12 +1137,12 @@ impl App for AppMain {
                     if state
                         .pane_manager
                         .window_stack
-                        .contains(&Window::FileNamePicker)
+                        .contains(&Window::WindowPicker)
                     {
-                        if state.file_name_picker.query.is_empty() {
-                            state.recompute_file_name_picker_results();
+                        if state.window_picker.query.is_empty() {
+                            state.recompute_window_picker_results();
                         } else {
-                            FileNamePickerComponent::spawn_match(
+                            WindowPickerComponent::spawn_match(
                                 &*state,
                                 Arc::clone(&self.picker_generation),
                                 self.picker_results_tx.clone(),
@@ -1639,7 +1639,7 @@ impl App for AppMain {
             }
         }
         if let Some(results) = best_results {
-            global_data.state.file_name_picker.results = results;
+            global_data.state.window_picker.results = results;
         }
 
         poll_terminal_output(self, &mut global_data.state);
@@ -1843,7 +1843,7 @@ fn render_status_bar(
             " Leader ".to_string(),
             format!(
                 "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Chat  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
-                leader_lbl(Action::OpenFilePicker),
+                leader_lbl(Action::OpenWindowPicker),
                 leader_lbl(Action::OpenTerminal),
                 leader_lbl(Action::OpenThemePicker),
                 leader_lbl(Action::OpenGitLog),
@@ -1858,7 +1858,7 @@ fn render_status_bar(
     } else {
         let pane = {
             let rest = match state.pane_manager.focused_window.as_ref() {
-                Some(Window::FileNamePicker) => "Esc:Close  Enter:Open".to_string(),
+                Some(Window::WindowPicker) => "Esc:Close  Enter:Open".to_string(),
                 Some(Window::ThemePicker) => "Esc:Cancel  Enter:Save".to_string(),
                 Some(Window::FilePreview(_)) => {
                     "e:Edit  Backspace:Send to back  ::Command".to_string()

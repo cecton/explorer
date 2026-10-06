@@ -452,9 +452,9 @@ impl Session {
         if state
             .pane_manager
             .window_stack
-            .contains(&Window::FileNamePicker)
+            .contains(&Window::WindowPicker)
         {
-            state.recompute_file_name_picker_results();
+            state.recompute_window_picker_results();
         }
     }
 }
@@ -481,7 +481,7 @@ fn pane_entry_from_window(
                 pane_size: window_state.pane_size.into(),
             })
         }
-        Window::FileNamePicker | Window::ThemePicker | Window::ModelPicker => None,
+        Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => None,
         Window::GitLog(id) => {
             let win = state.git_logs.get(id)?;
             Some(PaneEntry::GitLog {
@@ -969,7 +969,7 @@ mod tests {
         assert_eq!(state.pane_manager.window_stack.len(), 1);
         assert!(matches!(
             state.pane_manager.window_stack[0],
-            Window::FileNamePicker
+            Window::WindowPicker
         ));
         assert!(state.highlight_ranges.is_empty());
         assert!(state.pending_terminals.is_empty());

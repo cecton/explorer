@@ -7,15 +7,16 @@ pub const MAX_PANES: usize = 16;
 
 /// A pane that can appear in the window stack.
 ///
-/// Each variant is unique: there is at most one `FileNamePicker`, one `ThemePicker`, one
+/// Each variant is unique: there is at most one `WindowPicker`, one `ThemePicker`, one
 /// `ConversationTree`, and at most one `FilePreview`/`CommitDiff` per key (file/commit id)
 /// in the stack at any time.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Window {
     /// Preview of the file identified by `FileKey`.
     FilePreview(FileKey),
-    /// Fuzzy file-name picker overlay.
-    FileNamePicker,
+    /// Fuzzy picker of open windows and, once a query is typed, of files by name.
+    #[allow(clippy::enum_variant_names)]
+    WindowPicker,
     /// Theme picker overlay with live preview.
     ThemePicker,
     /// Embedded terminal pane identified by its session id.
@@ -493,7 +494,7 @@ mod tests {
 
     #[test]
     fn single_full_pane_uses_full_height() {
-        let manager = make_manager(&[Window::FileNamePicker]);
+        let manager = make_manager(&[Window::WindowPicker]);
         let slots = manager.layout(size(80, 24));
         assert_eq!(slots.len(), 1);
         assert_eq!(
@@ -504,7 +505,7 @@ mod tests {
 
     #[test]
     fn two_columns_for_wide_surface() {
-        let manager = make_manager(&[Window::FileNamePicker, Window::ThemePicker]);
+        let manager = make_manager(&[Window::WindowPicker, Window::ThemePicker]);
         let slots = manager.layout(size(240, 24));
         assert_eq!(slots.len(), 2);
         assert_eq!(
@@ -519,7 +520,7 @@ mod tests {
 
     #[test]
     fn half_panes_stack_in_one_column() {
-        let mut manager = make_manager(&[Window::FileNamePicker, Window::ThemePicker]);
+        let mut manager = make_manager(&[Window::WindowPicker, Window::ThemePicker]);
         for state in manager.window_states.values_mut() {
             state.pane_size = PaneSize::Half;
         }
@@ -538,13 +539,13 @@ mod tests {
     #[test]
     fn last_full_pane_shrinks_to_fill_remaining_space() {
         let mut manager = make_manager(&[
-            Window::FileNamePicker,
+            Window::WindowPicker,
             Window::ThemePicker,
             Window::Terminal(0),
         ]);
         manager
             .window_states
-            .get_mut(&Window::FileNamePicker)
+            .get_mut(&Window::WindowPicker)
             .unwrap()
             .pane_size = PaneSize::Full;
         manager
@@ -601,10 +602,10 @@ mod tests {
 
     #[test]
     fn quarter_and_half_leftover_absorbed_into_last_pane() {
-        let mut manager = make_manager(&[Window::FileNamePicker, Window::ThemePicker]);
+        let mut manager = make_manager(&[Window::WindowPicker, Window::ThemePicker]);
         manager
             .window_states
-            .get_mut(&Window::FileNamePicker)
+            .get_mut(&Window::WindowPicker)
             .unwrap()
             .pane_size = PaneSize::Quarter;
         manager
@@ -628,7 +629,7 @@ mod tests {
     #[test]
     fn meaningful_leftover_stays_in_same_column() {
         let mut manager = make_manager(&[
-            Window::FileNamePicker,
+            Window::WindowPicker,
             Window::ThemePicker,
             Window::Terminal(0),
             Window::Terminal(1),
@@ -649,13 +650,13 @@ mod tests {
     #[test]
     fn leftover_always_absorbed_into_last_pane() {
         let mut manager = make_manager(&[
-            Window::FileNamePicker,
+            Window::WindowPicker,
             Window::ThemePicker,
             Window::Terminal(0),
         ]);
         manager
             .window_states
-            .get_mut(&Window::FileNamePicker)
+            .get_mut(&Window::WindowPicker)
             .unwrap()
             .pane_size = PaneSize::Quarter;
         manager
@@ -696,24 +697,24 @@ mod tests {
     #[test]
     fn move_forward_and_backward() {
         let mut manager = make_manager(&[
-            Window::FileNamePicker,
+            Window::WindowPicker,
             Window::ThemePicker,
             Window::Terminal(0),
         ]);
-        manager.move_backward(&Window::FileNamePicker);
+        manager.move_backward(&Window::WindowPicker);
         assert_eq!(
             manager.window_stack,
             vec![
                 Window::ThemePicker,
-                Window::FileNamePicker,
+                Window::WindowPicker,
                 Window::Terminal(0)
             ]
         );
-        manager.move_forward(&Window::FileNamePicker);
+        manager.move_forward(&Window::WindowPicker);
         assert_eq!(
             manager.window_stack,
             vec![
-                Window::FileNamePicker,
+                Window::WindowPicker,
                 Window::ThemePicker,
                 Window::Terminal(0)
             ]
@@ -729,7 +730,7 @@ mod tests {
     #[test]
     fn cycle_focus_forward_wraps() {
         let mut manager = make_manager(&[
-            Window::FileNamePicker,
+            Window::WindowPicker,
             Window::ThemePicker,
             Window::Terminal(0),
         ]);
@@ -737,18 +738,18 @@ mod tests {
         manager.focused_window = Some(Window::Terminal(0));
         let visible = manager.layout(size(80, 24));
         manager.cycle_focus(&visible, 1);
-        assert_eq!(manager.focused_window, Some(Window::FileNamePicker));
+        assert_eq!(manager.focused_window, Some(Window::WindowPicker));
     }
 
     #[test]
     fn cycle_focus_backward_wraps() {
         let mut manager = make_manager(&[
-            Window::FileNamePicker,
+            Window::WindowPicker,
             Window::ThemePicker,
             Window::Terminal(0),
         ]);
         set_all_pane_sizes(&mut manager, PaneSize::Quarter);
-        manager.focused_window = Some(Window::FileNamePicker);
+        manager.focused_window = Some(Window::WindowPicker);
         let visible = manager.layout(size(80, 24));
         manager.cycle_focus(&visible, -1);
         assert_eq!(manager.focused_window, Some(Window::Terminal(0)));
@@ -756,15 +757,15 @@ mod tests {
 
     #[test]
     fn cycle_focus_empty_visible_is_noop() {
-        let mut manager = make_manager(&[Window::FileNamePicker]);
+        let mut manager = make_manager(&[Window::WindowPicker]);
         manager.cycle_focus(&[], 1);
-        assert_eq!(manager.focused_window, Some(Window::FileNamePicker));
+        assert_eq!(manager.focused_window, Some(Window::WindowPicker));
     }
 
     #[test]
     fn cycle_focus_wraps_to_second_when_focused_not_visible() {
         let mut manager = make_manager(&[
-            Window::FileNamePicker,
+            Window::WindowPicker,
             Window::ThemePicker,
             Window::Terminal(0),
         ]);
@@ -777,11 +778,11 @@ mod tests {
 
     #[test]
     fn resize_focused_grows_and_shrinks() {
-        let mut manager = make_manager(&[Window::FileNamePicker]);
-        manager.focused_window = Some(Window::FileNamePicker);
+        let mut manager = make_manager(&[Window::WindowPicker]);
+        manager.focused_window = Some(Window::WindowPicker);
         manager
             .window_states
-            .get_mut(&Window::FileNamePicker)
+            .get_mut(&Window::WindowPicker)
             .unwrap()
             .pane_size = PaneSize::Half;
         manager.resize_focused(ResizeDelta::Shrink);
@@ -789,7 +790,7 @@ mod tests {
         assert_eq!(
             manager
                 .window_states
-                .get(&Window::FileNamePicker)
+                .get(&Window::WindowPicker)
                 .unwrap()
                 .pane_size,
             PaneSize::Quarter
@@ -799,7 +800,7 @@ mod tests {
         assert_eq!(
             manager
                 .window_states
-                .get(&Window::FileNamePicker)
+                .get(&Window::WindowPicker)
                 .unwrap()
                 .pane_size,
             PaneSize::Half
@@ -903,14 +904,14 @@ mod tests {
 
     #[test]
     fn layout_zero_surface_returns_empty() {
-        let manager = make_manager(&[Window::FileNamePicker, Window::ThemePicker]);
+        let manager = make_manager(&[Window::WindowPicker, Window::ThemePicker]);
         let slots = manager.layout(size(0, 0));
         assert!(slots.is_empty());
     }
 
     #[test]
     fn layout_narrow_surface_uses_one_column() {
-        let mut manager = make_manager(&[Window::FileNamePicker, Window::ThemePicker]);
+        let mut manager = make_manager(&[Window::WindowPicker, Window::ThemePicker]);
         set_all_pane_sizes(&mut manager, PaneSize::Half);
         let slots = manager.layout(size(80, 24));
         assert_eq!(slots.len(), 2);

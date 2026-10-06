@@ -6,9 +6,9 @@ use crate::keymap::Keymap;
 use crate::loader::{FileKey, LoadedFile};
 use crate::session::TerminalRestoreInfo;
 use crate::tui::RgbValue;
-use crate::tui::file_name_picker::FileNamePickerComponent;
 use crate::tui::pane_manager::{DocPart, PaneManager, TextSelection, Window};
 use crate::tui::theme::HelixTheme;
+use crate::tui::window_picker::WindowPickerComponent;
 use crate::watcher::BatchedWatchEvent;
 use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
@@ -466,7 +466,7 @@ pub struct AppState {
     pub highlight_ranges: HashMap<FileKey, Vec<(usize, usize)>>,
     pub leader_active: bool,
     pub command_mode_active: bool,
-    pub file_name_picker: FuzzyPickerState<Window>,
+    pub window_picker: FuzzyPickerState<Window>,
     pub theme_picker: FuzzyPickerState<String>,
     pub theme: HelixTheme,
     pub saved_theme: HelixTheme,
@@ -547,8 +547,8 @@ impl AppState {
         self.session_dirty_at = Some(Instant::now());
     }
 
-    pub fn recompute_file_name_picker_results(&mut self) {
-        self.file_name_picker.results = FileNamePickerComponent::compute_results(self);
+    pub fn recompute_window_picker_results(&mut self) {
+        self.window_picker.results = WindowPickerComponent::compute_results(self);
     }
 
     pub fn with_terminal<R>(&self, id: usize, f: impl FnOnce(&TerminalPane) -> R) -> Option<R> {
@@ -582,8 +582,8 @@ impl AppState {
     ) -> Self {
         let saved_theme = theme.clone();
         let mut pane_manager = PaneManager::new();
-        pane_manager.push_window(Window::FileNamePicker);
-        pane_manager.focused_window = Some(Window::FileNamePicker);
+        pane_manager.push_window(Window::WindowPicker);
+        pane_manager.focused_window = Some(Window::WindowPicker);
         let repo = gix::ThreadSafeRepository::open(root.as_std_path()).ok();
 
         let mut state = Self {
@@ -596,7 +596,7 @@ impl AppState {
             highlight_ranges: HashMap::new(),
             leader_active: false,
             command_mode_active: false,
-            file_name_picker: FuzzyPickerState::default(),
+            window_picker: FuzzyPickerState::default(),
             theme_picker: FuzzyPickerState::default(),
             theme,
             saved_theme,
@@ -635,7 +635,7 @@ impl AppState {
             keymap,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
         };
-        state.recompute_file_name_picker_results();
+        state.recompute_window_picker_results();
 
         let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
             .map(|n| (n.to_string(), Vec::new()))

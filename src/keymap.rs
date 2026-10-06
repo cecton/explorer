@@ -7,7 +7,7 @@
 //! be overridden from `config.kdl` (see [`Keymap::apply_overrides`]).
 //!
 //! Config slugs accepted in the `keybindings` block: `leader`, `quit`, `focus-next`,
-//! `focus-prev`, `open-file-picker`, `open-terminal`, `open-theme-picker`,
+//! `focus-prev`, `open-window-picker`, `open-terminal`, `open-theme-picker`,
 //! `open-git-log`, `close-pane`, `resize-grow`, `resize-shrink`, `move-pane-forward`,
 //! `move-pane-backward`.
 
@@ -21,7 +21,7 @@ pub enum Action {
     Quit,
     FocusNext,
     FocusPrev,
-    OpenFilePicker,
+    OpenWindowPicker,
     OpenTerminal,
     OpenThemePicker,
     OpenGitLog,
@@ -42,7 +42,7 @@ impl Action {
             "quit" => Action::Quit,
             "focus-next" => Action::FocusNext,
             "focus-prev" => Action::FocusPrev,
-            "open-file-picker" => Action::OpenFilePicker,
+            "open-window-picker" => Action::OpenWindowPicker,
             "open-terminal" => Action::OpenTerminal,
             "open-theme-picker" => Action::OpenThemePicker,
             "open-git-log" => Action::OpenGitLog,
@@ -78,7 +78,7 @@ impl Default for Keymap {
         Keymap {
             leader_key: alt_char('`'),
             leader: vec![
-                (plain_char('f'), Action::OpenFilePicker),
+                (plain_char(' '), Action::OpenWindowPicker),
                 (plain_char('t'), Action::OpenTerminal),
                 (plain_char('T'), Action::OpenThemePicker),
                 (plain_char('g'), Action::OpenGitLog),
@@ -251,9 +251,10 @@ mod tests {
         let km = Keymap::default();
         assert_eq!(km.leader_action(&plain_char('q')), Some(Action::Quit));
         assert_eq!(
-            km.leader_action(&plain_char('f')),
-            Some(Action::OpenFilePicker)
+            km.leader_action(&plain_char(' ')),
+            Some(Action::OpenWindowPicker)
         );
+        assert_eq!(km.leader_action(&plain_char('f')), None);
         assert_eq!(
             km.global_action(&ctrl_special(SpecialKey::Down)),
             Some(Action::ResizeGrow)
