@@ -795,51 +795,9 @@ impl App for AppMain {
                 }
                 Some(Action::ClosePane) => {
                     let state = &mut global_data.state;
-                    let Some(old) = state.pane_manager.focused_window else {
-                        return Ok(EventPropagation::ConsumedRender);
-                    };
-                    if let Window::Terminal(tid) = old {
-                        // Send focus-lost before removing the pane.
-                        if let Some(pane) = state.terminal_panes.get(&tid) {
-                            let p = pane.lock();
-                            if p.ofs_buf.terminal_mode.focus_events {
-                                let _ = p
-                                    .pty_input_tx
-                                    .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
-                            }
-                        }
-                        if let Some(pane) = state.terminal_panes.remove(&tid) {
-                            let mut p = pane.lock();
-                            if let Some(mut killer) = p.child_killer.take() {
-                                let _ = killer.kill();
-                            }
-                        }
-                        state.pane_manager.remove_window(&Window::Terminal(tid));
-                        notify_terminal_focus_change(
-                            state,
-                            Some(old),
-                            state.pane_manager.focused_window,
-                        );
-                        sync_terminal_grabbed(state);
-                        state.mark_session_dirty();
-                        return Ok(EventPropagation::ConsumedRender);
+                    if let Some(old) = state.pane_manager.focused_window {
+                        close_window(state, old);
                     }
-                    if let Window::GitLog(id) = old {
-                        state.git_logs.remove(&id);
-                    }
-                    if let Window::CommitDiff(id) = old {
-                        state.commit_diffs.remove(&id);
-                    }
-                    if let Window::Discussion(id) = old {
-                        state.discussions.remove(&id);
-                    }
-                    state.pane_manager.remove_window(&old);
-                    notify_terminal_focus_change(
-                        state,
-                        Some(old),
-                        state.pane_manager.focused_window,
-                    );
-                    state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Some(Action::DismissLeader) => {
@@ -1732,6 +1690,45 @@ fn surface_size(window_size: Size) -> Size {
     col_count + row_count
 }
 
+/// Closes `window` for good: kills a terminal's process and drops the window's state.
+pub(super) fn close_window(state: &mut AppState, window: Window) {
+    let old = state.pane_manager.focused_window;
+    match window {
+        Window::Terminal(id) => {
+            if let Some(pane) = state.terminal_panes.remove(&id) {
+                let mut p = pane.lock();
+                if old == Some(window) && p.ofs_buf.terminal_mode.focus_events {
+                    let _ = p
+                        .pty_input_tx
+                        .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
+                }
+                if let Some(mut killer) = p.child_killer.take() {
+                    let _ = killer.kill();
+                }
+            }
+            state.terminal_to_preview.remove(&id);
+        }
+        Window::GitLog(id) => {
+            state.git_logs.remove(&id);
+        }
+        Window::CommitDiff(id) => {
+            state.commit_diffs.remove(&id);
+        }
+        Window::Discussion(id) => {
+            state.discussions.remove(&id);
+        }
+        Window::FilePreview(_)
+        | Window::ConversationTree
+        | Window::WindowPicker
+        | Window::ThemePicker
+        | Window::ModelPicker => {}
+    }
+    state.pane_manager.remove_window(&window);
+    notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
+    sync_terminal_grabbed(state);
+    state.mark_session_dirty();
+}
+
 pub(super) fn sync_terminal_grabbed(state: &mut AppState) {
     if !matches!(state.pane_manager.focused_window, Some(Window::Terminal(_))) {
         state.terminal_grabbed = false;
@@ -1850,7 +1847,9 @@ fn render_status_bar(
     } else {
         let pane = {
             let rest = match state.pane_manager.focused_window.as_ref() {
-                Some(Window::WindowPicker) => "Esc:Close  Enter:Open".to_string(),
+                Some(Window::WindowPicker) => {
+                    "Esc:Close picker  Enter:Open  Ctrl+X:Close window".to_string()
+                }
                 Some(Window::ThemePicker) => "Esc:Cancel  Enter:Save".to_string(),
                 Some(Window::FilePreview(_)) => {
                     "e:Edit  Backspace:Send to back  ::Command".to_string()

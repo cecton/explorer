@@ -349,6 +349,34 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
                 state.mark_session_dirty();
                 return Ok(EventPropagation::ConsumedRender);
             }
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('x'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) => {
+                let state = &mut global_data.state;
+                let index = state.window_picker.resolve_selected_index();
+                let Some(&(window, _)) = state.window_picker.results.get(index) else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
+                if !state.pane_manager.window_stack.contains(&window) {
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                crate::tui::app::close_window(state, window);
+                if state.window_picker.query.is_empty() {
+                    state.window_picker.results.remove(index);
+                    let results = &state.window_picker.results;
+                    state.window_picker.selected = results
+                        .get(index)
+                        .or(results.last())
+                        .map(|(window, _)| *window);
+                }
+                return Ok(EventPropagation::ConsumedRender);
+            }
             _ => {}
         }
 
