@@ -606,15 +606,17 @@ impl App for AppMain {
 
         for id in global_data.state.pending_git_logs.drain(..) {
             let main_tx = notify_tx.clone();
+            let source = global_data
+                .state
+                .git_logs
+                .get(&id)
+                .map(|win| win.source.clone())
+                .unwrap_or_default();
             crate::tui::git_log_pane::GitLogPaneComponent::reload_log(
                 global_data.state.repo.clone(),
                 main_tx,
                 id,
-                global_data
-                    .state
-                    .git_logs
-                    .get(&id)
-                    .and_then(|win| win.branch.clone()),
+                &source,
             );
         }
 
@@ -752,7 +754,7 @@ impl App for AppMain {
                         state.repo.clone(),
                         main_tx,
                         id,
-                        None,
+                        &LogSource::Head,
                     );
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -1443,7 +1445,7 @@ impl App for AppMain {
                             state.repo.clone(),
                             main_tx.clone(),
                             *id,
-                            win.branch.clone(),
+                            &win.source,
                         );
                     }
                     self.dirty_check_ticks = 4;

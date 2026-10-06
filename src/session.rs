@@ -3,6 +3,7 @@ use crate::loader::{LoadedFile, file_key_for_path, path_for_file_key};
 use crate::tui::AppState;
 use crate::tui::DiscussionState;
 use crate::tui::GitLogWindowState;
+use crate::tui::LogSource;
 use crate::tui::NodeHighlights;
 use crate::tui::pane_manager::{PaneSize, Window, WindowState};
 use crate::tui::{RgbValue, SYMBOL_PALETTE, SymbolHighlightGroup};
@@ -82,7 +83,7 @@ pub enum PaneEntry {
     #[serde(rename = "git_log")]
     GitLog {
         id: usize,
-        branch: Option<String>,
+        source: LogSource,
         query: String,
         scroll: usize,
         pane_size: SerializablePaneSize,
@@ -310,7 +311,7 @@ impl Session {
 
                 PaneEntry::GitLog {
                     id,
-                    branch,
+                    source,
                     query,
                     scroll,
                     pane_size,
@@ -327,7 +328,7 @@ impl Session {
                     );
                     state.next_git_log_id = state.next_git_log_id.max(id.saturating_add(1));
                     let mut win = GitLogWindowState {
-                        branch: branch.clone(),
+                        source: source.clone(),
                         query: query.clone(),
                         ..Default::default()
                     };
@@ -478,7 +479,7 @@ fn pane_entry_from_window(
             let win = state.git_logs.get(id)?;
             Some(PaneEntry::GitLog {
                 id: *id,
-                branch: win.branch.clone(),
+                source: win.source.clone(),
                 query: win.query.clone(),
                 scroll: window_state.scroll,
                 pane_size: window_state.pane_size.into(),
@@ -1147,8 +1148,8 @@ mod tests {
                 ..Default::default()
             },
         );
-        let mut win = GitLogWindowState {
-            branch: Some("origin/main".to_string()),
+        let win = GitLogWindowState {
+            source: LogSource::Branch("origin/main".to_string()),
             query: "fix:".to_string(),
             ..Default::default()
         };
@@ -1158,7 +1159,7 @@ mod tests {
         let session = Session::from_state(&state);
         let PaneEntry::GitLog {
             id,
-            branch,
+            source,
             query,
             scroll,
             ..
@@ -1167,7 +1168,7 @@ mod tests {
             panic!("expected git_log entry");
         };
         assert_eq!(id, &7);
-        assert_eq!(branch.as_deref(), Some("origin/main"));
+        assert_eq!(source, &LogSource::Branch("origin/main".to_string()));
         assert_eq!(query, "fix:");
         assert_eq!(scroll, &4);
 
@@ -1177,7 +1178,10 @@ mod tests {
         assert_eq!(restored.next_git_log_id, 8);
         assert_eq!(restored.pending_git_logs, vec![7]);
         let restored_win = restored.git_logs.get(&7).expect("window state");
-        assert_eq!(restored_win.branch.as_deref(), Some("origin/main"));
+        assert_eq!(
+            restored_win.source,
+            LogSource::Branch("origin/main".to_string())
+        );
         assert_eq!(restored_win.query, "fix:");
     }
 

@@ -708,6 +708,21 @@ mod tests {
     }
 
     #[test]
+    fn load_log_resolves_a_commit_hash_as_starting_point() {
+        let root = camino::Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo = gix::ThreadSafeRepository::open(root.as_std_path()).expect("open repo");
+        let head = load_log(&repo, None).expect("load_log");
+        let hex = hex::encode(head.entries[5].id);
+        for take in [7, 12, 40] {
+            let abbrev: String = hex.chars().take(take).collect();
+            let at = load_log(&repo, Some(&abbrev))
+                .unwrap_or_else(|e| panic!("load_log at {take}-char prefix: {e}"));
+            assert_eq!(at.entries[0].id, head.entries[5].id);
+            assert!(at.entries.len() < head.entries.len());
+        }
+    }
+
+    #[test]
     fn load_log_returns_empty_for_unborn_head() {
         let dir = tempfile::TempDir::new().expect("temp dir");
         gix::init(dir.path()).expect("init");

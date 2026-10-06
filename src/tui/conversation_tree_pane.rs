@@ -177,9 +177,11 @@ fn row_continuation_prefix(row: &TreeRow) -> String {
     prefix
 }
 
+/// `hash +N` of a node's commits, tip first: the walk a click on it opens. The
+/// metadata stores them oldest first.
 fn commit_label(node: &Node) -> Option<String> {
-    let first = node.meta.commits.first()?;
-    let short: String = first.chars().take(7).collect();
+    let tip = node.meta.commits.last()?;
+    let short: String = tip.chars().take(7).collect();
     Some(match node.meta.commits.len() {
         1 => short,
         n => format!("{short} +{}", n - 1),
@@ -191,6 +193,9 @@ pub struct ConversationTreeComponent {
     content_origin_row: usize,
     /// Row index shown on each visible content line, for mouse hit-testing.
     line_rows: Vec<usize>,
+    /// Clickable commit label of each visible line as `(start column, width)`:
+    /// `Some` only on a head line whose node has commits.
+    label_zones: Vec<Option<(usize, usize)>>,
     /// Selection as of the last render; a change re-anchors the scroll onto it.
     shown_selection: Option<NodeId>,
     /// Time and row of the last click, to recognize a double click.
@@ -205,6 +210,7 @@ impl ConversationTreeComponent {
             id,
             content_origin_row: 0,
             line_rows: Vec::new(),
+            label_zones: Vec::new(),
             shown_selection: None,
             last_click: None,
         }
@@ -475,16 +481,35 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     .row_index
                     .as_usize()
                     .checked_sub(self.content_origin_row);
+                let column = pos.col_index.as_usize();
                 let Some(row) = line.and_then(|line| self.line_rows.get(line)).copied() else {
                     return Ok(EventPropagation::ConsumedRender);
                 };
+                let on_label = line
+                    .and_then(|line| self.label_zones.get(line).copied().flatten())
+                    .is_some_and(|(start, width)| (start..start + width).contains(&column));
+                let Some(target) = rows.get(row) else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
+                Self::select(state, &rows, row);
+                if on_label {
+                    self.last_click = None;
+                    let hash = state
+                        .conversations
+                        .read()
+                        .node(&target.id)
+                        .and_then(|node| node.meta.commits.last().cloned());
+                    if let Some(hash) = hash {
+                        GitLogPaneComponent::open_log_at_commit(state, main_tx, hash);
+                    }
+                    return Ok(EventPropagation::ConsumedRender);
+                }
                 let now = Instant::now();
                 let double = self
                     .last_click
                     .is_some_and(|(at, last)| last == row && now.duration_since(at) < DOUBLE_CLICK);
                 self.last_click = (!double).then_some((now, row));
-                Self::select(state, &rows, row);
-                if double && let Some(target) = rows.get(row) {
+                if double {
                     DiscussionComponent::open_and_recover(state, main_tx, target.id.clone());
                 }
             }
@@ -526,6 +551,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             let pane_width = bounds.col_width.as_usize();
             self.content_origin_row = origin.row_index.as_usize();
             self.line_rows.clear();
+            self.label_zones.clear();
 
             let window = Window::ConversationTree;
             let state = &mut global_data.state;
@@ -685,6 +711,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     continue;
                 };
                 self.line_rows.push(line.row);
+                self.label_zones.push(None);
                 let row_info = &rows[line.row];
                 let Some(node) = tree.node(&row_info.id) else {
                     continue;
@@ -758,6 +785,8 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         if let Some(label) = commit_label(node) {
                             let column = pane_width.saturating_sub(display_width(&label));
                             paint(&mut render_ops, column, &label, hash_fg);
+                            let slot = self.label_zones.last_mut().expect("pushed above");
+                            *slot = Some((column, display_width(&label)));
                         }
                     }
                     LineKind::TitleRest | LineKind::Summary => {

@@ -80,32 +80,77 @@ impl GitLogPaneComponent {
         state.mark_session_dirty();
     }
 
+    /// Shows the history starting at `hash` in the topmost open git log window,
+    /// opening one when none is open.
+    pub(crate) fn open_log_at_commit(
+        state: &mut AppState,
+        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+        hash: String,
+    ) {
+        let id = state
+            .pane_manager
+            .window_stack
+            .iter()
+            .find_map(|window| match window {
+                Window::GitLog(id) => Some(*id),
+                _ => None,
+            })
+            .unwrap_or_else(|| {
+                let id = state.next_git_log_id;
+                state.next_git_log_id += 1;
+                state.git_logs.insert(id, GitLogWindowState::default());
+                id
+            });
+        let source = LogSource::Commit(hash);
+        {
+            let win = state.git_logs.get_mut(&id).expect("minted or found above");
+            win.source = source.clone();
+            win.query.clear();
+            win.filtered = None;
+            win.selected = 0;
+        }
+        let window = Window::GitLog(id);
+        let old = state.pane_manager.focused_window;
+        state.pane_manager.push_window(window);
+        state.pane_manager.focused_window = Some(window);
+        crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
+        Self::reload_log(state.repo.clone(), main_tx, id, &source);
+        state.mark_session_dirty();
+    }
+
     pub(crate) fn reload_log(
         repo: Option<gix::ThreadSafeRepository>,
         main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
         id: usize,
-        branch: Option<String>,
+        source: &LogSource,
     ) {
-        let Some(repo) = repo else {
-            send_signal!(
-                main_tx,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::GitLogLoaded {
-                    id,
-                    result: Err("open repository: not a git repository".to_string()),
-                })
-            );
-            return;
+        let arg = match source {
+            LogSource::Head => None,
+            LogSource::Branch(name) | LogSource::Commit(name) => Some(name.clone()),
         };
-        tokio::task::spawn_blocking(move || {
-            let result = crate::git::load_log(&repo, branch.as_deref()).map(Arc::new);
-            send_signal!(
-                main_tx,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::GitLogLoaded {
-                    id,
-                    result
-                })
-            );
-        });
+        match repo {
+            Some(repo) => {
+                tokio::task::spawn_blocking(move || {
+                    let result = crate::git::load_log(&repo, arg.as_deref()).map(Arc::new);
+                    send_signal!(
+                        main_tx,
+                        TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::GitLogLoaded {
+                            id,
+                            result
+                        })
+                    );
+                });
+            }
+            None => {
+                send_signal!(
+                    main_tx,
+                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::GitLogLoaded {
+                        id,
+                        result: Err("open repository: not a git repository".to_string()),
+                    })
+                );
+            }
+        }
     }
 
     fn refresh_branch_results(git_refs: &Option<Arc<Vec<GitRef>>>, win: &mut GitLogWindowState) {
@@ -144,9 +189,12 @@ impl GitLogPaneComponent {
 
 impl GitLogPaneComponent {
     pub(crate) fn title(win: &GitLogWindowState) -> String {
-        let mut title = match win.branch.as_deref() {
-            Some(branch) => format!("Logs ({branch})"),
-            None => "Logs".to_string(),
+        let mut title = match &win.source {
+            LogSource::Head => "Logs".to_string(),
+            LogSource::Branch(branch) => format!("Logs ({branch})"),
+            LogSource::Commit(hash) => {
+                format!("Logs ({})", hash.chars().take(7).collect::<String>())
+            }
         };
         if win
             .entries
@@ -304,8 +352,8 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                 }) => {
                     win.branch_picking = false;
                     win.branch_picker = FuzzyPickerState::default();
-                    win.branch = None;
-                    Self::reload_log(repo.clone(), main_tx, window_id, None);
+                    win.source = LogSource::Head;
+                    Self::reload_log(repo.clone(), main_tx, window_id, &LogSource::Head);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -325,11 +373,11 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                     if let Some(name) = picked {
                         win.branch_picking = false;
                         win.branch_picker = FuzzyPickerState::default();
-                        win.branch = Some(name.clone());
+                        win.source = LogSource::Branch(name.clone());
                         win.query.clear();
                         win.filtered = None;
                         win.selected = 0;
-                        Self::reload_log(repo.clone(), main_tx, window_id, Some(name));
+                        Self::reload_log(repo.clone(), main_tx, window_id, &win.source);
                     }
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -989,6 +1037,29 @@ mod tests {
             time_offset_secs: 0,
             summary: summary.to_string(),
         }
+    }
+
+    fn window_with_source(source: LogSource) -> GitLogWindowState {
+        GitLogWindowState {
+            source,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn title_shows_the_branch_commit_or_head() {
+        let title = |win: &GitLogWindowState| GitLogPaneComponent::title(win);
+        assert_eq!(title(&window_with_source(LogSource::Head)), "Logs");
+        assert_eq!(
+            title(&window_with_source(LogSource::Branch("origin/main".into()))),
+            "Logs (origin/main)"
+        );
+        assert_eq!(
+            title(&window_with_source(LogSource::Commit(
+                "0123456789abcdef".into()
+            ))),
+            "Logs (0123456)"
+        );
     }
 
     fn git_ref(kind: RefKind, name: &str) -> GitRef {

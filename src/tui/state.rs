@@ -248,6 +248,17 @@ impl<T: Clone + PartialEq> FuzzyPickerState<T> {
     }
 }
 
+/// What a git log window shows the history of. A commit source points the walk at
+/// that commit, so the newest entry is the commit itself.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LogSource {
+    #[default]
+    Head,
+    Branch(String),
+    Commit(String),
+}
+
 #[derive(Clone, Default)]
 pub struct GitLogWindowState {
     pub entries: Option<Arc<LogHistory>>,
@@ -256,8 +267,8 @@ pub struct GitLogWindowState {
     pub query: String,
     /// Some = query active: (entry index, nucleo match positions), relevance order.
     pub filtered: Option<Vec<(usize, Vec<u32>)>>,
-    /// Ref whose history this window shows; None = HEAD.
-    pub branch: Option<String>,
+    /// Where the history walk starts.
+    pub source: LogSource,
     pub branch_picking: bool,
     pub branch_picker: FuzzyPickerState<usize>,
 }
