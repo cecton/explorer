@@ -298,8 +298,6 @@ pub struct DiscussionState {
     pub mode: Mode,
     /// Why the last send was refused; cleared by the next edit.
     pub notice: Option<String>,
-    /// Keep the end of the reply in view while it streams.
-    pub follow: bool,
 }
 
 /// Highlighted byte ranges (start inclusive, end exclusive) in the prompt and the reply

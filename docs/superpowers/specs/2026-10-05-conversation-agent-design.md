@@ -626,8 +626,9 @@ window holds its node's prompt, reply and work log in memory only while it is op
   prompt, visually set apart; the work log when shown; the reply; a status line; the
   input with its mode label.
 - Prompt, work log and reply form one scrollable document owned by the PaneManager
-  (scrollbar, wheel and drag for free). While streaming, the view follows the end unless
-  the user scrolled up.
+  (scrollbar, wheel and drag for free). Sending a prompt puts the view at the top, where
+  it stays while the reply streams. A view scrolled to the bottom (and not at the top)
+  sticks to the bottom as the document or the input grows.
 - The prompt is plain wrapped text. The reply is rendered as Markdown by
   `src/tui/markdown.rs` (`pulldown-cmark`): headings, emphasis, strikethrough, inline
   and fenced code, block quotes, nested and task lists, links (text only, underlined),

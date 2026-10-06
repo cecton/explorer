@@ -732,7 +732,6 @@ impl DiscussionComponent {
                     discussion.reply.clear();
                     discussion.work_log.clear();
                     discussion.notice = None;
-                    discussion.follow = true;
                 }
                 Err(reason) => discussion.notice = Some(reason.clone()),
             }
@@ -918,7 +917,6 @@ impl DiscussionComponent {
         discussion.draft.clear();
         discussion.loaded = true;
         discussion.notice = None;
-        discussion.follow = true;
         state
             .pane_manager
             .set_window_scroll(&Window::Discussion(id), 0);
@@ -1296,7 +1294,6 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 return Ok(EventPropagation::Propagate);
             }
         };
-        discussion.follow = false;
         state.pane_manager.set_window_scroll(&window, target);
         state.pane_manager.clamp_scroll(&window);
         Ok(EventPropagation::ConsumedRender)
@@ -1367,7 +1364,6 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             .min(total_rows);
             let status_rows = usize::from(total_rows > input_rows);
             let doc_rows = total_rows - input_rows - status_rows;
-            let follow = discussion.follow;
 
             if self.input_window != Some(self.window_id) {
                 self.input.set_cursor_end(&discussion.draft);
@@ -1469,10 +1465,16 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let lines = self.doc_lines(discussion, shown, theme, pane_width);
             let line_count = lines.len();
             let max_scroll = line_count.saturating_sub(doc_rows);
-            let scroll = if follow {
+            let stored = state.pane_manager.window_scroll(&window);
+            let old_max = state
+                .pane_manager
+                .window_scroll_max(&window)
+                .saturating_sub(state.pane_manager.window_page_size(&window));
+            // Parked at the bottom of the previous frame, the view sticks to the new one.
+            let scroll = if stored > 0 && stored >= old_max {
                 max_scroll
             } else {
-                state.pane_manager.window_scroll(&window).min(max_scroll)
+                stored.min(max_scroll)
             };
 
             let mut render_ops = RenderOpIRVec::new();
