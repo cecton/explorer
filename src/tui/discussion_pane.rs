@@ -1338,6 +1338,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let pane_bg = theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
             let prompt_bg = theme
                 .ui_bg("ui.cursorline")
+                .or_else(|| theme.ui_bg("ui.cursorline.primary"))
                 .or_else(|| theme.ui_bg("ui.statusline"))
                 .unwrap_or(DEFAULT_STATUSLINE_BG);
             let text_fg = theme
@@ -1345,7 +1346,9 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 .unwrap_or(RgbValue::from_u8(170, 170, 200));
             let status_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
             let error_fg = theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG);
-            let (input_bg, input_fg) = title_bar_colors(focused, theme);
+            // A surface of its own, like Helix's help box: the input sits inside the
+            // window, where the focused title colors would read as the window's own row.
+            let input_bg = theme.ui_bg("ui.help").unwrap_or(pane_bg);
             // `ui.selection`, the regular color of the file preview.
             let selection_bg = theme
                 .ui_bg("ui.selection")
@@ -1372,7 +1375,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let mut input_ops = RenderOpIRVec::new();
             let input_origin = origin + height((doc_rows + status_rows) as u16);
             let input_style = new_style!(
-                color_fg: {TuiColor::from(input_fg)} color_bg: {TuiColor::from(input_bg)}
+                color_fg: {TuiColor::from(text_fg)} color_bg: {TuiColor::from(input_bg)}
             );
             for row_offset in 0..input_rows {
                 input_ops += RenderOpCommon::MoveCursorPositionRelTo(
@@ -1393,16 +1396,15 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 pane_width as u16,
                 input_rows,
                 focused,
-                (TuiColor::from(input_bg), TuiColor::from(input_fg)),
+                (TuiColor::from(input_bg), TuiColor::from(text_fg)),
             );
 
             // The mode label is repainted in its own color over the input's prompt.
             let mode_fg = match mode {
-                Mode::Feedback => theme.color_for_scope("function").unwrap_or(input_fg),
-                Mode::Commit => theme
-                    .color_for_scope("diff.plus")
-                    .unwrap_or(RgbValue::from_u8(150, 220, 120)),
-            };
+                Mode::Feedback => theme.color_for_scope("info"),
+                Mode::Commit => theme.color_for_scope("error"),
+            }
+            .unwrap_or(text_fg);
             let label_style = new_style!(
                 bold color_fg: {TuiColor::from(mode_fg)} color_bg: {TuiColor::from(input_bg)}
             );
