@@ -627,15 +627,18 @@ suggests `/compact` from the parent node.
   as many lines as it needs, and its summary is shown just below, wrapped as well.
   Moving the selection collapses the previous node and expands the new one, so browsing
   the tree with the arrows reads like a preview of each prompt.
-- **Layout of the tree**: roots are listed newest first; inside a conversation, nodes run
-  oldest first. The descendants of a root sit one level below it, which sets
-  conversations apart. After that, a node with a single child keeps that child at the
+- **Layout of the tree**: roots are listed oldest first, like the nodes inside a
+  conversation, so the whole pane reads from top to bottom; with nothing selected, the
+  pane selects the newest root, the last one. The descendants of a root sit one level
+  below it, which sets conversations apart. After that, a node with a single child keeps that child at the
   **same** indentation, so a straight line of prompts reads as a flat list. Indentation
   grows only below a node with several children, one level per fork. Each row draws a
   box-drawing prefix: one `│` rail per fork above whose later branches still follow, an
   arm (`├─`, or `└─` for a fork's last branch) at the start of a branch, and the fold
   column (`+` collapsed, `-` expanded, `─` for a leaf that starts a branch). A fork's
   arms and rail sit in the column of its fold marker, so they hang right under it. The
+  only child of a root is a branch too and gets a `└─` arm, which ties a single-thread
+  conversation to its root. The
   wrapped title and summary lines of the selected row repeat the rails, with a `│` under
   an expanded fold. Without the flat rule a 50-prompt conversation would be indented 50
   levels.

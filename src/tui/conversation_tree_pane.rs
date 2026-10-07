@@ -18,10 +18,11 @@ pub(crate) enum Fold {
     Expanded,
 }
 
-/// Where a row sits among the children of an expanded fork.
+/// Where a row sits among the children of an expanded fold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Branch {
-    /// Not a direct child of a fork: a root, or the continuation of a straight line.
+    /// Not a direct child of an expanded fold: a root, or the continuation of a
+    /// straight line.
     None,
     Start,
     LastStart,
@@ -36,13 +37,13 @@ pub(crate) struct TreeRow {
     pub branch: Branch,
 }
 
-/// Flattens the tree into display rows: roots newest first, nodes of a conversation
-/// oldest first. A root's descendants sit one level below it; after that, indentation
+/// Flattens the tree into display rows: roots oldest first, like the nodes of a
+/// conversation. A root's descendants sit one level below it; after that, indentation
 /// grows only below a fork, so a straight line of prompts stays a flat list.
 pub(crate) fn layout_rows(tree: &ConversationTree, expanded: &HashSet<NodeId>) -> Vec<TreeRow> {
     let mut rows = Vec::new();
     let mut rails = Vec::new();
-    for root in tree.roots().iter().rev() {
+    for root in tree.roots() {
         push_rows(tree, expanded, root, Branch::None, &mut rails, &mut rows);
     }
     rows
@@ -80,10 +81,10 @@ fn push_rows(
     }
     let last = node.children.len().saturating_sub(1);
     for (i, child) in node.children.iter().enumerate() {
-        let child_branch = match node.children.len() {
-            0 | 1 => Branch::None,
-            _ if i == last => Branch::LastStart,
-            _ => Branch::Start,
+        let child_branch = match fold {
+            Fold::Expanded if i == last => Branch::LastStart,
+            Fold::Expanded => Branch::Start,
+            _ => Branch::None,
         };
         if fold == Fold::Expanded {
             *rails.last_mut().unwrap() = i != last;
@@ -212,6 +213,7 @@ impl ConversationTreeComponent {
     fn selected_index(rows: &[TreeRow], selected: Option<&NodeId>) -> usize {
         selected
             .and_then(|id| rows.iter().position(|row| &row.id == id))
+            .or_else(|| rows.iter().rposition(|row| row.rails.is_empty()))
             .unwrap_or(0)
     }
 
@@ -854,12 +856,24 @@ mod tests {
     }
 
     #[test]
-    fn roots_are_newest_first_and_collapsed_by_default() {
+    fn roots_are_oldest_first_and_collapsed_by_default() {
         let (_tmp, tree) = tree_with(&["a1/a2", "b1"]);
         let rows = layout_rows(&tree, &HashSet::new());
         assert_eq!(
             shape(&rows),
-            [("b1", vec![], Fold::Leaf), ("a1", vec![], Fold::Collapsed)]
+            [("a1", vec![], Fold::Collapsed), ("b1", vec![], Fold::Leaf)]
+        );
+    }
+
+    #[test]
+    fn the_newest_root_is_selected_when_nothing_is() {
+        let (_tmp, tree) = tree_with(&["a1/a2", "b1/b2"]);
+        let rows = layout_rows(&tree, &ids(&["a1", "b1"]));
+        assert_eq!(ConversationTreeComponent::selected_index(&rows, None), 2);
+        let known = NodeId::new("a2");
+        assert_eq!(
+            ConversationTreeComponent::selected_index(&rows, Some(&known)),
+            1
         );
     }
 
@@ -905,7 +919,7 @@ mod tests {
             branches(&rows),
             [
                 Branch::None,
-                Branch::None,
+                Branch::LastStart,
                 Branch::Start,
                 Branch::None,
                 Branch::LastStart,
@@ -935,13 +949,13 @@ mod tests {
         assert_eq!(
             prefixes(&rows),
             [
-                "- ",     // c1: expanded root
-                "  - ",   // c2: expanded fork, only child of c1
-                "  ├── ", // d3: first branch of c2, arm under c2's fold column
-                "  └── ", // e3: last branch of c2
                 "- ",     // a1: expanded root
                 "├── ",   // a2: first branch of a1
                 "└── ",   // b2: last branch of a1
+                "- ",     // c1: expanded root
+                "└─- ",   // c2: expanded fork, only child of c1
+                "  ├── ", // d3: first branch of c2, arm under c2's fold column
+                "  └── ", // e3: last branch of c2
             ]
         );
     }
