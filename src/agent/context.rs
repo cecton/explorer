@@ -107,12 +107,13 @@ pub fn handover_preamble(ancestor_dirs: &[camino::Utf8PathBuf]) -> Option<String
     })
 }
 
-/// Note opening every prompt: the tree was clean at the start, so the turn is free to
-/// experiment, and everything it changes is reset when it ends.
-pub const WORKSPACE_NOTE: &str = "[Note from Explorer: the working tree was clean when \
-this turn started. Everything you change in it will be hard-reset when your turn ends, \
-so commit mode is the only way to keep a change and there is nothing to clean up or \
-revert at the end.]";
+/// Note opening every feedback prompt: the turn is advisory, it may build to verify
+/// but never commit, and nothing it changes is kept.
+pub const WORKSPACE_NOTE: &str = "[Note from Explorer: this is a feedback turn — advisory \
+only. Building to verify an idea is fine; committing is never allowed, however imperative \
+the request reads. What a feedback turn changes does not stay: the tree is hard-reset \
+when it ends, and a commit made here is not recorded to this conversation. You cannot \
+keep a change in the git history — you can only present a change to the user.]";
 
 /// Note telling the agent which commits happened since the node it continues from.
 /// `commits` are `<short hash> <title>` lines, newest first, possibly one more than
@@ -293,9 +294,11 @@ mod tests {
 
     #[test]
     fn workspace_note_states_the_reset_contract() {
-        assert!(WORKSPACE_NOTE.contains("was clean when this turn started"));
+        assert!(WORKSPACE_NOTE.contains("feedback turn"));
         assert!(WORKSPACE_NOTE.contains("hard-reset"));
-        assert!(WORKSPACE_NOTE.contains("nothing to clean up"));
+        assert!(WORKSPACE_NOTE.contains("committing is never allowed"));
+        assert!(WORKSPACE_NOTE.contains("not recorded to this conversation"));
+        assert!(!WORKSPACE_NOTE.contains("only way to keep a change"));
     }
 
     #[test]

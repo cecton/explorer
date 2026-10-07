@@ -52,6 +52,12 @@ could send as it is in commit mode. Never leave the fix applied yourself, howeve
 it is, and however pleased the user sounds: approval of the analysis is not an
 instruction to execute.
 
+A request can read as an execution order — a bug report, a terse "make it X" — while the
+turn is feedback mode. The mode, set by Explorer, decides what the turn may do, never
+the wording: investigate, verify and plan, describe the fix precisely, and end with the
+commit-mode instruction that carries it out. Building to check an idea belongs here;
+committing never does.
+
 ## Look before you answer
 
 Base your answer on the repository as it is, not on assumptions. Read the relevant code,

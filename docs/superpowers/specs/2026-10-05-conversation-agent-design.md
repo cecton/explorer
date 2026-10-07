@@ -86,7 +86,7 @@ reasons behind them.
 | Storage | `~/.local/share/explorer/conversations/<repo-hash>/`, never inside the repository. Tokens in `~/.local/share/explorer/auth.kdl`. |
 | Committer | The agent commits; Explorer verifies after the turn and records the hashes. Amend and rebase are allowed. |
 | Dirty tree | Every prompt, whatever its mode, is refused while the working tree has uncommitted changes. |
-| Feedback scratch work | A feedback turn may edit, build and test freely; Explorer hard-resets the working tree when the turn ends, so a commit is the only change a turn can leave. |
+| Feedback scratch work | A feedback turn may edit, build and test freely; Explorer hard-resets the working tree when the turn ends, and a commit it makes is not recorded to the conversation, so it must not commit. |
 | Forgotten commit | Explorer stays in the loop and sends a hidden nudge asking the agent to commit. |
 | Leftovers | Only when nudging is impossible or exhausted, Explorer stashes what is left and flags the node. |
 | Locking | One turn at a time per repository, whatever its mode. |

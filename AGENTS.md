@@ -272,7 +272,7 @@ Planned feature areas and their likely dependencies:
 - `reply.md` holds only the text of answers that called no tools. The text of an answer that called tools, and one line per tool call, go to `activity.md`, the work log. It is display-only: never replay it and never send it to a model.
 - Never pass `--bare` to `claude`: it disables the subscription login.
 - A queued prompt is never copied: the queue holds the window, and the text stays that window's `draft` until its turn starts. Nothing reaches the conversation tree or the disk before `start_turn`. The queue is released only from the main thread, after the finished turn's status is written to its node.
-- Every prompt requires a clean working tree, and only one turn runs at a time; a prompt sent meanwhile is queued. Feedback turns end with a hard reset of the tree, so a commit is the only change they can leave; commit turns end with the agent's leftovers stashed.
+- Every prompt requires a clean working tree, and only one turn runs at a time; a prompt sent meanwhile is queued. Feedback turns end with a hard reset of the tree, and a commit they make is not recorded to the conversation, so they must not commit; commit turns end with the agent's leftovers stashed.
 
 ### Comments
 
