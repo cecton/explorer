@@ -90,7 +90,7 @@ Source is organized as:
 - `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview (exceptions → input → navigation)
 - `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane); text selection uses global `AppState`
 - `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation; `render_ofs_buf_to_ir()` emits `ResetColor` for `Spacer` runs to prevent stale SGR inheritance; supports mouse selection, word/line text extraction, and clipboard copy; synchronized output (DEC private mode 2026) is buffered natively by `OfsBufVT100` in r3bl-open-core
-- `src/tui/input_line.rs` — query input with Emacs-style key bindings; single flat `match` on `InputEvent`; soft-wraps over several rows, `Up`/`Down` between rows, height cap with internal scroll; optional placeholder passed to `render` and `height` at each frame: weak text laid out after the typed text, over as many rows as it needs, which the cursor and the keys never enter
+- `src/tui/input_line.rs` — query input with Emacs-style key bindings; single flat `match` on `InputEvent`; soft-wraps over several rows, `Up`/`Down` between rows, `Ctrl+A`/`Ctrl+E` to the start and end of the line the cursor is on (newline to newline, whatever the wrapping), `Home`/`End` to the start and end of the whole text, height cap with internal scroll; optional placeholder passed to `render` and `height` at each frame: weak text laid out after the typed text, over as many rows as it needs, which the cursor and the keys never enter
 
 ---
 

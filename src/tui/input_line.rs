@@ -82,6 +82,12 @@ impl InputLine {
         true
     }
 
+    /// The line the cursor is on, from one newline to the next, however many rows it wraps over.
+    fn current_line(&self, query: &str) -> VisualRow {
+        let rows = visual_rows(query, usize::MAX);
+        rows[row_of_cursor(&rows, self.cursor)]
+    }
+
     pub fn handle_key(&mut self, input_event: &InputEvent, query: &mut String) -> bool {
         let grapheme_count = query.graphemes(true).count();
         self.cursor = self.cursor.min(grapheme_count);
@@ -96,7 +102,7 @@ impl InputLine {
                         alt_key_state: KeyState::NotPressed,
                     },
             }) => {
-                self.cursor = 0;
+                self.cursor = self.current_line(query).start;
                 true
             }
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -108,7 +114,8 @@ impl InputLine {
                         alt_key_state: KeyState::NotPressed,
                     },
             }) => {
-                self.cursor = grapheme_count;
+                let line = self.current_line(query);
+                self.cursor = line.start + line.len;
                 true
             }
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -906,6 +913,61 @@ mod wrap_tests {
         assert!(input.handle_key(&up(), &mut query));
         assert_eq!(input.cursor, 2);
         assert!(!input.handle_key(&up(), &mut query));
+    }
+
+    fn ctrl(ch: char) -> InputEvent {
+        InputEvent::Keyboard(KeyPress::WithModifiers {
+            key: Key::Character(ch),
+            mask: ModifierKeysMask::new().with_ctrl(),
+        })
+    }
+
+    fn plain(key: SpecialKey) -> InputEvent {
+        InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::SpecialKey(key),
+        })
+    }
+
+    #[test]
+    fn ctrl_a_and_ctrl_e_stay_on_the_line_of_the_cursor() {
+        let mut input = InputLine::new();
+        let mut query = "abcdef\ngh\n\nijkl".to_string();
+        input.cursor = 8;
+        assert!(input.handle_key(&ctrl('a'), &mut query));
+        assert_eq!(input.cursor, 7);
+        assert!(input.handle_key(&ctrl('e'), &mut query));
+        assert_eq!(input.cursor, 9);
+        input.cursor = 10;
+        assert!(input.handle_key(&ctrl('a'), &mut query));
+        assert_eq!(input.cursor, 10, "an empty line starts at the cursor");
+        assert!(input.handle_key(&ctrl('e'), &mut query));
+        assert_eq!(input.cursor, 10);
+        assert_eq!(query, "abcdef\ngh\n\nijkl");
+    }
+
+    #[test]
+    fn ctrl_a_and_ctrl_e_ignore_soft_wrapping() {
+        let mut input = InputLine::new();
+        let mut query = "abcdefgh\nij".to_string();
+        input.row_capacity.store(4, Ordering::Relaxed);
+        input.cursor = 6;
+        assert!(input.handle_key(&ctrl('a'), &mut query));
+        assert_eq!(input.cursor, 0);
+        input.cursor = 1;
+        assert!(input.handle_key(&ctrl('e'), &mut query));
+        assert_eq!(input.cursor, 8);
+    }
+
+    #[test]
+    fn home_and_end_span_the_whole_text() {
+        let mut input = InputLine::new();
+        let mut query = "abcdef\ngh\nijkl".to_string();
+        input.cursor = 8;
+        assert!(input.handle_key(&plain(SpecialKey::Home), &mut query));
+        assert_eq!(input.cursor, 0);
+        input.cursor = 8;
+        assert!(input.handle_key(&plain(SpecialKey::End), &mut query));
+        assert_eq!(input.cursor, 14);
     }
 
     #[test]
