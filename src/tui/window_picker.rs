@@ -108,7 +108,7 @@ impl TitleRow for WindowPickerComponent {
         let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
         let query = &state.window_picker.query;
         let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
-        let height = InputLine::height(query, "", width, max_rows);
+        let height = InputLine::height(query, None, "", width, max_rows);
 
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
         let color_bg = TuiColor::from(bg_rgb);
@@ -127,6 +127,7 @@ impl TitleRow for WindowPickerComponent {
         self.input_line.render(
             ops,
             query,
+            None,
             "",
             origin,
             width,

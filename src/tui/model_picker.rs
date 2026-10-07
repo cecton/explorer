@@ -143,7 +143,7 @@ impl TitleRow for ModelPickerComponent {
         let query = &state.model_picker.query;
         let prompt = "Model: ";
         let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
-        let height = InputLine::height(query, prompt, width, max_rows);
+        let height = InputLine::height(query, None, prompt, width, max_rows);
 
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
         let color_bg = TuiColor::from(bg_rgb);
@@ -162,6 +162,7 @@ impl TitleRow for ModelPickerComponent {
         self.input_line.render(
             ops,
             query,
+            None,
             prompt,
             origin,
             width,

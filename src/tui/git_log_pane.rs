@@ -250,6 +250,7 @@ impl GitLogPaneComponent {
             input_line.render(
                 ops,
                 query,
+                None,
                 prompt,
                 origin,
                 width,

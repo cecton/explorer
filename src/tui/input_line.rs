@@ -524,10 +524,18 @@ impl InputLine {
         true
     }
 
-    /// Rows the input occupies once soft-wrapped to `width`, at most `max_rows`.
-    pub fn height(query: &str, prompt: &str, width: u16, max_rows: usize) -> usize {
+    /// Rows the input occupies once soft-wrapped to `width`, at most `max_rows`. The
+    /// placeholder counts as text that follows `query`.
+    pub fn height(
+        query: &str,
+        placeholder: Option<&str>,
+        prompt: &str,
+        width: u16,
+        max_rows: usize,
+    ) -> usize {
         let capacity = (width as usize).saturating_sub(prompt.graphemes(true).count());
-        visual_rows(query, capacity).len().min(max_rows).max(1)
+        let shown = format!("{query}{}", placeholder.unwrap_or_default());
+        visual_rows(&shown, capacity).len().min(max_rows).max(1)
     }
 
     /// Places the cursor at the end of `query`. Used when opening an input prefilled with existing
@@ -538,12 +546,14 @@ impl InputLine {
 
     /// Paints the input soft-wrapped to `width` on at most `max_rows` rows, scrolling
     /// inside them so the cursor row stays visible. The prompt stays on the first row
-    /// shown and every row starts after it.
+    /// shown and every row starts after it. The placeholder is laid out as text that
+    /// follows `query`, in its own color; the cursor never enters it.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         mut ops: &mut RenderOpIRVec,
         query: &str,
+        placeholder: Option<(&str, TuiColor)>,
         prompt: &str,
         origin: Pos,
         width: u16,
@@ -565,9 +575,22 @@ impl InputLine {
         let cursor_style = new_style!(color_fg: {color_bg} color_bg: {color_text});
         ops += RenderOpCommon::ApplyColors(Some(text_style));
 
-        let graphemes: Vec<&str> = query.graphemes(true).collect();
-        let cursor = self.cursor.min(graphemes.len());
-        let rows = visual_rows(query, capacity);
+        let typed = query.graphemes(true).count();
+        let (placeholder, placeholder_style) = match placeholder {
+            Some((text, color)) => (text, new_style!(color_fg: {color} color_bg: {color_bg})),
+            None => ("", text_style),
+        };
+        let shown = format!("{query}{placeholder}");
+        let style_at = |index: usize| {
+            if index < typed {
+                text_style
+            } else {
+                placeholder_style
+            }
+        };
+        let graphemes: Vec<&str> = shown.graphemes(true).collect();
+        let cursor = self.cursor.min(typed);
+        let rows = visual_rows(&shown, capacity);
         let cursor_row = row_of_cursor(&rows, cursor);
         let max_rows = max_rows.max(1);
 
@@ -598,16 +621,21 @@ impl InputLine {
                 origin,
                 col(prompt_width as u16) + row(screen_row as u16),
             );
+            ops += RenderOpCommon::ApplyColors(Some(style_at(visual.start)));
             for (column, gr) in graphemes[visual.start..visual.start + visual.len]
                 .iter()
                 .enumerate()
             {
-                if focused && row_idx == cursor_row && visual.start + column == cursor {
+                let index = visual.start + column;
+                if focused && row_idx == cursor_row && index == cursor {
                     ops += RenderOpCommon::ApplyColors(Some(cursor_style));
                     ops += RenderOpIR::PaintTextWithAttributes((*gr).into(), Some(cursor_style));
-                    ops += RenderOpCommon::ApplyColors(Some(text_style));
+                    ops += RenderOpCommon::ApplyColors(Some(style_at(index + 1)));
                 } else {
-                    ops += RenderOpIR::PaintTextWithAttributes((*gr).into(), Some(text_style));
+                    if index == typed {
+                        ops += RenderOpCommon::ApplyColors(Some(placeholder_style));
+                    }
+                    ops += RenderOpIR::PaintTextWithAttributes((*gr).into(), Some(style_at(index)));
                 }
             }
             if focused && row_idx == cursor_row && cursor == visual.start + visual.len {
@@ -667,6 +695,7 @@ mod cursor_render_tests {
         input.render(
             &mut ops,
             "",
+            None,
             "",
             col(0) + row(0),
             20,
@@ -680,6 +709,88 @@ mod cursor_render_tests {
         assert_eq!(pen.color_bg, Some(color_text));
     }
 
+    /// Text and foreground of every paint op, in order.
+    fn painted(ops: &RenderOpIRVec) -> Vec<(String, Option<TuiColor>)> {
+        ops.iter()
+            .filter_map(|op| match op {
+                RenderOpIR::PaintTextWithAttributes(text, style) => {
+                    Some((text.to_string(), style.and_then(|style| style.color_fg)))
+                }
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn placeholder_follows_the_text_in_its_own_color_over_several_rows() {
+        let (color_bg, color_text) = colors();
+        let weak = TuiColor::from(RgbValue::from_u8(90, 90, 90));
+        let query = "/squash";
+        let placeholder = " <ref>\nSquash the commits since a ref";
+        let mut input = InputLine::new();
+        input.set_cursor_end(query);
+        let mut ops = RenderOpIRVec::new();
+        input.render(
+            &mut ops,
+            query,
+            Some((placeholder, weak)),
+            "",
+            col(0) + row(0),
+            20,
+            4,
+            true,
+            (color_bg, color_text),
+        );
+
+        let painted = painted(&ops);
+        let text: String = painted.iter().map(|(text, _)| text.as_str()).collect();
+        assert_eq!(text, "/squash <ref>Squash the commits since a ref");
+        assert_eq!(painted[6], ("h".to_string(), Some(color_text)));
+        // The cursor sits on the first cell of the placeholder.
+        assert_eq!(painted[7], (" ".to_string(), Some(color_bg)));
+        assert_eq!(painted[8], ("<".to_string(), Some(weak)));
+        assert_eq!(painted.last().map(|(_, color)| *color), Some(Some(weak)));
+        let pen = pen_before_paint(&ops, "<").expect("the placeholder must set the pen");
+        assert_eq!(pen.color_fg, Some(weak));
+        assert_eq!(pen.color_bg, Some(color_bg));
+
+        assert_eq!(InputLine::height(query, Some(placeholder), "", 20, 4), 3);
+        assert_eq!(InputLine::height(query, Some(placeholder), "", 20, 2), 2);
+        assert_eq!(InputLine::height(query, None, "", 20, 4), 1);
+    }
+
+    #[test]
+    fn cursor_and_keys_ignore_the_placeholder() {
+        let (color_bg, color_text) = colors();
+        let weak = TuiColor::from(RgbValue::from_u8(90, 90, 90));
+        let mut query = "/squash".to_string();
+        let mut input = InputLine::new();
+        input.set_cursor_end(&query);
+        let mut ops = RenderOpIRVec::new();
+        input.render(
+            &mut ops,
+            &query,
+            Some(("\nSquash the commits", weak)),
+            "",
+            col(0) + row(0),
+            20,
+            4,
+            true,
+            (color_bg, color_text),
+        );
+
+        // The cursor ends the typed row; the placeholder starts on the next one.
+        let painted = painted(&ops);
+        assert_eq!(painted[7], (" ".to_string(), Some(color_bg)));
+        assert_eq!(painted[8], ("S".to_string(), Some(weak)));
+        let down = InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::SpecialKey(SpecialKey::Down),
+        });
+        assert!(!input.handle_key(&down, &mut query));
+        assert_eq!(input.cursor, 7);
+        assert_eq!(query, "/squash");
+    }
+
     #[test]
     fn mid_line_cursor_grapheme_sets_swapped_pen() {
         let (color_bg, color_text) = colors();
@@ -689,6 +800,7 @@ mod cursor_render_tests {
         input.render(
             &mut ops,
             "ab",
+            None,
             "",
             col(0) + row(0),
             20,
@@ -710,6 +822,7 @@ mod cursor_render_tests {
         input.render(
             &mut ops,
             "",
+            None,
             "",
             col(0) + row(0),
             20,
@@ -766,9 +879,9 @@ mod wrap_tests {
 
     #[test]
     fn height_counts_wrapped_rows_and_respects_the_cap() {
-        assert_eq!(InputLine::height("", "> ", 10, 5), 1);
-        assert_eq!(InputLine::height("abcdefghij", "> ", 10, 5), 2);
-        assert_eq!(InputLine::height("a\nb\nc\nd", "", 10, 3), 3);
+        assert_eq!(InputLine::height("", None, "> ", 10, 5), 1);
+        assert_eq!(InputLine::height("abcdefghij", None, "> ", 10, 5), 2);
+        assert_eq!(InputLine::height("a\nb\nc\nd", None, "", 10, 3), 3);
     }
 
     #[test]
@@ -804,7 +917,17 @@ mod wrap_tests {
             TuiColor::from(RgbValue::from_u8(0, 0, 0)),
             TuiColor::from(RgbValue::from_u8(255, 255, 255)),
         );
-        input.render(&mut ops, &query, "", col(0) + row(0), 4, 3, true, colors);
+        input.render(
+            &mut ops,
+            &query,
+            None,
+            "",
+            col(0) + row(0),
+            4,
+            3,
+            true,
+            colors,
+        );
         input.cursor = 1;
         assert!(input.handle_key(&down(), &mut query));
         assert_eq!(input.cursor, 5);
@@ -820,7 +943,17 @@ mod wrap_tests {
             TuiColor::from(RgbValue::from_u8(0, 0, 0)),
             TuiColor::from(RgbValue::from_u8(255, 255, 255)),
         );
-        input.render(&mut ops, query, "", col(0) + row(0), 10, 2, false, colors);
+        input.render(
+            &mut ops,
+            query,
+            None,
+            "",
+            col(0) + row(0),
+            10,
+            2,
+            false,
+            colors,
+        );
         let painted: Vec<&str> = ops
             .iter()
             .filter_map(|op| match op {

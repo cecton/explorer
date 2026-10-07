@@ -254,6 +254,7 @@ impl FilePreviewComponent {
         self.command_input.render(
             ops,
             cmd,
+            None,
             ":",
             origin,
             width,
@@ -296,6 +297,7 @@ impl FilePreviewComponent {
         self.search_input.render(
             ops,
             pattern,
+            None,
             prompt,
             origin,
             width,
@@ -1253,14 +1255,14 @@ impl TitleRow for FilePreviewComponent {
             let origin = pane_box.style_adjusted_origin_pos;
             let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
             let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
-            let height = InputLine::height(cmd, ":", width, max_rows);
+            let height = InputLine::height(cmd, None, ":", width, max_rows);
             self.render_command_title(ops, origin, width, height, focused, theme);
             height
         } else if let Some(pattern) = &self.search_mode {
             let origin = pane_box.style_adjusted_origin_pos;
             let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
             let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
-            let height = InputLine::height(pattern, "/", width, max_rows);
+            let height = InputLine::height(pattern, None, "/", width, max_rows);
             self.render_search_title(ops, origin, width, height, focused, theme);
             height
         } else {

@@ -1635,6 +1635,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let (status, alert) = status_line(state, self.window_id, discussion);
             let input_rows = InputLine::height(
                 &discussion.draft,
+                None,
                 "",
                 pane_width as u16,
                 (total_rows / 2).max(1),
@@ -1662,6 +1663,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             self.input.render(
                 &mut input_ops,
                 &discussion.draft,
+                None,
                 "",
                 input_origin,
                 pane_width as u16,
