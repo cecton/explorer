@@ -8,10 +8,23 @@ pub enum Expansion {
     },
     /// The built-in `/compact`, with the instructions typed after it.
     Compact { instructions: String },
+    /// The built-in `/commit`, with the additional instructions typed after it.
+    Commit { instructions: String },
 }
 
-/// Name of the built-in command, which a custom command cannot take.
+/// Names of the built-in commands, which a custom command cannot take.
 pub const COMPACT: &str = "compact";
+pub const COMMIT: &str = "commit";
+
+/// The prompt a `/commit` sends: a go-ahead, then the instructions typed after it.
+pub fn commit_prompt(instructions: &str) -> String {
+    let go_ahead = "OK, go ahead.";
+    if instructions.is_empty() {
+        go_ahead.to_string()
+    } else {
+        format!("{go_ahead}\n\nAdditional instructions:\n\n{instructions}")
+    }
+}
 
 /// Splits `/name rest` when the prompt starts with a command name: lowercase letters,
 /// digits and dashes, followed by whitespace or the end of the text.
@@ -38,6 +51,11 @@ pub fn expand(typed: &str, commands: &[(String, String)]) -> Expansion {
     };
     if name == COMPACT {
         return Expansion::Compact {
+            instructions: rest.to_string(),
+        };
+    }
+    if name == COMMIT {
+        return Expansion::Commit {
             instructions: rest.to_string(),
         };
     }
@@ -117,6 +135,28 @@ mod tests {
         assert_eq!(
             expand("/compacted", &commands()),
             prompt("/compacted", None)
+        );
+    }
+
+    #[test]
+    fn commit_is_built_in_and_sends_a_go_ahead() {
+        assert_eq!(
+            expand("/commit", &commands()),
+            Expansion::Commit {
+                instructions: String::new()
+            }
+        );
+        assert_eq!(
+            expand("/commit  but keep the old name\n", &commands()),
+            Expansion::Commit {
+                instructions: "but keep the old name".to_string()
+            }
+        );
+        assert_eq!(expand("/commits", &commands()), prompt("/commits", None));
+        assert_eq!(commit_prompt(""), "OK, go ahead.");
+        assert_eq!(
+            commit_prompt("but keep the old name"),
+            "OK, go ahead.\n\nAdditional instructions:\n\nbut keep the old name"
         );
     }
 }

@@ -10,31 +10,13 @@ pub mod turn;
 use serde::{Deserialize, Serialize};
 use std::fmt;
 
-/// How a prompt is sent: to the teacher, or to the executor.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+/// How a turn runs: for the teacher, or for the executor.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
-    /// The agent explains and advises; the repository is left untouched.
-    #[default]
+    /// The agent explains and advises; what it changes is discarded.
     Feedback,
     /// The agent carries out an instruction and commits the result.
     Commit,
-}
-
-impl Mode {
-    pub fn toggled(self) -> Self {
-        match self {
-            Mode::Feedback => Mode::Commit,
-            Mode::Commit => Mode::Feedback,
-        }
-    }
-
-    pub fn label(self) -> &'static str {
-        match self {
-            Mode::Feedback => "feedback",
-            Mode::Commit => "commit",
-        }
-    }
 }
 
 /// Reasoning effort offered for every model. `Default` sends no effort parameter.

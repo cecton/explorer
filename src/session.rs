@@ -104,8 +104,6 @@ pub enum PaneEntry {
         node: Option<String>,
         #[serde(default)]
         draft: String,
-        #[serde(default)]
-        mode: crate::agent::Mode,
         pane_size: SerializablePaneSize,
     },
 }
@@ -373,7 +371,6 @@ impl Session {
                 PaneEntry::Discussion {
                     node,
                     draft,
-                    mode,
                     pane_size,
                 } => {
                     let id = state.next_discussion_id;
@@ -393,7 +390,6 @@ impl Session {
                             loaded: node.is_none(),
                             node: node.as_deref().map(NodeId::new),
                             draft,
-                            mode,
                             ..Default::default()
                         },
                     );
@@ -500,7 +496,6 @@ fn pane_entry_from_window(
                     .as_ref()
                     .map(|node| node.as_str().to_string()),
                 draft: discussion.draft.clone(),
-                mode: discussion.mode,
                 pane_size: window_state.pane_size.into(),
             })
         }

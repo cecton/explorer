@@ -484,7 +484,6 @@ fn invocation<'a>(
 ) -> Invocation<'a> {
     Invocation {
         target,
-        mode: request.mode,
         root: &request.root,
         system,
         prompt,
@@ -558,7 +557,6 @@ async fn run_own_loop(
         return Ok(());
     }
     let tool_context = ToolContext {
-        mode: request.mode,
         root: request.root.clone(),
         tree: Arc::clone(&request.tree),
         node: request.node.clone(),

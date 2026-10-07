@@ -846,26 +846,13 @@ impl App for AppMain {
             }
         }
 
-        // Shift+Tab toggles the prompt mode of a focused Discussion window instead of
-        // cycling focus; `<leader>Shift+Tab` above still does.
-        let mode_toggle = matches!(
-            global_data.state.pane_manager.focused_window,
-            Some(Window::Discussion(_))
-        ) && matches!(
-            input_event,
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::BackTab),
-            })
-        );
-
         // Global shortcuts: Tab/BackTab cycles focus; Ctrl+Up/Down resize; Ctrl+Left/Right reorder.
         // Skipped for Terminal panes so Tab reaches the PTY (e.g. shell completion).
         // When a terminal is ungrabbed Tab cycles focus.
-        if !mode_toggle
-            && (!matches!(
-                global_data.state.pane_manager.focused_window,
-                Some(Window::Terminal(_))
-            ) || !global_data.state.terminal_grabbed)
+        if (!matches!(
+            global_data.state.pane_manager.focused_window,
+            Some(Window::Terminal(_))
+        ) || !global_data.state.terminal_grabbed)
             && !global_data.state.mouse_drag_active
         {
             match keyboard.and_then(|kp| global_data.state.keymap.global_action(&kp)) {
@@ -1921,7 +1908,7 @@ fn render_status_bar(
                         .to_string()
                 }
                 Some(Window::Discussion(_)) => {
-                    "Enter:Send  Shift+Enter:New line  Shift+Tab:Mode  Ctrl+P:Model  PgUp/PgDn:scroll"
+                    "Enter:Send  Shift+Enter:New line  /commit:Go ahead  Ctrl+P:Model  PgUp/PgDn:scroll"
                         .to_string()
                 }
                 Some(Window::ModelPicker) => model_picker_hint(state),

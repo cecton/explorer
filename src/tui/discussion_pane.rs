@@ -88,7 +88,7 @@ pub struct DiscussionComponent {
 
 /// What a turn is asked to do.
 pub(crate) enum TurnKind {
-    /// A prompt sent in a mode.
+    /// A prompt run in a mode: feedback, or commit for the built-in `/commit`.
     Prompt(Mode),
     /// The built-in `/compact`: summarize the branch so far.
     Compact { instructions: String },
@@ -122,7 +122,7 @@ impl Launch {
         let kind = match source.meta.node_type {
             Some(NodeType::Compact) => match commands::expand(&prompt, &[]) {
                 Expansion::Compact { instructions } => TurnKind::Compact { instructions },
-                Expansion::Prompt { .. } => TurnKind::Compact {
+                Expansion::Prompt { .. } | Expansion::Commit { .. } => TurnKind::Compact {
                     instructions: String::new(),
                 },
             },
@@ -316,10 +316,6 @@ fn node_mode(node: &Node) -> Mode {
     }
 }
 
-fn input_label(mode: Mode) -> String {
-    format!("{}> ", mode.label())
-}
-
 /// Share of the theme's warning color in the background of highlighted text.
 const MARKER_STRENGTH: f32 = 0.4;
 
@@ -409,8 +405,8 @@ fn move_queued(state: &mut AppState, window: usize, earlier: bool) {
 
 /// The turn the draft of window `id` asks for, as the window stands now: a new node
 /// below the node shown, or a sibling of it when its turn failed or was cancelled.
-/// `None` without a draft or a model.
-fn compose_launch(state: &AppState, id: usize) -> Option<Launch> {
+/// `None` without a draft or a model; a refusal when the draft cannot make a turn.
+fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>> {
     let discussion = state.discussions.get(&id)?;
     if discussion.draft.trim().is_empty() {
         return None;
@@ -436,12 +432,23 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Launch> {
         Expansion::Compact { instructions } => {
             (typed, None, TurnKind::Compact { instructions }, None)
         }
+        Expansion::Commit { instructions } if instructions.is_empty() && parent.is_none() => {
+            return Some(Err(Refusal::Rejected(
+                "/commit has nothing to go ahead with in a new conversation".to_string(),
+            )));
+        }
+        Expansion::Commit { instructions } => (
+            commands::commit_prompt(&instructions),
+            Some(typed),
+            TurnKind::Prompt(Mode::Commit),
+            None,
+        ),
         Expansion::Prompt { text, command } => {
             let input = command.is_some().then_some(typed);
-            (text, input, TurnKind::Prompt(discussion.mode), command)
+            (text, input, TurnKind::Prompt(Mode::Feedback), command)
         }
     };
-    Some(Launch {
+    Some(Ok(Launch {
         parent,
         prompt,
         input,
@@ -449,7 +456,7 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Launch> {
         command,
         spec,
         rerun: None,
-    })
+    }))
 }
 
 /// The text of `part`, as the offsets of a [`DocLine`] index it. The work log entries
@@ -887,7 +894,7 @@ impl DiscussionComponent {
     /// Opens a window on the parent of `node` with the input prefilled with the node's
     /// prompt as it was typed, so that an edited version can be sent as a new sibling.
     pub(crate) fn open_edit(state: &mut AppState, main_tx: MainTx, node: &NodeId) {
-        let (parent, draft, model, mode) = {
+        let (parent, draft, model) = {
             let tree = state.conversations.read();
             let Some(source) = tree.node(node) else {
                 return;
@@ -896,12 +903,7 @@ impl DiscussionComponent {
                 .node_dir(node)
                 .map(|dir| crate::conversation::read_input(&dir))
                 .unwrap_or_default();
-            (
-                source.parent.clone(),
-                draft,
-                node_model(source),
-                node_mode(source),
-            )
+            (source.parent.clone(), draft, node_model(source))
         };
         let id = state.next_discussion_id;
         state.next_discussion_id += 1;
@@ -912,7 +914,6 @@ impl DiscussionComponent {
                 node: parent,
                 draft,
                 model,
-                mode,
                 ..Default::default()
             },
         );
@@ -931,20 +932,12 @@ impl DiscussionComponent {
         let id = existing.unwrap_or_else(|| {
             let id = state.next_discussion_id;
             state.next_discussion_id += 1;
-            let (model, mode) = {
-                let tree = state.conversations.read();
-                let shown = tree.node(&node);
-                (
-                    shown.and_then(node_model),
-                    shown.map(node_mode).unwrap_or_default(),
-                )
-            };
+            let model = state.conversations.read().node(&node).and_then(node_model);
             state.discussions.insert(
                 id,
                 DiscussionState {
                     node: Some(node),
                     model,
-                    mode,
                     ..Default::default()
                 },
             );
@@ -1012,12 +1005,15 @@ impl DiscussionComponent {
         if state.queued_turns.iter().any(|entry| entry.window == id) {
             return;
         }
-        let Some(launch) = compose_launch(state, id) else {
+        let Some(composed) = compose_launch(state, id) else {
             return;
         };
-        let prompt = launch.prompt.clone();
-        match start_turn(state, main_tx, launch) {
-            Ok(node) => Self::apply_sent(state, id, node, prompt),
+        let started = composed.and_then(|launch| {
+            let prompt = launch.prompt.clone();
+            start_turn(state, main_tx, launch).map(|node| (node, prompt))
+        });
+        match started {
+            Ok((node, prompt)) => Self::apply_sent(state, id, node, prompt),
             Err(Refusal::Busy(_)) => {
                 let Some(discussion) = state.discussions.get_mut(&id) else {
                     return;
@@ -1072,13 +1068,16 @@ impl DiscussionComponent {
                 state.queued_turns.remove(0);
                 continue;
             }
-            let Some(launch) = compose_launch(state, id) else {
+            let Some(composed) = compose_launch(state, id) else {
                 state.queued_turns.remove(0);
                 continue;
             };
-            let prompt = launch.prompt.clone();
-            let refusal = match start_turn(state, main_tx.clone(), launch) {
-                Ok(node) => {
+            let started = composed.and_then(|launch| {
+                let prompt = launch.prompt.clone();
+                start_turn(state, main_tx.clone(), launch).map(|node| (node, prompt))
+            });
+            let refusal = match started {
+                Ok((node, prompt)) => {
                     state.queued_turns.remove(0);
                     Self::apply_sent(state, id, node, prompt);
                     continue;
@@ -1374,7 +1373,7 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
     }
     let queued = queue_hint(state, id);
     let Some(node) = &discussion.node else {
-        let help = "Enter:Send  Shift+Enter:New line  Shift+Tab:Mode";
+        let help = "Enter:Send  Shift+Enter:New line  /commit:Go ahead";
         return (queued.unwrap_or_else(|| help.to_string()), false);
     };
     if let Some(handle) = state.running_turns.get(node) {
@@ -1453,14 +1452,6 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 key: Key::SpecialKey(SpecialKey::Enter),
             }) => {
                 Self::send(state, main_tx, id);
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::BackTab),
-            }) => {
-                discussion.mode = discussion.mode.toggled();
-                discussion.notice = None;
-                state.mark_session_dirty();
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -1642,11 +1633,9 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let marker = marker_bg(theme, pane_bg);
 
             let (status, alert) = status_line(state, self.window_id, discussion);
-            let mode = discussion.mode;
-            let label = input_label(mode);
             let input_rows = InputLine::height(
                 &discussion.draft,
-                &label,
+                "",
                 pane_width as u16,
                 (total_rows / 2).max(1),
             )
@@ -1673,27 +1662,13 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             self.input.render(
                 &mut input_ops,
                 &discussion.draft,
-                &label,
+                "",
                 input_origin,
                 pane_width as u16,
                 input_rows,
                 focused,
                 (TuiColor::from(input_bg), TuiColor::from(text_fg)),
             );
-
-            // The mode label is repainted in its own color over the input's prompt.
-            let mode_fg = match mode {
-                Mode::Feedback => theme.color_for_scope("info"),
-                Mode::Commit => theme.color_for_scope("error"),
-            }
-            .unwrap_or(text_fg);
-            let label_style = new_style!(
-                bold color_fg: {TuiColor::from(mode_fg)} color_bg: {TuiColor::from(input_bg)}
-            );
-            input_ops += RenderOpCommon::MoveCursorPositionRelTo(input_origin, col(0) + row(0));
-            input_ops += RenderOpCommon::ApplyColors(Some(label_style));
-            input_ops +=
-                RenderOpIR::PaintTextWithAttributes(label.as_str().into(), Some(label_style));
 
             self.doc_origin = (origin.row_index.as_usize(), origin.col_index.as_usize());
             self.doc_rows = doc_rows;
@@ -2041,7 +2016,6 @@ mod tests {
         assert_eq!(node_mode(tree.node(&id).unwrap()), Mode::Commit);
         let (_tmp, tree, id) = node_with_metadata("type: compact\n");
         assert_eq!(node_mode(tree.node(&id).unwrap()), Mode::Feedback);
-        assert_eq!(input_label(Mode::Commit), "commit> ");
     }
 
     fn empty_state() -> AppState {
@@ -2166,26 +2140,57 @@ mod tests {
 
         for discussion in state.discussions.values_mut() {
             discussion.draft = "/review bar".to_string();
-            discussion.mode = Mode::Commit;
         }
-        let below = compose_launch(&state, 0).unwrap();
+        let below = compose_launch(&state, 0).unwrap().unwrap();
         assert_eq!(below.parent, Some(NodeId::new("a1")));
         assert_eq!(below.prompt, "Review it.\n\nbar");
         assert_eq!(below.input.as_deref(), Some("/review bar"));
         assert_eq!(below.command.as_deref(), Some("review"));
-        assert!(matches!(below.kind, TurnKind::Prompt(Mode::Commit)));
+        assert!(matches!(below.kind, TurnKind::Prompt(Mode::Feedback)));
 
-        let beside = compose_launch(&state, 1).unwrap();
+        let beside = compose_launch(&state, 1).unwrap().unwrap();
         assert_eq!(beside.parent, Some(NodeId::new("a1")));
 
         state.discussions.get_mut(&0).unwrap().draft = "as typed".to_string();
-        let typed = compose_launch(&state, 0).unwrap();
+        let typed = compose_launch(&state, 0).unwrap().unwrap();
         assert_eq!(typed.prompt, "as typed");
         assert!(typed.input.is_none());
         assert!(typed.command.is_none());
 
         state.discussions.get_mut(&0).unwrap().model = None;
         assert!(compose_launch(&state, 0).is_none());
+    }
+
+    #[test]
+    fn commit_command_composes_a_go_ahead_in_commit_mode() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state.discussions.get_mut(&0).unwrap().draft = "/commit".to_string();
+        let bare = compose_launch(&state, 0).unwrap().unwrap();
+        assert_eq!(bare.parent, Some(NodeId::new("a1")));
+        assert_eq!(bare.prompt, "OK, go ahead.");
+        assert_eq!(bare.input.as_deref(), Some("/commit"));
+        assert!(bare.command.is_none());
+        assert!(matches!(bare.kind, TurnKind::Prompt(Mode::Commit)));
+
+        state.discussions.get_mut(&0).unwrap().draft = "/commit keep the name".to_string();
+        let detailed = compose_launch(&state, 0).unwrap().unwrap();
+        assert_eq!(
+            detailed.prompt,
+            "OK, go ahead.\n\nAdditional instructions:\n\nkeep the name"
+        );
+        assert_eq!(detailed.input.as_deref(), Some("/commit keep the name"));
+
+        let root = state.discussions.get_mut(&0).unwrap();
+        root.node = None;
+        assert!(matches!(
+            compose_launch(&state, 0),
+            Some(Ok(Launch { parent: None, .. }))
+        ));
+        state.discussions.get_mut(&0).unwrap().draft = "/commit ".to_string();
+        assert!(matches!(
+            compose_launch(&state, 0),
+            Some(Err(Refusal::Rejected(_)))
+        ));
     }
 
     #[test]

@@ -1,5 +1,5 @@
+use super::Effort;
 use super::turn::Recorder;
-use super::{Effort, Mode};
 use camino::Utf8Path;
 use serde_json::Value;
 use std::process::Stdio;
@@ -7,8 +7,6 @@ use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 /// Removes Claude Code's own trailer from the commits it makes.
 const NO_ATTRIBUTION: &str = r#"{"attribution":{"commit":"","pr":""}}"#;
-/// Tools denied in feedback mode, where the repository must stay untouched.
-const EDITING_TOOLS: &str = "Edit Write NotebookEdit";
 
 /// A model of the local `claude` CLI and the effort to run it with.
 #[derive(Clone, Debug)]
@@ -29,7 +27,6 @@ pub enum Resume<'a> {
 
 pub struct Invocation<'a> {
     pub target: &'a ClaudeTarget,
-    pub mode: Mode,
     pub root: &'a Utf8Path,
     /// Appended to Claude Code's own system prompt.
     pub system: &'a str,
@@ -185,10 +182,6 @@ fn arguments(invocation: &Invocation<'_>) -> Vec<String> {
     if invocation.target.effort != Effort::Default {
         args.push("--effort".to_string());
         args.push(invocation.target.effort.as_str().to_string());
-    }
-    if invocation.mode == Mode::Feedback {
-        args.push("--disallowedTools".to_string());
-        args.push(EDITING_TOOLS.to_string());
     }
     match invocation.resume {
         Resume::Fresh => {}
@@ -398,14 +391,13 @@ mod tests {
     }
 
     #[test]
-    fn arguments_follow_mode_effort_and_session() {
+    fn arguments_follow_effort_and_session() {
         let target = ClaudeTarget {
             model: "opus".to_string(),
             effort: Effort::High,
         };
-        let invocation = |mode, resume| Invocation {
+        let invocation = |resume| Invocation {
             target: &target,
-            mode,
             root: Utf8Path::new("/repo"),
             system: "SYSTEM",
             prompt: "hi",
@@ -413,17 +405,16 @@ mod tests {
         };
         let joined = |invocation: &Invocation<'_>| arguments(invocation).join(" ");
 
-        let feedback = joined(&invocation(Mode::Feedback, Resume::Fork("abc")));
-        assert!(feedback.contains("--model opus --effort high"));
-        assert!(feedback.contains("--disallowedTools Edit Write NotebookEdit"));
-        assert!(feedback.ends_with("--resume abc --fork-session"));
-        assert!(feedback.contains("--append-system-prompt SYSTEM"));
-        assert!(feedback.contains("--system-prompt-snapshot off"));
-        assert!(!feedback.contains("--bare"));
+        let forked = joined(&invocation(Resume::Fork("abc")));
+        assert!(forked.contains("--model opus --effort high"));
+        assert!(!forked.contains("--disallowedTools"));
+        assert!(forked.ends_with("--resume abc --fork-session"));
+        assert!(forked.contains("--append-system-prompt SYSTEM"));
+        assert!(forked.contains("--system-prompt-snapshot off"));
+        assert!(!forked.contains("--bare"));
 
-        let commit = joined(&invocation(Mode::Commit, Resume::Continue("abc")));
-        assert!(!commit.contains("--disallowedTools"));
-        assert!(commit.ends_with("--resume abc"));
+        let continued = joined(&invocation(Resume::Continue("abc")));
+        assert!(continued.ends_with("--resume abc"));
 
         let default_effort = ClaudeTarget {
             model: "haiku".to_string(),
@@ -431,7 +422,7 @@ mod tests {
         };
         let fresh = Invocation {
             target: &default_effort,
-            ..invocation(Mode::Commit, Resume::Fresh)
+            ..invocation(Resume::Fresh)
         };
         let fresh = joined(&fresh);
         assert!(!fresh.contains("--effort"));

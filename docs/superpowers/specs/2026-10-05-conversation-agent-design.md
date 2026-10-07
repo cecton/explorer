@@ -53,7 +53,8 @@ comes from the agent. This gives the two modes, and two very different agents:
   instruction as given, speaks up only for an unforeseen hurdle, and commits. (opencode:
   "build".)
 
-The user picks the mode for each prompt; Explorer never guesses it.
+The user picks the mode for each prompt; Explorer never guesses it: every prompt is
+feedback, and `/commit` starts a commit turn.
 
 ### Why a commit for every editing prompt
 
@@ -79,7 +80,7 @@ reasons behind them.
 |---|---|
 | LLM library | `genai` as wire client; Explorer owns the agent loop, the tools and the tree. Not adk-rust (its runner owns session history, which fights a tree). MiniMax Code is TypeScript: reference only, like opencode. |
 | Endpoint kinds | `openai` (Chat Completions with URL and token, default) and `claude-code` (spawns the local `claude` CLI; the only sanctioned way to use a Claude subscription). No Anthropic API-key kind. |
-| Mode | Chosen by the user per prompt with `Shift+Tab`, saved in the node, and selects the system prompt, the tools and the git rules. |
+| Mode | Feedback for every prompt; the built-in `/commit` starts a commit turn. Saved in the node, it selects the system prompt and the git rules. |
 | Fork versus git | Forks are conversation-only. The repository stays at current HEAD; the agent is told which commits happened since the node it continues from. |
 | Context replay | Full transcript (tool calls and results) stored per node and replayed exactly. |
 | Backend switch | Allowed. Crossing between `claude-code` and `openai` replays ancestors as prompt and reply text only (lossy handover). |
@@ -148,7 +149,7 @@ conversations/3fa9c1d2e4b5a6f7/
 | File | Content | Written |
 |---|---|---|
 | `prompt.md` | The exact prompt sent, after slash-command expansion. | Immediately on send, before any network call. |
-| `input.md` | The prompt as typed, before slash-command expansion. This is the text given back for editing (`e` in the tree). Absent when the prompt was sent as typed: the typed text is then `prompt.md`. Never sent to a model. | With `prompt.md`, only when a custom command was expanded. |
+| `input.md` | The prompt as typed, before slash-command expansion. This is the text given back for editing (`e` in the tree). Absent when the prompt was sent as typed: the typed text is then `prompt.md`. Never sent to a model. | With `prompt.md`, only when a custom command or `/commit` was expanded. |
 | `metadata.md` | Flat `key: value` lines, see below. | On send; rewritten when the turn ends and when favorite toggles. |
 | `reply.md` | The text of the answers that called no tools, in order: the reply proper. | Flushed about once per second while streaming, when an answer turns out to call tools, and at the end. |
 | `activity.md` | The work log, in order: the text of each answer that called tools, and one `- <tool> <detail>` line per tool call. Display-only: never replayed and never sent to a model. Absent when the turn called no tools. | Appended as each answer calls its tools. |
@@ -283,18 +284,18 @@ changed model carries on from the node that used it.
 |---|---|---|
 | System prompt | `prompts/feedback.md` | `prompts/commit.md` |
 | Role | teacher: explains, advises, disagrees | executor: follows the instruction |
-| Tools (own loop) | `read`, `glob`, `grep`, `shell`, `conversation` | all of them, plus `write` and `edit` |
+| Tools | all of them | all of them |
 | Working tree | a lab: edits are allowed and discarded | the deliverable: edits are committed |
 | Dirty tree on send | refused | refused |
 | Lock | exclusive | exclusive |
 | After the turn | hard reset of the working tree | verify, nudge, record commits |
 
-- `Shift+Tab` in a Discussion window toggles the mode of the prompt being written. The
-  mode is shown as the input's label (`feedback>` / `commit>`, colored).
-- A window starts in the mode of the node it shows (a `compact` node counts as
-  feedback); a new root starts in feedback. The window's mode is saved in the session.
-- In feedback mode the working tree is a lab. The shell is available, and on
-  `claude-code` so is everything but the editing tools, so the agent can apply a
+- A window has no mode of its own. A prompt is sent in feedback mode, and the built-in
+  `/commit` (section 10) is the only way to start a commit turn, so the mode travels
+  with the text of the prompt: through the queue, and back into the input when a turn
+  fails or is cancelled. The input has no label.
+- In feedback mode the working tree is a lab. The shell and the editing tools are
+  available on both kinds of endpoint, so the agent can apply a
   candidate fix, build and run the tests to verify what it claims. Nothing of it
   survives: when the turn ends, however it ended, Explorer runs `git reset --hard HEAD`
   and `git clean -fd` (ignored files are kept) and records `scratch-reset: true` if
@@ -315,7 +316,7 @@ never share it. A prompt sent while any turn is running, `/compact` included, is
 not part of the session, and after a restart the draft is back in the input, to be
 sent again by hand. An entry is a window and the node it showed, never a copy of the
 text: the queued prompt stays the draft of its window, so it can be edited, and its
-model and mode changed, until the turn starts. Slash commands are expanded at that
+model changed, until the turn starts. Slash commands are expanded at that
 moment. A window holds at most one queued prompt; `Enter` does nothing more while it
 waits. Only what time fixes is queued: a prompt sent while another turn runs, or below
 a node whose own turn is still running. Every other refusal is immediate.
@@ -381,8 +382,8 @@ model again; the turn is over when a response contains no tool call.
 | Tool | Behavior |
 |---|---|
 | `read` | Read a file, optional line range. |
-| `write` | Create or overwrite a file. Commit mode only. |
-| `edit` | Replace an exact string in a file; fails if the string is absent or ambiguous. Commit mode only. |
+| `write` | Create or overwrite a file. |
+| `edit` | Replace an exact string in a file; fails if the string is absent or ambiguous. |
 | `glob` | List paths matching a pattern. |
 | `grep` | Regex search over file contents. |
 | `shell` | Run `sh -c` in the repository root. Default timeout 120 s, maximum 600 s; output truncated to head and tail beyond a size cap. |
@@ -426,7 +427,6 @@ claude -p --output-format stream-json --verbose --include-partial-messages \
        --system-prompt-snapshot off \
        --permission-mode bypassPermissions \
        --settings '{"attribution":{"commit":"","pr":""}}' \
-       [--disallowedTools "Edit Write NotebookEdit"]        feedback mode
        [--resume <parent session-id> --fork-session]         child nodes
 ```
 
@@ -581,7 +581,7 @@ deal with them and with second opinions:
   model spec, and opens it. The pick belongs to that sibling only; it does not become
   the model offered to new roots. Works on any node, complete or not.
 - **`e` — edit as a new sibling.** Opens a Discussion window on the node's **parent**
-  with the input prefilled with the node's prompt as typed and its mode selected. Nothing is
+  with the input prefilled with the node's prompt as typed, `/commit` included. Nothing is
   created until the user sends. On a root, this is a new-root window.
 
 Since forks are conversation-only, a sibling of a commit node runs on a repository that
@@ -602,8 +602,15 @@ the end of the text, is looked up among the commands:
   typed text in the tree.
 - **Unknown name**: the text is sent as typed. A prompt beginning with a path such as
   `/home/…` is therefore harmless.
+- **`/commit [instructions]`** (built-in, cannot be overridden): starts a commit turn.
+  `prompt.md` is `OK, go ahead.`, followed, when instructions were typed, by a blank
+  line, `Additional instructions:`, a blank line and the instructions; `input.md` holds
+  the text as typed. `prompts/commit.md` tells the agent that a go-ahead stands for the
+  instruction closing the previous reply, or else for the plan the conversation settled
+  on, and that additional instructions win on conflict. A bare `/commit` in a new
+  conversation is refused with a notice: it has nothing to go ahead with.
 - **`/compact [instructions]`** (built-in, cannot be overridden): creates a child node of
-  type `compact`, whatever the mode selected. Its turn is one call to the window's model
+  type `compact`. Its turn is one call to the window's model
   with the branch so far as context and `prompts/compact.md` as instruction, plus any
   typed instructions; no tools. It is guarded and closed like a feedback turn: clean
   tree, no other turn running. Its `reply.md` is the summary. Descendants
@@ -687,7 +694,7 @@ window holds its node's prompt, reply and work log in memory only while it is op
 
 - Top to bottom: title row (node title, the window's model spec on the right); the node's
   prompt, visually set apart; the work log when shown; the reply; a status line; the
-  input with its mode label.
+  input, without a label.
 - Prompt, work log and reply form one scrollable document owned by the PaneManager
   (scrollbar, wheel and drag for free). Sending a prompt puts the view at the top, where
   it stays while the reply streams. A view scrolled to the bottom (and not at the top)
@@ -737,9 +744,6 @@ window holds its node's prompt, reply and work log in memory only while it is op
 - Keys:
   - `Enter` — send.
   - `Shift+Enter` — insert a newline.
-  - `Shift+Tab` — toggle feedback / commit. `Shift+Tab` is globally bound to
-    `focus-prev`; while a Discussion window is focused the window takes it, and
-    `<leader>Shift+Tab` still moves focus.
   - `Ctrl+P` — Model Picker.
   - `Esc` — take the queued prompt back, else cancel the running turn, else nothing.
   - `Ctrl+Plus` / `Ctrl+Minus` — move the queued prompt earlier or later in the queue.
@@ -783,7 +787,7 @@ picker was opened:
 - `AppSignal` gains the tree-loaded, models-fetched, turn-event and title/summary-ready
   variants.
 - `Action::OpenConversations`, slug `open-conversations`, default `<leader>c`.
-- Session: `PaneEntry::ConversationTree`; `PaneEntry::Discussion { node, draft, mode }`;
+- Session: `PaneEntry::ConversationTree`; `PaneEntry::Discussion { node, draft }`;
   expanded set; the highlights of nodes, by node id. No model is saved. The Model Picker is not saved. `SESSION_VERSION`
   3 → 4.
 - New dependencies: `genai`; `reqwest` for the model-list fetch, which genai only does
@@ -832,8 +836,7 @@ Hermetic unit tests:
 - title and summary: answer parsing, title cut at 100 characters, reply cut and commits
   listed in the record sent;
 - stream-json parsing from a recorded `claude` fixture;
-- file tools refusing paths outside the root; `write` and `edit` absent in feedback
-  mode.
+- file tools refusing paths outside the root.
 
 Real endpoints and the `claude` CLI are verified manually.
 
@@ -857,7 +860,7 @@ Real endpoints and the `claude` CLI are verified manually.
 - The `claude` CLI (2.1): the forked session id arrives in the `system/init` event;
   `--resume` of an unknown session ends with an error result and no turn, which
   triggers the lossy handover; the attribution setting removes the commit trailer;
-  `--disallowedTools` removes the editing tools; `--tools ""` and
+  `--tools ""` and
   `--no-session-persistence` serve titles and summaries. `--bare` must not be used: it
   disables the subscription login.
 

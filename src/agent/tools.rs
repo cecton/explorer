@@ -1,5 +1,5 @@
+use super::ToolCall;
 use super::llm::ToolSpec;
-use super::{Mode, ToolCall};
 use crate::conversation::{ConversationTree, NodeId};
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use parking_lot::RwLock;
@@ -18,50 +18,14 @@ const SHELL_MAX_OUTPUT_BYTES: usize = 30_000;
 
 /// What the tools of one turn act on.
 pub struct ToolContext {
-    pub mode: Mode,
     pub root: Utf8PathBuf,
     pub tree: Arc<RwLock<ConversationTree>>,
     /// The node whose turn is running.
     pub node: NodeId,
 }
 
-/// The tools advertised to the model. `write` and `edit` exist in commit mode only.
-pub fn specs(mode: Mode) -> Vec<ToolSpec> {
-    let mut specs = read_only_specs();
-    if mode == Mode::Commit {
-        specs.push(ToolSpec {
-            name: "write",
-            description: "Create a file or replace its whole content. Missing parent \
-                          directories are created.",
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path relative to the repository root"},
-                    "content": {"type": "string"}
-                },
-                "required": ["path", "content"]
-            }),
-        });
-        specs.push(ToolSpec {
-            name: "edit",
-            description: "Replace one exact occurrence of `old_string` in a file with \
-                          `new_string`. Fails when the text is absent or appears more \
-                          than once; include enough surrounding lines to make it unique.",
-            schema: json!({
-                "type": "object",
-                "properties": {
-                    "path": {"type": "string", "description": "Path relative to the repository root"},
-                    "old_string": {"type": "string"},
-                    "new_string": {"type": "string"}
-                },
-                "required": ["path", "old_string", "new_string"]
-            }),
-        });
-    }
-    specs
-}
-
-fn read_only_specs() -> Vec<ToolSpec> {
+/// The tools advertised to the model.
+pub fn specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "conversation",
@@ -135,6 +99,34 @@ fn read_only_specs() -> Vec<ToolSpec> {
                 "required": ["command"]
             }),
         },
+        ToolSpec {
+            name: "write",
+            description: "Create a file or replace its whole content. Missing parent \
+                          directories are created.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to the repository root"},
+                    "content": {"type": "string"}
+                },
+                "required": ["path", "content"]
+            }),
+        },
+        ToolSpec {
+            name: "edit",
+            description: "Replace one exact occurrence of `old_string` in a file with \
+                          `new_string`. Fails when the text is absent or appears more \
+                          than once; include enough surrounding lines to make it unique.",
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "Path relative to the repository root"},
+                    "old_string": {"type": "string"},
+                    "new_string": {"type": "string"}
+                },
+                "required": ["path", "old_string", "new_string"]
+            }),
+        },
     ]
 }
 
@@ -152,28 +144,25 @@ pub fn describe(call: &ToolCall) -> String {
 pub async fn run(context: &ToolContext, call: &ToolCall) -> String {
     let args = call.arguments.clone();
     let root = context.root.as_path();
-    let result = match (call.name.as_str(), context.mode) {
-        ("conversation", _) => {
+    let result = match call.name.as_str() {
+        "conversation" => {
             let tree = Arc::clone(&context.tree);
             let node = context.node.clone();
             blocking(move || conversation(&tree, &node, &args)).await
         }
-        ("read", _) => read(root, &args),
-        ("write", Mode::Commit) => write(root, &args),
-        ("edit", Mode::Commit) => edit(root, &args),
-        ("write" | "edit", Mode::Feedback) => {
-            Err("files cannot be changed in feedback mode".to_string())
-        }
-        ("glob", _) => {
+        "read" => read(root, &args),
+        "write" => write(root, &args),
+        "edit" => edit(root, &args),
+        "glob" => {
             let root = root.to_owned();
             blocking(move || glob(&root, &args)).await
         }
-        ("grep", _) => {
+        "grep" => {
             let root = root.to_owned();
             blocking(move || grep(&root, &args)).await
         }
-        ("shell", _) => shell(root, &args).await,
-        (other, _) => Err(format!("unknown tool: {other}")),
+        "shell" => shell(root, &args).await,
+        other => Err(format!("unknown tool: {other}")),
     };
     result.unwrap_or_else(|error| format!("error: {error}"))
 }
@@ -522,9 +511,8 @@ mod tests {
         (tmp, root)
     }
 
-    fn context(mode: Mode, root: &Utf8Path) -> ToolContext {
+    fn context(root: &Utf8Path) -> ToolContext {
         ToolContext {
-            mode,
             root: root.to_owned(),
             tree: Arc::default(),
             node: NodeId::new("current"),
@@ -566,13 +554,13 @@ mod tests {
     async fn read_numbers_lines_and_honors_offset_and_limit() {
         let (_tmp, root) = repo();
         let all = run(
-            &context(Mode::Feedback, &root),
+            &context(&root),
             &call("read", json!({"path": "src/main.rs"})),
         )
         .await;
         assert_eq!(all, "1\tfn main() {\n2\t    run();\n3\t}\n");
         let part = run(
-            &context(Mode::Feedback, &root),
+            &context(&root),
             &call(
                 "read",
                 json!({"path": "src/main.rs", "offset": 2, "limit": 1}),
@@ -583,11 +571,7 @@ mod tests {
             part,
             "2\t    run();\n[lines 2-2 of 3; use offset to read more]\n"
         );
-        let outside = run(
-            &context(Mode::Feedback, &root),
-            &call("read", json!({"path": "../x"})),
-        )
-        .await;
+        let outside = run(&context(&root), &call("read", json!({"path": "../x"}))).await;
         assert!(outside.starts_with("error: "), "{outside}");
     }
 
@@ -595,23 +579,19 @@ mod tests {
     async fn glob_and_grep_skip_pruned_directories() {
         let (_tmp, root) = repo();
         let listed = run(
-            &context(Mode::Feedback, &root),
+            &context(&root),
             &call("glob", json!({"pattern": "**/*.rs"})),
         )
         .await;
         assert_eq!(listed, "src/main.rs\nsrc/tui/app.rs\n");
 
-        let found = run(
-            &context(Mode::Feedback, &root),
-            &call("grep", json!({"pattern": "run"})),
-        )
-        .await;
+        let found = run(&context(&root), &call("grep", json!({"pattern": "run"}))).await;
         assert_eq!(
             found,
             "README.md:2: run it\nsrc/main.rs:2:     run();\nsrc/tui/app.rs:1: pub fn run() {}\n"
         );
         let scoped = run(
-            &context(Mode::Feedback, &root),
+            &context(&root),
             &call(
                 "grep",
                 json!({"pattern": "run", "path": "src", "glob": "**/app.rs"}),
@@ -619,11 +599,7 @@ mod tests {
         )
         .await;
         assert_eq!(scoped, "src/tui/app.rs:1: pub fn run() {}\n");
-        let none = run(
-            &context(Mode::Feedback, &root),
-            &call("grep", json!({"pattern": "zzz"})),
-        )
-        .await;
+        let none = run(&context(&root), &call("grep", json!({"pattern": "zzz"}))).await;
         assert_eq!(none, "no matches\n");
     }
 
@@ -631,19 +607,19 @@ mod tests {
     async fn shell_reports_output_exit_code_and_timeout() {
         let (_tmp, root) = repo();
         let ok = run(
-            &context(Mode::Feedback, &root),
+            &context(&root),
             &call("shell", json!({"command": "echo hi; pwd"})),
         )
         .await;
         assert_eq!(ok, format!("hi\n{root}\n"));
         let failed = run(
-            &context(Mode::Feedback, &root),
+            &context(&root),
             &call("shell", json!({"command": "echo oops >&2; exit 3"})),
         )
         .await;
         assert_eq!(failed, "oops\nexit code: 3\n");
         let slow = run(
-            &context(Mode::Feedback, &root),
+            &context(&root),
             &call("shell", json!({"command": "sleep 5", "timeout": 1})),
         )
         .await;
@@ -670,15 +646,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn write_and_edit_exist_in_commit_mode_only() {
+    async fn write_creates_files_inside_the_repository_only() {
         let (_tmp, root) = repo();
-        let names = |mode| -> Vec<&str> { specs(mode).iter().map(|spec| spec.name).collect() };
+        let names: Vec<&str> = specs().iter().map(|spec| spec.name).collect();
         assert_eq!(
-            names(Mode::Feedback),
-            ["conversation", "read", "glob", "grep", "shell"]
-        );
-        assert_eq!(
-            names(Mode::Commit),
+            names,
             [
                 "conversation",
                 "read",
@@ -694,24 +666,13 @@ mod tests {
             "write",
             json!({"path": "docs/new.md", "content": "one\ntwo\n"}),
         );
-        let refused = run(&context(Mode::Feedback, &root), &write_call).await;
-        assert_eq!(refused, "error: files cannot be changed in feedback mode");
-        assert!(!root.join("docs/new.md").exists());
-
-        assert_eq!(
-            run(&context(Mode::Commit, &root), &write_call).await,
-            "wrote 8 bytes\n"
-        );
+        assert_eq!(run(&context(&root), &write_call).await, "wrote 8 bytes\n");
         assert_eq!(
             std::fs::read_to_string(root.join("docs/new.md")).unwrap(),
             "one\ntwo\n"
         );
         let outside = call("write", json!({"path": "../evil", "content": "x"}));
-        assert!(
-            run(&context(Mode::Commit, &root), &outside)
-                .await
-                .starts_with("error: ")
-        );
+        assert!(run(&context(&root), &outside).await.starts_with("error: "));
     }
 
     #[tokio::test]
@@ -724,12 +685,12 @@ mod tests {
                 json!({"path": "a.txt", "old_string": old, "new_string": new}),
             )
         };
-        let ambiguous = run(&context(Mode::Commit, &root), &edit_call("alpha", "x")).await;
+        let ambiguous = run(&context(&root), &edit_call("alpha", "x")).await;
         assert!(ambiguous.contains("appears 2 times"), "{ambiguous}");
-        let missing = run(&context(Mode::Commit, &root), &edit_call("gamma", "x")).await;
+        let missing = run(&context(&root), &edit_call("gamma", "x")).await;
         assert_eq!(missing, "error: old_string was not found in the file");
         assert_eq!(
-            run(&context(Mode::Commit, &root), &edit_call("beta", "gamma")).await,
+            run(&context(&root), &edit_call("beta", "gamma")).await,
             "edited\n"
         );
         assert_eq!(
@@ -753,7 +714,6 @@ mod tests {
         std::fs::write(node_dir.join("prompt.md"), "do it\n").unwrap();
         std::fs::write(node_dir.join("reply.md"), "done\n").unwrap();
         let context = ToolContext {
-            mode: Mode::Feedback,
             root: root.clone(),
             tree: Arc::new(RwLock::new(ConversationTree::load(&store))),
             node: NodeId::new("n2"),

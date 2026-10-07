@@ -13,7 +13,7 @@ pub async fn run(
     messages: &mut Vec<Message>,
     recorder: &mut Recorder,
 ) -> Result<(), String> {
-    let tool_specs = tools::specs(context.mode);
+    let tool_specs = tools::specs();
     loop {
         recorder.begin_answer();
         let response = llm::stream_chat(

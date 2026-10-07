@@ -218,8 +218,15 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                         "command name '{name}' must be made of lowercase letters, digits and dashes"
                     ));
                 }
-                if name == crate::agent::commands::COMPACT {
-                    return Err("command 'compact' is built in and cannot be redefined".to_string());
+                if [
+                    crate::agent::commands::COMPACT,
+                    crate::agent::commands::COMMIT,
+                ]
+                .contains(&name)
+                {
+                    return Err(format!(
+                        "command '{name}' is built in and cannot be redefined"
+                    ));
                 }
                 let prompt = child
                     .children()
@@ -484,6 +491,7 @@ mod config_tests {
     #[test]
     fn agent_block_rejects_bad_commands() {
         assert!(parse("agent {\n command \"compact\" {\n prompt \"x\"\n }\n}").is_err());
+        assert!(parse("agent {\n command \"commit\" {\n prompt \"x\"\n }\n}").is_err());
         assert!(parse("agent {\n command \"Bad Name\" {\n prompt \"x\"\n }\n}").is_err());
         assert!(parse("agent {\n command \"review\" {\n }\n}").is_err());
     }

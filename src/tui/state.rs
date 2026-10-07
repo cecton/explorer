@@ -1,5 +1,5 @@
 use crate::agent::turn::{TurnHandle, TurnOutcome};
-use crate::agent::{AgentConfig, Effort, Mode, ModelSpec};
+use crate::agent::{AgentConfig, Effort, ModelSpec};
 use crate::conversation::{ConversationTree, NodeId};
 use crate::git::{DiffLine, GitRef, LogHistory};
 use crate::keymap::Keymap;
@@ -307,8 +307,6 @@ pub struct DiscussionState {
     pub draft: String,
     /// Model the next prompt is sent to.
     pub model: Option<ModelSpec>,
-    /// Mode the next prompt is sent in; toggled with Shift+Tab.
-    pub mode: Mode,
     /// Why the last send was refused; cleared by the next edit.
     pub notice: Option<String>,
     /// Set when the draft was replaced from outside the input, whose cursor then moves
