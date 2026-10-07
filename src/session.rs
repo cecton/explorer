@@ -40,7 +40,7 @@ pub struct Session {
     /// Selected UI theme name for this project.
     #[serde(default)]
     pub theme: Option<String>,
-    /// Roots and forks expanded in the Conversation Tree window.
+    /// Forks and threads expanded in the Conversation Tree window.
     #[serde(default)]
     pub conversation_expanded: Vec<String>,
     /// Highlights in the prompts and replies of conversation nodes, by node id.

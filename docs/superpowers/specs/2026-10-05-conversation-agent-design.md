@@ -630,21 +630,26 @@ suggests `/compact` from the parent node.
 - **Layout of the tree**: roots are listed oldest first, like the nodes inside a
   conversation, so the whole pane reads from top to bottom; with nothing selected, the
   pane selects the newest root, the last one. The descendants of a root sit one level
-  below it, which sets conversations apart. After that, a node with a single child keeps that child at the
-  **same** indentation, so a straight line of prompts reads as a flat list. Indentation
-  grows only below a node with several children, one level per fork. Each row draws a
+  below it, which sets conversations apart. After that, a node with a single child keeps
+  that child at the **same** indentation, so a straight line of prompts reads as a flat
+  list. Indentation grows only below a node with several children, one level per fork. Each row draws a
   box-drawing prefix: one `│` rail per fork above whose later branches still follow, an
   arm (`├─`, or `└─` for a fork's last branch) at the start of a branch, and the fold
   column (`+` collapsed, `-` expanded, `─` for a leaf that starts a branch). A fork's
   arms and rail sit in the column of its fold marker, so they hang right under it. The
-  only child of a root is a branch too and gets a `└─` arm, which ties a single-thread
-  conversation to its root. The
-  wrapped title and summary lines of the selected row repeat the rails, with a `│` under
-  an expanded fold. Without the flat rule a 50-prompt conversation would be indented 50
+  first row below a root is a branch too and gets a `└─` arm, which ties a
+  single-thread conversation to its root. The wrapped title and summary lines of the
+  selected row repeat the rails, with a `│` in the fold column when the next row hangs
+  one level deeper. Without the flat rule a 50-prompt conversation would be indented 50
   levels.
-- Roots and forks are collapsed until expanded, marked `+` or `-` in the fold column.
-  Sending a prompt expands the way to the new node. The expanded set is saved in the
-  session.
+- **Threads**: a thread starts at a root or at a branch of a fork and runs through
+  single replies until a leaf or a fork. It folds into its head, its first node: a
+  collapsed thread shows only the head, so a linear conversation is one row. The fork
+  ending a thread is not part of what the head hides: it stays visible, with its own
+  fold, whether the thread is collapsed or not.
+- Threads and forks are collapsed until expanded, marked `+` or `-` in the fold column
+  of the thread head or of the fork. Sending a prompt expands the folds on the way to
+  the new node. The expanded set is saved in the session.
 - Feedback and commit nodes have distinct colors. Other states get a color and a
   one-character marker in a fixed gutter column right after the date: running (a
   braille spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), failed `✗`, cancelled `■`, uncommitted (stashed)
@@ -657,8 +662,11 @@ suggests `/compact` from the parent node.
 - Keys:
   - `Up` `Down` `PgUp` `PgDn` `Home` `End` — move the selection.
   - Mouse click — moves the selection only. Double click — same as `Enter`.
-  - `Left` / `Right` — collapse / expand a root or a fork; `Left` elsewhere jumps to the
-    root or fork the branch hangs from. The expanded set is saved in the session.
+  - `Left` / `Right` — collapse / expand a thread or a fork. `Right` on a thread head
+    also moves the selection to the thread's last reply (the one before the fork when
+    the thread ends in one), whether the thread was collapsed or already open: that is
+    the node to read the outcome from and to continue. `Left` elsewhere jumps to the
+    thread head or fork the row hangs from. The expanded set is saved in the session.
   - `Enter` — open the node; recover it if incomplete (section 9).
   - `m` — same prompt with another model (section 9).
   - `e` — edit as a new sibling (section 9).

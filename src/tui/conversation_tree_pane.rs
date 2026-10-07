@@ -12,17 +12,16 @@ const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Fold {
-    /// Neither a root with children nor a fork: nothing to fold.
+    /// Neither a fork nor the head of a thread with replies to hide: nothing to fold.
     Leaf,
     Collapsed,
     Expanded,
 }
 
-/// Where a row sits among the children of an expanded fold.
+/// Whether a row starts a branch: a child of a fork, or the first row below a root.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Branch {
-    /// Not a direct child of an expanded fold: a root, or the continuation of a
-    /// straight line.
+    /// A root, or the continuation of a thread.
     None,
     Start,
     LastStart,
@@ -38,60 +37,141 @@ pub(crate) struct TreeRow {
 }
 
 /// Flattens the tree into display rows: roots oldest first, like the nodes of a
-/// conversation. A root's descendants sit one level below it; after that, indentation
-/// grows only below a fork, so a straight line of prompts stays a flat list.
+/// conversation. A thread, the straight run of single replies below a root or a
+/// branch, folds into its head; the fork ending it stays visible. A root's descendants
+/// sit one level below it; after that, indentation grows only below a fork.
 pub(crate) fn layout_rows(tree: &ConversationTree, expanded: &HashSet<NodeId>) -> Vec<TreeRow> {
     let mut rows = Vec::new();
     let mut rails = Vec::new();
     for root in tree.roots() {
-        push_rows(tree, expanded, root, Branch::None, &mut rails, &mut rows);
+        push_thread(tree, expanded, root, Branch::None, &mut rails, &mut rows);
     }
     rows
 }
 
-fn push_rows(
+/// The straight run below `head`: the single replies that fold into it, then the fork
+/// ending the run, if any. Both are empty when `head` is itself a fork.
+fn thread_below<'a>(
+    tree: &'a ConversationTree,
+    head: &NodeId,
+) -> (Vec<&'a NodeId>, Option<&'a NodeId>) {
+    let mut hidden = Vec::new();
+    let mut current = tree.node(head);
+    while let Some([only]) = current.map(|node| node.children.as_slice()) {
+        let reply = tree.node(only);
+        if reply.is_some_and(|reply| reply.children.len() > 1) {
+            return (hidden, Some(only));
+        }
+        hidden.push(only);
+        current = reply;
+    }
+    (hidden, None)
+}
+
+/// Last of the replies folded into the thread head `head`: where `Right` lands.
+pub(crate) fn thread_end(tree: &ConversationTree, head: &NodeId) -> Option<NodeId> {
+    thread_below(tree, head).0.last().map(|id| (*id).clone())
+}
+
+/// The nodes on the way to `node`, itself included, that can hold a fold: forks and
+/// thread heads.
+pub(crate) fn folds_on_the_way(tree: &ConversationTree, node: &NodeId) -> Vec<NodeId> {
+    let is_fork = |id: &NodeId| tree.node(id).is_some_and(|node| node.children.len() > 1);
+    tree.lineage(node)
+        .into_iter()
+        .filter(|id| {
+            let parent = tree.node(id).and_then(|node| node.parent.as_ref());
+            is_fork(id) || parent.is_none_or(is_fork)
+        })
+        .collect()
+}
+
+fn fold_of(foldable: bool, expanded: bool) -> Fold {
+    match (foldable, expanded) {
+        (false, _) => Fold::Leaf,
+        (true, true) => Fold::Expanded,
+        (true, false) => Fold::Collapsed,
+    }
+}
+
+fn push_thread(
     tree: &ConversationTree,
     expanded: &HashSet<NodeId>,
-    id: &NodeId,
+    head: &NodeId,
     branch: Branch,
     rails: &mut Vec<bool>,
     rows: &mut Vec<TreeRow>,
 ) {
-    let Some(node) = tree.node(id) else {
+    let Some(node) = tree.node(head) else {
         return;
     };
-    let is_root = node.parent.is_none();
-    let foldable = node.children.len() > 1 || (is_root && !node.children.is_empty());
-    let fold = match (foldable, expanded.contains(id)) {
-        (false, _) => Fold::Leaf,
-        (true, true) => Fold::Expanded,
-        (true, false) => Fold::Collapsed,
-    };
+    let (hidden, fork) = thread_below(tree, head);
+    let is_fork = node.children.len() > 1;
+    let fold = fold_of(is_fork || !hidden.is_empty(), expanded.contains(head));
     rows.push(TreeRow {
-        id: id.clone(),
+        id: head.clone(),
         rails: rails.clone(),
         fold,
         branch,
     });
-    if fold == Fold::Collapsed {
+    if is_fork {
+        if fold == Fold::Expanded {
+            push_branches(tree, expanded, node, rails, rows);
+        }
         return;
     }
-    if fold == Fold::Expanded {
-        rails.push(true);
+    let below_root = node.parent.is_none() && !node.children.is_empty();
+    let mut branch = Branch::None;
+    if below_root {
+        rails.push(false);
+        branch = Branch::LastStart;
     }
-    let last = node.children.len().saturating_sub(1);
-    for (i, child) in node.children.iter().enumerate() {
-        let child_branch = match fold {
-            Fold::Expanded if i == last => Branch::LastStart,
-            Fold::Expanded => Branch::Start,
-            _ => Branch::None,
-        };
-        if fold == Fold::Expanded {
-            *rails.last_mut().unwrap() = i != last;
+    if fold == Fold::Expanded {
+        for id in hidden {
+            rows.push(TreeRow {
+                id: id.clone(),
+                rails: rails.clone(),
+                fold: Fold::Leaf,
+                branch,
+            });
+            branch = Branch::None;
         }
-        push_rows(tree, expanded, child, child_branch, rails, rows);
     }
-    if fold == Fold::Expanded {
+    if let Some(fork) = fork
+        && let Some(fork_node) = tree.node(fork)
+    {
+        let fold = fold_of(true, expanded.contains(fork));
+        rows.push(TreeRow {
+            id: fork.clone(),
+            rails: rails.clone(),
+            fold,
+            branch,
+        });
+        if fold == Fold::Expanded {
+            push_branches(tree, expanded, fork_node, rails, rows);
+        }
+    }
+    if below_root {
+        rails.pop();
+    }
+}
+
+fn push_branches(
+    tree: &ConversationTree,
+    expanded: &HashSet<NodeId>,
+    fork: &Node,
+    rails: &mut Vec<bool>,
+    rows: &mut Vec<TreeRow>,
+) {
+    let last = fork.children.len().saturating_sub(1);
+    for (i, child) in fork.children.iter().enumerate() {
+        let branch = if i == last {
+            Branch::LastStart
+        } else {
+            Branch::Start
+        };
+        rails.push(i != last);
+        push_thread(tree, expanded, child, branch, rails, rows);
         rails.pop();
     }
 }
@@ -155,17 +235,14 @@ fn row_prefix(row: &TreeRow) -> String {
 }
 
 /// The prefix of the wrapped title and summary lines under a selected row's head:
-/// rails only, plus a `│` under an expanded fold so the drop connects to its children.
-fn row_continuation_prefix(row: &TreeRow) -> String {
+/// rails only, plus a `│` in the fold column when rows hang from it (`hangs`: the next
+/// row is one level deeper), so the drop connects to them.
+fn row_continuation_prefix(row: &TreeRow, hangs: bool) -> String {
     let mut prefix = String::new();
     for rail in &row.rails {
         prefix.push_str(if *rail { "│ " } else { "  " });
     }
-    if row.fold == Fold::Expanded {
-        prefix.push_str("│ ");
-    } else {
-        prefix.push_str("  ");
-    }
+    prefix.push_str(if hangs { "│ " } else { "  " });
     prefix
 }
 
@@ -383,11 +460,19 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Right),
             }) => {
-                if let Some(row) = rows.get(index)
-                    && row.fold == Fold::Collapsed
-                {
+                let Some(row) = rows.get(index) else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
+                if row.fold == Fold::Collapsed {
                     state.tree_view.expanded.insert(row.id.clone());
                     state.mark_session_dirty();
+                }
+                let end = match row.fold {
+                    Fold::Leaf => None,
+                    _ => thread_end(&state.conversations.read(), &row.id),
+                };
+                if let Some(end) = end {
+                    state.tree_view.selected = Some(end);
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {
@@ -800,7 +885,10 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         }
                     }
                     LineKind::TitleRest | LineKind::Summary => {
-                        let continuation = row_continuation_prefix(row_info);
+                        let hangs = rows
+                            .get(line.row + 1)
+                            .is_some_and(|next| next.rails.len() > row_info.rails.len());
+                        let continuation = row_continuation_prefix(row_info, hangs);
                         paint_plain(
                             &mut render_ops,
                             gutter_width,
@@ -895,22 +983,33 @@ mod tests {
     #[test]
     fn indentation_grows_only_below_an_expanded_fork() {
         let (_tmp, tree) = tree_with(&["a1/a2/a3/a4", "a1/a2/b3"]);
-        let collapsed_fork = layout_rows(&tree, &ids(&["a1"]));
+        let collapsed_fork = layout_rows(&tree, &HashSet::new());
         assert_eq!(
             shape(&collapsed_fork),
             [
-                ("a1", vec![], Fold::Expanded),
+                ("a1", vec![], Fold::Leaf),
                 ("a2", vec![false], Fold::Collapsed)
             ]
         );
 
-        let rows = layout_rows(&tree, &ids(&["a1", "a2"]));
+        let collapsed_branch = layout_rows(&tree, &ids(&["a2"]));
+        assert_eq!(
+            shape(&collapsed_branch),
+            [
+                ("a1", vec![], Fold::Leaf),
+                ("a2", vec![false], Fold::Expanded),
+                ("a3", vec![false, true], Fold::Collapsed),
+                ("b3", vec![false, false], Fold::Leaf),
+            ]
+        );
+
+        let rows = layout_rows(&tree, &ids(&["a2", "a3"]));
         assert_eq!(
             shape(&rows),
             [
-                ("a1", vec![], Fold::Expanded),
+                ("a1", vec![], Fold::Leaf),
                 ("a2", vec![false], Fold::Expanded),
-                ("a3", vec![false, true], Fold::Leaf),
+                ("a3", vec![false, true], Fold::Expanded),
                 ("a4", vec![false, true], Fold::Leaf),
                 ("b3", vec![false, false], Fold::Leaf),
             ]
@@ -945,14 +1044,14 @@ mod tests {
     #[test]
     fn head_prefix_draws_rails_arms_and_fold_column() {
         let (_tmp, tree) = tree_with(&["a1/a2", "a1/b2", "c1/c2/d3", "c1/c2/e3"]);
-        let rows = layout_rows(&tree, &ids(&["a1", "c1", "c2"]));
+        let rows = layout_rows(&tree, &ids(&["a1", "c2"]));
         assert_eq!(
             prefixes(&rows),
             [
                 "- ",     // a1: expanded root
                 "├── ",   // a2: first branch of a1
                 "└── ",   // b2: last branch of a1
-                "- ",     // c1: expanded root
+                "  ",     // c1: root with nothing to fold but its fork
                 "└─- ",   // c2: expanded fork, only child of c1
                 "  ├── ", // d3: first branch of c2, arm under c2's fold column
                 "  └── ", // e3: last branch of c2
@@ -972,7 +1071,7 @@ mod tests {
                 "└── ", // b2: last branch, leaf
             ]
         );
-        let continuation = row_continuation_prefix(&rows[1]);
+        let continuation = row_continuation_prefix(&rows[1], false);
         assert_eq!(continuation, "│   ");
     }
 
@@ -998,8 +1097,78 @@ mod tests {
     #[test]
     fn continuation_prefix_hangs_under_an_expanded_fork() {
         let (_tmp, tree) = tree_with(&["a1/a2/b3", "a1/a2/c3"]);
-        let rows = layout_rows(&tree, &ids(&["a1", "a2"]));
-        let continuation = row_continuation_prefix(&rows[1]);
+        let rows = layout_rows(&tree, &ids(&["a2"]));
+        let continuation = row_continuation_prefix(&rows[1], true);
         assert_eq!(continuation, "  │ ");
+    }
+
+    #[test]
+    fn a_thread_hides_its_run_until_its_head_is_expanded() {
+        let (_tmp, tree) = tree_with(&["a1/a2/a3/a4", "a1/b2"]);
+        let collapsed = layout_rows(&tree, &ids(&["a1"]));
+        assert_eq!(
+            shape(&collapsed),
+            [
+                ("a1", vec![], Fold::Expanded),
+                ("a2", vec![true], Fold::Collapsed),
+                ("b2", vec![false], Fold::Leaf),
+            ]
+        );
+
+        let rows = layout_rows(&tree, &ids(&["a1", "a2"]));
+        assert_eq!(
+            prefixes(&rows),
+            [
+                "- ",   // a1: expanded fork
+                "├─- ", // a2: expanded thread head
+                "│   ", // a3: reply in the thread
+                "│   ", // a4
+                "└── ", // b2
+            ]
+        );
+    }
+
+    #[test]
+    fn the_fork_ending_a_collapsed_thread_stays_visible() {
+        let (_tmp, tree) = tree_with(&["a1/a2/a3/a4/b5", "a1/a2/a3/a4/c5", "a1/z2"]);
+        let rows = layout_rows(&tree, &ids(&["a1", "a4"]));
+        assert_eq!(
+            shape(&rows),
+            [
+                ("a1", vec![], Fold::Expanded),
+                ("a2", vec![true], Fold::Collapsed),
+                ("a4", vec![true], Fold::Expanded),
+                ("b5", vec![true, true], Fold::Leaf),
+                ("c5", vec![true, false], Fold::Leaf),
+                ("z2", vec![false], Fold::Leaf),
+            ]
+        );
+    }
+
+    #[test]
+    fn the_first_row_below_a_root_gets_the_arm() {
+        let (_tmp, tree) = tree_with(&["a1/a2/a3/b4", "a1/a2/a3/c4"]);
+        let collapsed = layout_rows(&tree, &HashSet::new());
+        assert_eq!(prefixes(&collapsed), ["+ ", "└─+ "]);
+        let rows = layout_rows(&tree, &ids(&["a1"]));
+        assert_eq!(prefixes(&rows), ["- ", "└── ", "  + "]);
+    }
+
+    #[test]
+    fn thread_end_is_the_last_reply_before_a_leaf_or_a_fork() {
+        let (_tmp, tree) = tree_with(&["a1/a2/a3", "b1/b2/b3/c4", "b1/b2/b3/d4", "e1"]);
+        let end = |head: &str| thread_end(&tree, &NodeId::new(head));
+        assert_eq!(end("a1"), Some(NodeId::new("a3")));
+        assert_eq!(end("b1"), Some(NodeId::new("b2")));
+        assert_eq!(end("b3"), None);
+        assert_eq!(end("e1"), None);
+    }
+
+    #[test]
+    fn folds_on_the_way_are_the_forks_and_thread_heads() {
+        let (_tmp, tree) = tree_with(&["a1/a2/a3/b4/b5", "a1/a2/a3/c4"]);
+        let folds = folds_on_the_way(&tree, &NodeId::new("b5"));
+        let names: Vec<&str> = folds.iter().map(NodeId::as_str).collect();
+        assert_eq!(names, ["a1", "a3", "b4"]);
     }
 }

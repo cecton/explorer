@@ -238,7 +238,7 @@ pub(crate) fn start_turn(
         command,
         ..Default::default()
     };
-    let (node, lineage, context) = {
+    let (node, lineage, folds, context) = {
         let mut tree = state.conversations.write();
         let node = match rerun {
             Some(node) => {
@@ -260,10 +260,11 @@ pub(crate) fn start_turn(
         let context = tree
             .turn_context(&node)
             .ok_or_else(|| Refusal::Rejected("the new node has no directory".to_string()))?;
-        (node.clone(), tree.lineage(&node), context)
+        let folds = crate::tui::conversation_tree_pane::folds_on_the_way(&tree, &node);
+        (node.clone(), tree.lineage(&node), folds, context)
     };
     let session = lineage.first().unwrap_or(&node).as_str().to_string();
-    state.tree_view.expanded.extend(lineage);
+    state.tree_view.expanded.extend(folds);
     state.tree_view.selected = Some(node.clone());
     state.mark_session_dirty();
 
