@@ -768,6 +768,32 @@ impl App for AppMain {
                     state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
+                Some(Action::ToggleFavorite) => {
+                    let state = &mut global_data.state;
+                    let node = match state.pane_manager.focused_window {
+                        Some(Window::Discussion(id)) => state
+                            .discussions
+                            .get(&id)
+                            .and_then(|discussion| discussion.node.clone()),
+                        Some(Window::ConversationTree) => state.tree_view.selected.clone(),
+                        _ => None,
+                    };
+                    if let Some(node) = node
+                        && let Err(e) = state.conversations.write().toggle_favorite(&node)
+                    {
+                        tracing::warn!("failed to save favorite: {e}");
+                        let notice = Some(format!("favorite not saved: {e}"));
+                        match state.pane_manager.focused_window {
+                            Some(Window::Discussion(id)) => {
+                                if let Some(discussion) = state.discussions.get_mut(&id) {
+                                    discussion.notice = notice;
+                                }
+                            }
+                            _ => state.tree_view.notice = notice,
+                        }
+                    }
+                    return Ok(EventPropagation::ConsumedRender);
+                }
                 Some(Action::Quit) => {
                     return Ok(EventPropagation::ExitMainEventLoop);
                 }
@@ -1848,12 +1874,13 @@ fn render_status_bar(
         (
             " Leader ".to_string(),
             format!(
-                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Chat  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
+                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Chat  {}:Favorite  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
                 leader_lbl(Action::OpenWindowPicker),
                 leader_lbl(Action::OpenTerminal),
                 leader_lbl(Action::OpenThemePicker),
                 leader_lbl(Action::OpenGitLog),
                 leader_lbl(Action::OpenConversations),
+                leader_lbl(Action::ToggleFavorite),
                 leader_lbl(Action::ClosePane),
                 leader_lbl(Action::Quit),
                 leader_lbl(Action::FocusNext),

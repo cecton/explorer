@@ -1245,7 +1245,10 @@ impl DiscussionComponent {
             .and_then(|discussion| discussion.node.as_ref())
             .and_then(|node| {
                 let tree = state.conversations.read();
-                tree.node(node).map(|node| node.display_title().to_string())
+                tree.node(node).map(|node| {
+                    let marker = if node.meta.favorite { "* " } else { "" };
+                    format!("{marker}{}", node.display_title())
+                })
             })
             .unwrap_or_else(|| "New conversation".to_string())
     }

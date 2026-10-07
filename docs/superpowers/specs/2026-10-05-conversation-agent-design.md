@@ -657,7 +657,7 @@ suggests `/compact` from the parent node.
   - `m` — same prompt with another model (section 9).
   - `e` — edit as a new sibling (section 9).
   - `n` — new root: opens a Discussion window with no node, only the input.
-  - `f` — toggle favorite.
+  - `f` — toggle favorite. `<leader>f` (`toggle-favorite`) does the same.
   - `c` — open Commit Diff windows for the node's commits (existing `Window::CommitDiff`).
   - `Ctrl+D` — first press arms deletion of the node and its descendants and the status
     bar shows the count; a second `Ctrl+D` on the same node deletes. Any other key or a
@@ -730,6 +730,9 @@ window holds its node's prompt, reply and work log in memory only while it is op
   - `Esc` — take the queued prompt back, else cancel the running turn, else nothing.
   - `Ctrl+Plus` / `Ctrl+Minus` — move the queued prompt earlier or later in the queue.
   - `Ctrl+O` — show or hide the work log.
+  - `<leader>f` (`toggle-favorite`) — toggle the favorite of the node shown; nothing
+    while the window has no node. A favorite node's title starts with `* `, in the
+    title bar and in the window picker.
   - `PgUp` / `PgDn` — scroll the document.
   - All existing Emacs bindings of the input, `Ctrl+C` to clear it included. The window
     closes with `<leader>x`.
@@ -873,7 +876,8 @@ Defaults chosen without an explicit answer; change freely.
     `git stash push --include-untracked`; the stash of an earlier attempt of the same
     node is no longer referenced by its metadata once the node is run again.
 17. Key choices: `<leader>c`, `n`, `f`, `c`, `Ctrl+O`; in the Discussion window `Esc`
-    cancels or takes back and `Ctrl+C` only clears the input.
+    cancels or takes back and `Ctrl+C` only clears the input. The favorite of the node
+    in focus is on `<leader>f` rather than `Ctrl+F`, which stays the input's forward-char.
 18. Turns are serialized even when both are feedback turns, since each may use the
     working tree.
 19. A commit made by a feedback turn is neither prevented nor undone; only the prompt

@@ -8,8 +8,8 @@
 //!
 //! Config slugs accepted in the `keybindings` block: `leader`, `quit`, `focus-next`,
 //! `focus-prev`, `open-window-picker`, `open-terminal`, `open-theme-picker`,
-//! `open-git-log`, `close-pane`, `resize-grow`, `resize-shrink`, `move-pane-forward`,
-//! `move-pane-backward`.
+//! `open-git-log`, `open-conversations`, `toggle-favorite`, `close-pane`, `resize-grow`,
+//! `resize-shrink`, `move-pane-forward`, `move-pane-backward`.
 
 use r3bl_tui::{Key, KeyPress, KeyState, ModifierKeysMask, SpecialKey};
 
@@ -26,6 +26,7 @@ pub enum Action {
     OpenThemePicker,
     OpenGitLog,
     OpenConversations,
+    ToggleFavorite,
     ClosePane,
     GrabTerminal,
     DismissLeader,
@@ -47,6 +48,7 @@ impl Action {
             "open-theme-picker" => Action::OpenThemePicker,
             "open-git-log" => Action::OpenGitLog,
             "open-conversations" => Action::OpenConversations,
+            "toggle-favorite" => Action::ToggleFavorite,
             "close-pane" => Action::ClosePane,
             "resize-grow" => Action::ResizeGrow,
             "resize-shrink" => Action::ResizeShrink,
@@ -83,6 +85,7 @@ impl Default for Keymap {
                 (plain_char('T'), Action::OpenThemePicker),
                 (plain_char('g'), Action::OpenGitLog),
                 (plain_char('c'), Action::OpenConversations),
+                (plain_char('f'), Action::ToggleFavorite),
                 (plain_char('q'), Action::Quit),
                 (plain_char('x'), Action::ClosePane),
                 (plain_special(SpecialKey::Tab), Action::FocusNext),
@@ -254,7 +257,11 @@ mod tests {
             km.leader_action(&plain_char(' ')),
             Some(Action::OpenWindowPicker)
         );
-        assert_eq!(km.leader_action(&plain_char('f')), None);
+        assert_eq!(
+            km.leader_action(&plain_char('f')),
+            Some(Action::ToggleFavorite)
+        );
+        assert_eq!(km.leader_action(&plain_char('z')), None);
         assert_eq!(
             km.global_action(&ctrl_special(SpecialKey::Down)),
             Some(Action::ResizeGrow)
