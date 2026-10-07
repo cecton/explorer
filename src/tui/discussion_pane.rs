@@ -2,6 +2,7 @@ use crate::agent::commands::{self, Command, Expansion};
 use crate::agent::turn::{self, TurnRequest};
 use crate::agent::{Mode, ModelSpec};
 use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
+use crate::keymap::{Action, Keymap, hint};
 use crate::loader::word_bounds;
 use crate::tui::markdown;
 use crate::tui::pane_component::drag_modifier_from_mouse;
@@ -1306,7 +1307,7 @@ impl DiscussionComponent {
             .get(&window_id)
             .and_then(|discussion| discussion.model.as_ref())
             .map_or_else(
-                || "no model (Ctrl+P)".to_string(),
+                || format!("no model ({})", model_picker_chord(&state.keymap)),
                 |spec| spec.short_label(),
             );
 
@@ -1459,6 +1460,14 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
     (text, failed)
 }
 
+fn model_picker_chord(keymap: &Keymap) -> String {
+    let key = keymap
+        .leader_key_for(Action::OpenModelPicker)
+        .map(|key| hint(&key))
+        .unwrap_or_default();
+    format!("{} {key}", hint(&keymap.leader_key))
+}
+
 impl Component<AppState, AppSignal> for DiscussionComponent {
     fn reset(&mut self) {
         self.cache = None;
@@ -1500,18 +1509,6 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 key: Key::SpecialKey(SpecialKey::Enter),
             }) => {
                 Self::send(state, main_tx, id);
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('p'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => {
-                ModelPickerComponent::open(state, main_tx, ModelPickerPurpose::Window(id));
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::Plain {

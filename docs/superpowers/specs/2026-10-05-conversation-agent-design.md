@@ -267,7 +267,7 @@ lists every `endpoint × model × effort` combination.
 There is no configured default and nothing about the model is saved in the session.
 
 - **Continuing or forking from a node**: the Discussion window starts with that node's
-  model spec. The user may change it with `Ctrl+P` before sending.
+  model spec. The user may change it with `<leader>m` before sending.
 - **New root**: the window starts with the model last picked during this run of
   Explorer. After startup nothing has been picked yet, so the first new conversation of
   the day requires a pick; sending without one opens the picker.
@@ -778,7 +778,7 @@ window holds its node's prompt, reply and work log in memory only while it is op
 - Keys:
   - `Enter` — send.
   - `Shift+Enter` — insert a newline.
-  - `Ctrl+P` — Model Picker.
+  - `<leader>m` (`open-model-picker`) — Model Picker.
   - `Esc` — take the queued prompt back, else cancel the running turn, else nothing.
   - `Ctrl+Plus` / `Ctrl+Minus` — move the queued prompt earlier or later in the queue.
   - `Ctrl+O` — show or hide the work log.
@@ -803,7 +803,7 @@ window holds its node's prompt, reply and work log in memory only while it is op
 nucleo matching over the model spec strings). `Esc` cancels. `Enter` depends on how the
 picker was opened:
 
-- from a Discussion window (`Ctrl+P`): sets that window's model (section 5) and returns
+- from a Discussion window (`<leader>m`): sets that window's model (section 5) and returns
   focus to it. It never affects a turn already running.
 - from the tree (`m`): creates the sibling described in section 9.
 
@@ -822,6 +822,8 @@ picker was opened:
 - `AppSignal` gains the tree-loaded, models-fetched, turn-event and title/summary-ready
   variants.
 - `Action::OpenConversations`, slug `open-conversations`, default `<leader>c`.
+- `Action::OpenModelPicker`, slug `open-model-picker`, default `<leader>m`: the Model
+  Picker of the Discussion window in focus.
 - Session: `PaneEntry::ConversationTree`; `PaneEntry::Discussion { node, draft }`;
   expanded set; the highlights of nodes, by node id. No model is saved. The Model Picker is not saved. `SESSION_VERSION`
   3 → 4.

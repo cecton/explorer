@@ -8,8 +8,9 @@
 //!
 //! Config slugs accepted in the `keybindings` block: `leader`, `quit`, `focus-next`,
 //! `focus-prev`, `open-window-picker`, `open-terminal`, `open-theme-picker`,
-//! `open-git-log`, `open-conversations`, `toggle-favorite`, `close-pane`, `resize-grow`,
-//! `resize-shrink`, `move-pane-forward`, `move-pane-backward`, `send-to-back`.
+//! `open-git-log`, `open-conversations`, `toggle-favorite`, `open-model-picker`,
+//! `close-pane`, `resize-grow`, `resize-shrink`, `move-pane-forward`, `move-pane-backward`,
+//! `send-to-back`.
 
 use r3bl_tui::{Key, KeyPress, KeyState, ModifierKeysMask, SpecialKey};
 
@@ -27,6 +28,7 @@ pub enum Action {
     OpenGitLog,
     OpenConversations,
     ToggleFavorite,
+    OpenModelPicker,
     ClosePane,
     GrabTerminal,
     DismissLeader,
@@ -50,6 +52,7 @@ impl Action {
             "open-git-log" => Action::OpenGitLog,
             "open-conversations" => Action::OpenConversations,
             "toggle-favorite" => Action::ToggleFavorite,
+            "open-model-picker" => Action::OpenModelPicker,
             "close-pane" => Action::ClosePane,
             "resize-grow" => Action::ResizeGrow,
             "resize-shrink" => Action::ResizeShrink,
@@ -88,6 +91,7 @@ impl Default for Keymap {
                 (plain_char('g'), Action::OpenGitLog),
                 (plain_char('c'), Action::OpenConversations),
                 (plain_char('f'), Action::ToggleFavorite),
+                (plain_char('m'), Action::OpenModelPicker),
                 (plain_char('q'), Action::Quit),
                 (plain_char('x'), Action::ClosePane),
                 (plain_special(SpecialKey::Tab), Action::FocusNext),
@@ -263,6 +267,10 @@ mod tests {
         assert_eq!(
             km.leader_action(&plain_char('f')),
             Some(Action::ToggleFavorite)
+        );
+        assert_eq!(
+            km.leader_action(&plain_char('m')),
+            Some(Action::OpenModelPicker)
         );
         assert_eq!(km.leader_action(&plain_char('z')), None);
         assert_eq!(

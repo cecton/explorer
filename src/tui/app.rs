@@ -794,6 +794,16 @@ impl App for AppMain {
                     }
                     return Ok(EventPropagation::ConsumedRender);
                 }
+                Some(Action::OpenModelPicker) => {
+                    if let Some(Window::Discussion(id)) =
+                        global_data.state.pane_manager.focused_window
+                    {
+                        let main_tx = global_data.main_thread_channel_sender.clone();
+                        let purpose = ModelPickerPurpose::Window(id);
+                        ModelPickerComponent::open(&mut global_data.state, main_tx, purpose);
+                    }
+                    return Ok(EventPropagation::ConsumedRender);
+                }
                 Some(Action::Quit) => {
                     return Ok(EventPropagation::ExitMainEventLoop);
                 }
@@ -1875,13 +1885,14 @@ fn render_status_bar(
         (
             " Leader ".to_string(),
             format!(
-                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Chat  {}:Favorite  {}:To back  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
+                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Chat  {}:Favorite  {}:Model  {}:To back  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
                 leader_lbl(Action::OpenWindowPicker),
                 leader_lbl(Action::OpenTerminal),
                 leader_lbl(Action::OpenThemePicker),
                 leader_lbl(Action::OpenGitLog),
                 leader_lbl(Action::OpenConversations),
                 leader_lbl(Action::ToggleFavorite),
+                leader_lbl(Action::OpenModelPicker),
                 leader_lbl(Action::SendToBack),
                 leader_lbl(Action::ClosePane),
                 leader_lbl(Action::Quit),
@@ -1911,7 +1922,7 @@ fn render_status_bar(
                         .to_string()
                 }
                 Some(Window::Discussion(_)) => {
-                    "Enter:Send  Shift+Enter:New line  Ctrl+P:Model  PgUp/PgDn:scroll"
+                    "Enter:Send  Shift+Enter:New line  PgUp/PgDn:scroll"
                         .to_string()
                 }
                 Some(Window::ModelPicker) => model_picker_hint(state),
