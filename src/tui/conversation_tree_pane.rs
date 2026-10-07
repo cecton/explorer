@@ -1,8 +1,9 @@
 use crate::agent::turn::spinner_frame;
 use crate::conversation::{ConversationTree, Node, NodeId, NodeStatus, NodeType};
+use crate::tui::state::PendingTurn;
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -197,6 +198,27 @@ fn state_marker(node: &Node, running_for: Option<Duration>) -> Option<char> {
         _ if node.meta.stash.is_some() => Some('±'),
         (_, Some(NodeType::Compact)) => Some('≡'),
         _ => None,
+    }
+}
+
+/// Queue position of the head-most prompt queued below each node. A queued prompt has
+/// no node yet, so its badge sits on the row of the node it will follow.
+fn queue_badges(queue: &[PendingTurn]) -> HashMap<NodeId, usize> {
+    let mut badges = HashMap::new();
+    for (position, entry) in queue.iter().enumerate() {
+        if let Some(parent) = &entry.parent {
+            badges.entry(parent.clone()).or_insert(position + 1);
+        }
+    }
+    badges
+}
+
+/// One column, nine digits.
+fn queue_glyph(position: usize) -> char {
+    if position < 10 {
+        (b'0' + position as u8) as char
+    } else {
+        '…'
     }
 }
 
@@ -493,6 +515,13 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Esc),
+            }) => {
+                if let Some(row) = rows.get(index) {
+                    crate::tui::discussion_pane::take_back(state, main_tx, &row.id);
+                }
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Backspace),
             }) => {
                 state.pane_manager.send_to_back(&window);
@@ -654,6 +683,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             let selected = Self::selected_index(&rows, state.tree_view.selected.as_ref());
             let selected_id = rows.get(selected).map(|row| row.id.clone());
             state.tree_view.selected = selected_id.clone();
+            let badges = queue_badges(&state.queued_turns);
 
             let theme = &state.theme;
             let pane_bg = theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
@@ -858,6 +888,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     .get(&row_info.id)
                     .map(|handle| handle.started.elapsed());
                 let marker = state_marker(node, running_for);
+                let queue_position = badges.get(&row_info.id).copied();
                 match line.kind {
                     LineKind::Head => {
                         let gutter = if is_selected {
@@ -872,8 +903,15 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         } else {
                             paint(&mut render_ops, fold_column, fold_text, type_fg);
                         }
-                        if let Some(marker) = marker {
-                            let column = gutter_width - 2;
+                        let column = gutter_width - 2;
+                        if let Some(position) = queue_position {
+                            paint(
+                                &mut render_ops,
+                                column,
+                                &queue_glyph(position).to_string(),
+                                type_fg,
+                            );
+                        } else if let Some(marker) = marker {
                             paint(&mut render_ops, column, &marker.to_string(), type_fg);
                         }
                         paint(&mut render_ops, text_column, &line.text, type_fg);
@@ -1152,6 +1190,33 @@ mod tests {
         assert_eq!(prefixes(&collapsed), ["+ ", "└─+ "]);
         let rows = layout_rows(&tree, &ids(&["a1"]));
         assert_eq!(prefixes(&rows), ["- ", "└── ", "  + "]);
+    }
+
+    #[test]
+    fn a_parent_is_badged_with_the_position_of_its_head_most_entry() {
+        let entry = |window: usize, parent: &str| PendingTurn {
+            window,
+            parent: Some(NodeId::new(parent)),
+        };
+        let badges = queue_badges(&[
+            entry(0, "a1"),
+            entry(1, "a2"),
+            entry(2, "a1"),
+            PendingTurn {
+                window: 3,
+                parent: None,
+            },
+        ]);
+        assert_eq!(badges.get(&NodeId::new("a1")), Some(&1));
+        assert_eq!(badges.get(&NodeId::new("a2")), Some(&2));
+        assert!(!badges.contains_key(&NodeId::new("a3")));
+    }
+
+    #[test]
+    fn a_position_past_nine_renders_an_ellipsis() {
+        assert_eq!(queue_glyph(1), '1');
+        assert_eq!(queue_glyph(9), '9');
+        assert_eq!(queue_glyph(10), '…');
     }
 
     #[test]

@@ -171,6 +171,21 @@ pub(crate) fn drop_queue_entry(state: &mut AppState, window: usize) {
     state.queued_turns.retain(|entry| entry.window != window);
 }
 
+/// Takes back the head-most prompt queued below `parent`, if any: it returns to the
+/// draft of the window that queued it, and the queue moves up.
+pub(crate) fn take_back(state: &mut AppState, main_tx: MainTx, parent: &NodeId) {
+    let Some(entry) = state
+        .queued_turns
+        .iter()
+        .find(|entry| entry.parent.as_ref() == Some(parent))
+        .cloned()
+    else {
+        return;
+    };
+    drop_queue_entry(state, entry.window);
+    DiscussionComponent::release_queue(state, main_tx);
+}
+
 /// Checks the guards, creates the node on disk and starts its turn. On refusal nothing
 /// is created and the reason is returned.
 pub(crate) fn start_turn(
@@ -1485,8 +1500,9 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Esc),
             }) if queued => {
-                drop_queue_entry(state, id);
-                Self::release_queue(state, main_tx);
+                if let Some(node) = discussion.node.clone() {
+                    take_back(state, main_tx, &node);
+                }
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::Plain {
@@ -2240,6 +2256,39 @@ mod tests {
         assert_eq!(other.draft, "a follow-up");
         assert!(!other.draft_replaced);
         assert_eq!(queued_windows(&state), [0]);
+    }
+
+    #[test]
+    fn take_back_takes_the_head_most_prompt_below_the_node() {
+        let (_tmp, mut state) = state_with_failed_child();
+        let (main_tx, _main_rx) = mpsc::channel(1);
+        state.queued_turns = vec![
+            PendingTurn {
+                window: 1,
+                parent: Some(NodeId::new("a1")),
+            },
+            PendingTurn {
+                window: 2,
+                parent: Some(NodeId::new("a1")),
+            },
+        ];
+        state.discussions.insert(
+            2,
+            DiscussionState {
+                node: Some(NodeId::new("a1")),
+                ..Default::default()
+            },
+        );
+        state.discussions.get_mut(&1).unwrap().draft = "queued text".to_string();
+
+        take_back(&mut state, mpsc::channel(1).0, &NodeId::new("a3"));
+        assert_eq!(queued_windows(&state), [1, 2]);
+
+        // The head-most entry leaves the queue and its text stays its window's draft;
+        // release then drops the other window's entry, whose draft is empty.
+        take_back(&mut state, main_tx, &NodeId::new("a1"));
+        assert!(state.queued_turns.is_empty());
+        assert_eq!(state.discussions[&1].draft, "queued text");
     }
 
     #[test]
