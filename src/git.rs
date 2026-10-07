@@ -239,9 +239,11 @@ fn collect_refs(repo: &gix::Repository) -> Result<HashMap<[u8; 20], Vec<GitRef>>
         let Some((kind, name)) = classify_ref_name(reference.name().as_bstr()) else {
             continue;
         };
-        let id = reference
-            .peel_to_id()
-            .map_err(|e| format!("peel ref: {e}"))?;
+        // A dangling symref (e.g. a stale origin/HEAD) must not fail the whole log;
+        // git itself only warns about it.
+        let Ok(id) = reference.peel_to_id() else {
+            continue;
+        };
         let Ok(id20) = <[u8; 20]>::try_from(id.as_bytes()) else {
             continue;
         };
@@ -720,6 +722,23 @@ mod tests {
             assert_eq!(at.entries[0].id, head.entries[5].id);
             assert!(at.entries.len() < head.entries.len());
         }
+    }
+
+    #[test]
+    fn load_log_tolerates_a_dangling_symref() {
+        let (_tmp, root) = temp_repo();
+        let head = commit(&root, "a.txt", "one", "init");
+        std::fs::create_dir_all(root.join(".git/refs/remotes/origin")).unwrap();
+        std::fs::write(
+            root.join(".git/refs/remotes/origin/HEAD"),
+            "ref: refs/remotes/origin/master\n",
+        )
+        .unwrap();
+
+        let repo = gix::ThreadSafeRepository::open(root.as_std_path()).expect("open repo");
+        let history = load_log(&repo, None).expect("load_log skips the dangling symref");
+        assert_eq!(history.entries.len(), 1);
+        assert_eq!(hex::encode(history.entries[0].id), head);
     }
 
     #[test]
