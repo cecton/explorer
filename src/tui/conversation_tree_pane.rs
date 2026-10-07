@@ -780,12 +780,11 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         };
                         paint_plain(&mut render_ops, 0, &node.created_display, gutter);
                         paint_plain(&mut render_ops, gutter_width, &rail_prefix, gutter);
-                        let fold_fg = if row_info.fold == Fold::Leaf {
-                            gutter
+                        if row_info.fold == Fold::Leaf {
+                            paint_plain(&mut render_ops, fold_column, fold_text, gutter);
                         } else {
-                            type_fg
-                        };
-                        paint(&mut render_ops, fold_column, fold_text, fold_fg);
+                            paint(&mut render_ops, fold_column, fold_text, type_fg);
+                        }
                         if let Some(marker) = marker {
                             let column = gutter_width - 2;
                             paint(&mut render_ops, column, &marker.to_string(), type_fg);
