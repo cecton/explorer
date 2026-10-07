@@ -648,7 +648,7 @@ the end of the text, is looked up among the commands:
 typed after it, the input shows a placeholder in the `comment` color (section 11): what
 the command expects, continuing the draft (`<argument>` for a custom command), then its
 description on the next row. The built-ins have one too: `/commit` with
-`[additional instructions]` and `/compact` with `[instructions]`. The hint doubles as
+`[additional instructions]` and `/compact` with `[instructions]` and its description. The hint doubles as
 the sign that the name was recognized, since an unknown name is sent as typed. It
 disappears once anything is typed after the name.
 

@@ -85,16 +85,12 @@ pub const COMPACT: &str = "compact";
 pub const COMMIT: &str = "commit";
 
 /// Each built-in command with what it expects after its name and what it does.
-const BUILT_INS: [(&str, &str, &str); 2] = [
-    (
-        COMMIT,
-        "[additional instructions]",
-        "Carry out what the conversation settled on and commit it",
-    ),
+const BUILT_INS: [(&str, &str, Option<&str>); 2] = [
+    (COMMIT, "[additional instructions]", None),
     (
         COMPACT,
         "[instructions]",
-        "Summarize the conversation into a node to continue from",
+        Some("Summarize the conversation into a node to continue from"),
     ),
 ];
 
@@ -119,7 +115,10 @@ pub fn placeholder(typed: &str, commands: &[Command]) -> Option<String> {
         return None;
     }
     let (argument, description) = match BUILT_INS.iter().find(|(built_in, ..)| *built_in == name) {
-        Some((_, argument, description)) => (Some(argument.to_string()), Some(*description)),
+        Some((_, argument, description)) => (
+            Some(argument.to_string()),
+            description.map(|description| description.to_string()),
+        ),
         None => {
             let command = commands.iter().find(|command| command.name == name)?;
             (
@@ -127,7 +126,7 @@ pub fn placeholder(typed: &str, commands: &[Command]) -> Option<String> {
                     .argument
                     .as_ref()
                     .map(|argument| format!("<{argument}>")),
-                command.description.as_deref(),
+                command.description.clone(),
             )
         }
     };
@@ -140,7 +139,7 @@ pub fn placeholder(typed: &str, commands: &[Command]) -> Option<String> {
     }
     if let Some(description) = description {
         hint.push('\n');
-        hint.push_str(description);
+        hint.push_str(&description);
     }
     (!hint.is_empty()).then_some(hint)
 }
@@ -283,9 +282,7 @@ mod tests {
         );
         assert_eq!(
             placeholder("/commit", &commands).as_deref(),
-            Some(
-                " [additional instructions]\nCarry out what the conversation settled on and commit it"
-            )
+            Some(" [additional instructions]")
         );
         assert!(
             placeholder("/compact", &[])
