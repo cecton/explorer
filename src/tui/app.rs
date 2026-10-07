@@ -1424,6 +1424,9 @@ impl App for AppMain {
                             if discussion.node.as_ref() == Some(node) {
                                 discussion.reply.clone_from(&reply);
                                 discussion.work_log.clone_from(&work_log);
+                                if outcome.status == crate::conversation::NodeStatus::Done {
+                                    discussion.thinking.clear();
+                                }
                             }
                         }
                     }

@@ -853,6 +853,7 @@ impl DiscussionComponent {
                 Ok(_) => {
                     discussion.reply.clear();
                     discussion.work_log.clear();
+                    discussion.thinking.clear();
                     discussion.notice = None;
                 }
                 Err(reason) => discussion.notice = Some(reason.clone()),
@@ -1041,6 +1042,7 @@ impl DiscussionComponent {
         discussion.prompt = prompt;
         discussion.reply.clear();
         discussion.work_log.clear();
+        discussion.thinking.clear();
         discussion.show_work_log = None;
         discussion.draft.clear();
         discussion.loaded = true;
