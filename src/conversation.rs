@@ -1,3 +1,4 @@
+use crate::agent::ModelSpec;
 use camino::{Utf8Path, Utf8PathBuf};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -209,13 +210,12 @@ impl Node {
     /// The model the turn ran on, as `endpoint/model (effort)` with `default` effort
     /// shown bare.
     pub fn model_label(&self) -> Option<String> {
-        let model = self.meta.model.as_deref()?;
-        let endpoint = self.meta.endpoint.as_deref()?;
-        let label = match self.meta.effort.as_deref() {
-            Some("default") | None => format!("{endpoint}/{model}"),
-            Some(effort) => format!("{endpoint}/{model} ({effort})"),
-        };
-        Some(label)
+        let spec = ModelSpec::from_parts(
+            self.meta.endpoint.as_deref()?,
+            self.meta.model.as_deref()?,
+            self.meta.effort.as_deref()?,
+        )?;
+        Some(spec.short_label())
     }
 
     pub fn display_title(&self) -> &str {

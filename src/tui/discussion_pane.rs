@@ -1262,7 +1262,10 @@ impl DiscussionComponent {
             .discussions
             .get(&window_id)
             .and_then(|discussion| discussion.model.as_ref())
-            .map_or_else(|| "no model (Ctrl+P)".to_string(), ToString::to_string);
+            .map_or_else(
+                || "no model (Ctrl+P)".to_string(),
+                |spec| spec.short_label(),
+            );
 
         let pane_width = pane_box.style_adjusted_bounds_size.col_width.as_usize();
         let label = format!(" {model} ");

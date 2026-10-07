@@ -92,6 +92,17 @@ impl ModelSpec {
     }
 }
 
+impl ModelSpec {
+    /// `endpoint/model (effort)`, the form shown in discussion windows; a default
+    /// effort is not shown.
+    pub fn short_label(&self) -> String {
+        match self.effort {
+            Effort::Default => format!("{}/{}", self.endpoint, self.model),
+            effort => format!("{}/{} ({})", self.endpoint, self.model, effort.as_str()),
+        }
+    }
+}
+
 impl fmt::Display for ModelSpec {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -216,6 +227,14 @@ mod tests {
         assert_eq!(spec.model, "anthropic/claude-opus");
         assert_eq!(spec.effort, Effort::High);
         assert_eq!(spec.to_string(), "openrouter/anthropic/claude-opus/high");
+    }
+
+    #[test]
+    fn short_label_shows_the_effort_except_when_default() {
+        let spec = ModelSpec::parse("zai/glm-5.3-flash/default").unwrap();
+        assert_eq!(spec.short_label(), "zai/glm-5.3-flash");
+        let spec = ModelSpec::parse("zai/glm-5.3-flash/low").unwrap();
+        assert_eq!(spec.short_label(), "zai/glm-5.3-flash (low)");
     }
 
     #[test]
