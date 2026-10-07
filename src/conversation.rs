@@ -112,6 +112,8 @@ pub struct Metadata {
     pub scratch_reset: bool,
     pub favorite: bool,
     pub command: Option<String>,
+    /// Set for a custom command sent without the mode's system prompt.
+    pub no_system_prompt: bool,
     pub session_id: Option<String>,
     pub tokens_in: Option<u64>,
     pub error: Option<String>,
@@ -147,6 +149,7 @@ impl Metadata {
                 "scratch-reset" => meta.scratch_reset = value == "true",
                 "favorite" => meta.favorite = value == "true",
                 "command" => meta.command = Some(value.to_string()),
+                "system-prompt" => meta.no_system_prompt = value == "off",
                 "session-id" => meta.session_id = Some(value.to_string()),
                 "tokens-in" => meta.tokens_in = value.parse().ok(),
                 "secs" => meta.secs = value.parse().ok(),
@@ -184,6 +187,7 @@ impl Metadata {
         push("scratch-reset", self.scratch_reset.then_some("true"));
         push("favorite", self.favorite.then_some("true"));
         push("command", self.command.as_deref());
+        push("system-prompt", self.no_system_prompt.then_some("off"));
         push("session-id", self.session_id.as_deref());
         push("tokens-in", tokens_in.as_deref());
         push("secs", secs.as_deref());
@@ -764,6 +768,7 @@ mod tests {
             scratch_reset: true,
             favorite: true,
             command: Some("review".into()),
+            no_system_prompt: true,
             session_id: Some("1234-uuid".into()),
             tokens_in: Some(84_210),
             secs: Some(95),

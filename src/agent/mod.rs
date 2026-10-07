@@ -142,8 +142,8 @@ pub struct AgentConfig {
     pub endpoints: Vec<Endpoint>,
     /// Model used for titles and summaries; neither is generated without it.
     pub summary_model: Option<ModelSpec>,
-    /// Custom slash commands: `(name, base prompt)`.
-    pub commands: Vec<(String, String)>,
+    /// Custom slash commands.
+    pub commands: Vec<commands::Command>,
 }
 
 impl AgentConfig {

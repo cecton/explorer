@@ -87,7 +87,11 @@ async fn main() {
         tui::build_state(Arc::clone(&files), root.clone(), theme.clone(), keymap);
     initial_state.show_timers = counters.show;
     initial_state.count_render_as_active = counters.render_counts_as_active;
-    initial_state.agent = Arc::new(config::resolve_agent(agent_settings, &config::load_auth()));
+    initial_state.agent = Arc::new(config::resolve_agent(
+        agent_settings,
+        &config::load_auth(),
+        config::load_commands(),
+    ));
 
     if let Some(session) = session::load_session(&root) {
         // Seed the time counters with this project's cumulative totals before `apply`

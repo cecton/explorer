@@ -1,6 +1,7 @@
+use crate::agent::commands::{self, Command};
 use crate::agent::{AgentConfig, CLAUDE_CODE_KIND, Endpoint, EndpointKind, ModelSpec};
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 pub struct Config {
     /// Fallback theme used only when a project has no session (or no session-saved
@@ -21,8 +22,6 @@ pub struct Config {
 pub struct AgentSettings {
     pub endpoints: Vec<EndpointDecl>,
     pub summary_model: Option<ModelSpec>,
-    /// Custom slash commands: `(name, base prompt)`.
-    pub commands: Vec<(String, String)>,
 }
 
 /// Settings for the status-bar session/project time counters.
@@ -107,9 +106,58 @@ fn parse_auth(content: &str) -> Result<HashMap<String, String>, String> {
     Ok(tokens)
 }
 
+/// Custom slash commands, from `<config_dir>/commands/<name>.md`.
+pub fn load_commands() -> Vec<Command> {
+    directories::ProjectDirs::from("", "", "explorer")
+        .map(|dirs| read_commands(&dirs.config_dir().join("commands")))
+        .unwrap_or_default()
+}
+
+/// The commands of the `.md` files in `dir`, by name. A file that cannot make a
+/// command is logged and skipped; a missing directory yields none.
+fn read_commands(dir: &Path) -> Vec<Command> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<Command> = entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "md" {
+                return None;
+            }
+            let name = path.file_stem()?.to_str()?;
+            if !commands::is_command_name(name) {
+                tracing::warn!(
+                    "ignoring {}: a command name is made of lowercase letters, digits and dashes",
+                    path.display()
+                );
+                return None;
+            }
+            if commands::is_built_in(name) {
+                tracing::warn!("ignoring {}: '{name}' is built in", path.display());
+                return None;
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| tracing::warn!("cannot read {}: {e}", path.display()))
+                .ok()?;
+            let command = Command::parse(name, &text);
+            if command.is_none() {
+                tracing::warn!("ignoring {}: it has no prompt", path.display());
+            }
+            command
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
 /// Joins the declared endpoints with their tokens. An endpoint without a token is
 /// logged and left out, so none of its models is ever listed.
-pub fn resolve_agent(settings: AgentSettings, tokens: &HashMap<String, String>) -> AgentConfig {
+pub fn resolve_agent(
+    settings: AgentSettings,
+    tokens: &HashMap<String, String>,
+    commands: Vec<Command>,
+) -> AgentConfig {
     let endpoints = settings
         .endpoints
         .into_iter()
@@ -136,7 +184,7 @@ pub fn resolve_agent(settings: AgentSettings, tokens: &HashMap<String, String>) 
     AgentConfig {
         endpoints,
         summary_model: settings.summary_model,
-        commands: settings.commands,
+        commands,
     }
 }
 
@@ -206,36 +254,6 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                     format!("summary-model '{value}' is not of the form endpoint/model/effort")
                 })?;
                 settings.summary_model = Some(spec);
-            }
-            "command" => {
-                let name = string_arg(child).ok_or("agent.command must have a string name")?;
-                let valid = !name.is_empty()
-                    && name
-                        .chars()
-                        .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-');
-                if !valid {
-                    return Err(format!(
-                        "command name '{name}' must be made of lowercase letters, digits and dashes"
-                    ));
-                }
-                if [
-                    crate::agent::commands::COMPACT,
-                    crate::agent::commands::COMMIT,
-                ]
-                .contains(&name)
-                {
-                    return Err(format!(
-                        "command '{name}' is built in and cannot be redefined"
-                    ));
-                }
-                let prompt = child
-                    .children()
-                    .and_then(|fields| fields.get("prompt"))
-                    .and_then(string_arg)
-                    .ok_or_else(|| format!("command '{name}' must have a prompt"))?;
-                settings
-                    .commands
-                    .push((name.to_string(), prompt.to_string()));
             }
             _ => {}
         }
@@ -465,35 +483,31 @@ mod config_tests {
     }
 
     #[test]
-    fn agent_block_parses_custom_commands() {
-        let config = parse(
-            r#"
-            agent {
-                command "review" {
-                    prompt "Review the change below."
-                }
-                command "plan-it" {
-                    prompt "Plan this."
-                }
-            }
-        "#,
+    fn commands_are_read_from_markdown_files_named_after_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("review.md"), "Review the change below.\n").unwrap();
+        std::fs::write(
+            dir.join("plan-it.md"),
+            "---\nsystem-prompt: off\nargument: topic\n---\nPlan this.\n",
         )
-        .expect("valid config");
-        assert_eq!(
-            config.agent.commands,
-            [
-                ("review".to_string(), "Review the change below.".to_string()),
-                ("plan-it".to_string(), "Plan this.".to_string()),
-            ]
-        );
-    }
+        .unwrap();
+        std::fs::write(dir.join("Bad Name.md"), "x").unwrap();
+        std::fs::write(dir.join("compact.md"), "x").unwrap();
+        std::fs::write(dir.join("commit.md"), "x").unwrap();
+        std::fs::write(dir.join("empty.md"), "---\nargument: x\n---\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
 
-    #[test]
-    fn agent_block_rejects_bad_commands() {
-        assert!(parse("agent {\n command \"compact\" {\n prompt \"x\"\n }\n}").is_err());
-        assert!(parse("agent {\n command \"commit\" {\n prompt \"x\"\n }\n}").is_err());
-        assert!(parse("agent {\n command \"Bad Name\" {\n prompt \"x\"\n }\n}").is_err());
-        assert!(parse("agent {\n command \"review\" {\n }\n}").is_err());
+        let commands = read_commands(dir);
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["plan-it", "review"]);
+        assert_eq!(commands[0].prompt, "Plan this.");
+        assert!(!commands[0].system_prompt);
+        assert_eq!(commands[0].argument.as_deref(), Some("topic"));
+        assert_eq!(commands[1].prompt, "Review the change below.");
+        assert!(commands[1].system_prompt);
+
+        assert!(read_commands(&dir.join("missing")).is_empty());
     }
 
     #[test]
@@ -528,10 +542,9 @@ mod config_tests {
                 },
             ],
             summary_model: None,
-            commands: Vec::new(),
         };
         let tokens = parse_auth("router \"sk-or\"\nunused \"x\"").expect("valid auth");
-        let agent = resolve_agent(settings, &tokens);
+        let agent = resolve_agent(settings, &tokens, Vec::new());
         let names: Vec<&str> = agent.endpoints.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["router", "claude"]);
         assert_eq!(

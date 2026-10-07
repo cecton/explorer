@@ -1908,7 +1908,7 @@ fn render_status_bar(
                         .to_string()
                 }
                 Some(Window::Discussion(_)) => {
-                    "Enter:Send  Shift+Enter:New line  /commit:Go ahead  Ctrl+P:Model  PgUp/PgDn:scroll"
+                    "Enter:Send  Shift+Enter:New line  Ctrl+P:Model  PgUp/PgDn:scroll"
                         .to_string()
                 }
                 Some(Window::ModelPicker) => model_picker_hint(state),

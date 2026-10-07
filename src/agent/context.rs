@@ -11,10 +11,19 @@ const COMPACT_PROMPT: &str = include_str!("../../prompts/compact.md");
 pub const NOTE_MAX_COMMITS: usize = 20;
 
 /// The system prompt of a turn: mode instructions, the project's own instructions,
-/// and the state of the repository when the prompt was sent.
-pub fn system_prompt(mode: Mode, root: &Utf8Path, head: Option<&str>, date: &str) -> String {
-    let mut out = String::from(mode_prompt(mode));
-    out.push_str("\n\n");
+/// and the state of the repository when the prompt was sent. Without a `mode`, the
+/// mode instructions are left out.
+pub fn system_prompt(
+    mode: Option<Mode>,
+    root: &Utf8Path,
+    head: Option<&str>,
+    date: &str,
+) -> String {
+    let mut out = String::new();
+    if let Some(mode) = mode {
+        out.push_str(mode_prompt(mode));
+        out.push_str("\n\n");
+    }
     out.push_str(CONVERSATION_TOOL_PROMPT.trim_end());
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         out.push_str("\n\n## Project instructions (AGENTS.md)\n\n");
@@ -26,8 +35,16 @@ pub fn system_prompt(mode: Mode, root: &Utf8Path, head: Option<&str>, date: &str
 
 /// What is appended to Claude Code's own system prompt: it loads the project's
 /// instructions itself, so only the mode and the environment are added.
-pub fn claude_system_prompt(mode: Mode, root: &Utf8Path, head: Option<&str>, date: &str) -> String {
-    format!("{}{}", mode_prompt(mode), environment(root, head, date))
+pub fn claude_system_prompt(
+    mode: Option<Mode>,
+    root: &Utf8Path,
+    head: Option<&str>,
+    date: &str,
+) -> String {
+    let mode_prompt = mode.map(mode_prompt).unwrap_or_default();
+    format!("{mode_prompt}{}", environment(root, head, date))
+        .trim_start()
+        .to_string()
 }
 
 fn mode_prompt(mode: Mode) -> &'static str {
@@ -281,15 +298,30 @@ mod tests {
     fn system_prompt_includes_project_instructions_and_environment() {
         let (_tmp, root) = temp_dir();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = system_prompt(Mode::Feedback, &root, Some("abc123"), "2026-10-05");
+        let prompt = system_prompt(Some(Mode::Feedback), &root, Some("abc123"), "2026-10-05");
         assert!(prompt.starts_with("You are the coding agent inside Explorer"));
         assert!(prompt.contains("**feedback mode**"));
         assert!(prompt.contains("## The conversation tree"));
-        let commit = system_prompt(Mode::Commit, &root, None, "2026-10-05");
+        let commit = system_prompt(Some(Mode::Commit), &root, None, "2026-10-05");
         assert!(commit.contains("**commit mode**"));
         assert!(commit.ends_with("- HEAD: none yet (no commit)\n"));
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
         assert!(prompt.ends_with("- Date: 2026-10-05\n- HEAD: abc123\n"));
+    }
+
+    #[test]
+    fn system_prompt_without_a_mode_keeps_everything_but_the_mode_prompt() {
+        let (_tmp, root) = temp_dir();
+        std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
+        let prompt = system_prompt(None, &root, Some("abc123"), "2026-10-05");
+        assert!(prompt.starts_with("## The conversation tree"));
+        assert!(!prompt.contains("You are the coding agent inside Explorer"));
+        assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
+        assert!(prompt.ends_with("- Date: 2026-10-05\n- HEAD: abc123\n"));
+
+        let claude = claude_system_prompt(None, &root, Some("abc123"), "2026-10-05");
+        assert!(claude.starts_with("## Environment\n"));
+        assert!(claude.ends_with("- HEAD: abc123\n"));
     }
 
     #[test]
@@ -314,7 +346,7 @@ mod tests {
     fn claude_prompt_has_mode_and_environment_but_not_project_instructions() {
         let (_tmp, root) = temp_dir();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = claude_system_prompt(Mode::Commit, &root, Some("abc"), "2026-10-05");
+        let prompt = claude_system_prompt(Some(Mode::Commit), &root, Some("abc"), "2026-10-05");
         assert!(prompt.contains("**commit mode**"));
         assert!(!prompt.contains("Use tabs."));
         assert!(!prompt.contains("## The conversation tree"));

@@ -91,6 +91,8 @@ pub struct TurnOutcome {
 #[derive(Clone)]
 pub struct TurnRequest {
     pub mode: Mode,
+    /// False for a custom command sent without the mode's system prompt.
+    pub system_prompt: bool,
     pub node: NodeId,
     pub node_dir: Utf8PathBuf,
     /// Directories of the ancestors to replay, root first.
@@ -412,7 +414,7 @@ async fn run_claude_code(
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
             let system = context::claude_system_prompt(
-                request.mode,
+                request.system_prompt.then_some(request.mode),
                 &request.root,
                 request.head.as_deref(),
                 &request.date,
@@ -507,7 +509,7 @@ async fn run_own_loop(
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
             let system = context::system_prompt(
-                request.mode,
+                request.system_prompt.then_some(request.mode),
                 &request.root,
                 request.head.as_deref(),
                 &request.date,

@@ -1,4 +1,4 @@
-use crate::agent::commands::{self, Expansion};
+use crate::agent::commands::{self, Command, Expansion};
 use crate::agent::turn::{self, TurnRequest};
 use crate::agent::{Mode, ModelSpec};
 use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
@@ -90,6 +90,9 @@ pub struct DiscussionComponent {
 pub(crate) enum TurnKind {
     /// A prompt run in a mode: feedback, or commit for the built-in `/commit`.
     Prompt(Mode),
+    /// A custom command sent without the mode's system prompt: nothing tells its turn
+    /// that the tree is a lab, so its work is kept and closed like a commit turn.
+    NoSystemPrompt,
     /// The built-in `/compact`: summarize the branch so far.
     Compact { instructions: String },
 }
@@ -126,6 +129,7 @@ impl Launch {
                     instructions: String::new(),
                 },
             },
+            _ if source.meta.no_system_prompt => TurnKind::NoSystemPrompt,
             _ => TurnKind::Prompt(node_mode(source)),
         };
         Some(Self {
@@ -183,10 +187,13 @@ pub(crate) fn start_turn(
         spec,
         rerun,
     } = launch;
+    let no_system_prompt = matches!(kind, TurnKind::NoSystemPrompt);
     // A compact turn changes nothing, so it runs under the shared lock like feedback.
     let (mode, node_type, compact) = match kind {
         TurnKind::Prompt(Mode::Feedback) => (Mode::Feedback, NodeType::Feedback, None),
-        TurnKind::Prompt(Mode::Commit) => (Mode::Commit, NodeType::Commit, None),
+        TurnKind::Prompt(Mode::Commit) | TurnKind::NoSystemPrompt => {
+            (Mode::Commit, NodeType::Commit, None)
+        }
         TurnKind::Compact { instructions } => {
             (Mode::Feedback, NodeType::Compact, Some(instructions))
         }
@@ -236,6 +243,7 @@ pub(crate) fn start_turn(
         status: Some(NodeStatus::Running),
         head_before: head.clone(),
         command,
+        no_system_prompt,
         ..Default::default()
     };
     let (node, lineage, folds, context) = {
@@ -276,6 +284,7 @@ pub(crate) fn start_turn(
     let request = TurnRequest {
         model: spec.to_string(),
         mode,
+        system_prompt: !no_system_prompt,
         node: node.clone(),
         node_dir: context.node_dir.clone(),
         ancestor_dirs: context.ancestor_dirs,
@@ -444,8 +453,15 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
             None,
         ),
         Expansion::Prompt { text, command } => {
+            let kind = match command {
+                Some(Command {
+                    system_prompt: false,
+                    ..
+                }) => TurnKind::NoSystemPrompt,
+                _ => TurnKind::Prompt(Mode::Feedback),
+            };
             let input = command.is_some().then_some(typed);
-            (text, input, TurnKind::Prompt(Mode::Feedback), command)
+            (text, input, kind, command.map(|c| c.name.clone()))
         }
     };
     Some(Ok(Launch {
@@ -1373,7 +1389,7 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
     }
     let queued = queue_hint(state, id);
     let Some(node) = &discussion.node else {
-        let help = "Enter:Send  Shift+Enter:New line  /commit:Go ahead";
+        let help = "Enter:Send  Shift+Enter:New line";
         return (queued.unwrap_or_else(|| help.to_string()), false);
     };
     if let Some(handle) = state.running_turns.get(node) {
@@ -1633,9 +1649,10 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let marker = marker_bg(theme, pane_bg);
 
             let (status, alert) = status_line(state, self.window_id, discussion);
+            let hint = commands::placeholder(&discussion.draft, &state.agent.commands);
             let input_rows = InputLine::height(
                 &discussion.draft,
-                None,
+                hint.as_deref(),
                 "",
                 pane_width as u16,
                 (total_rows / 2).max(1),
@@ -1663,7 +1680,8 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             self.input.render(
                 &mut input_ops,
                 &discussion.draft,
-                None,
+                hint.as_deref()
+                    .map(|hint| (hint, TuiColor::from(status_fg))),
                 "",
                 input_origin,
                 pane_width as u16,
@@ -2046,7 +2064,10 @@ mod tests {
         let mut state = empty_state();
         *state.conversations.write() = ConversationTree::load(&root);
         state.agent = Arc::new(crate::agent::AgentConfig {
-            commands: vec![("review".to_string(), "Review it.".to_string())],
+            commands: vec![
+                Command::parse("review", "Review it.").unwrap(),
+                Command::parse("squash", "---\nsystem-prompt: off\n---\nSquash since:").unwrap(),
+            ],
             ..Default::default()
         });
         for (id, node) in [(0, "a1"), (1, "a2")] {
@@ -2152,6 +2173,13 @@ mod tests {
 
         let beside = compose_launch(&state, 1).unwrap().unwrap();
         assert_eq!(beside.parent, Some(NodeId::new("a1")));
+
+        state.discussions.get_mut(&0).unwrap().draft = "/squash main".to_string();
+        let squash = compose_launch(&state, 0).unwrap().unwrap();
+        assert_eq!(squash.prompt, "Squash since:\n\nmain");
+        assert_eq!(squash.input.as_deref(), Some("/squash main"));
+        assert_eq!(squash.command.as_deref(), Some("squash"));
+        assert!(matches!(squash.kind, TurnKind::NoSystemPrompt));
 
         state.discussions.get_mut(&0).unwrap().draft = "as typed".to_string();
         let typed = compose_launch(&state, 0).unwrap().unwrap();
@@ -2263,10 +2291,15 @@ mod tests {
         let parent = root.join("a1");
         let commit = parent.join("a2");
         let compact = parent.join("a3");
+        let squash = parent.join("a4");
         for (dir, metadata) in [
             (&parent, "type: feedback\n"),
             (&commit, "type: commit\ncommand: review\n"),
             (&compact, "type: compact\n"),
+            (
+                &squash,
+                "type: commit\ncommand: squash\nsystem-prompt: off\n",
+            ),
         ] {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(dir.join("metadata.md"), metadata).unwrap();
@@ -2287,6 +2320,11 @@ mod tests {
         assert!(
             matches!(launch.kind, TurnKind::Compact { ref instructions } if instructions == "keep names")
         );
+
+        let launch =
+            Launch::replay(&tree, &NodeId::new("a4"), "x".to_string(), spec.clone()).unwrap();
+        assert!(matches!(launch.kind, TurnKind::NoSystemPrompt));
+        assert_eq!(launch.command.as_deref(), Some("squash"));
 
         let root_launch =
             Launch::replay(&tree, &NodeId::new("a1"), "hi".to_string(), spec).unwrap();

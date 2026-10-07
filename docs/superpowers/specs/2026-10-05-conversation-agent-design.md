@@ -173,7 +173,8 @@ commits: <full hash> <full hash>     commit nodes only; oldest first
 stash: <full hash>            only when leftovers were stashed
 scratch-reset: true           only when a feedback turn's changes were discarded
 favorite: true                only when set
-command: review               only when a slash command was expanded
+command: review               only when a custom command was expanded
+system-prompt: off            only for a command sent without the mode prompt
 session-id: <uuid>            claude-code only
 tokens-in: 84210
 error: <one line>             only for failed
@@ -213,10 +214,6 @@ agent {
     }
 
     summary-model "kimi/kimi-k2/low"
-
-    command "review" {
-        prompt "Review the change described below for correctness and style."
-    }
 }
 ```
 
@@ -232,7 +229,9 @@ agent {
     `opus`, `sonnet`, `haiku`.
 - `summary-model` — model spec used for both titles and summaries. If absent, neither is
   generated.
-- `command "<name>" { prompt "…" }` — custom slash command, see section 10.
+
+Custom slash commands are not in `config.kdl`: each is a file of
+`<config_dir>/commands/`, see section 10.
 
 ### `auth.kdl`
 
@@ -594,12 +593,39 @@ first.
 A prompt that starts with `/name`, where `name` is `[a-z0-9-]+` followed by whitespace or
 the end of the text, is looked up among the commands:
 
-- **Custom command** (config): the prompt becomes the command's base prompt, then two
-  newlines, then the rest of the typed text. With no rest, just the base prompt.
+- **Custom command**: a file `<config_dir>/commands/<name>.md`, read at startup. The
+  file name is the command name and the body is its base prompt. The prompt becomes
+  the base prompt, then two newlines, then the rest of the typed text. With no rest,
+  just the base prompt.
   Expansion happens on send; `prompt.md` stores the expanded text, `input.md` the text
   as typed and `metadata.md` the command name. A node replayed with another model
   carries the `input.md` of its source. An untitled node shows the first line of the
   typed text in the tree.
+
+  The file may open with a metadata block: `---` on the first line, flat `key: value`
+  lines, and a closing `---`. Unknown keys are ignored, and a block that is never closed
+  is part of the prompt.
+
+  ```markdown
+  ---
+  system-prompt: off
+  argument: commit-like
+  description: Squash the commits since a ref into one
+  ---
+  Squash all commits into a single commit since:
+  ```
+
+  - `system-prompt: on | off` (default `on`). With `on`, the command is a feedback turn
+    like any prompt. With `off`, the turn gets no mode prompt on either kind of endpoint
+    (the rest of the system prompt stays) and no workspace note. Since nothing tells it
+    that the tree is a lab, its work is kept: the turn runs and closes as a commit turn
+    (commits recorded, nudge, leftovers stashed) and its node has type `commit`. The
+    node records `system-prompt: off`, so a replay or a rerun leaves the mode prompt
+    out again.
+  - `argument` and `description` are display only, see the hint below.
+
+  A file whose name is not `[a-z0-9-]+`, that takes the name of a built-in, or that has
+  no prompt is logged and skipped.
 - **Unknown name**: the text is sent as typed. A prompt beginning with a path such as
   `/home/…` is therefore harmless.
 - **`/commit [instructions]`** (built-in, cannot be overridden): starts a commit turn.
@@ -617,6 +643,14 @@ the end of the text, is looked up among the commands:
   of a compact node replay context starting from it, with that summary as the opening
   message. On `claude-code`, the summary is produced in a fork of the parent session and
   descendants start a fresh session from it.
+
+**Hint.** While the draft of a Discussion window is a known command name with nothing
+typed after it, the input shows a placeholder in the `comment` color (section 11): what
+the command expects, continuing the draft (`<argument>` for a custom command), then its
+description on the next row. The built-ins have one too: `/commit` with
+`[additional instructions]` and `/compact` with `[instructions]`. The hint doubles as
+the sign that the name was recognized, since an unknown name is sent as typed. It
+disappears once anything is typed after the name.
 
 The Discussion window shows the input-token count of the node's last request so the user
 can see a branch growing. A context-length error from the endpoint is shown as such and
@@ -779,7 +813,8 @@ picker was opened:
   on-demand reads, write-through mutations, delete, table-of-contents pages. The node
   of a commit is found by scanning the nodes' metadata, which is fast enough not to
   need an index.
-- `src/config.rs` — `agent` block; new `auth.kdl` loader.
+- `src/config.rs` — `agent` block; new `auth.kdl` loader; `load_commands` reads the
+  command files.
 - `src/tui/markdown.rs` — Markdown to theme-colored styled lines, for replies.
 - `AppState` gains the tree, `discussions` (each with its model spec), the model list,
   the model last picked in this run and the running-turn handles, which are also the
@@ -816,7 +851,8 @@ Hermetic unit tests:
   and replies not retained;
 - `metadata.md` round trip;
 - lock: any running turn excludes every prompt;
-- slash expansion: custom, unknown, path-like, `/compact`;
+- slash expansion: custom, unknown, path-like, `/compact`, `/commit`; command file
+  parsing and the hint;
 - context assembly: ancestor walk, compact cut-off, handover, repository-moved note,
   injected messages preserved;
 - commit-turn closing on a temporary git repository: clean, nudge then clean, nudges
