@@ -139,13 +139,40 @@ impl Launch {
     }
 }
 
+/// Why a turn did not start.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum Refusal {
+    /// A turn is running: the prompt can start once it has ended.
+    Busy(&'static str),
+    /// The working tree has uncommitted changes.
+    DirtyTree,
+    Rejected(String),
+}
+
+impl Refusal {
+    pub(crate) fn into_reason(self) -> String {
+        match self {
+            Self::Busy(reason) => reason.to_string(),
+            Self::DirtyTree => {
+                "the working tree has uncommitted changes; commit or stash them first".to_string()
+            }
+            Self::Rejected(reason) => reason,
+        }
+    }
+}
+
+/// Forgets the prompt queued by `window`, when it has one.
+pub(crate) fn drop_queue_entry(state: &mut AppState, window: usize) {
+    state.queued_turns.retain(|entry| entry.window != window);
+}
+
 /// Checks the guards, creates the node on disk and starts its turn. On refusal nothing
 /// is created and the reason is returned.
 pub(crate) fn start_turn(
     state: &mut AppState,
     main_tx: MainTx,
     launch: Launch,
-) -> Result<NodeId, String> {
+) -> Result<NodeId, Refusal> {
     let Launch {
         parent,
         prompt,
@@ -168,18 +195,22 @@ pub(crate) fn start_turn(
         .endpoint(&spec.endpoint)
         .map(|endpoint| endpoint.kind.label());
     let (Some(endpoint_kind), Some(backend)) = (endpoint_kind, state.agent.backend(&spec)) else {
-        return Err(format!(
+        return Err(Refusal::Rejected(format!(
             "endpoint '{}' is not configured or has no token",
             spec.endpoint
-        ));
+        )));
     };
     let parent_status = parent
         .as_ref()
         .and_then(|parent| state.conversations.read().node(parent)?.meta.status);
     match parent_status {
         Some(NodeStatus::Done) | None => {}
-        Some(NodeStatus::Running) => return Err("this node is still running".to_string()),
-        Some(_) => return Err("this node is not complete; continue from its parent".to_string()),
+        Some(NodeStatus::Running) => return Err(Refusal::Busy("this node is still running")),
+        Some(_) => {
+            return Err(Refusal::Rejected(
+                "this node is not complete; continue from its parent".to_string(),
+            ));
+        }
     }
     let running: Vec<Mode> = state
         .running_turns
@@ -187,12 +218,10 @@ pub(crate) fn start_turn(
         .map(|handle| handle.mode)
         .collect();
     if let Some(reason) = lock_refusal(&running) {
-        return Err(reason.to_string());
+        return Err(Refusal::Busy(reason));
     }
     if crate::git::status_short(&state.root).is_ok_and(|status| !status.trim().is_empty()) {
-        return Err(
-            "the working tree has uncommitted changes; commit or stash them first".to_string(),
-        );
+        return Err(Refusal::DirtyTree);
     }
 
     let head = state.repo.as_ref().and_then(crate::git::head_id);
@@ -219,17 +248,17 @@ pub(crate) fn start_turn(
                         ..meta
                     };
                 })
-                .map_err(|e| format!("could not restart the node: {e}"))?;
+                .map_err(|e| Refusal::Rejected(format!("could not restart the node: {e}")))?;
                 state.discussion_highlights.remove(&node);
                 node
             }
             None => tree
                 .create_node(parent.as_ref(), now, meta, &prompt, input.as_deref())
-                .map_err(|e| format!("could not create the node: {e}"))?,
+                .map_err(|e| Refusal::Rejected(format!("could not create the node: {e}")))?,
         };
         let context = tree
             .turn_context(&node)
-            .ok_or("the new node has no directory")?;
+            .ok_or_else(|| Refusal::Rejected("the new node has no directory".to_string()))?;
         (node.clone(), tree.lineage(&node), context)
     };
     let session = lineage.first().unwrap_or(&node).as_str().to_string();
@@ -333,6 +362,91 @@ fn span_style(span: &markdown::Span, bg: RgbValue) -> TuiStyle {
 /// and a commit turn must have it clean and to itself.
 fn lock_refusal(running: &[Mode]) -> Option<&'static str> {
     (!running.is_empty()).then_some("another turn is running; wait for it to finish")
+}
+
+fn ordinal(rank: usize) -> String {
+    let suffix = match (rank % 10, rank % 100) {
+        (_, 11..=13) => "th",
+        (1, _) => "st",
+        (2, _) => "nd",
+        (3, _) => "rd",
+        _ => "th",
+    };
+    format!("{rank}{suffix}")
+}
+
+/// Status line part of a window whose prompt is queued: its place and the keys that
+/// act on it.
+fn queue_hint(state: &AppState, window: usize) -> Option<String> {
+    let index = state
+        .queued_turns
+        .iter()
+        .position(|entry| entry.window == window)?;
+    Some(format!(
+        "queued · {} · Ctrl+Plus/Minus:Priority · Esc:Take back",
+        ordinal(index + 1)
+    ))
+}
+
+/// Moves the prompt queued by `window` one place earlier or later.
+fn move_queued(state: &mut AppState, window: usize, earlier: bool) {
+    let queue = &mut state.queued_turns;
+    let Some(index) = queue.iter().position(|entry| entry.window == window) else {
+        return;
+    };
+    let target = if earlier {
+        index.checked_sub(1)
+    } else {
+        Some(index + 1).filter(|next| *next < queue.len())
+    };
+    if let Some(target) = target {
+        queue.swap(index, target);
+    }
+}
+
+/// The turn the draft of window `id` asks for, as the window stands now: a new node
+/// below the node shown, or a sibling of it when its turn failed or was cancelled.
+/// `None` without a draft or a model.
+fn compose_launch(state: &AppState, id: usize) -> Option<Launch> {
+    let discussion = state.discussions.get(&id)?;
+    if discussion.draft.trim().is_empty() {
+        return None;
+    }
+    let spec = discussion.model.clone()?;
+    let parent = {
+        let tree = state.conversations.read();
+        match discussion.node.as_ref().and_then(|node| tree.node(node)) {
+            Some(Node {
+                parent,
+                meta:
+                    Metadata {
+                        status: Some(NodeStatus::Failed | NodeStatus::Cancelled),
+                        ..
+                    },
+                ..
+            }) => parent.clone(),
+            _ => discussion.node.clone(),
+        }
+    };
+    let typed = discussion.draft.clone();
+    let (prompt, input, kind, command) = match commands::expand(&typed, &state.agent.commands) {
+        Expansion::Compact { instructions } => {
+            (typed, None, TurnKind::Compact { instructions }, None)
+        }
+        Expansion::Prompt { text, command } => {
+            let input = command.is_some().then_some(typed);
+            (text, input, TurnKind::Prompt(discussion.mode), command)
+        }
+    };
+    Some(Launch {
+        parent,
+        prompt,
+        input,
+        kind,
+        command,
+        spec,
+        rerun: None,
+    })
 }
 
 /// The text of `part`, as the offsets of a [`DocLine`] index it. The work log entries
@@ -727,7 +841,7 @@ impl DiscussionComponent {
         };
         let started = launch
             .map_err(str::to_string)
-            .and_then(|launch| start_turn(state, main_tx, launch));
+            .and_then(|launch| start_turn(state, main_tx, launch).map_err(Refusal::into_reason));
         for discussion in state.discussions.values_mut() {
             if discussion.node.as_ref() != Some(&node) {
                 continue;
@@ -761,7 +875,7 @@ impl DiscussionComponent {
         };
         match start_turn(state, main_tx.clone(), launch) {
             Ok(sibling) => Self::open(state, main_tx, sibling),
-            Err(reason) => state.tree_view.notice = Some(reason),
+            Err(refusal) => state.tree_view.notice = Some(refusal.into_reason()),
         }
     }
 
@@ -874,8 +988,9 @@ impl DiscussionComponent {
         });
     }
 
-    /// Sends the draft of window `id` as a new node below the node it shows. A refused
-    /// send keeps the draft and explains itself in the window's notice.
+    /// Sends the draft of window `id`, or queues it while a turn is running: the draft
+    /// then stays in the input until its turn starts. A refused send keeps the draft and
+    /// explains itself in the window's notice.
     fn send(state: &mut AppState, main_tx: MainTx, id: usize) {
         let Some(discussion) = state.discussions.get(&id) else {
             return;
@@ -883,38 +998,39 @@ impl DiscussionComponent {
         if discussion.draft.trim().is_empty() {
             return;
         }
-        let Some(spec) = discussion.model.clone() else {
+        if discussion.model.is_none() {
             ModelPickerComponent::open(state, main_tx, ModelPickerPurpose::Window(id));
             return;
+        }
+        // A queue held back goes first, so that this prompt cannot overtake it.
+        Self::release_queue(state, main_tx.clone());
+        if state.queued_turns.iter().any(|entry| entry.window == id) {
+            return;
+        }
+        let Some(launch) = compose_launch(state, id) else {
+            return;
         };
-        let typed = discussion.draft.clone();
-        let (prompt, input, kind, command) = match commands::expand(&typed, &state.agent.commands) {
-            Expansion::Compact { instructions } => {
-                (typed, None, TurnKind::Compact { instructions }, None)
+        let prompt = launch.prompt.clone();
+        match start_turn(state, main_tx, launch) {
+            Ok(node) => Self::apply_sent(state, id, node, prompt),
+            Err(Refusal::Busy(_)) => {
+                let Some(discussion) = state.discussions.get_mut(&id) else {
+                    return;
+                };
+                discussion.notice = None;
+                let parent = discussion.node.clone();
+                state.queued_turns.push(PendingTurn { window: id, parent });
             }
-            Expansion::Prompt { text, command } => {
-                let input = command.is_some().then_some(typed);
-                (text, input, TurnKind::Prompt(discussion.mode), command)
-            }
-        };
-        let launch = Launch {
-            parent: discussion.node.clone(),
-            prompt: prompt.clone(),
-            input,
-            kind,
-            command,
-            spec,
-            rerun: None,
-        };
-        let node = match start_turn(state, main_tx, launch) {
-            Ok(node) => node,
-            Err(reason) => {
+            Err(refusal) => {
                 if let Some(discussion) = state.discussions.get_mut(&id) {
-                    discussion.notice = Some(reason);
+                    discussion.notice = Some(refusal.into_reason());
                 }
-                return;
             }
-        };
+        }
+    }
+
+    /// Makes window `id` show `node`, the node its draft was just sent as.
+    fn apply_sent(state: &mut AppState, id: usize, node: NodeId, prompt: String) {
         let Some(discussion) = state.discussions.get_mut(&id) else {
             return;
         };
@@ -929,6 +1045,94 @@ impl DiscussionComponent {
         state
             .pane_manager
             .set_window_scroll(&Window::Discussion(id), 0);
+    }
+
+    /// Starts the queued prompts, next first, for as long as no turn is running. Each is
+    /// composed from its window as it stands now. A prompt that can no longer be sent
+    /// leaves the queue with a notice; a dirty working tree holds the whole queue back.
+    pub(crate) fn release_queue(state: &mut AppState, main_tx: MainTx) {
+        while state.running_turns.is_empty() {
+            let Some(entry) = state.queued_turns.first().cloned() else {
+                return;
+            };
+            let id = entry.window;
+            let Some(discussion) = state.discussions.get_mut(&id) else {
+                state.queued_turns.remove(0);
+                continue;
+            };
+            if discussion.node != entry.parent {
+                discussion.notice =
+                    Some("this window moved on since the prompt was queued".to_string());
+                state.queued_turns.remove(0);
+                continue;
+            }
+            let Some(launch) = compose_launch(state, id) else {
+                state.queued_turns.remove(0);
+                continue;
+            };
+            let prompt = launch.prompt.clone();
+            let refusal = match start_turn(state, main_tx.clone(), launch) {
+                Ok(node) => {
+                    state.queued_turns.remove(0);
+                    Self::apply_sent(state, id, node, prompt);
+                    continue;
+                }
+                Err(refusal) => refusal,
+            };
+            let held = matches!(refusal, Refusal::Busy(_) | Refusal::DirtyTree);
+            let reason = refusal.into_reason();
+            if !held {
+                state.queued_turns.remove(0);
+            }
+            if let Some(discussion) = state.discussions.get_mut(&id) {
+                discussion.notice = Some(if held {
+                    format!("queue held: {reason} · Enter:Retry")
+                } else {
+                    reason
+                });
+            }
+            if held {
+                return;
+            }
+        }
+    }
+
+    /// Gives the prompt of `node`, whose turn failed or was cancelled, back to the
+    /// windows showing it: as it was typed, over whatever their input held, a queued
+    /// follow-up included.
+    pub(crate) fn restore_prompt(state: &mut AppState, node: &NodeId) {
+        let Some(input) = state
+            .conversations
+            .read()
+            .node_dir(node)
+            .map(|dir| crate::conversation::read_input(&dir))
+        else {
+            return;
+        };
+        let shown: Vec<usize> = state
+            .discussions
+            .iter()
+            .filter(|(_, discussion)| discussion.node.as_ref() == Some(node))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in shown {
+            drop_queue_entry(state, id);
+            if let Some(discussion) = state.discussions.get_mut(&id) {
+                discussion.draft.clone_from(&input);
+                discussion.draft_replaced = true;
+            }
+        }
+        state.mark_session_dirty();
+    }
+
+    /// Puts the input cursor at the end of the draft when the input turns to another
+    /// window, or when the draft was replaced from outside.
+    fn sync_input(&mut self, discussion: &mut DiscussionState) {
+        let replaced = std::mem::take(&mut discussion.draft_replaced);
+        if replaced || self.input_window != Some(self.window_id) {
+            self.input.set_cursor_end(&discussion.draft);
+            self.input_window = Some(self.window_id);
+        }
     }
 
     fn doc_lines(
@@ -1121,20 +1325,20 @@ fn work_log_shown(tree: &ConversationTree, discussion: &DiscussionState) -> bool
     })
 }
 
-/// Status line of a window: a refusal, the progress of a running turn, or the outcome
-/// of the node shown. The flag asks for the error color.
-fn status_line(state: &AppState, discussion: &DiscussionState) -> (String, bool) {
+/// Status line of window `id`: a refusal, the progress of a running turn, the place of
+/// its prompt in the queue, or the outcome of the node shown. The flag asks for the
+/// error color.
+fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (String, bool) {
     if let Some(notice) = &discussion.notice {
         return (notice.clone(), true);
     }
     if !discussion.loaded {
         return ("Loading…".to_string(), false);
     }
+    let queued = queue_hint(state, id);
     let Some(node) = &discussion.node else {
-        return (
-            "Enter:Send  Shift+Enter:New line  Shift+Tab:Mode".to_string(),
-            false,
-        );
+        let help = "Enter:Send  Shift+Enter:New line  Shift+Tab:Mode";
+        return (queued.unwrap_or_else(|| help.to_string()), false);
     };
     if let Some(handle) = state.running_turns.get(node) {
         let live = handle.live.lock();
@@ -1146,8 +1350,12 @@ fn status_line(state: &AppState, discussion: &DiscussionState) -> (String, bool)
         if let Some(tokens) = live.tokens_in {
             text.push_str(&format!(" · {tokens} tokens in"));
         }
-        text.push_str(" · Ctrl+C:Cancel");
+        text.push_str(" · ");
+        text.push_str(queued.as_deref().unwrap_or("Esc:Cancel"));
         return (text, false);
+    }
+    if let Some(queued) = queued {
+        return (queued, false);
     }
     let (mut text, failed) = state
         .conversations
@@ -1191,14 +1399,12 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
         let Some(discussion) = state.discussions.get_mut(&id) else {
             return Ok(EventPropagation::Propagate);
         };
-        if self.input_window != Some(id) {
-            self.input.set_cursor_end(&discussion.draft);
-            self.input_window = Some(id);
-        }
+        self.sync_input(discussion);
         let running = discussion
             .node
             .as_ref()
             .and_then(|node| state.running_turns.get(node));
+        let queued = state.queued_turns.iter().any(|entry| entry.window == id);
         let scroll = state.pane_manager.window_scroll(&window);
         let page = state.pane_manager.window_page_size(&window).max(1);
 
@@ -1229,18 +1435,44 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 ModelPickerComponent::open(state, main_tx, ModelPickerPurpose::Window(id));
                 return Ok(EventPropagation::ConsumedRender);
             }
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('c'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Esc),
+            }) if queued => {
+                drop_queue_entry(state, id);
+                Self::release_queue(state, main_tx);
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Esc),
             }) if running.is_some() => {
                 if let Some(handle) = running {
                     handle.cancel();
                 }
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            // Ctrl+Plus arrives as `+` or `=`, shifted or not, depending on the terminal.
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('+' | '='),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        alt_key_state: KeyState::NotPressed,
+                        ..
+                    },
+            }) if queued => {
+                move_queued(state, id, true);
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('-'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        alt_key_state: KeyState::NotPressed,
+                        ..
+                    },
+            }) if queued => {
+                move_queued(state, id, false);
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -1324,6 +1556,9 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let focused = has_focus.get_id() == Some(self.id);
             let state = &mut global_data.state;
 
+            if let Some(discussion) = state.discussions.get_mut(&self.window_id) {
+                self.sync_input(discussion);
+            }
             // A running turn's reply lives in its handle; mirror it while it grows.
             if let Some(discussion) = state.discussions.get_mut(&self.window_id)
                 && let Some(handle) = discussion
@@ -1364,7 +1599,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 .unwrap_or(RgbValue::from_u8(50, 50, 90));
             let marker = marker_bg(theme, pane_bg);
 
-            let (status, alert) = status_line(state, discussion);
+            let (status, alert) = status_line(state, self.window_id, discussion);
             let mode = discussion.mode;
             let label = input_label(mode);
             let input_rows = InputLine::height(
@@ -1377,10 +1612,6 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let status_rows = usize::from(total_rows > input_rows);
             let doc_rows = total_rows - input_rows - status_rows;
 
-            if self.input_window != Some(self.window_id) {
-                self.input.set_cursor_end(&discussion.draft);
-                self.input_window = Some(self.window_id);
-            }
             let mut input_ops = RenderOpIRVec::new();
             let input_origin = origin + height((doc_rows + status_rows) as u16);
             let input_style = new_style!(
@@ -1767,6 +1998,202 @@ mod tests {
         let (_tmp, tree, id) = node_with_metadata("type: compact\n");
         assert_eq!(node_mode(tree.node(&id).unwrap()), Mode::Feedback);
         assert_eq!(input_label(Mode::Commit), "commit> ");
+    }
+
+    fn empty_state() -> AppState {
+        let files = Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new()));
+        AppState::new(
+            files,
+            Utf8PathBuf::from("/tmp"),
+            HelixTheme::default(),
+            crate::keymap::Keymap::default(),
+        )
+    }
+
+    /// A state over a done root `a1` and its failed child `a2`, which was sent with the
+    /// `review` command; window 0 shows `a1` and window 1 shows `a2`.
+    fn state_with_failed_child() -> (tempfile::TempDir, AppState) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let parent = root.join("a1");
+        let child = parent.join("a2");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(parent.join("metadata.md"), "status: done\n").unwrap();
+        std::fs::write(child.join("metadata.md"), "status: failed\n").unwrap();
+        std::fs::write(child.join("prompt.md"), "Review it.\n\nfoo").unwrap();
+        std::fs::write(child.join("input.md"), "/review foo").unwrap();
+
+        let mut state = empty_state();
+        *state.conversations.write() = ConversationTree::load(&root);
+        state.agent = Arc::new(crate::agent::AgentConfig {
+            commands: vec![("review".to_string(), "Review it.".to_string())],
+            ..Default::default()
+        });
+        for (id, node) in [(0, "a1"), (1, "a2")] {
+            state.discussions.insert(
+                id,
+                DiscussionState {
+                    node: Some(NodeId::new(node)),
+                    model: ModelSpec::parse("mock/m/low"),
+                    loaded: true,
+                    ..Default::default()
+                },
+            );
+        }
+        (tmp, state)
+    }
+
+    fn queue(state: &mut AppState, windows: &[usize]) {
+        state.queued_turns = windows
+            .iter()
+            .map(|window| PendingTurn {
+                window: *window,
+                parent: None,
+            })
+            .collect();
+    }
+
+    fn queued_windows(state: &AppState) -> Vec<usize> {
+        state
+            .queued_turns
+            .iter()
+            .map(|entry| entry.window)
+            .collect()
+    }
+
+    #[test]
+    fn ordinal_names_a_place_in_the_queue() {
+        let places: Vec<String> = [1, 2, 3, 4, 11, 12, 13, 21, 22, 101, 111]
+            .into_iter()
+            .map(ordinal)
+            .collect();
+        assert_eq!(
+            places,
+            [
+                "1st", "2nd", "3rd", "4th", "11th", "12th", "13th", "21st", "22nd", "101st",
+                "111th"
+            ]
+        );
+    }
+
+    #[test]
+    fn a_queued_prompt_moves_one_place_at_a_time_and_stops_at_the_ends() {
+        let mut state = empty_state();
+        queue(&mut state, &[7, 8, 9]);
+
+        move_queued(&mut state, 9, true);
+        assert_eq!(queued_windows(&state), [7, 9, 8]);
+        move_queued(&mut state, 9, true);
+        move_queued(&mut state, 9, true);
+        assert_eq!(queued_windows(&state), [9, 7, 8]);
+        move_queued(&mut state, 7, false);
+        move_queued(&mut state, 7, false);
+        assert_eq!(queued_windows(&state), [9, 8, 7]);
+        move_queued(&mut state, 4, true);
+        assert_eq!(queued_windows(&state), [9, 8, 7]);
+
+        drop_queue_entry(&mut state, 8);
+        assert_eq!(queued_windows(&state), [9, 7]);
+        assert!(
+            queue_hint(&state, 7)
+                .unwrap()
+                .starts_with("queued · 2nd · ")
+        );
+        assert!(queue_hint(&state, 8).is_none());
+    }
+
+    #[test]
+    fn status_line_shows_the_place_of_a_queued_prompt() {
+        let (_tmp, mut state) = state_with_failed_child();
+        let (idle, _) = status_line(&state, 0, &state.discussions[&0]);
+        assert!(!idle.contains("queued"));
+
+        queue(&mut state, &[1, 0]);
+        let (status, alert) = status_line(&state, 0, &state.discussions[&0]);
+        assert!(status.starts_with("queued · 2nd · "));
+        assert!(status.ends_with("Esc:Take back"));
+        assert!(!alert);
+    }
+
+    #[test]
+    fn a_draft_is_composed_below_a_done_node_and_beside_a_failed_one() {
+        let (_tmp, mut state) = state_with_failed_child();
+        assert!(compose_launch(&state, 0).is_none());
+
+        for discussion in state.discussions.values_mut() {
+            discussion.draft = "/review bar".to_string();
+            discussion.mode = Mode::Commit;
+        }
+        let below = compose_launch(&state, 0).unwrap();
+        assert_eq!(below.parent, Some(NodeId::new("a1")));
+        assert_eq!(below.prompt, "Review it.\n\nbar");
+        assert_eq!(below.input.as_deref(), Some("/review bar"));
+        assert_eq!(below.command.as_deref(), Some("review"));
+        assert!(matches!(below.kind, TurnKind::Prompt(Mode::Commit)));
+
+        let beside = compose_launch(&state, 1).unwrap();
+        assert_eq!(beside.parent, Some(NodeId::new("a1")));
+
+        state.discussions.get_mut(&0).unwrap().draft = "as typed".to_string();
+        let typed = compose_launch(&state, 0).unwrap();
+        assert_eq!(typed.prompt, "as typed");
+        assert!(typed.input.is_none());
+        assert!(typed.command.is_none());
+
+        state.discussions.get_mut(&0).unwrap().model = None;
+        assert!(compose_launch(&state, 0).is_none());
+    }
+
+    #[test]
+    fn a_failed_turn_gives_its_typed_prompt_back_over_the_draft() {
+        let (_tmp, mut state) = state_with_failed_child();
+        for discussion in state.discussions.values_mut() {
+            discussion.draft = "a follow-up".to_string();
+        }
+        queue(&mut state, &[1, 0]);
+
+        DiscussionComponent::restore_prompt(&mut state, &NodeId::new("a2"));
+
+        let shown = &state.discussions[&1];
+        assert_eq!(shown.draft, "/review foo");
+        assert!(shown.draft_replaced);
+        let other = &state.discussions[&0];
+        assert_eq!(other.draft, "a follow-up");
+        assert!(!other.draft_replaced);
+        assert_eq!(queued_windows(&state), [0]);
+    }
+
+    #[test]
+    fn a_queued_prompt_that_cannot_be_sent_leaves_the_queue() {
+        let (_tmp, mut state) = state_with_failed_child();
+        let (main_tx, _main_rx) = mpsc::channel(1);
+        state.discussions.get_mut(&0).unwrap().draft = "go".to_string();
+        state.discussions.get_mut(&1).unwrap().draft = "   ".to_string();
+        state.queued_turns = vec![
+            PendingTurn {
+                window: 5,
+                parent: None,
+            },
+            PendingTurn {
+                window: 1,
+                parent: Some(NodeId::new("a2")),
+            },
+            PendingTurn {
+                window: 0,
+                parent: None,
+            },
+        ];
+
+        DiscussionComponent::release_queue(&mut state, main_tx);
+
+        assert!(state.queued_turns.is_empty());
+        assert!(state.running_turns.is_empty());
+        assert!(state.discussions[&1].notice.is_none());
+        assert_eq!(
+            state.discussions[&0].notice.as_deref(),
+            Some("this window moved on since the prompt was queued")
+        );
+        assert_eq!(state.discussions[&0].draft, "go");
     }
 
     #[test]

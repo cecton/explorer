@@ -308,7 +308,34 @@ changed model carries on from the node that used it.
 
 One turn runs at a time per repository, whatever its mode: a feedback turn experiments
 in the working tree and a commit turn needs it clean and to itself, so two turns can
-never share it. A send is refused while any turn is running, `/compact` included.
+never share it. A prompt sent while any turn is running, `/compact` included, is
+**queued** and starts as soon as the lock is free.
+
+**Queue.** The queue is global, in order of sending, and lives in memory only: it is
+not part of the session, and after a restart the draft is back in the input, to be
+sent again by hand. An entry is a window and the node it showed, never a copy of the
+text: the queued prompt stays the draft of its window, so it can be edited, and its
+model and mode changed, until the turn starts. Slash commands are expanded at that
+moment. A window holds at most one queued prompt; `Enter` does nothing more while it
+waits. Only what time fixes is queued: a prompt sent while another turn runs, or below
+a node whose own turn is still running. Every other refusal is immediate.
+
+- The status line shows `queued`, the place in the queue and the keys below. When the
+  window's own node is running, this follows its progress.
+- `Esc` takes the prompt back out of the queue; the text stays in the input.
+- `Ctrl+Plus` and `Ctrl+Minus` move it one place earlier or later. They rely on the
+  terminal reporting modified keys (xterm `modifyOtherKeys`).
+- When a turn ends, entries start next first for as long as no turn is running. An
+  entry that can no longer be sent (endpoint or model gone, empty draft) leaves the
+  queue with the reason in its window. A dirty working tree holds the whole queue
+  back, with the reason in the window of the next entry: `Enter` in any Discussion
+  window tries again, and no prompt overtakes the queue meanwhile.
+- A queued follow-up to a node whose turn fails or is cancelled is dropped, and its
+  text replaced as described under Cancel in 8.2.
+- Closing a window, or deleting its node, removes its entry.
+
+Recovering a node and replaying one with another model (section 9) start from the tree,
+not from an input: they are not queued and are refused while a turn runs.
 
 A refused send keeps the input and shows the reason on the status line.
 
@@ -439,7 +466,10 @@ On `Enter` in a Discussion window:
 1. **Guards.** The prompt is not empty; the window has a model (otherwise the picker
    opens); the node shown is `done` (or the window is a new root); no other turn is
    running; the working tree is clean, untracked non-ignored files included, whatever
-   the mode.
+   the mode. While a turn is running the prompt is queued instead (section 6,
+   Locking), and these steps happen when its turn comes. From a window showing a
+   failed or cancelled node, the prompt is sent as a **sibling** of that node, below
+   its parent.
 2. **Expand** a slash command if the prompt starts with one.
 3. **Persist.** Create the node directory; write `prompt.md`, `input.md` when a
    command was expanded, and `metadata.md` (`type`, `status: running`, `head-before`).
@@ -502,10 +532,17 @@ hard-reset when the turn ends, so the agent neither holds back from experimentin
 spends tokens reverting. Like the other notes it is in the transcript but not in
 `prompt.md`.
 
-**Cancel.** `Ctrl+C` in the Discussion window of a running node aborts the HTTP stream or
+**Cancel.** `Esc` in the Discussion window of a running node aborts the HTTP stream or
 kills the child process group (including a running `shell` command). Status becomes
 `cancelled`; the partial reply and the work log are kept; the turn is closed as
 described above for its mode, so a cancelled or failed feedback turn is reset too.
+When the window also holds a queued follow-up, the first `Esc` takes that back and the
+second cancels the turn.
+
+**Prompt given back.** When a turn ends `cancelled` or `failed`, every window showing
+its node gets the prompt back in its input, as it was typed (`input.md`, else
+`prompt.md`), replacing whatever the input held. The window keeps showing the node, its
+error and its partial reply; sending from it creates a sibling.
 
 **Quit.** Quitting Explorer cancels running turns the same way. A running turn is not
 resumable and is not part of session restore.
@@ -529,7 +566,8 @@ display.
 ## 9. Recovering, replaying and editing nodes
 
 A node whose status is not `done` (failed, cancelled, interrupted) is **incomplete**.
-Incomplete nodes are always leaves: a prompt cannot be sent from one. Three tree keys
+Incomplete nodes are always leaves: a prompt sent from a window showing one becomes its
+sibling. Three tree keys
 deal with them and with second opinions:
 
 - **`Enter` — open, and recover if incomplete.** Opens the node in a Discussion window.
@@ -543,7 +581,7 @@ deal with them and with second opinions:
   model spec, and opens it. The pick belongs to that sibling only; it does not become
   the model offered to new roots. Works on any node, complete or not.
 - **`e` — edit as a new sibling.** Opens a Discussion window on the node's **parent**
-  with the input prefilled with the node's prompt and its mode selected. Nothing is
+  with the input prefilled with the node's prompt as typed and its mode selected. Nothing is
   created until the user sends. On a root, this is a new-root window.
 
 Since forks are conversation-only, a sibling of a commit node runs on a repository that
@@ -689,11 +727,12 @@ window holds its node's prompt, reply and work log in memory only while it is op
     `focus-prev`; while a Discussion window is focused the window takes it, and
     `<leader>Shift+Tab` still moves focus.
   - `Ctrl+P` — Model Picker.
-  - `Ctrl+C` — cancel the running turn.
+  - `Esc` — take the queued prompt back, else cancel the running turn, else nothing.
+  - `Ctrl+Plus` / `Ctrl+Minus` — move the queued prompt earlier or later in the queue.
   - `Ctrl+O` — show or hide the work log.
   - `PgUp` / `PgDn` — scroll the document.
-  - All existing Emacs bindings of the input. `Esc` does nothing; the window closes with
-    `<leader>x`.
+  - All existing Emacs bindings of the input, `Ctrl+C` to clear it included. The window
+    closes with `<leader>x`.
 
 ### 11.3 Input component
 
@@ -833,8 +872,8 @@ Defaults chosen without an explicit answer; change freely.
 16. A turn found dirty after a commit turn is stashed with
     `git stash push --include-untracked`; the stash of an earlier attempt of the same
     node is no longer referenced by its metadata once the node is run again.
-17. Key choices: `<leader>c`, `n`, `f`, `c`, `Ctrl+C`, `Ctrl+O`; `Esc` inert in the
-    Discussion window.
+17. Key choices: `<leader>c`, `n`, `f`, `c`, `Ctrl+O`; in the Discussion window `Esc`
+    cancels or takes back and `Ctrl+C` only clears the input.
 18. Turns are serialized even when both are feedback turns, since each may use the
     working tree.
 19. A commit made by a feedback turn is neither prevented nor undone; only the prompt

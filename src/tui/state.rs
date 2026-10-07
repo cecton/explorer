@@ -309,6 +309,18 @@ pub struct DiscussionState {
     pub mode: Mode,
     /// Why the last send was refused; cleared by the next edit.
     pub notice: Option<String>,
+    /// Set when the draft was replaced from outside the input, whose cursor then moves
+    /// to its end.
+    pub draft_replaced: bool,
+}
+
+/// A prompt waiting for the running turn to end. Its text is not copied: it stays the
+/// draft of `window`, editable until the turn starts.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PendingTurn {
+    pub window: usize,
+    /// Node the window showed when the prompt was queued.
+    pub parent: Option<NodeId>,
 }
 
 /// Highlighted byte ranges (start inclusive, end exclusive) in the prompt and the reply
@@ -519,6 +531,8 @@ pub struct AppState {
     pub model_picker_purpose: Option<ModelPickerPurpose>,
     /// Turns in progress, by node.
     pub running_turns: HashMap<NodeId, TurnHandle>,
+    /// Prompts waiting for their turn, next to start first. Never saved with the session.
+    pub queued_turns: Vec<PendingTurn>,
     pub mouse_drag_active: bool,
     pub terminal_grabbed: bool,
     pub text_selection: Option<TextSelection>,
@@ -625,6 +639,7 @@ impl AppState {
             model_picker: FuzzyPickerState::default(),
             model_picker_purpose: None,
             running_turns: HashMap::new(),
+            queued_turns: Vec::new(),
             mouse_drag_active: false,
             terminal_grabbed: false,
             text_selection: None,

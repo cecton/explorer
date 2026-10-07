@@ -305,6 +305,7 @@ impl ConversationTreeComponent {
             .map(|(id, _)| *id)
             .collect();
         for id in closed {
+            crate::tui::discussion_pane::drop_queue_entry(state, id);
             state.discussions.remove(&id);
             state.pane_manager.remove_window(&Window::Discussion(id));
         }

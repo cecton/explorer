@@ -1366,6 +1366,7 @@ impl App for AppMain {
                                 id,
                             );
                         } else {
+                            crate::tui::discussion_pane::drop_queue_entry(state, id);
                             state.discussions.remove(&id);
                             state.pane_manager.remove_window(&Window::Discussion(id));
                             state.mark_session_dirty();
@@ -1438,6 +1439,13 @@ impl App for AppMain {
                     if let Err(e) = updated {
                         tracing::warn!("failed to save the outcome of {}: {e}", node.as_str());
                     }
+                    if matches!(
+                        outcome.status,
+                        crate::conversation::NodeStatus::Failed
+                            | crate::conversation::NodeStatus::Cancelled
+                    ) {
+                        DiscussionComponent::restore_prompt(state, node);
+                    }
                     // A turn may have moved HEAD or stashed: refresh what shows git state.
                     let main_tx = global_data.main_thread_channel_sender.clone();
                     for (id, win) in &state.git_logs {
@@ -1448,6 +1456,7 @@ impl App for AppMain {
                             &win.source,
                         );
                     }
+                    DiscussionComponent::release_queue(state, main_tx);
                     self.dirty_check_ticks = 4;
                 }
                 AppSignal::NodeTitleReady { node, title } => {
@@ -1717,6 +1726,7 @@ pub(super) fn close_window(state: &mut AppState, window: Window) {
             state.commit_diffs.remove(&id);
         }
         Window::Discussion(id) => {
+            crate::tui::discussion_pane::drop_queue_entry(state, id);
             state.discussions.remove(&id);
         }
         Window::FilePreview(_)
