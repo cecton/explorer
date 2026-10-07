@@ -208,13 +208,20 @@ fn compute_line_starts(content: &str) -> Vec<usize> {
 }
 
 pub fn find_git_root() -> PathBuf {
-    let mut dir = env::current_dir().expect("cannot get current directory");
+    let start = env::current_dir().expect("cannot get current directory");
+    find_git_root_from(start)
+}
+
+fn find_git_root_from(start: PathBuf) -> PathBuf {
+    let mut dir = start;
     loop {
-        if dir.join(".git").is_dir() {
+        // `.git` is a directory in a normal checkout but a `gitdir:` file in a
+        // linked worktree, so only existence can be required here.
+        if dir.join(".git").exists() {
             return dir;
         }
         if !dir.pop() {
-            panic!("no git repository found (no .git directory in any parent)");
+            panic!("no git repository found (no .git in any parent)");
         }
     }
 }
@@ -436,5 +443,31 @@ mod tests {
         let stub = LoadedFile::stub(Utf8PathBuf::from("/repo/missing.rs"));
         assert!(stub.removed.load(std::sync::atomic::Ordering::Relaxed));
         assert!(stub.data.read().content.is_empty());
+    }
+
+    #[test]
+    fn find_git_root_discovers_a_linked_worktree() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root =
+            camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8 temp dir");
+        let git = |args: &[&str]| {
+            let out = std::process::Command::new("git")
+                .current_dir(&root)
+                .args(args)
+                .output()
+                .expect("run git");
+            assert!(out.status.success(), "git {args:?} failed");
+        };
+        git(&["init", "-q", "-b", "main", "main"]);
+        git(&["-C", "main", "config", "user.name", "test"]);
+        git(&["-C", "main", "config", "user.email", "t@example.com"]);
+        git(&["-C", "main", "commit", "-q", "--allow-empty", "-m", "init"]);
+        git(&[
+            "-C", "main", "worktree", "add", "-q", "../wt", "-b", "topic",
+        ]);
+
+        let worktree = root.join("wt").into_std_path_buf();
+        assert!(!worktree.join(".git").is_dir(), "worktree .git is a file");
+        assert_eq!(find_git_root_from(worktree), root.join("wt"));
     }
 }
