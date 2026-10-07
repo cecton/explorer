@@ -385,22 +385,31 @@ impl InputLine {
     }
 
     fn kill_to_end(&mut self, query: &mut String) -> bool {
-        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
-        if self.cursor >= graphemes.len() {
+        let line = self.current_line(query);
+        let line_end = line.start + line.len;
+        let end = if self.cursor == line_end {
+            line_end + 1
+        } else {
+            line_end
+        };
+        let start_byte = grapheme_byte_offset(query, self.cursor);
+        let end_byte = grapheme_byte_offset(query, end);
+        if start_byte == end_byte {
             return false;
         }
-        let byte = graphemes[self.cursor].0;
-        query.truncate(byte);
+        query.replace_range(start_byte..end_byte, "");
         true
     }
 
     fn kill_to_start(&mut self, query: &mut String) -> bool {
-        if self.cursor == 0 {
+        let start = self.current_line(query).start;
+        if self.cursor == start {
             return false;
         }
+        let start_byte = grapheme_byte_offset(query, start);
         let end_byte = grapheme_byte_offset(query, self.cursor);
-        *query = query[end_byte..].to_string();
-        self.cursor = 0;
+        query.replace_range(start_byte..end_byte, "");
+        self.cursor = start;
         true
     }
 
@@ -956,6 +965,48 @@ mod wrap_tests {
         input.cursor = 1;
         assert!(input.handle_key(&ctrl('e'), &mut query));
         assert_eq!(input.cursor, 8);
+    }
+
+    #[test]
+    fn ctrl_k_kills_to_the_end_of_the_line_then_joins_the_next_one() {
+        let mut input = InputLine::new();
+        let mut query = "abcdef\ngh\nijkl".to_string();
+        input.cursor = 2;
+        assert!(input.handle_key(&ctrl('k'), &mut query));
+        assert_eq!(query, "ab\ngh\nijkl");
+        assert_eq!(input.cursor, 2);
+        assert!(input.handle_key(&ctrl('k'), &mut query));
+        assert_eq!(query, "abgh\nijkl");
+        assert_eq!(input.cursor, 2);
+        input.cursor = 9;
+        assert!(!input.handle_key(&ctrl('k'), &mut query));
+        assert_eq!(query, "abgh\nijkl");
+    }
+
+    #[test]
+    fn ctrl_u_kills_to_the_start_of_the_line_only() {
+        let mut input = InputLine::new();
+        let mut query = "abcdef\ngh\nijkl".to_string();
+        input.cursor = 12;
+        assert!(input.handle_key(&ctrl('u'), &mut query));
+        assert_eq!(query, "abcdef\ngh\nkl");
+        assert_eq!(input.cursor, 10);
+        assert!(!input.handle_key(&ctrl('u'), &mut query));
+        assert_eq!(query, "abcdef\ngh\nkl");
+    }
+
+    #[test]
+    fn ctrl_k_and_ctrl_u_ignore_soft_wrapping() {
+        let mut input = InputLine::new();
+        let mut query = "abcdefgh\nij".to_string();
+        input.row_capacity.store(4, Ordering::Relaxed);
+        input.cursor = 6;
+        assert!(input.handle_key(&ctrl('u'), &mut query));
+        assert_eq!(query, "gh\nij");
+        let mut query = "abcdefgh\nij".to_string();
+        input.cursor = 1;
+        assert!(input.handle_key(&ctrl('k'), &mut query));
+        assert_eq!(query, "a\nij");
     }
 
     #[test]
