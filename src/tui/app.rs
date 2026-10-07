@@ -1444,12 +1444,15 @@ impl App for AppMain {
                             let live = handle.live.lock();
                             (live.reply.clone(), live.work_log.clone())
                         };
-                        for discussion in state.discussions.values_mut() {
+                        for (id, discussion) in state.discussions.iter_mut() {
                             if discussion.node.as_ref() == Some(node) {
                                 discussion.reply.clone_from(&reply);
                                 discussion.work_log.clone_from(&work_log);
                                 if outcome.status == crate::conversation::NodeStatus::Done {
                                     discussion.thinking.clear();
+                                    state
+                                        .pane_manager
+                                        .set_window_scroll(&Window::Discussion(*id), 0);
                                 }
                             }
                         }
