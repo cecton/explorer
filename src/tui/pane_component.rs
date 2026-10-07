@@ -25,6 +25,8 @@ pub struct PaneComponent {
     content_col_count: u16,
     /// Total rows in the content area.
     content_row_count: u16,
+    /// Rows the scrollbar spans from the top of the content area.
+    scrollbar_row_count: u16,
     /// Origin column of the content area, used for absolute scrollbar column calculation.
     content_origin_col: u16,
     /// Whether the user is currently dragging the scrollbar thumb.
@@ -59,6 +61,7 @@ impl PaneComponent {
             content_origin_row: 0,
             content_col_count: 0,
             content_row_count: 0,
+            scrollbar_row_count: 0,
             content_origin_col: 0,
             scrollbar_dragging: false,
             scrollbar_grab_state: None,
@@ -113,7 +116,7 @@ impl PaneComponent {
                 (scroll, scroll_max, page_size)
             }
         };
-        let scrollbar_height = self.content_row_count as usize;
+        let scrollbar_height = self.scrollbar_row_count as usize;
 
         match mouse.kind {
             MouseInputKind::MouseDown(Button::Left) => {
@@ -403,13 +406,13 @@ impl Component<AppState, AppSignal> for PaneComponent {
             let origin_row = self.content_origin_row as usize;
             let col_count = self.content_col_count as usize;
             let scrollbar_col = origin_col + col_count.saturating_sub(1);
-            let bottom_row = origin_row + self.content_row_count as usize;
+            let bottom_row = origin_row + self.scrollbar_row_count as usize;
 
             let in_vertical = self.scrollbar_dragging || (row >= origin_row && row < bottom_row);
             let in_horizontal = col == scrollbar_col
                 || (self.scrollbar_dragging && col >= origin_col && col < origin_col + col_count);
 
-            if self.content_row_count > 0
+            if self.scrollbar_row_count > 0
                 && in_vertical
                 && in_horizontal
                 && let Some(ref window) = active_window
@@ -1101,7 +1104,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 Some(Window::Discussion(id)) => {
                     self.discussion.set_window_id(id);
                     self.discussion
-                        .render(global_data, inner_bounds, surface_bounds, has_focus)?
+                        .render(global_data, content_box, surface_bounds, has_focus)?
                 }
                 Some(Window::ModelPicker) => self.model_picker.render(
                     global_data,
@@ -1111,6 +1114,13 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 )?,
                 None => {}
             };
+
+            // The Discussion keeps its input out of the scrollbar's column.
+            let scrollbar_rows = match active_window {
+                Some(Window::Discussion(_)) => self.discussion.scrollbar_rows(),
+                _ => self.content_row_count as usize,
+            };
+            self.scrollbar_row_count = scrollbar_rows as u16;
 
             // Render scrollbar on the rightmost column if there's an active window.
             if let Some(window) = active_window {
@@ -1144,6 +1154,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 render_scrollbar(
                     &mut scrollbar_ops,
                     &content_box,
+                    scrollbar_rows,
                     scroll,
                     scroll_max,
                     page_size,
@@ -1157,12 +1168,12 @@ impl Component<AppState, AppSignal> for PaneComponent {
 fn render_scrollbar(
     render_ops: &mut RenderOpIRVec,
     content_box: &FlexBox,
+    visible_rows: usize,
     scroll: usize,
     scroll_max: usize,
     page_size: usize,
     theme: &HelixTheme,
 ) {
-    let visible_rows = content_box.style_adjusted_bounds_size.row_height.as_usize();
     if visible_rows == 0 {
         return;
     }

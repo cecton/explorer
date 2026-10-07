@@ -83,6 +83,7 @@ pub struct DiscussionComponent {
     doc_origin: (usize, usize),
     doc_rows: usize,
     doc_width: usize,
+    status_rows: usize,
     drag: Option<Drag>,
 }
 
@@ -651,12 +652,18 @@ impl DiscussionComponent {
             doc_origin: (0, 0),
             doc_rows: 0,
             doc_width: 0,
+            status_rows: 0,
             drag: None,
         }
     }
 
     pub fn set_window_id(&mut self, window_id: usize) {
         self.window_id = window_id;
+    }
+
+    /// The rows the pane's scrollbar spans: the document and the status line, not the input.
+    pub fn scrollbar_rows(&self) -> usize {
+        self.doc_rows + self.status_rows
     }
 
     fn in_doc(&self, pos: Pos) -> bool {
@@ -1625,6 +1632,8 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let bounds = current_box.style_adjusted_bounds_size;
             let total_rows = bounds.row_height.as_usize();
             let pane_width = bounds.col_width.as_usize();
+            // The pane's scrollbar takes the last column, down to the status line.
+            let doc_width = pane_width.saturating_sub(1);
             let window = Window::Discussion(self.window_id);
             let focused = has_focus.get_id() == Some(self.id);
             let state = &mut global_data.state;
@@ -1718,7 +1727,8 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
 
             self.doc_origin = (origin.row_index.as_usize(), origin.col_index.as_usize());
             self.doc_rows = doc_rows;
-            self.doc_width = pane_width;
+            self.doc_width = doc_width;
+            self.status_rows = status_rows;
 
             // As in the file preview, a selection in progress hides the highlights.
             let selection = match &state.text_selection {
@@ -1769,7 +1779,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             };
 
             let shown = work_log_shown(&state.conversations.read(), discussion);
-            let lines = self.doc_lines(discussion, shown, theme, pane_width);
+            let lines = self.doc_lines(discussion, shown, theme, doc_width);
             let line_count = lines.len();
             let max_scroll = line_count.saturating_sub(doc_rows);
             let stored = state.pane_manager.window_scroll(&window);
@@ -1801,14 +1811,14 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 );
                 *ops += RenderOpCommon::ApplyColors(Some(strip_style));
                 *ops += RenderOpIR::PaintTextWithAttributes(
-                    " ".repeat(pane_width).into(),
+                    " ".repeat(doc_width).into(),
                     Some(strip_style),
                 );
                 let mut x = 0usize;
                 for piece in row_pieces(spans, marked) {
                     let truncated;
-                    let text: &str = if x + display_width(piece.text) > pane_width {
-                        truncated = truncate(piece.text, pane_width.saturating_sub(x));
+                    let text: &str = if x + display_width(piece.text) > doc_width {
+                        truncated = truncate(piece.text, doc_width.saturating_sub(x));
                         truncated.as_str()
                     } else {
                         piece.text
@@ -1863,7 +1873,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             }
             if status_rows > 0 {
                 let fg = if alert { error_fg } else { status_fg };
-                let text = truncate(&status, pane_width);
+                let text = truncate(&status, doc_width);
                 let span = [markdown::Span::plain(text, fg)];
                 paint_row(
                     &mut render_ops,
