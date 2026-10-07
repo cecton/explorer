@@ -194,7 +194,7 @@ pub struct Node {
     pub meta: Metadata,
     pub title: Option<String>,
     pub summary: Option<String>,
-    /// First line of `prompt.md`, kept only when the node has no title.
+    /// First line of the prompt as typed, kept only when the node has no title.
     prompt_first_line: Option<String>,
     /// Creation time in local time, `YYYY-MM-DD HH:MM`, derived from the id.
     pub created_display: String,
@@ -228,7 +228,8 @@ impl Node {
         let title = read_trimmed("title.md").map(|text| single_line(&text));
         let prompt_first_line = match title {
             Some(_) => None,
-            None => read_trimmed("prompt.md")
+            None => read_trimmed("input.md")
+                .or_else(|| read_trimmed("prompt.md"))
                 .and_then(|text| text.lines().next().map(str::to_string))
                 .filter(|line| !line.is_empty()),
         };
@@ -377,13 +378,15 @@ impl ConversationTree {
     }
 
     /// Creates a node under `parent` (or a new root): its directory, `prompt.md` and
-    /// `metadata.md` are on disk when this returns.
+    /// `metadata.md` are on disk when this returns. `input` is the prompt as typed, when
+    /// a slash command expanded it into `prompt`; it is stored as `input.md`.
     pub fn create_node(
         &mut self,
         parent: Option<&NodeId>,
         now_secs: i64,
         mut meta: Metadata,
         prompt: &str,
+        input: Option<&str>,
     ) -> std::io::Result<NodeId> {
         let stamp = utc_stamp(now_secs);
         let mut id = NodeId::new(&stamp.replace(':', "-"));
@@ -400,6 +403,9 @@ impl ConversationTree {
         meta.created = Some(stamp);
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("prompt.md"), prompt)?;
+        if let Some(input) = input {
+            std::fs::write(dir.join("input.md"), input)?;
+        }
         write_atomic(&dir.join("metadata.md"), &meta.to_text())?;
 
         let node = Node {
@@ -408,7 +414,8 @@ impl ConversationTree {
             meta,
             title: None,
             summary: None,
-            prompt_first_line: prompt
+            prompt_first_line: input
+                .unwrap_or(prompt)
                 .lines()
                 .map(str::trim)
                 .find(|line| !line.is_empty())
@@ -505,6 +512,17 @@ impl ConversationTree {
 pub fn read_prompt_and_reply(dir: &Utf8Path) -> (String, String) {
     let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
     (read("prompt.md"), read("reply.md"))
+}
+
+/// A node's `input.md`: its prompt as typed, kept only when a slash command expanded it.
+pub fn read_typed_input(dir: &Utf8Path) -> Option<String> {
+    std::fs::read_to_string(dir.join("input.md")).ok()
+}
+
+/// What the user typed for a node: its `input.md`, or `prompt.md` when it was sent as
+/// typed. This is the text to give back for editing.
+pub fn read_input(dir: &Utf8Path) -> String {
+    read_typed_input(dir).unwrap_or_else(|| read_prompt_and_reply(dir).0)
 }
 
 /// The lines of a node's `activity.md`, the work log of its turn; empty without one.
@@ -852,7 +870,7 @@ mod tests {
         };
 
         let first = tree
-            .create_node(None, 86_401, meta.clone(), "\n  hello there\nmore")
+            .create_node(None, 86_401, meta.clone(), "\n  hello there\nmore", None)
             .unwrap();
         assert_eq!(first.as_str(), "1970-01-02T00-00-01Z");
         let dir = root.join(first.as_str());
@@ -866,13 +884,50 @@ mod tests {
         );
         assert_eq!(tree.node(&first).unwrap().display_title(), "hello there");
 
-        let twin = tree.create_node(None, 86_401, meta.clone(), "x").unwrap();
+        let twin = tree
+            .create_node(None, 86_401, meta.clone(), "x", None)
+            .unwrap();
         assert_eq!(twin.as_str(), "1970-01-02T00-00-01Z-2");
-        let child = tree.create_node(Some(&first), 86_401, meta, "y").unwrap();
+        let child = tree
+            .create_node(Some(&first), 86_401, meta, "y", None)
+            .unwrap();
         assert_eq!(child.as_str(), "1970-01-02T00-00-01Z-3");
         assert!(dir.join(child.as_str()).join("prompt.md").exists());
         assert_eq!(tree.lineage(&child), [first.clone(), child.clone()]);
         assert_eq!(tree.roots(), [first, twin]);
+    }
+
+    #[test]
+    fn create_node_keeps_the_typed_input_of_an_expanded_prompt() {
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+
+        let expanded = tree
+            .create_node(
+                None,
+                0,
+                Metadata::default(),
+                "Review the change.\n\nfoo",
+                Some("/review foo"),
+            )
+            .unwrap();
+        let dir = root.join(expanded.as_str());
+        assert_eq!(read_prompt_and_reply(&dir).0, "Review the change.\n\nfoo");
+        assert_eq!(read_input(&dir), "/review foo");
+        assert_eq!(tree.node(&expanded).unwrap().display_title(), "/review foo");
+
+        let typed = tree
+            .create_node(None, 1, Metadata::default(), "as typed", None)
+            .unwrap();
+        let dir = root.join(typed.as_str());
+        assert!(read_typed_input(&dir).is_none());
+        assert_eq!(read_input(&dir), "as typed");
+
+        let reloaded = ConversationTree::load(&root);
+        assert_eq!(
+            reloaded.node(&expanded).unwrap().display_title(),
+            "/review foo"
+        );
     }
 
     #[test]
@@ -1060,7 +1115,7 @@ mod tests {
         let (_tmp, root) = temp_root();
         let mut tree = ConversationTree::load(&root);
         let id = tree
-            .create_node(None, 0, Metadata::default(), "prompt")
+            .create_node(None, 0, Metadata::default(), "prompt", None)
             .unwrap();
         tree.update_meta(&id, |meta| meta.status = Some(NodeStatus::Done))
             .unwrap();

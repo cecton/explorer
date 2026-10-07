@@ -98,6 +98,8 @@ pub(crate) struct Launch {
     pub parent: Option<NodeId>,
     /// Text stored as the node's `prompt.md`.
     pub prompt: String,
+    /// The prompt as typed, when a slash command expanded it into `prompt`.
+    pub input: Option<String>,
     pub kind: TurnKind,
     /// Custom slash command the prompt was expanded from.
     pub command: Option<String>,
@@ -128,6 +130,7 @@ impl Launch {
         Some(Self {
             parent: source.parent.clone(),
             prompt,
+            input: None,
             kind,
             command: source.meta.command.clone(),
             spec,
@@ -146,6 +149,7 @@ pub(crate) fn start_turn(
     let Launch {
         parent,
         prompt,
+        input,
         kind,
         command,
         spec,
@@ -220,7 +224,7 @@ pub(crate) fn start_turn(
                 node
             }
             None => tree
-                .create_node(parent.as_ref(), now, meta, &prompt)
+                .create_node(parent.as_ref(), now, meta, &prompt, input.as_deref())
                 .map_err(|e| format!("could not create the node: {e}"))?,
         };
         let context = tree
@@ -744,11 +748,13 @@ impl DiscussionComponent {
     pub(crate) fn duplicate(state: &mut AppState, main_tx: MainTx, node: &NodeId, spec: ModelSpec) {
         let launch = {
             let tree = state.conversations.read();
-            let prompt = tree
-                .node_dir(node)
-                .map(|dir| crate::conversation::read_prompt_and_reply(&dir).0)
+            let dir = tree.node_dir(node);
+            let prompt = dir
+                .as_ref()
+                .map(|dir| crate::conversation::read_prompt_and_reply(dir).0)
                 .unwrap_or_default();
-            Launch::replay(&tree, node, prompt, spec)
+            let input = dir.and_then(|dir| crate::conversation::read_typed_input(&dir));
+            Launch::replay(&tree, node, prompt, spec).map(|launch| Launch { input, ..launch })
         };
         let Some(launch) = launch else {
             return;
@@ -760,7 +766,7 @@ impl DiscussionComponent {
     }
 
     /// Opens a window on the parent of `node` with the input prefilled with the node's
-    /// prompt, so that an edited version can be sent as a new sibling.
+    /// prompt as it was typed, so that an edited version can be sent as a new sibling.
     pub(crate) fn open_edit(state: &mut AppState, main_tx: MainTx, node: &NodeId) {
         let (parent, draft, model, mode) = {
             let tree = state.conversations.read();
@@ -769,7 +775,7 @@ impl DiscussionComponent {
             };
             let draft = tree
                 .node_dir(node)
-                .map(|dir| crate::conversation::read_prompt_and_reply(&dir).0)
+                .map(|dir| crate::conversation::read_input(&dir))
                 .unwrap_or_default();
             (
                 source.parent.clone(),
@@ -882,17 +888,19 @@ impl DiscussionComponent {
             return;
         };
         let typed = discussion.draft.clone();
-        let (prompt, kind, command) = match commands::expand(&typed, &state.agent.commands) {
+        let (prompt, input, kind, command) = match commands::expand(&typed, &state.agent.commands) {
             Expansion::Compact { instructions } => {
-                (typed, TurnKind::Compact { instructions }, None)
+                (typed, None, TurnKind::Compact { instructions }, None)
             }
             Expansion::Prompt { text, command } => {
-                (text, TurnKind::Prompt(discussion.mode), command)
+                let input = command.is_some().then_some(typed);
+                (text, input, TurnKind::Prompt(discussion.mode), command)
             }
         };
         let launch = Launch {
             parent: discussion.node.clone(),
             prompt: prompt.clone(),
+            input,
             kind,
             command,
             spec,

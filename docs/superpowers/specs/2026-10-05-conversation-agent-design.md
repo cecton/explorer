@@ -148,6 +148,7 @@ conversations/3fa9c1d2e4b5a6f7/
 | File | Content | Written |
 |---|---|---|
 | `prompt.md` | The exact prompt sent, after slash-command expansion. | Immediately on send, before any network call. |
+| `input.md` | The prompt as typed, before slash-command expansion. This is the text given back for editing (`e` in the tree). Absent when the prompt was sent as typed: the typed text is then `prompt.md`. Never sent to a model. | With `prompt.md`, only when a custom command was expanded. |
 | `metadata.md` | Flat `key: value` lines, see below. | On send; rewritten when the turn ends and when favorite toggles. |
 | `reply.md` | The text of the answers that called no tools, in order: the reply proper. | Flushed about once per second while streaming, when an answer turns out to call tools, and at the end. |
 | `activity.md` | The work log, in order: the text of each answer that called tools, and one `- <tool> <detail>` line per tool call. Display-only: never replayed and never sent to a model. Absent when the turn called no tools. | Appended as each answer calls its tools. |
@@ -440,9 +441,9 @@ On `Enter` in a Discussion window:
    running; the working tree is clean, untracked non-ignored files included, whatever
    the mode.
 2. **Expand** a slash command if the prompt starts with one.
-3. **Persist.** Create the node directory; write `prompt.md` and `metadata.md`
-   (`type`, `status: running`, `head-before`). The window now shows the new node and the
-   tree selection follows it.
+3. **Persist.** Create the node directory; write `prompt.md`, `input.md` when a
+   command was expanded, and `metadata.md` (`type`, `status: running`, `head-before`).
+   The window now shows the new node and the tree selection follows it.
 4. **Start** the turn. The title and the summary are asked once it has ended (8.2).
 5. **Stream.** Reply text is flushed to `reply.md`; transcript lines are appended as
    messages complete. A turn is a series of model answers, and all but the last end by
@@ -557,8 +558,10 @@ the end of the text, is looked up among the commands:
 
 - **Custom command** (config): the prompt becomes the command's base prompt, then two
   newlines, then the rest of the typed text. With no rest, just the base prompt.
-  Expansion happens on send; `prompt.md` stores the expanded text and `metadata.md` the
-  command name.
+  Expansion happens on send; `prompt.md` stores the expanded text, `input.md` the text
+  as typed and `metadata.md` the command name. A node replayed with another model
+  carries the `input.md` of its source. An untitled node shows the first line of the
+  typed text in the tree.
 - **Unknown name**: the text is sent as typed. A prompt beginning with a path such as
   `/home/…` is therefore harmless.
 - **`/compact [instructions]`** (built-in, cannot be overridden): creates a child node of
