@@ -1374,9 +1374,19 @@ fn status_text(node: &Node) -> (String, bool) {
         push(&format!("{tokens} tokens in"));
     }
     if let Some(secs) = node.meta.secs {
-        push(&format!("{secs}s"));
+        push(&fmt_elapsed(secs));
     }
     (text, failed)
+}
+
+/// How long a turn ran or has been running: `5s`, `2m 5s`, `1h 0m 5s`.
+fn fmt_elapsed(secs: u64) -> String {
+    let (h, m, s) = (secs / 3600, secs % 3600 / 60, secs % 60);
+    match (h, m) {
+        (0, 0) => format!("{s}s"),
+        (0, _) => format!("{m}m {s}s"),
+        _ => format!("{h}h {m}m {s}s"),
+    }
 }
 
 /// Whether the work log of the node shown is displayed: as toggled, otherwise only
@@ -1411,11 +1421,11 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
         let live = handle.live.lock();
         let elapsed = handle.started.elapsed();
         let spinner = turn::spinner_frame(elapsed);
-        let secs = elapsed.as_secs();
+        let time = fmt_elapsed(elapsed.as_secs());
         let mut text = match (&live.activity, live.reply.is_empty()) {
-            (Some(activity), _) => format!("{spinner} running {secs}s · {activity}"),
-            (None, true) => format!("{spinner} thinking"),
-            (None, false) => format!("{spinner} running {secs}s"),
+            (Some(activity), _) => format!("{spinner} running {time} · {activity}"),
+            (None, true) => format!("{spinner} thinking {time}"),
+            (None, false) => format!("{spinner} running {time}"),
         };
         if let Some(tokens) = live.tokens_in {
             text.push_str(&format!(" · {tokens} tokens in"));
@@ -2157,6 +2167,16 @@ mod tests {
                 .starts_with("queued · 2nd · ")
         );
         assert!(queue_hint(&state, 8).is_none());
+    }
+
+    #[test]
+    fn elapsed_time_drops_the_leading_zero_units_only() {
+        assert_eq!(fmt_elapsed(0), "0s");
+        assert_eq!(fmt_elapsed(59), "59s");
+        assert_eq!(fmt_elapsed(60), "1m 0s");
+        assert_eq!(fmt_elapsed(125), "2m 5s");
+        assert_eq!(fmt_elapsed(3605), "1h 0m 5s");
+        assert_eq!(fmt_elapsed(3725), "1h 2m 5s");
     }
 
     #[test]
