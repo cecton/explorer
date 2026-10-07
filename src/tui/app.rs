@@ -1878,7 +1878,7 @@ fn render_status_bar(
                     "Backspace:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll".to_string()
                 }
                 Some(Window::ConversationTree) => {
-                    "↑↓:Select  ←→:Fold  Enter:Open  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  Ctrl+D:Delete"
+                    "Backspace:Send to back  ↑↓:Select  ←→:Fold  Enter:Open  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  Ctrl+D:Delete"
                         .to_string()
                 }
                 Some(Window::Discussion(_)) => {

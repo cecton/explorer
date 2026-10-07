@@ -413,6 +413,12 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Backspace),
+            }) => {
+                state.pane_manager.send_to_back(&window);
+                state.mark_session_dirty();
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Enter),
             }) => {
                 if let Some(row) = rows.get(index) {
