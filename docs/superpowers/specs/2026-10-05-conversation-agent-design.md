@@ -634,20 +634,23 @@ suggests `/compact` from the parent node.
   grows only below a node with several children, one level per fork. Each row draws a
   box-drawing prefix: one `│` rail per fork above whose later branches still follow, an
   arm (`├─`, or `└─` for a fork's last branch) at the start of a branch, and the fold
-  column (`+` collapsed, `-` expanded, `─` for a leaf that starts a branch). The wrapped
-  title and summary lines of the selected row repeat the rails, with a `│` under an
-  expanded fold. Without the flat rule a 50-prompt conversation would be indented 50
+  column (`+` collapsed, `-` expanded, `─` for a leaf that starts a branch). A fork's
+  arms and rail sit in the column of its fold marker, so they hang right under it. The
+  wrapped title and summary lines of the selected row repeat the rails, with a `│` under
+  an expanded fold. Without the flat rule a 50-prompt conversation would be indented 50
   levels.
 - Roots and forks are collapsed until expanded, marked `+` or `-` in the fold column.
   Sending a prompt expands the way to the new node. The expanded set is saved in the
   session.
 - Feedback and commit nodes have distinct colors. Other states get a color and a
-  one-character ASCII marker in a fixed gutter column right after the date: running,
-  failed, cancelled, uncommitted (stashed), compact, handover. Favorites are
-  highlighted across the whole row. Rails and arms are drawn in `ui.linenr`, never
-  bold; on the selected row the date and rails use `ui.linenr.selected`, falling back
-  to `ui.text`, since in ayu-derived themes `ui.linenr` equals the selection
-  background.
+  one-character marker in a fixed gutter column right after the date: running (a
+  braille spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), failed `✗`, cancelled `■`, uncommitted (stashed)
+  `±`, compact `≡`. All of them exist in the Terminus font. While a turn runs it asks
+  for a redraw every 100 ms, one spinner frame; the frame is computed from the time
+  the turn started. Favorites are highlighted across the whole row. Rails and arms are
+  drawn in `ui.linenr`, never bold; on the selected row the date and rails, including
+  those of its wrapped lines, use `ui.linenr.selected`, falling back to `ui.text`,
+  since in ayu-derived themes `ui.linenr` equals the selection background.
 - Keys:
   - `Up` `Down` `PgUp` `PgDn` `Home` `End` — move the selection.
   - Mouse click — moves the selection only. Double click — same as `Enter`.
@@ -692,9 +695,9 @@ window holds its node's prompt, reply and work log in memory only while it is op
   and for any node that is not done or has an empty reply, so a failed or cancelled
   turn still shows what it did. A done node with a reply hides it; `Ctrl+O` shows or
   hides it either way, and the status line of a node that has one says so.
-- Status line: running (current tool, elapsed time), done (type, short hashes, stash or
-  discarded scratch work, tokens), failed (error), cancelled, or the reason a send was
-  refused.
+- Status line: running (the same spinner as in the tree, current tool, elapsed time),
+  done (type, short hashes, stash or discarded scratch work, tokens), failed (error),
+  cancelled, or the reason a send was refused.
 - The input is always active, also while a turn runs: the next prompt can be drafted,
   but `Enter` is refused until the node is done. Drafts are kept per window and saved in
   the session.

@@ -1,4 +1,4 @@
-use crate::agent::CLAUDE_CODE_KIND;
+use crate::agent::turn::spinner_frame;
 use crate::conversation::{ConversationTree, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
@@ -6,7 +6,7 @@ use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
-const GUTTER_GAP: &str = "  ";
+const GUTTER_GAP: &str = "   ";
 const SCROLL_STEP: usize = 3;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -108,29 +108,14 @@ struct Line {
     text: String,
 }
 
-/// Whether `node` runs on the other side of the Claude Code boundary than its parent,
-/// which made it start from the ancestors' text only.
-fn is_handover(tree: &ConversationTree, node: &Node) -> bool {
-    let is_cli = |kind: &Option<String>| kind.as_deref() == Some(CLAUDE_CODE_KIND);
-    node.parent
-        .as_ref()
-        .and_then(|parent| tree.node(parent))
-        .is_some_and(|parent| {
-            parent.meta.kind.is_some()
-                && node.meta.kind.is_some()
-                && is_cli(&parent.meta.kind) != is_cli(&node.meta.kind)
-        })
-}
-
-fn state_marker(tree: &ConversationTree, node: &Node) -> char {
+fn state_marker(node: &Node, running_for: Option<Duration>) -> Option<char> {
     match (node.meta.status, node.meta.node_type) {
-        (Some(NodeStatus::Running), _) => '~',
-        (Some(NodeStatus::Failed), _) => '!',
-        (Some(NodeStatus::Cancelled), _) => 'x',
-        _ if node.meta.stash.is_some() => '?',
-        (_, Some(NodeType::Compact)) => '=',
-        _ if is_handover(tree, node) => '>',
-        _ => ' ',
+        (Some(NodeStatus::Running), _) => Some(spinner_frame(running_for.unwrap_or_default())),
+        (Some(NodeStatus::Failed), _) => Some('✗'),
+        (Some(NodeStatus::Cancelled), _) => Some('■'),
+        _ if node.meta.stash.is_some() => Some('±'),
+        (_, Some(NodeType::Compact)) => Some('≡'),
+        _ => None,
     }
 }
 
@@ -139,13 +124,19 @@ fn state_marker(tree: &ConversationTree, node: &Node) -> char {
 /// but a leaf's `─` stays gutter color as part of the arm).
 fn row_prefix_parts(row: &TreeRow) -> (String, &'static str) {
     let mut prefix = String::new();
-    for rail in &row.rails {
+    let (own, above) = match row.rails.split_last() {
+        Some((own, above)) => (Some(*own), above),
+        None => (None, &row.rails[..]),
+    };
+    for rail in above {
         prefix.push_str(if *rail { "│ " } else { "  " });
     }
-    match row.branch {
-        Branch::None => prefix.push_str("  "),
-        Branch::Start => prefix.push_str("├─"),
-        Branch::LastStart => prefix.push_str("└─"),
+    match (row.branch, own) {
+        (Branch::Start, _) => prefix.push_str("├─"),
+        (Branch::LastStart, _) => prefix.push_str("└─"),
+        (Branch::None, Some(true)) => prefix.push_str("│ "),
+        (Branch::None, Some(false)) => prefix.push_str("  "),
+        (Branch::None, None) => {}
     }
     let fold = match (row.branch, row.fold) {
         (_, Fold::Collapsed) => "+ ",
@@ -775,7 +766,11 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let (rail_prefix, fold_text) = row_prefix_parts(row_info);
                 let fold_column = gutter_width + display_width(&rail_prefix);
                 let text_column = fold_column + display_width(fold_text);
-                let marker = state_marker(&tree, node);
+                let running_for = state
+                    .running_turns
+                    .get(&row_info.id)
+                    .map(|handle| handle.started.elapsed());
+                let marker = state_marker(node, running_for);
                 match line.kind {
                     LineKind::Head => {
                         let gutter = if is_selected {
@@ -791,8 +786,9 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                             type_fg
                         };
                         paint(&mut render_ops, fold_column, fold_text, fold_fg);
-                        if marker != ' ' {
-                            paint(&mut render_ops, gutter_width, &marker.to_string(), type_fg);
+                        if let Some(marker) = marker {
+                            let column = gutter_width - 2;
+                            paint(&mut render_ops, column, &marker.to_string(), type_fg);
                         }
                         paint(&mut render_ops, text_column, &line.text, type_fg);
                         if let Some(label) = commit_label(node) {
@@ -804,7 +800,12 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     }
                     LineKind::TitleRest | LineKind::Summary => {
                         let continuation = row_continuation_prefix(row_info);
-                        paint_plain(&mut render_ops, gutter_width, &continuation, gutter_fg);
+                        paint_plain(
+                            &mut render_ops,
+                            gutter_width,
+                            &continuation,
+                            selected_gutter_fg,
+                        );
                         let fg = match line.kind {
                             LineKind::Summary if armed => error_fg,
                             LineKind::Summary => dim_fg,
@@ -935,13 +936,13 @@ mod tests {
         assert_eq!(
             prefixes(&rows),
             [
-                "  - ",     // c1: expanded root
-                "    - ",   // c2: expanded fork, only child of c1 → no rail
-                "  │ ├── ", // d3: first branch of c2, rail hangs from c2
-                "    └── ", // e3: last branch of c2
-                "  - ",     // a1: expanded root
-                "│ ├── ",   // a2: first branch of a1
-                "  └── ",   // b2: last branch of a1
+                "- ",     // c1: expanded root
+                "  - ",   // c2: expanded fork, only child of c1
+                "  ├── ", // d3: first branch of c2, arm under c2's fold column
+                "  └── ", // e3: last branch of c2
+                "- ",     // a1: expanded root
+                "├── ",   // a2: first branch of a1
+                "└── ",   // b2: last branch of a1
             ]
         );
     }
@@ -953,9 +954,9 @@ mod tests {
         assert_eq!(
             prefixes(&rows),
             [
-                "  - ",   // a1: expanded root
-                "│ ├─+ ", // a2: collapsed fork starting a branch
-                "  └── ", // b2: last branch, leaf
+                "- ",   // a1: expanded root
+                "├─+ ", // a2: collapsed fork starting a branch
+                "└── ", // b2: last branch, leaf
             ]
         );
         let continuation = row_continuation_prefix(&rows[1]);

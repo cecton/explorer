@@ -15,6 +15,9 @@ use tokio::sync::{mpsc, watch};
 
 const REPLY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 const PROGRESS_SIGNAL_INTERVAL: Duration = Duration::from_millis(80);
+/// How often a running turn asks for a redraw, which is also one spinner frame.
+pub const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
+const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const TITLE_MAX_CHARS: usize = 100;
 const REPLY_MAX_CHARS: usize = 8000;
 const COMMITS_MAX: usize = 20;
@@ -43,6 +46,12 @@ pub struct LiveTurn {
     pub tokens_in: Option<u64>,
     /// Claude Code session holding this turn, once the CLI has announced it.
     pub session_id: Option<String>,
+}
+
+/// The spinner frame of a turn that has been running for `elapsed`.
+pub fn spinner_frame(elapsed: Duration) -> char {
+    let frame = elapsed.as_millis() / REDRAW_INTERVAL.as_millis();
+    SPINNER[frame as usize % SPINNER.len()]
 }
 
 /// Main-thread handle on a running turn.
@@ -280,6 +289,17 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
         cancel: Arc::new(cancel_tx),
     };
 
+    let redraw_tx = main_tx.clone();
+    let redraw = tokio::spawn(async move {
+        let mut interval = tokio::time::interval(REDRAW_INTERVAL);
+        loop {
+            interval.tick().await;
+            let _ = redraw_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                AppSignal::TurnProgress,
+            ));
+        }
+    });
+
     tokio::spawn(async move {
         let mut recorder = Recorder {
             live: Arc::clone(&live),
@@ -344,6 +364,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
                 },
             ))
             .await;
+        redraw.abort();
         if status == NodeStatus::Done
             && let Some(backend) = &request.summary_backend
         {
@@ -744,6 +765,18 @@ async fn title_and_summarize(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn spinner_advances_with_the_elapsed_time_and_wraps() {
+        assert_eq!(spinner_frame(Duration::ZERO), '⠋');
+        assert_eq!(
+            spinner_frame(REDRAW_INTERVAL - Duration::from_millis(1)),
+            '⠋'
+        );
+        assert_eq!(spinner_frame(REDRAW_INTERVAL), '⠙');
+        assert_eq!(spinner_frame(REDRAW_INTERVAL * 9), '⠏');
+        assert_eq!(spinner_frame(REDRAW_INTERVAL * 10), '⠋');
+    }
 
     fn git(root: &Utf8Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")

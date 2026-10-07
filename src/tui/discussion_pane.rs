@@ -1378,11 +1378,13 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
     };
     if let Some(handle) = state.running_turns.get(node) {
         let live = handle.live.lock();
-        let secs = handle.started.elapsed().as_secs();
+        let elapsed = handle.started.elapsed();
+        let spinner = turn::spinner_frame(elapsed);
+        let secs = elapsed.as_secs();
         let mut text = match (&live.activity, live.reply.is_empty()) {
-            (Some(activity), _) => format!("running {secs}s · {activity}"),
-            (None, true) => "thinking".to_string(),
-            (None, false) => format!("running {secs}s"),
+            (Some(activity), _) => format!("{spinner} running {secs}s · {activity}"),
+            (None, true) => format!("{spinner} thinking"),
+            (None, false) => format!("{spinner} running {secs}s"),
         };
         if let Some(tokens) = live.tokens_in {
             text.push_str(&format!(" · {tokens} tokens in"));
