@@ -35,6 +35,11 @@ pub struct LiveTurn {
     pub work_log: Vec<String>,
     /// The tool call in progress, as shown on the status line.
     pub activity: Option<String>,
+    /// The thinking streamed so far in the answer in progress; shown dimmed in the
+    /// discussion window and never recorded.
+    pub thinking: String,
+    /// Model this turn was sent to, shown next to its outcome.
+    pub model: String,
     pub tokens_in: Option<u64>,
     /// Claude Code session holding this turn, once the CLI has announced it.
     pub session_id: Option<String>,
@@ -60,6 +65,8 @@ impl TurnHandle {
 pub struct TurnOutcome {
     pub status: NodeStatus,
     pub error: Option<String>,
+    /// Seconds the turn took, wall clock.
+    pub secs: u64,
     pub head_after: Option<String>,
     pub tokens_in: Option<u64>,
     /// Commits the turn produced, oldest first.
@@ -89,6 +96,8 @@ pub struct TurnRequest {
     /// `YYYY-MM-DD`, for the system prompt.
     pub date: String,
     pub backend: Backend,
+    /// `endpoint/model/effort` this turn is sent to, shown in the status line.
+    pub model: String,
     /// Model that titles and summarizes the node once its turn is done.
     pub summary_backend: Option<Backend>,
     /// Id of the conversation's root node, sent to OpenAI-compatible servers as the
@@ -135,6 +144,9 @@ pub struct Recorder {
     answer_start: usize,
     last_flush: Instant,
     last_signal: Instant,
+    /// Chars of thinking recorded for the answer in progress; lets the recorder drop
+    /// the live thinking when the answer turns out to call tools.
+    thinking_start: usize,
 }
 
 impl Recorder {
@@ -167,11 +179,16 @@ impl Recorder {
             live.reply.push_str(missing);
         }
         self.answer_start = live.reply.len();
+        self.thinking_start = live.thinking.len();
     }
 
     /// The current answer calls tools: its text is not part of the reply, and moves
     /// to the work log.
     pub fn answer_calls_tools(&mut self) {
+        {
+            let mut live = self.live.lock();
+            live.thinking.truncate(self.thinking_start);
+        }
         let text = {
             let mut live = self.live.lock();
             let start = self.answer_start.min(live.reply.len());
@@ -208,6 +225,14 @@ impl Recorder {
         if self.last_flush.elapsed() >= REPLY_FLUSH_INTERVAL {
             self.flush_reply();
         }
+        if self.last_signal.elapsed() >= PROGRESS_SIGNAL_INTERVAL {
+            self.signal();
+        }
+    }
+
+    /// Thinking of the answer in progress; shown dimmed and never recorded.
+    pub fn reasoning(&mut self, chunk: &str) {
+        self.live.lock().thinking.push_str(chunk);
         if self.last_signal.elapsed() >= PROGRESS_SIGNAL_INTERVAL {
             self.signal();
         }
@@ -263,7 +288,9 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             answer_start: 0,
             last_flush: Instant::now(),
             last_signal: Instant::now(),
+            thinking_start: 0,
         };
+        live.lock().model = request.model.clone();
         let (status, error) = tokio::select! {
             result = run(&request, &mut recorder) => match result {
                 Ok(()) => (NodeStatus::Done, None),
@@ -301,6 +328,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
         let outcome = TurnOutcome {
             status,
             error,
+            secs: handle.started.elapsed().as_secs(),
             head_after: head_after.clone(),
             tokens_in,
             commits,
@@ -484,11 +512,21 @@ async fn run_own_loop(
     if request.compact.is_some() {
         // A compact turn is a single answer, without tools.
         recorder.begin_answer();
-        let response =
-            llm::stream_chat(target, &request.session, &system, &messages, &[], |text| {
-                recorder.text(text);
-            })
-            .await?;
+        let response = llm::stream_chat(
+            target,
+            &request.session,
+            &system,
+            &messages,
+            &[],
+            |is_thinking, text| {
+                if is_thinking {
+                    recorder.reasoning(text);
+                } else {
+                    recorder.text(text);
+                }
+            },
+        )
+        .await?;
         if let Some(tokens) = response.tokens_in {
             recorder.tokens_in(tokens);
         }
@@ -746,6 +784,7 @@ mod tests {
             answer_start: 0,
             last_flush: Instant::now(),
             last_signal: Instant::now(),
+            thinking_start: 0,
         };
 
         recorder.begin_answer();
@@ -772,6 +811,35 @@ mod tests {
         assert_eq!(live.reply, "First part.\n\nCommitted.");
         assert_eq!(live.work_log.len(), 4);
         assert_eq!(live.activity.as_deref(), Some("shell git commit"));
+    }
+
+    #[test]
+    fn thinking_of_tool_calling_answers_is_dropped_and_the_last_one_kept() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main_tx, _main_rx) = mpsc::channel(8);
+        let mut recorder = Recorder {
+            live: Arc::new(Mutex::new(LiveTurn::default())),
+            node_dir: Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap(),
+            main_tx,
+            answer_start: 0,
+            last_flush: Instant::now(),
+            last_signal: Instant::now(),
+            thinking_start: 0,
+        };
+
+        recorder.begin_answer();
+        recorder.reasoning("should I look?");
+        recorder.text("Let me look.\n");
+        recorder.answer_calls_tools();
+        recorder.tool_call("read a.txt".to_string());
+        recorder.begin_answer();
+        recorder.reasoning("deep thought");
+        recorder.text("Done.");
+        recorder.flush_reply();
+
+        let live = recorder.live.lock();
+        assert_eq!(live.thinking, "deep thought");
+        assert_eq!(live.reply, "Done.");
     }
 
     #[test]

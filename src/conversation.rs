@@ -114,6 +114,8 @@ pub struct Metadata {
     pub session_id: Option<String>,
     pub tokens_in: Option<u64>,
     pub error: Option<String>,
+    /// Wall-clock seconds the turn took.
+    pub secs: Option<u64>,
 }
 
 impl Metadata {
@@ -146,6 +148,7 @@ impl Metadata {
                 "command" => meta.command = Some(value.to_string()),
                 "session-id" => meta.session_id = Some(value.to_string()),
                 "tokens-in" => meta.tokens_in = value.parse().ok(),
+                "secs" => meta.secs = value.parse().ok(),
                 "error" => meta.error = Some(value.to_string()),
                 _ => {}
             }
@@ -165,6 +168,7 @@ impl Metadata {
         };
         let commits = self.commits.join(" ");
         let tokens_in = self.tokens_in.map(|n| n.to_string());
+        let secs = self.secs.map(|n| n.to_string());
         push("type", self.node_type.map(NodeType::as_str));
         push("endpoint", self.endpoint.as_deref());
         push("kind", self.kind.as_deref());
@@ -181,6 +185,7 @@ impl Metadata {
         push("command", self.command.as_deref());
         push("session-id", self.session_id.as_deref());
         push("tokens-in", tokens_in.as_deref());
+        push("secs", secs.as_deref());
         push("error", self.error.as_deref());
         out
     }
@@ -201,6 +206,18 @@ pub struct Node {
 }
 
 impl Node {
+    /// The model the turn ran on, as `endpoint/model (effort)` with `default` effort
+    /// shown bare.
+    pub fn model_label(&self) -> Option<String> {
+        let model = self.meta.model.as_deref()?;
+        let endpoint = self.meta.endpoint.as_deref()?;
+        let label = match self.meta.effort.as_deref() {
+            Some("default") | None => format!("{endpoint}/{model}"),
+            Some(effort) => format!("{endpoint}/{model} ({effort})"),
+        };
+        Some(label)
+    }
+
     pub fn display_title(&self) -> &str {
         self.title
             .as_deref()
@@ -749,6 +766,7 @@ mod tests {
             command: Some("review".into()),
             session_id: Some("1234-uuid".into()),
             tokens_in: Some(84_210),
+            secs: Some(95),
             error: Some("rate limited: try later".into()),
         };
         assert_eq!(Metadata::parse(&meta.to_text()), meta);

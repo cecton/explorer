@@ -296,6 +296,8 @@ pub struct DiscussionState {
     pub reply: String,
     /// Work log of the node's turn: narration and tool calls, never part of the reply.
     pub work_log: Vec<String>,
+    /// Thinking of the running turn, streamed dimmed; empty once the turn is over.
+    pub thinking: String,
     /// Whether the work log is shown, once toggled with Ctrl+O; `None` shows it only
     /// while the node has no finished reply.
     pub show_work_log: Option<bool>,
@@ -338,7 +340,7 @@ impl NodeHighlights {
         match part {
             DocPart::Prompt => &self.prompt,
             DocPart::Reply => &self.reply,
-            DocPart::WorkLog => &[],
+            DocPart::WorkLog | DocPart::Thinking => &[],
         }
     }
 
@@ -347,7 +349,7 @@ impl NodeHighlights {
         match part {
             DocPart::Prompt => Some(&mut self.prompt),
             DocPart::Reply => Some(&mut self.reply),
-            DocPart::WorkLog => None,
+            DocPart::WorkLog | DocPart::Thinking => None,
         }
     }
 

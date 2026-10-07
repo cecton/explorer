@@ -34,6 +34,7 @@ struct DocCache {
     prompt_len: usize,
     reply_len: usize,
     work_log_len: usize,
+    thinking_len: usize,
     work_log_shown: bool,
     lines: Vec<DocLine>,
 }
@@ -272,6 +273,7 @@ pub(crate) fn start_turn(
         .as_ref()
         .and_then(|summary| state.agent.backend(summary));
     let request = TurnRequest {
+        model: spec.to_string(),
         mode,
         node: node.clone(),
         node_dir: context.node_dir.clone(),
@@ -455,6 +457,7 @@ fn part_text(discussion: &DiscussionState, part: DocPart) -> Cow<'_, str> {
     match part {
         DocPart::Prompt => Cow::Borrowed(&discussion.prompt),
         DocPart::WorkLog => Cow::Owned(discussion.work_log.join("\n")),
+        DocPart::Thinking => Cow::Borrowed(&discussion.thinking),
         DocPart::Reply => Cow::Borrowed(&discussion.reply),
     }
 }
@@ -1148,6 +1151,7 @@ impl DiscussionComponent {
                 && cache.prompt_len == discussion.prompt.len()
                 && cache.reply_len == discussion.reply.len()
                 && cache.work_log_len == discussion.work_log.len()
+                && cache.thinking_len == discussion.thinking.len()
                 && cache.work_log_shown == work_log_shown
         });
         if !fresh {
@@ -1172,6 +1176,23 @@ impl DiscussionComponent {
                     spans: Vec::new(),
                     bg: None,
                 });
+                if !discussion.thinking.is_empty() {
+                    for (start, text) in wrap(&discussion.thinking, width) {
+                        lines.push(DocLine {
+                            part: Some(DocPart::Thinking),
+                            spans: vec![markdown::Span {
+                                src: Some(start),
+                                ..markdown::Span::plain(text, dim_fg)
+                            }],
+                            bg: None,
+                        });
+                    }
+                    lines.push(DocLine {
+                        part: None,
+                        spans: Vec::new(),
+                        bg: None,
+                    });
+                }
                 if work_log_shown && !discussion.work_log.is_empty() {
                     let mut base = 0;
                     for entry in &discussion.work_log {
@@ -1207,6 +1228,7 @@ impl DiscussionComponent {
                 prompt_len: discussion.prompt.len(),
                 reply_len: discussion.reply.len(),
                 work_log_len: discussion.work_log.len(),
+                thinking_len: discussion.thinking.len(),
                 work_log_shown,
                 lines,
             });
@@ -1306,8 +1328,14 @@ fn status_text(node: &Node) -> (String, bool) {
     if node.meta.scratch_reset {
         push("scratch discarded");
     }
+    if let Some(model) = node.model_label() {
+        push(&model);
+    }
     if let Some(tokens) = node.meta.tokens_in {
         push(&format!("{tokens} tokens in"));
+    }
+    if let Some(secs) = node.meta.secs {
+        push(&format!("{secs}s"));
     }
     (text, failed)
 }
@@ -1342,11 +1370,12 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
     };
     if let Some(handle) = state.running_turns.get(node) {
         let live = handle.live.lock();
-        let mut text = format!("running {}s", handle.started.elapsed().as_secs());
-        if let Some(activity) = &live.activity {
-            text.push_str(" · ");
-            text.push_str(activity);
-        }
+        let secs = handle.started.elapsed().as_secs();
+        let mut text = match (&live.activity, live.reply.is_empty()) {
+            (Some(activity), _) => format!("running {secs}s · {activity}"),
+            (None, true) => "thinking".to_string(),
+            (None, false) => format!("running {secs}s"),
+        };
         if let Some(tokens) = live.tokens_in {
             text.push_str(&format!(" · {tokens} tokens in"));
         }
@@ -1569,9 +1598,11 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 let live = handle.live.lock();
                 if live.reply.len() != discussion.reply.len()
                     || live.work_log.len() != discussion.work_log.len()
+                    || live.thinking.len() != discussion.thinking.len()
                 {
                     discussion.reply.clone_from(&live.reply);
                     discussion.work_log.clone_from(&live.work_log);
+                    discussion.thinking.clone_from(&live.thinking);
                 }
             }
             let Some(discussion) = state.discussions.get(&self.window_id) else {
@@ -1697,7 +1728,9 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let marks_of = |part: Option<DocPart>| -> (&[(usize, usize)], RgbValue, bool) {
                 match part {
                     Some(DocPart::Prompt) => (&marks[0].0, marks[0].1, marks[0].2),
-                    Some(DocPart::WorkLog) => (&marks[1].0, marks[1].1, marks[1].2),
+                    Some(DocPart::WorkLog | DocPart::Thinking) => {
+                        (&marks[1].0, marks[1].1, marks[1].2)
+                    }
                     Some(DocPart::Reply) => (&marks[2].0, marks[2].1, marks[2].2),
                     None => (&[], pane_bg, true),
                 }

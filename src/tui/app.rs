@@ -1386,6 +1386,7 @@ impl App for AppMain {
                         discussion.prompt = prompt.clone();
                         discussion.reply = reply.clone();
                         discussion.work_log = work_log.clone();
+                        discussion.thinking.clear();
                         discussion.loaded = true;
                         if discussion.model.is_none() {
                             discussion.model = state
@@ -1429,6 +1430,7 @@ impl App for AppMain {
                     let updated = state.conversations.write().update_meta(node, |meta| {
                         meta.status = Some(outcome.status);
                         meta.error = outcome.error.clone();
+                        meta.secs = Some(outcome.secs);
                         meta.head_after = outcome.head_after.clone();
                         meta.tokens_in = outcome.tokens_in;
                         meta.commits = outcome.commits.clone();

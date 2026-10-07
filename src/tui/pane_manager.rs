@@ -39,6 +39,7 @@ pub enum Window {
 pub enum DocPart {
     Prompt,
     WorkLog,
+    Thinking,
     Reply,
 }
 

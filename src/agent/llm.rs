@@ -132,7 +132,7 @@ pub async fn stream_chat(
     system: &str,
     messages: &[Message],
     tools: &[ToolSpec],
-    mut on_text: impl FnMut(&str),
+    mut on_chunk: impl FnMut(bool, &str),
 ) -> Result<LlmResponse, String> {
     let options = chat_options(target.effort, session);
     let mut stream = client()
@@ -149,9 +149,10 @@ pub async fn stream_chat(
     while let Some(event) = stream.next().await {
         match event.map_err(error_text)? {
             ChatStreamEvent::Chunk(chunk) => {
-                on_text(&chunk.content);
+                on_chunk(false, &chunk.content);
                 response.text.push_str(&chunk.content);
             }
+            ChatStreamEvent::ReasoningChunk(chunk) => on_chunk(true, &chunk.content),
             ChatStreamEvent::End(end) => {
                 response.tokens_in = end
                     .captured_usage

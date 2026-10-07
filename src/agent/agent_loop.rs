@@ -16,9 +16,20 @@ pub async fn run(
     let tool_specs = tools::specs(context.mode);
     loop {
         recorder.begin_answer();
-        let response = llm::stream_chat(target, session, system, messages, &tool_specs, |text| {
-            recorder.text(text);
-        })
+        let response = llm::stream_chat(
+            target,
+            session,
+            system,
+            messages,
+            &tool_specs,
+            |is_thinking, text| {
+                if is_thinking {
+                    recorder.reasoning(text);
+                } else {
+                    recorder.text(text);
+                }
+            },
+        )
         .await?;
         if let Some(tokens) = response.tokens_in {
             recorder.tokens_in(tokens);
