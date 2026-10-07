@@ -191,6 +191,7 @@ fn commit_label(node: &Node) -> Option<String> {
 pub struct ConversationTreeComponent {
     id: FlexBoxId,
     content_origin_row: usize,
+    content_origin_col: usize,
     /// Row index shown on each visible content line, for mouse hit-testing.
     line_rows: Vec<usize>,
     /// Clickable commit label of each visible line as `(start column, width)`:
@@ -209,6 +210,7 @@ impl ConversationTreeComponent {
         Self {
             id,
             content_origin_row: 0,
+            content_origin_col: 0,
             line_rows: Vec::new(),
             label_zones: Vec::new(),
             shown_selection: None,
@@ -488,7 +490,10 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     .row_index
                     .as_usize()
                     .checked_sub(self.content_origin_row);
-                let column = pos.col_index.as_usize();
+                let column = pos
+                    .col_index
+                    .as_usize()
+                    .saturating_sub(self.content_origin_col);
                 let Some(row) = line.and_then(|line| self.line_rows.get(line)).copied() else {
                     return Ok(EventPropagation::ConsumedRender);
                 };
@@ -557,6 +562,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             let total_rows = bounds.row_height.as_usize();
             let pane_width = bounds.col_width.as_usize();
             self.content_origin_row = origin.row_index.as_usize();
+            self.content_origin_col = origin.col_index.as_usize();
             self.line_rows.clear();
             self.label_zones.clear();
 
@@ -954,6 +960,25 @@ mod tests {
         );
         let continuation = row_continuation_prefix(&rows[1]);
         assert_eq!(continuation, "│   ");
+    }
+
+    #[test]
+    fn label_zone_hit_test_is_pane_relative() {
+        let pane_width = 120;
+        let label = "abc1234 +2";
+        let width = display_width(label);
+        let column = pane_width - width;
+        let zone = (column, width);
+        let inside = |col: usize| (zone.0..zone.0 + zone.1).contains(&col);
+        assert!(inside(column));
+        assert!(inside(pane_width - 1));
+        assert!(!inside(column.saturating_sub(1)));
+        // A click at the same absolute column in pane 2 (origin 100) hits zone
+        // `column - 100`, not `column`.
+        let origin_col = 100;
+        let abs = column + origin_col;
+        assert!(!(zone.0..zone.0 + zone.1).contains(&abs));
+        assert!(inside(abs.saturating_sub(origin_col)));
     }
 
     #[test]
