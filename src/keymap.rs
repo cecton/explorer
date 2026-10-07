@@ -9,7 +9,7 @@
 //! Config slugs accepted in the `keybindings` block: `leader`, `quit`, `focus-next`,
 //! `focus-prev`, `open-window-picker`, `open-terminal`, `open-theme-picker`,
 //! `open-git-log`, `open-conversations`, `toggle-favorite`, `close-pane`, `resize-grow`,
-//! `resize-shrink`, `move-pane-forward`, `move-pane-backward`.
+//! `resize-shrink`, `move-pane-forward`, `move-pane-backward`, `send-to-back`.
 
 use r3bl_tui::{Key, KeyPress, KeyState, ModifierKeysMask, SpecialKey};
 
@@ -34,6 +34,7 @@ pub enum Action {
     ResizeShrink,
     MovePaneForward,
     MovePaneBackward,
+    SendToBack,
 }
 
 impl Action {
@@ -54,6 +55,7 @@ impl Action {
             "resize-shrink" => Action::ResizeShrink,
             "move-pane-forward" => Action::MovePaneForward,
             "move-pane-backward" => Action::MovePaneBackward,
+            "send-to-back" => Action::SendToBack,
             _ => return None,
         })
     }
@@ -90,6 +92,7 @@ impl Default for Keymap {
                 (plain_char('x'), Action::ClosePane),
                 (plain_special(SpecialKey::Tab), Action::FocusNext),
                 (plain_special(SpecialKey::BackTab), Action::FocusPrev),
+                (plain_special(SpecialKey::Backspace), Action::SendToBack),
                 (plain_special(SpecialKey::Esc), Action::DismissLeader),
             ],
             global: vec![
@@ -262,6 +265,10 @@ mod tests {
             Some(Action::ToggleFavorite)
         );
         assert_eq!(km.leader_action(&plain_char('z')), None);
+        assert_eq!(
+            km.leader_action(&plain_special(SpecialKey::Backspace)),
+            Some(Action::SendToBack)
+        );
         assert_eq!(
             km.global_action(&ctrl_special(SpecialKey::Down)),
             Some(Action::ResizeGrow)

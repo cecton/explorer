@@ -828,6 +828,17 @@ impl App for AppMain {
                     }
                     return Ok(EventPropagation::ConsumedRender);
                 }
+                Some(Action::SendToBack) => {
+                    let state = &mut global_data.state;
+                    if let Some(focused) = state.pane_manager.focused_window {
+                        let old = Some(focused);
+                        state.pane_manager.send_to_back(&focused);
+                        notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
+                        sync_terminal_grabbed(state);
+                        state.mark_session_dirty();
+                    }
+                    return Ok(EventPropagation::ConsumedRender);
+                }
                 Some(Action::DismissLeader) => {
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -1874,13 +1885,14 @@ fn render_status_bar(
         (
             " Leader ".to_string(),
             format!(
-                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Chat  {}:Favorite  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
+                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Chat  {}:Favorite  {}:To back  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
                 leader_lbl(Action::OpenWindowPicker),
                 leader_lbl(Action::OpenTerminal),
                 leader_lbl(Action::OpenThemePicker),
                 leader_lbl(Action::OpenGitLog),
                 leader_lbl(Action::OpenConversations),
                 leader_lbl(Action::ToggleFavorite),
+                leader_lbl(Action::SendToBack),
                 leader_lbl(Action::ClosePane),
                 leader_lbl(Action::Quit),
                 leader_lbl(Action::FocusNext),
