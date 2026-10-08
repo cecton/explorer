@@ -1354,7 +1354,6 @@ impl DiscussionComponent {
 /// One-line description of a node's outcome, and whether it reports a failure.
 fn status_text(node: &Node) -> (String, bool) {
     let kind = match node.meta.node_type {
-        Some(NodeType::Commit) => "commit",
         Some(NodeType::Compact) => "compact",
         _ => "",
     };
@@ -2069,12 +2068,20 @@ mod tests {
     }
 
     #[test]
-    fn status_text_lists_outcome_type_and_short_hashes() {
+    fn status_text_names_the_compact_type() {
+        let (_tmp, tree, id) = node_with_metadata("type: compact\nstatus: done\ntokens-in: 1200\n");
+        let (text, failed) = status_text(tree.node(&id).unwrap());
+        assert_eq!(text, "done · compact · 1k");
+        assert!(!failed);
+    }
+
+    #[test]
+    fn status_text_does_not_repeat_a_commit_mode() {
         let (_tmp, tree, id) = node_with_metadata(
             "type: commit\nstatus: done\ncommits: 0123456789abcdef 89abcdef01234567\ntokens-in: 1200\n",
         );
         let (text, failed) = status_text(tree.node(&id).unwrap());
-        assert_eq!(text, "done · commit · 0123456 89abcde · 1k");
+        assert_eq!(text, "done · 0123456 89abcde · 1k");
         assert!(!failed);
     }
 

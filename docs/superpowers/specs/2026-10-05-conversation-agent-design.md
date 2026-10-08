@@ -750,7 +750,8 @@ window holds its node's prompt, reply and work log in memory only while it is op
 - Status line: running (the same spinner as in the tree, current tool, elapsed time,
   context size), done (type, short hashes, stash, context size, elapsed time), failed
   (error), cancelled, or the reason a send was refused. The context size is abbreviated
-  (`96k`, `1.2M`); the feedback type is not repeated, only `commit` and `compact` are.
+  (`96k`, `1.2M`); of the types only `compact` is named, since a commit node is
+  recognizable by its hashes and every other node is feedback.
 - The input is always active, also while a turn runs: the next prompt can be drafted,
   but `Enter` is refused until the node is done. Drafts are kept per window and saved in
   the session.
