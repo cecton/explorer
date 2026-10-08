@@ -642,6 +642,14 @@ fn utc_date(secs: i64) -> String {
     format!("{year:04}-{month:02}-{day:02}")
 }
 
+/// Points the view of window `id` at a document that starts now: at its top, with no
+/// height of its own yet, so the render reads a running turn as one to follow.
+fn start_view(state: &mut AppState, id: usize) {
+    let window = Window::Discussion(id);
+    state.pane_manager.set_window_scroll(&window, 0);
+    state.pane_manager.set_window_scroll_max(&window, 0);
+}
+
 impl DiscussionComponent {
     pub fn new(id: FlexBoxId) -> Self {
         Self {
@@ -892,18 +900,28 @@ impl DiscussionComponent {
         let started = launch
             .map_err(str::to_string)
             .and_then(|launch| start_turn(state, main_tx, launch).map_err(Refusal::into_reason));
-        for discussion in state.discussions.values_mut() {
-            if discussion.node.as_ref() != Some(&node) {
-                continue;
-            }
+        let shown: Vec<usize> = state
+            .discussions
+            .iter()
+            .filter(|(_, discussion)| discussion.node.as_ref() == Some(&node))
+            .map(|(id, _)| *id)
+            .collect();
+        for id in shown {
             match &started {
                 Ok(_) => {
-                    discussion.reply.clear();
-                    discussion.work_log.clear();
-                    discussion.thinking.clear();
-                    discussion.notice = None;
+                    if let Some(discussion) = state.discussions.get_mut(&id) {
+                        discussion.reply.clear();
+                        discussion.work_log.clear();
+                        discussion.thinking.clear();
+                        discussion.notice = None;
+                    }
+                    start_view(state, id);
                 }
-                Err(reason) => discussion.notice = Some(reason.clone()),
+                Err(reason) => {
+                    if let Some(discussion) = state.discussions.get_mut(&id) {
+                        discussion.notice = Some(reason.clone());
+                    }
+                }
             }
         }
     }
@@ -1083,9 +1101,7 @@ impl DiscussionComponent {
         discussion.draft.clear();
         discussion.loaded = true;
         discussion.notice = None;
-        state
-            .pane_manager
-            .set_window_scroll(&Window::Discussion(id), 0);
+        start_view(state, id);
     }
 
     /// Starts the queued prompts, next first, for as long as no turn is running. Each is
@@ -1784,8 +1800,17 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 .pane_manager
                 .window_scroll_max(&window)
                 .saturating_sub(state.pane_manager.window_page_size(&window));
-            // Parked at the bottom of the previous frame, the view sticks to the new one.
-            let scroll = if stored > 0 && stored >= old_max {
+            // The view rides the bottom of the document across anything that changes how
+            // much of it fits, `old_max` being the bottom of the previous frame. A running
+            // turn rides it from its first frame, where the document still fits and its
+            // two ends are the same row; a finished one only while the user left it there,
+            // so a scroll away from the bottom holds.
+            let running = discussion
+                .node
+                .as_ref()
+                .is_some_and(|node| state.running_turns.contains_key(node));
+            let follow = (running || stored > 0) && stored >= old_max;
+            let scroll = if follow {
                 max_scroll
             } else {
                 stored.min(max_scroll)
