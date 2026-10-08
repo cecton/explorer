@@ -1354,10 +1354,9 @@ impl DiscussionComponent {
 /// One-line description of a node's outcome, and whether it reports a failure.
 fn status_text(node: &Node) -> (String, bool) {
     let kind = match node.meta.node_type {
-        Some(NodeType::Feedback) => "feedback",
         Some(NodeType::Commit) => "commit",
         Some(NodeType::Compact) => "compact",
-        None => "",
+        _ => "",
     };
     let (mut text, failed) = match node.meta.status {
         Some(NodeStatus::Failed) => {
@@ -1388,19 +1387,25 @@ fn status_text(node: &Node) -> (String, bool) {
     if node.meta.stash.is_some() {
         push("uncommitted changes stashed");
     }
-    if node.meta.scratch_reset {
-        push("scratch discarded");
-    }
     if let Some(model) = node.model_label() {
         push(&model);
     }
     if let Some(tokens) = node.meta.tokens_in {
-        push(&format!("{tokens} tokens in"));
+        push(&fmt_tokens(tokens));
     }
     if let Some(secs) = node.meta.secs {
         push(&fmt_elapsed(secs));
     }
     (text, failed)
+}
+
+/// Size of the context of a turn: `962`, `96k`, `1.2M`.
+fn fmt_tokens(tokens: u64) -> String {
+    match tokens {
+        0..1000 => tokens.to_string(),
+        1000..1_000_000 => format!("{}k", tokens / 1000),
+        _ => format!("{}.{}M", tokens / 1_000_000, tokens % 1_000_000 / 100_000),
+    }
 }
 
 /// How long a turn ran or has been running: `5s`, `2m 5s`, `1h 0m 5s`.
@@ -1452,7 +1457,7 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
             (None, false) => format!("{spinner} running {time}"),
         };
         if let Some(tokens) = live.tokens_in {
-            text.push_str(&format!(" · {tokens} tokens in"));
+            text.push_str(&format!(" · {}", fmt_tokens(tokens)));
         }
         text.push_str(" · ");
         text.push_str(queued.as_deref().unwrap_or("Esc:Cancel"));
@@ -2053,12 +2058,32 @@ mod tests {
     }
 
     #[test]
+    fn token_counts_are_abbreviated() {
+        assert_eq!(fmt_tokens(0), "0");
+        assert_eq!(fmt_tokens(999), "999");
+        assert_eq!(fmt_tokens(1000), "1k");
+        assert_eq!(fmt_tokens(1200), "1k");
+        assert_eq!(fmt_tokens(28937), "28k");
+        assert_eq!(fmt_tokens(1_000_000), "1.0M");
+        assert_eq!(fmt_tokens(1_234_567), "1.2M");
+    }
+
+    #[test]
     fn status_text_lists_outcome_type_and_short_hashes() {
         let (_tmp, tree, id) = node_with_metadata(
             "type: commit\nstatus: done\ncommits: 0123456789abcdef 89abcdef01234567\ntokens-in: 1200\n",
         );
         let (text, failed) = status_text(tree.node(&id).unwrap());
-        assert_eq!(text, "done · commit · 0123456 89abcde · 1200 tokens in");
+        assert_eq!(text, "done · commit · 0123456 89abcde · 1k");
+        assert!(!failed);
+    }
+
+    #[test]
+    fn status_text_does_not_repeat_the_feedback_mode() {
+        let (_tmp, tree, id) =
+            node_with_metadata("type: feedback\nstatus: done\ntokens-in: 28937\n");
+        let (text, failed) = status_text(tree.node(&id).unwrap());
+        assert_eq!(text, "done · 28k");
         assert!(!failed);
     }
 
@@ -2067,7 +2092,7 @@ mod tests {
         let (_tmp, tree, id) =
             node_with_metadata("type: feedback\nstatus: failed\nerror: rate limited\n");
         let (text, failed) = status_text(tree.node(&id).unwrap());
-        assert_eq!(text, "failed: rate limited · feedback");
+        assert_eq!(text, "failed: rate limited");
         assert!(failed);
     }
 
