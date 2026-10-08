@@ -105,7 +105,13 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
         "stream_event" => {
             let event = &message["event"];
             match event.get("type").and_then(Value::as_str).unwrap_or("") {
-                "message_start" => vec![StreamEvent::AnswerStart],
+                "message_start" => {
+                    let mut events = vec![StreamEvent::AnswerStart];
+                    events.extend(
+                        context_tokens(&event["message"]["usage"]).map(StreamEvent::TokensIn),
+                    );
+                    events
+                }
                 "content_block_start" if event["content_block"]["type"] == "tool_use" => {
                     let name = text(&event["content_block"], "name");
                     vec![StreamEvent::ToolStart(name.unwrap_or_default())]
@@ -360,6 +366,20 @@ mod tests {
                 }
             ]
         );
+    }
+
+    #[test]
+    fn message_start_reports_the_context_before_the_answer_streams() {
+        let start = r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start","message":{"usage":{"input_tokens":2,"cache_creation_input_tokens":10352,"cache_read_input_tokens":8368,"output_tokens":16}}},"session_id":"s"}"#;
+        assert_eq!(
+            parse_line(start),
+            [
+                StreamEvent::AnswerStart,
+                StreamEvent::TokensIn(2 + 10352 + 8368)
+            ]
+        );
+        let no_usage = r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start"},"session_id":"s"}"#;
+        assert_eq!(parse_line(no_usage), [StreamEvent::AnswerStart]);
     }
 
     #[test]
