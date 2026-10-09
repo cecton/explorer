@@ -23,7 +23,7 @@ pub use app::{build_state, run};
 pub use r3bl_tui::core::ansi::RgbValue;
 pub use state::{
     AppSignal, AppState, DiscussionState, GitLogWindowState, LogSource, NodeHighlights,
-    PreviewSearch, SEARCH_CURRENT, SEARCH_CURRENT_FG, SEARCH_MATCH, SEARCH_MATCH_FG,
+    PreviewSearch, RowTarget, SEARCH_CURRENT, SEARCH_CURRENT_FG, SEARCH_MATCH, SEARCH_MATCH_FG,
     SYMBOL_PALETTE, SearchDirection, SymbolHighlightGroup, SymbolRefLocation, TerminalPane,
 };
 pub use theme::HelixTheme;

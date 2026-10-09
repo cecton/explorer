@@ -1,9 +1,9 @@
 use crate::agent::turn::spinner_frame;
 use crate::conversation::{ConversationTree, Node, NodeId, NodeStatus, NodeType};
-use crate::tui::state::PendingTurn;
+use crate::tui::state::{PendingTurn, RowTarget};
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
@@ -30,11 +30,22 @@ pub(crate) enum Branch {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TreeRow {
-    pub id: NodeId,
+    pub target: RowTarget,
     /// One entry per level: whether the fork above still has branches below this row.
     pub rails: Vec<bool>,
     pub fold: Fold,
     pub branch: Branch,
+}
+
+impl TreeRow {
+    fn node(id: &NodeId, rails: Vec<bool>, fold: Fold, branch: Branch) -> Self {
+        Self {
+            target: RowTarget::Node(id.clone()),
+            rails,
+            fold,
+            branch,
+        }
+    }
 }
 
 /// Flattens the tree into display rows: roots oldest first, like the nodes of a
@@ -109,12 +120,7 @@ fn push_thread(
     let (hidden, fork) = thread_below(tree, head);
     let is_fork = node.children.len() > 1;
     let fold = fold_of(is_fork || !hidden.is_empty(), expanded.contains(head));
-    rows.push(TreeRow {
-        id: head.clone(),
-        rails: rails.clone(),
-        fold,
-        branch,
-    });
+    rows.push(TreeRow::node(head, rails.clone(), fold, branch));
     if is_fork {
         if fold == Fold::Expanded {
             push_branches(tree, expanded, node, rails, rows);
@@ -129,12 +135,7 @@ fn push_thread(
     }
     if fold == Fold::Expanded {
         for id in hidden {
-            rows.push(TreeRow {
-                id: id.clone(),
-                rails: rails.clone(),
-                fold: Fold::Leaf,
-                branch,
-            });
+            rows.push(TreeRow::node(id, rails.clone(), Fold::Leaf, branch));
             branch = Branch::None;
         }
     }
@@ -142,12 +143,7 @@ fn push_thread(
         && let Some(fork_node) = tree.node(fork)
     {
         let fold = fold_of(true, expanded.contains(fork));
-        rows.push(TreeRow {
-            id: fork.clone(),
-            rails: rails.clone(),
-            fold,
-            branch,
-        });
+        rows.push(TreeRow::node(fork, rails.clone(), fold, branch));
         if fold == Fold::Expanded {
             push_branches(tree, expanded, fork_node, rails, rows);
         }
@@ -201,16 +197,40 @@ fn state_marker(node: &Node, running_for: Option<Duration>) -> Option<char> {
     }
 }
 
-/// Queue position of the head-most prompt queued below each node. A queued prompt has
-/// no node yet, so its badge sits on the row of the node it will follow.
-fn queue_badges(queue: &[PendingTurn]) -> HashMap<NodeId, usize> {
-    let mut badges = HashMap::new();
+/// The tree with one provisional row per queued prompt, after the row of the node it
+/// will follow. An entry whose anchor row is not shown (folded away, or a root prompt
+/// whose window shows no node yet) is left out: the queue is not part of the tree, so
+/// it cannot invent a row for a node that is not on screen.
+pub(crate) fn with_queued(rows: Vec<TreeRow>, queue: &[PendingTurn]) -> Vec<TreeRow> {
+    let mut extra: Vec<Vec<TreeRow>> = vec![Vec::new(); rows.len()];
     for (position, entry) in queue.iter().enumerate() {
-        if let Some(parent) = &entry.parent {
-            badges.entry(parent.clone()).or_insert(position + 1);
+        let Some(parent) = &entry.parent else {
+            continue;
+        };
+        let Some(anchor) = rows
+            .iter()
+            .position(|row| row.target.node() == Some(parent))
+        else {
+            continue;
+        };
+        extra[anchor].push(TreeRow {
+            target: RowTarget::Queued {
+                window: entry.window,
+                position: position + 1,
+            },
+            rails: rows[anchor].rails.clone(),
+            fold: Fold::Leaf,
+            branch: Branch::LastStart,
+        });
+    }
+    let mut lines = Vec::with_capacity(rows.len());
+    for (index, row) in rows.into_iter().enumerate() {
+        lines.push(row);
+        for queued in extra[index].drain(..) {
+            lines.push(queued);
         }
     }
-    badges
+    lines
 }
 
 /// One column, nine digits.
@@ -220,6 +240,24 @@ fn queue_glyph(position: usize) -> char {
     } else {
         '…'
     }
+}
+
+/// What a provisional row shows: the first line of the prompt its window holds.
+fn queued_text(state: &AppState, row: &TreeRow) -> String {
+    let RowTarget::Queued { window, .. } = &row.target else {
+        return String::new();
+    };
+    let draft = state
+        .discussions
+        .get(window)
+        .map(|discussion| discussion.draft.as_str())
+        .unwrap_or_default();
+    draft
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or("(empty prompt)")
+        .to_string()
 }
 
 /// The tree prefix of a row's head line, split where the color changes: the rails
@@ -289,7 +327,7 @@ pub struct ConversationTreeComponent {
     /// `Some` only on a head line whose node has commits.
     label_zones: Vec<Option<(usize, usize)>>,
     /// Selection as of the last render; a change re-anchors the scroll onto it.
-    shown_selection: Option<NodeId>,
+    shown_selection: Option<RowTarget>,
     /// Time and row of the last click, to recognize a double click.
     last_click: Option<(Instant, usize)>,
 }
@@ -309,16 +347,24 @@ impl ConversationTreeComponent {
         }
     }
 
-    fn selected_index(rows: &[TreeRow], selected: Option<&NodeId>) -> usize {
+    fn selected_index(rows: &[TreeRow], selected: Option<&RowTarget>) -> usize {
         selected
-            .and_then(|id| rows.iter().position(|row| &row.id == id))
+            .and_then(|target| rows.iter().position(|row| &row.target == target))
             .or_else(|| rows.iter().rposition(|row| row.rails.is_empty()))
             .unwrap_or(0)
     }
 
+    /// The rows the pane shows: the tree, plus a provisional row per queued prompt.
+    fn rows(state: &AppState) -> Vec<TreeRow> {
+        with_queued(
+            layout_rows(&state.conversations.read(), &state.tree_view.expanded),
+            &state.queued_turns,
+        )
+    }
+
     fn select(state: &mut AppState, rows: &[TreeRow], index: usize) {
         if let Some(row) = rows.get(index.min(rows.len().saturating_sub(1))) {
-            state.tree_view.selected = Some(row.id.clone());
+            state.tree_view.selected = Some(row.target.clone());
         }
     }
 
@@ -328,7 +374,7 @@ impl ConversationTreeComponent {
         while let Some(ancestor) = current {
             if let Some(index) = rows
                 .iter()
-                .position(|row| row.id == ancestor && row.fold != Fold::Leaf)
+                .position(|row| row.target.node() == Some(&ancestor) && row.fold != Fold::Leaf)
             {
                 return Some(index);
             }
@@ -361,7 +407,7 @@ impl ConversationTreeComponent {
     }
 
     fn delete_selected(state: &mut AppState, rows: &[TreeRow], index: usize) {
-        let Some(row) = rows.get(index) else {
+        let Some(id) = rows.get(index).and_then(|row| row.target.node().cloned()) else {
             return;
         };
         let running_below = {
@@ -369,13 +415,13 @@ impl ConversationTreeComponent {
             state
                 .running_turns
                 .keys()
-                .any(|running| tree.lineage(running).contains(&row.id))
+                .any(|running| tree.lineage(running).contains(&id))
         };
         if running_below {
             state.tree_view.notice = Some("a turn is running in this branch".to_string());
             return;
         }
-        let removed = match state.conversations.write().delete(&row.id) {
+        let removed = match state.conversations.write().delete(&id) {
             Ok(removed) => removed,
             Err(e) => {
                 tracing::warn!("failed to delete conversation node: {e}");
@@ -440,7 +486,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
         let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;
         let window = Window::ConversationTree;
-        let rows = layout_rows(&state.conversations.read(), &state.tree_view.expanded);
+        let rows = Self::rows(state);
         let index = Self::selected_index(&rows, state.tree_view.selected.as_ref());
         let page = state
             .pane_manager
@@ -485,16 +531,19 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let Some(row) = rows.get(index) else {
                     return Ok(EventPropagation::ConsumedRender);
                 };
+                let Some(id) = row.target.node().cloned() else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
                 if row.fold == Fold::Collapsed {
-                    state.tree_view.expanded.insert(row.id.clone());
+                    state.tree_view.expanded.insert(id.clone());
                     state.mark_session_dirty();
                 }
                 let end = match row.fold {
                     Fold::Leaf => None,
-                    _ => thread_end(&state.conversations.read(), &row.id),
+                    _ => thread_end(&state.conversations.read(), &id),
                 };
                 if let Some(end) = end {
-                    state.tree_view.selected = Some(end);
+                    state.tree_view.selected = Some(RowTarget::Node(end));
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {
@@ -503,12 +552,14 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let Some(row) = rows.get(index) else {
                     return Ok(EventPropagation::ConsumedRender);
                 };
+                let Some(id) = row.target.node().cloned() else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
                 if row.fold == Fold::Expanded {
-                    state.tree_view.expanded.remove(&row.id);
+                    state.tree_view.expanded.remove(&id);
                     state.mark_session_dirty();
                 } else {
-                    let ancestor =
-                        Self::foldable_ancestor(&rows, &state.conversations.read(), &row.id);
+                    let ancestor = Self::foldable_ancestor(&rows, &state.conversations.read(), &id);
                     if let Some(ancestor) = ancestor {
                         Self::select(state, &rows, ancestor);
                     }
@@ -516,11 +567,15 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Esc),
-            }) => {
-                if let Some(row) = rows.get(index) {
-                    crate::tui::discussion_pane::take_back(state, main_tx, &row.id);
+            }) => match rows.get(index).map(|row| &row.target) {
+                Some(RowTarget::Queued { window, .. }) => {
+                    crate::tui::discussion_pane::take_back_window(state, main_tx, *window);
                 }
-            }
+                Some(RowTarget::Node(id)) => {
+                    crate::tui::discussion_pane::take_back(state, main_tx, id);
+                }
+                None => {}
+            },
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Backspace),
             }) => {
@@ -529,41 +584,45 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Enter),
-            }) => {
-                if let Some(row) = rows.get(index) {
-                    DiscussionComponent::open_and_recover(state, main_tx, row.id.clone());
+            }) => match rows.get(index).map(|row| &row.target) {
+                Some(RowTarget::Queued { window, .. }) => {
+                    DiscussionComponent::show(state, *window);
                 }
-            }
+                Some(RowTarget::Node(id)) => {
+                    DiscussionComponent::open_and_recover(state, main_tx, id.clone());
+                }
+                None => {}
+            },
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('n'),
             }) => DiscussionComponent::open_new_root(state),
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('m'),
             }) => {
-                if let Some(row) = rows.get(index) {
-                    let purpose = ModelPickerPurpose::Duplicate(row.id.clone());
+                if let Some(id) = rows.get(index).and_then(|row| row.target.node()) {
+                    let purpose = ModelPickerPurpose::Duplicate(id.clone());
                     ModelPickerComponent::open(state, main_tx, purpose);
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('e'),
             }) => {
-                if let Some(row) = rows.get(index) {
-                    DiscussionComponent::open_edit(state, main_tx, &row.id);
+                if let Some(id) = rows.get(index).and_then(|row| row.target.node()) {
+                    DiscussionComponent::open_edit(state, main_tx, id);
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('c'),
             }) => {
-                if let Some(row) = rows.get(index) {
-                    Self::open_commits(state, main_tx, &row.id);
+                if let Some(id) = rows.get(index).and_then(|row| row.target.node()) {
+                    Self::open_commits(state, main_tx, id);
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('f'),
             }) => {
-                if let Some(row) = rows.get(index)
-                    && let Err(e) = state.conversations.write().toggle_favorite(&row.id)
+                if let Some(id) = rows.get(index).and_then(|row| row.target.node())
+                    && let Err(e) = state.conversations.write().toggle_favorite(id)
                 {
                     tracing::warn!("failed to save favorite: {e}");
                     state.tree_view.notice = Some(format!("favorite not saved: {e}"));
@@ -581,11 +640,14 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let Some(row) = rows.get(index) else {
                     return Ok(EventPropagation::ConsumedRender);
                 };
-                if armed.as_ref() == Some(&row.id) {
+                let Some(id) = row.target.node().cloned() else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
+                if armed.as_ref() == Some(&id) {
                     Self::delete_selected(state, &rows, index);
                 } else {
-                    state.tree_view.selected = Some(row.id.clone());
-                    state.tree_view.armed_delete = Some(row.id.clone());
+                    state.tree_view.selected = Some(RowTarget::Node(id.clone()));
+                    state.tree_view.armed_delete = Some(id);
                 }
             }
             InputEvent::Mouse(MouseInput {
@@ -611,12 +673,23 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     return Ok(EventPropagation::ConsumedRender);
                 };
                 Self::select(state, &rows, row);
+                let Some(id) = target.target.node().cloned() else {
+                    let now = Instant::now();
+                    let double = self.last_click.is_some_and(|(at, last)| {
+                        last == row && now.duration_since(at) < DOUBLE_CLICK
+                    });
+                    self.last_click = (!double).then_some((now, row));
+                    if double && let RowTarget::Queued { window, .. } = &target.target {
+                        DiscussionComponent::show(state, *window);
+                    }
+                    return Ok(EventPropagation::ConsumedRender);
+                };
                 if on_label {
                     self.last_click = None;
                     let hash = state
                         .conversations
                         .read()
-                        .node(&target.id)
+                        .node(&id)
                         .and_then(|node| node.meta.commits.last().cloned());
                     if let Some(hash) = hash {
                         GitLogPaneComponent::open_log_at_commit(state, main_tx, hash);
@@ -629,7 +702,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     .is_some_and(|(at, last)| last == row && now.duration_since(at) < DOUBLE_CLICK);
                 self.last_click = (!double).then_some((now, row));
                 if double {
-                    DiscussionComponent::open_and_recover(state, main_tx, target.id.clone());
+                    DiscussionComponent::open_and_recover(state, main_tx, id);
                 }
             }
             InputEvent::Mouse(MouseInput {
@@ -679,11 +752,13 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
 
             let tree_handle = state.conversations.clone();
             let tree = tree_handle.read();
-            let rows = layout_rows(&tree, &state.tree_view.expanded);
+            let rows = with_queued(
+                layout_rows(&tree, &state.tree_view.expanded),
+                &state.queued_turns,
+            );
             let selected = Self::selected_index(&rows, state.tree_view.selected.as_ref());
-            let selected_id = rows.get(selected).map(|row| row.id.clone());
-            state.tree_view.selected = selected_id.clone();
-            let badges = queue_badges(&state.queued_turns);
+            let selected_target = rows.get(selected).map(|row| row.target.clone());
+            state.tree_view.selected = selected_target.clone();
 
             let theme = &state.theme;
             let pane_bg = theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
@@ -745,7 +820,8 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
 
             let gutter_width = rows
                 .iter()
-                .filter_map(|row| tree.node(&row.id))
+                .filter_map(|row| row.target.node())
+                .filter_map(|id| tree.node(id))
                 .map(|node| display_width(&node.created_display))
                 .max()
                 .unwrap_or(0)
@@ -754,7 +830,21 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             let mut lines: Vec<Line> = Vec::with_capacity(rows.len() + 8);
             let mut selected_span = (0, 0);
             for (row_idx, row) in rows.iter().enumerate() {
-                let Some(node) = tree.node(&row.id) else {
+                let Some(id) = row.target.node() else {
+                    let prefix_width = gutter_width + display_width(&row_prefix(row));
+                    let width = pane_width.saturating_sub(prefix_width).max(1);
+                    let start = lines.len();
+                    lines.push(Line {
+                        row: row_idx,
+                        kind: LineKind::Head,
+                        text: truncate(&queued_text(state, row), width),
+                    });
+                    if row_idx == selected {
+                        selected_span = (start, lines.len());
+                    }
+                    continue;
+                };
+                let Some(node) = tree.node(id) else {
                     continue;
                 };
                 let prefix_width = gutter_width + display_width(&row_prefix(row));
@@ -802,7 +892,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 .set_window_scroll_max(&window, lines.len());
             state.pane_manager.clamp_scroll(&window);
             let mut scroll = state.pane_manager.window_scroll(&window);
-            if self.shown_selection != selected_id && total_rows > 0 {
+            if self.shown_selection != selected_target && total_rows > 0 {
                 let (start, end) = selected_span;
                 if end > scroll + total_rows {
                     scroll = end - total_rows;
@@ -811,7 +901,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     scroll = start;
                 }
                 state.pane_manager.set_window_scroll(&window, scroll);
-                self.shown_selection = selected_id;
+                self.shown_selection = selected_target.clone();
             }
 
             for row_offset in 0..total_rows {
@@ -834,11 +924,46 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 self.line_rows.push(line.row);
                 self.label_zones.push(None);
                 let row_info = &rows[line.row];
-                let Some(node) = tree.node(&row_info.id) else {
+                let gutter = if is_selected {
+                    selected_gutter_fg
+                } else {
+                    gutter_fg
+                };
+                let plain =
+                    |fg: RgbValue| new_style!(color_fg: {TuiColor::from(fg)} color_bg: {bg});
+                let paint_plain =
+                    |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: RgbValue| {
+                        let style = plain(fg);
+                        *ops += RenderOpCommon::MoveCursorPositionRelTo(
+                            origin,
+                            col(column as u16) + row(row_offset as u16),
+                        );
+                        *ops += RenderOpCommon::ApplyColors(Some(style));
+                        *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+                    };
+                let (rail_prefix, fold_text) = row_prefix_parts(row_info);
+                let fold_column = gutter_width + display_width(&rail_prefix);
+                let text_column = fold_column + display_width(fold_text);
+
+                // A queued prompt has no node: nothing to arm, fold or label.
+                let Some(node) = row_info.target.node().and_then(|id| tree.node(id)) else {
+                    let RowTarget::Queued { position, .. } = row_info.target else {
+                        continue;
+                    };
+                    paint_plain(&mut render_ops, gutter_width, &rail_prefix, gutter);
+                    paint_plain(&mut render_ops, fold_column, fold_text, gutter);
+                    paint_plain(
+                        &mut render_ops,
+                        gutter_width - 2,
+                        &queue_glyph(position).to_string(),
+                        dim_fg,
+                    );
+                    paint_plain(&mut render_ops, text_column, &line.text, dim_fg);
                     continue;
                 };
+                let node_id = row_info.target.node().expect("checked above");
 
-                let armed = state.tree_view.armed_delete.as_ref() == Some(&row_info.id);
+                let armed = state.tree_view.armed_delete.as_ref() == Some(node_id);
                 let favorite = node.meta.favorite;
                 let type_fg = match (node.meta.status, node.meta.node_type) {
                     _ if armed => error_fg,
@@ -858,8 +983,6 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         new_style!(color_fg: {fg} color_bg: {bg})
                     }
                 };
-                let plain =
-                    |fg: RgbValue| new_style!(color_fg: {TuiColor::from(fg)} color_bg: {bg});
                 let paint = |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: RgbValue| {
                     let style = styled(fg);
                     *ops += RenderOpCommon::MoveCursorPositionRelTo(
@@ -869,33 +992,14 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     *ops += RenderOpCommon::ApplyColors(Some(style));
                     *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
                 };
-                let paint_plain =
-                    |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: RgbValue| {
-                        let style = plain(fg);
-                        *ops += RenderOpCommon::MoveCursorPositionRelTo(
-                            origin,
-                            col(column as u16) + row(row_offset as u16),
-                        );
-                        *ops += RenderOpCommon::ApplyColors(Some(style));
-                        *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                    };
 
-                let (rail_prefix, fold_text) = row_prefix_parts(row_info);
-                let fold_column = gutter_width + display_width(&rail_prefix);
-                let text_column = fold_column + display_width(fold_text);
                 let running_for = state
                     .running_turns
-                    .get(&row_info.id)
+                    .get(node_id)
                     .map(|handle| handle.started.elapsed());
                 let marker = state_marker(node, running_for);
-                let queue_position = badges.get(&row_info.id).copied();
                 match line.kind {
                     LineKind::Head => {
-                        let gutter = if is_selected {
-                            selected_gutter_fg
-                        } else {
-                            gutter_fg
-                        };
                         paint_plain(&mut render_ops, 0, &node.created_display, gutter);
                         paint_plain(&mut render_ops, gutter_width, &rail_prefix, gutter);
                         if row_info.fold == Fold::Leaf {
@@ -903,16 +1007,13 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         } else {
                             paint(&mut render_ops, fold_column, fold_text, type_fg);
                         }
-                        let column = gutter_width - 2;
-                        if let Some(position) = queue_position {
+                        if let Some(marker) = marker {
                             paint(
                                 &mut render_ops,
-                                column,
-                                &queue_glyph(position).to_string(),
+                                gutter_width - 2,
+                                &marker.to_string(),
                                 type_fg,
                             );
-                        } else if let Some(marker) = marker {
-                            paint(&mut render_ops, column, &marker.to_string(), type_fg);
                         }
                         paint(&mut render_ops, text_column, &line.text, type_fg);
                         if let Some(label) = commit_label(node) {
@@ -965,7 +1066,13 @@ mod tests {
 
     fn shape(rows: &[TreeRow]) -> Vec<(&str, Vec<bool>, Fold)> {
         rows.iter()
-            .map(|row| (row.id.as_str(), row.rails.clone(), row.fold))
+            .map(|row| {
+                (
+                    row.target.node().map(|id| id.as_str()).unwrap_or("?"),
+                    row.rails.clone(),
+                    row.fold,
+                )
+            })
             .collect()
     }
 
@@ -996,7 +1103,7 @@ mod tests {
         let (_tmp, tree) = tree_with(&["a1/a2", "b1/b2"]);
         let rows = layout_rows(&tree, &ids(&["a1", "b1"]));
         assert_eq!(ConversationTreeComponent::selected_index(&rows, None), 2);
-        let known = NodeId::new("a2");
+        let known = RowTarget::Node(NodeId::new("a2"));
         assert_eq!(
             ConversationTreeComponent::selected_index(&rows, Some(&known)),
             1
@@ -1193,23 +1300,63 @@ mod tests {
     }
 
     #[test]
-    fn a_parent_is_badged_with_the_position_of_its_head_most_entry() {
+    fn a_queued_prompt_gets_a_row_below_the_node_it_will_follow() {
+        let (_tmp, tree) = tree_with(&["a1/a2", "b1"]);
+        let rows = layout_rows(&tree, &ids(&["a1"]));
         let entry = |window: usize, parent: &str| PendingTurn {
             window,
             parent: Some(NodeId::new(parent)),
         };
-        let badges = queue_badges(&[
-            entry(0, "a1"),
-            entry(1, "a2"),
-            entry(2, "a1"),
-            PendingTurn {
-                window: 3,
-                parent: None,
-            },
-        ]);
-        assert_eq!(badges.get(&NodeId::new("a1")), Some(&1));
-        assert_eq!(badges.get(&NodeId::new("a2")), Some(&2));
-        assert!(!badges.contains_key(&NodeId::new("a3")));
+        let rows = with_queued(
+            rows,
+            &[
+                entry(0, "a1"),
+                entry(1, "a2"),
+                entry(2, "a1"),
+                PendingTurn {
+                    window: 3,
+                    parent: None,
+                },
+            ],
+        );
+
+        // Each entry sits after its anchor, in queue order; the root prompt (no parent)
+        // has no anchor row, so it is left out.
+        assert_eq!(
+            rows.iter().map(|row| &row.target).collect::<Vec<_>>(),
+            [
+                &RowTarget::Node(NodeId::new("a1")),
+                &RowTarget::Queued {
+                    window: 0,
+                    position: 1
+                },
+                &RowTarget::Queued {
+                    window: 2,
+                    position: 3
+                },
+                &RowTarget::Node(NodeId::new("a2")),
+                &RowTarget::Queued {
+                    window: 1,
+                    position: 2
+                },
+                &RowTarget::Node(NodeId::new("b1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_queued_prompt_whose_anchor_is_folded_away_has_no_row() {
+        let (_tmp, tree) = tree_with(&["a1/a2"]);
+        let rows = layout_rows(&tree, &HashSet::new());
+        assert_eq!(rows.len(), 1, "a2 is folded into a1");
+        let rows = with_queued(
+            rows,
+            &[PendingTurn {
+                window: 0,
+                parent: Some(NodeId::new("a2")),
+            }],
+        );
+        assert_eq!(rows.len(), 1);
     }
 
     #[test]

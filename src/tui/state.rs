@@ -276,7 +276,7 @@ pub struct GitLogWindowState {
 /// View state of the Conversation Tree window.
 #[derive(Clone, Default)]
 pub struct TreeViewState {
-    pub selected: Option<NodeId>,
+    pub selected: Option<RowTarget>,
     /// Roots and forks whose children are shown; everything else is collapsed.
     pub expanded: HashSet<NodeId>,
     /// Node a first `Ctrl+D` marked for deletion; a second one on it deletes.
@@ -321,6 +321,29 @@ pub struct PendingTurn {
     pub window: usize,
     /// Node the window showed when the prompt was queued.
     pub parent: Option<NodeId>,
+}
+
+/// What a Conversation Tree row points at: a node, or a queued prompt whose node does
+/// not exist yet.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum RowTarget {
+    Node(NodeId),
+    /// A prompt waiting in the queue, by the window that holds it. `position` is its
+    /// place in the queue, shown in the gutter.
+    Queued {
+        window: usize,
+        position: usize,
+    },
+}
+
+impl RowTarget {
+    /// The node this row shows, when it has one.
+    pub fn node(&self) -> Option<&NodeId> {
+        match self {
+            Self::Node(id) => Some(id),
+            Self::Queued { .. } => None,
+        }
+    }
 }
 
 /// Highlighted byte ranges (start inclusive, end exclusive) in the prompt and the reply

@@ -188,6 +188,14 @@ pub(crate) fn take_back(state: &mut AppState, main_tx: MainTx, parent: &NodeId) 
     DiscussionComponent::release_queue(state, main_tx);
 }
 
+/// Takes back the prompt window `window` queued, if any. Its text stays the draft of
+/// that window. A window on a new conversation queues with no parent, so its entry is
+/// found by window, not by the node it will follow.
+pub(crate) fn take_back_window(state: &mut AppState, main_tx: MainTx, window: usize) {
+    drop_queue_entry(state, window);
+    DiscussionComponent::release_queue(state, main_tx);
+}
+
 /// Checks the guards, creates the node on disk and starts its turn. On refusal nothing
 /// is created and the reason is returned.
 pub(crate) fn start_turn(
@@ -290,7 +298,7 @@ pub(crate) fn start_turn(
     };
     let session = lineage.first().unwrap_or(&node).as_str().to_string();
     state.tree_view.expanded.extend(folds);
-    state.tree_view.selected = Some(node.clone());
+    state.tree_view.selected = Some(RowTarget::Node(node.clone()));
     state.mark_session_dirty();
 
     let summary_backend = state
@@ -859,7 +867,7 @@ impl DiscussionComponent {
         state.mouse_drag_active = false;
     }
 
-    fn show(state: &mut AppState, id: usize) {
+    pub(crate) fn show(state: &mut AppState, id: usize) {
         let window = Window::Discussion(id);
         let old = state.pane_manager.focused_window;
         state.pane_manager.push_window(window);

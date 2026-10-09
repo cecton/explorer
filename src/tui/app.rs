@@ -775,7 +775,12 @@ impl App for AppMain {
                             .discussions
                             .get(&id)
                             .and_then(|discussion| discussion.node.clone()),
-                        Some(Window::ConversationTree) => state.tree_view.selected.clone(),
+                        Some(Window::ConversationTree) => state
+                            .tree_view
+                            .selected
+                            .as_ref()
+                            .and_then(RowTarget::node)
+                            .cloned(),
                         _ => None,
                     };
                     if let Some(node) = node

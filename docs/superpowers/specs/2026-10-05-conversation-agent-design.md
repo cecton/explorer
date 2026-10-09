@@ -326,6 +326,14 @@ a node whose own turn is still running. Every other refusal is immediate.
 - `Esc` takes the prompt back out of the queue; the text stays in the input.
 - `Ctrl+Plus` and `Ctrl+Minus` move it one place earlier or later. They rely on the
   terminal reporting modified keys (xterm `modifyOtherKeys`).
+- **In the Conversation Tree**, a queued prompt has a row of its own: dimmed, holding
+  the first line of the prompt as it stands, with its place in the queue in the gutter
+  column where a node's state marker goes. It sits right after the row of the node it
+  will follow, and is left out when that node is folded away: the queue is not part of
+  the tree, so it cannot show a row for a node that is not on screen. A prompt queued
+  in a window showing no node yet has no anchor row either. `Enter` on such a row
+  focuses the window that holds the prompt, `Esc` takes it back, and every other key
+  does nothing: a queued prompt has no node to fold, favorite, edit, replay or delete.
 - When a turn ends, entries start next first for as long as no turn is running. An
   entry that can no longer be sent (endpoint or model gone, empty draft) leaves the
   queue with the reason in its window. A dirty working tree holds the whole queue
@@ -718,6 +726,13 @@ suggests `/compact` from the parent node.
   - `Ctrl+D` — first press arms deletion of the node and its descendants and the status
     bar shows the count; a second `Ctrl+D` on the same node deletes. Any other key or a
     selection change disarms.
+- **A queued prompt is a row too** (section 6): dimmed, holding the first line of its
+  prompt as it stands, with its place in the queue where a node's state marker goes. It
+  follows the row of the node it will follow, and is left out when that node is folded
+  away, or when the window it belongs to shows no node yet. It is selectable like any
+  other row; `Enter` focuses the window that holds it and `Esc` takes it back, while
+  `m`, `e`, `c`, `f`, `Ctrl+D`, `Left` and `Right` do nothing on it, since a queued
+  prompt has no node to act on.
 - **Deletion** removes the directories and closes Discussion windows showing deleted
   nodes; their highlights go with them. Commits and stashes are not touched. A running node and its ancestors cannot be
   deleted.
