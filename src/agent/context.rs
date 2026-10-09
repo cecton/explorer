@@ -10,15 +10,10 @@ const COMPACT_PROMPT: &str = include_str!("../../prompts/compact.md");
 /// Commits listed in a repository-moved note before it says there are more.
 pub const NOTE_MAX_COMMITS: usize = 20;
 
-/// The system prompt of a turn: mode instructions, the project's own instructions,
-/// and the state of the repository when the prompt was sent. Without a `mode`, the
-/// mode instructions are left out.
-pub fn system_prompt(
-    mode: Option<Mode>,
-    root: &Utf8Path,
-    head: Option<&str>,
-    date: &str,
-) -> String {
+/// The system prompt of a turn: mode instructions and the project's own instructions.
+/// Without a `mode`, the mode instructions are left out. It holds nothing that changes
+/// between turns: see [`environment_note`].
+pub fn system_prompt(mode: Option<Mode>, root: &Utf8Path) -> String {
     let mut out = String::new();
     if let Some(mode) = mode {
         out.push_str(mode_prompt(mode));
@@ -29,22 +24,13 @@ pub fn system_prompt(
         out.push_str("\n\n## Project instructions (AGENTS.md)\n\n");
         out.push_str(agents.trim());
     }
-    out.push_str(&environment(root, head, date));
     out
 }
 
 /// What is appended to Claude Code's own system prompt: it loads the project's
-/// instructions itself, so only the mode and the environment are added.
-pub fn claude_system_prompt(
-    mode: Option<Mode>,
-    root: &Utf8Path,
-    head: Option<&str>,
-    date: &str,
-) -> String {
-    let mode_prompt = mode.map(mode_prompt).unwrap_or_default();
-    format!("{mode_prompt}{}", environment(root, head, date))
-        .trim_start()
-        .to_string()
+/// instructions itself, so only the mode instructions are added.
+pub fn claude_system_prompt(mode: Option<Mode>) -> String {
+    mode.map(mode_prompt).unwrap_or_default().to_string()
 }
 
 fn mode_prompt(mode: Mode) -> &'static str {
@@ -55,14 +41,18 @@ fn mode_prompt(mode: Mode) -> &'static str {
     .trim_end()
 }
 
-fn environment(root: &Utf8Path, head: Option<&str>, date: &str) -> String {
-    let mut out = String::from("\n\n## Environment\n\n");
-    out.push_str(&format!("- Repository root: {root}\n- Date: {date}\n"));
-    match head {
-        Some(head) => out.push_str(&format!("- HEAD: {head}\n")),
-        None => out.push_str("- HEAD: none yet (no commit)\n"),
-    }
-    out
+/// The state of the repository when the prompt was sent. It belongs to the message,
+/// not to the system prompt: HEAD moves on every commit, and anything that changes
+/// ahead of the replayed ancestors throws away the endpoint's prefix cache.
+pub fn environment_note(root: &Utf8Path, head: Option<&str>, date: &str) -> String {
+    let head = match head {
+        Some(head) => head.to_string(),
+        None => "none yet (no commit)".to_string(),
+    };
+    format!(
+        "[Note from Explorer: the state of the repository when this message was sent.]\n\n\
+         - Repository root: {root}\n- Date: {date}\n- HEAD: {head}"
+    )
 }
 
 /// The messages `transcript.jsonl` of a node holds, or `None` without a usable one.
@@ -295,33 +285,50 @@ mod tests {
     }
 
     #[test]
-    fn system_prompt_includes_project_instructions_and_environment() {
+    fn system_prompt_holds_no_state_of_the_repository() {
         let (_tmp, root) = temp_dir();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = system_prompt(Some(Mode::Feedback), &root, Some("abc123"), "2026-10-05");
+        let prompt = system_prompt(Some(Mode::Feedback), &root);
         assert!(prompt.starts_with("You are the coding agent inside Explorer"));
         assert!(prompt.contains("**feedback mode**"));
         assert!(prompt.contains("## The conversation tree"));
-        let commit = system_prompt(Some(Mode::Commit), &root, None, "2026-10-05");
+        let commit = system_prompt(Some(Mode::Commit), &root);
         assert!(commit.contains("**commit mode**"));
-        assert!(commit.ends_with("- HEAD: none yet (no commit)\n"));
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
-        assert!(prompt.ends_with("- Date: 2026-10-05\n- HEAD: abc123\n"));
+        for part in ["HEAD", "Repository root", "Date", "Environment"] {
+            assert!(
+                !prompt.contains(part),
+                "{part} is not part of the system prompt"
+            );
+        }
+        assert!(
+            commit.ends_with("Use tabs."),
+            "the system prompt ends with the project instructions: {commit}"
+        );
+    }
+
+    #[test]
+    fn environment_note_carries_the_head_the_date_and_the_root() {
+        let (_tmp, root) = temp_dir();
+        let note = environment_note(&root, Some("abc123"), "2026-10-05");
+        assert!(note.starts_with("[Note from Explorer:"));
+        assert!(note.contains(&format!("- Repository root: {root}\n")));
+        assert!(note.contains("- Date: 2026-10-05\n"));
+        assert!(note.ends_with("- HEAD: abc123"));
+        let empty = environment_note(&root, None, "2026-10-05");
+        assert!(empty.ends_with("- HEAD: none yet (no commit)"));
     }
 
     #[test]
     fn system_prompt_without_a_mode_keeps_everything_but_the_mode_prompt() {
         let (_tmp, root) = temp_dir();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = system_prompt(None, &root, Some("abc123"), "2026-10-05");
+        let prompt = system_prompt(None, &root);
         assert!(prompt.starts_with("## The conversation tree"));
         assert!(!prompt.contains("You are the coding agent inside Explorer"));
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
-        assert!(prompt.ends_with("- Date: 2026-10-05\n- HEAD: abc123\n"));
 
-        let claude = claude_system_prompt(None, &root, Some("abc123"), "2026-10-05");
-        assert!(claude.starts_with("## Environment\n"));
-        assert!(claude.ends_with("- HEAD: abc123\n"));
+        assert_eq!(claude_system_prompt(None), "");
     }
 
     #[test]
@@ -343,14 +350,14 @@ mod tests {
     }
 
     #[test]
-    fn claude_prompt_has_mode_and_environment_but_not_project_instructions() {
+    fn claude_prompt_has_the_mode_but_not_project_instructions() {
         let (_tmp, root) = temp_dir();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = claude_system_prompt(Some(Mode::Commit), &root, Some("abc"), "2026-10-05");
+        let prompt = claude_system_prompt(Some(Mode::Commit));
         assert!(prompt.contains("**commit mode**"));
         assert!(!prompt.contains("Use tabs."));
         assert!(!prompt.contains("## The conversation tree"));
-        assert!(prompt.ends_with("- HEAD: abc\n"));
+        assert!(!prompt.contains("HEAD"));
     }
 
     #[test]

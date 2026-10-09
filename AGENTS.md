@@ -62,7 +62,7 @@ Source is organized as:
 - `src/agent/agent_loop.rs` — our own agent loop for OpenAI-compatible endpoints
 - `src/agent/tools.rs` — agent tools (`conversation`, `read`, `glob`, `grep`, `shell`, `write`, `edit`, the same in both modes), confined to the repository root
 - `src/agent/claude_code.rs` — `claude -p` driver: arguments, `stream-json` parser, session forking
-- `src/agent/context.rs` — system prompts (from `prompts/*.md`), ancestor replay, handover preamble, the notes Explorer injects
+- `src/agent/context.rs` — system prompts (from `prompts/*.md`), ancestor replay, handover preamble, the notes Explorer injects (repository state, compaction, repository-moved)
 - `src/agent/commands.rs` — slash commands: `Command` (a custom command file: optional metadata block between two `---` lines with `system-prompt: on | off`, `argument`, `description`, then the base prompt), expansion (`/compact` and `/commit` built in; `commit_prompt` is the go-ahead a `/commit` sends), `placeholder` (the hint for a draft that is a command name with nothing after it)
 - `src/agent/models.rs` — `GET <url>/models`
 - `src/git.rs` — gix-backed git data: `load_log` (first-parent walk of HEAD or a resolved branch/tag ref, capped at `MAX_LOG_ENTRIES` entries in a `LogHistory`, plus `refs`: commit → branches/remote branches/tags map built by peeling every ref), `load_refs` (flat branch/tag list for the branch picker), `load_commit_diff` (unified text), `LogEntry`, `GitRef`/`RefKind`, `DiffLine`/`DiffKind`, `commit_type_prefix` (conventional-commit parsing), datetime + short-id helpers
@@ -275,6 +275,7 @@ Planned feature areas and their likely dependencies:
 - A window has no mode: a prompt is a feedback turn unless it is `/commit` or a custom command with `system-prompt: off`, so the mode travels with the typed text (queue, `input.md`, restored prompts).
 - A custom command with `system-prompt: off` gets no mode prompt and no workspace note, so its turn must never be reset: it runs and closes as a commit turn (`TurnKind::NoSystemPrompt`), and its node records `system-prompt: off` for replays. Both modes have the same tools; what differs is the system prompt and how the turn is closed.
 - Every prompt requires a clean working tree, and only one turn runs at a time; a prompt sent meanwhile is queued. Feedback turns end with a hard reset of the tree, and a commit they make is not recorded to the conversation, so they must not commit; commit turns end with the agent's leftovers stashed.
+- The system prompt holds nothing that changes between turns. The repository state (root, date, HEAD) opens the user message as an Explorer note, together with the compaction and repository-moved notes: HEAD moves on every commit, and the endpoints cache on the longest common prefix, so a change ahead of the replayed ancestors throws the cache of the whole transcript away.
 
 ### Comments
 

@@ -128,9 +128,15 @@ pub struct TurnRequest {
     pub tree: Arc<RwLock<ConversationTree>>,
 }
 
-/// The text to send for `request`: what the turn asks, preceded by the summary of a
-/// compacted parent and by the repository-moved note. Reads files and runs git.
+/// The text to send for `request`: what the turn asks, preceded by the notes Explorer
+/// adds — the state of the repository, the summary of a compacted parent, and what
+/// moved since the parent's turn. Reads files and runs git.
 fn message_to_send(request: &TurnRequest) -> String {
+    let environment = Some(context::environment_note(
+        &request.root,
+        request.head.as_deref(),
+        &request.date,
+    ));
     let summary = request.compacted_parent.as_ref().map(|dir| {
         let (_, summary) = crate::conversation::read_prompt_and_reply(dir);
         context::compaction_note(&summary)
@@ -145,7 +151,7 @@ fn message_to_send(request: &TurnRequest) -> String {
         Some(instructions) => context::compact_request(instructions),
         None => request.prompt.clone(),
     };
-    context::with_notes(&[summary, moved, workspace], &ask)
+    context::with_notes(&[environment, summary, moved, workspace], &ask)
 }
 
 /// Collects a turn's output: live reply and work log for the UI, `reply.md`,
@@ -423,12 +429,8 @@ async fn run_claude_code(
     let (system, message, preamble) = {
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
-            let system = context::claude_system_prompt(
-                request.system_prompt.then_some(request.mode),
-                &request.root,
-                request.head.as_deref(),
-                &request.date,
-            );
+            let system =
+                context::claude_system_prompt(request.system_prompt.then_some(request.mode));
             let preamble = context::handover_preamble(&request.ancestor_dirs);
             (system, message_to_send(&request), preamble)
         })
@@ -521,8 +523,6 @@ async fn run_own_loop(
             let system = context::system_prompt(
                 request.system_prompt.then_some(request.mode),
                 &request.root,
-                request.head.as_deref(),
-                &request.date,
             );
             let mut messages: Vec<Message> = request
                 .ancestor_dirs

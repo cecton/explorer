@@ -376,8 +376,13 @@ Stream the turn; when the model asks for tools, run them, append the results, ca
 model again; the turn is over when a response contains no tool call.
 
 - **System prompt**: the mode's prompt + `prompts/conversation_tool.md` + the
-  repository's `AGENTS.md` if present + an Environment section built at runtime
-  (repository root, date, current HEAD).
+  repository's `AGENTS.md` if present. It holds nothing that changes between turns.
+- **Repository state**: the repository root, the date and the current HEAD open the new
+  user message as an Explorer note, next to the compaction and repository-moved notes.
+  They are deliberately not in the system prompt: HEAD moves on every commit, and a
+  change ahead of the replayed ancestors throws away the endpoint's prefix cache
+  (measured at 30k of a 41k prompt). After the move, the turn that follows a commit
+  caches the whole transcript instead of nothing.
 - **Replay**: for each ancestor from root to parent, the messages of its
   `transcript.jsonl`, read from disk. The walk starts at the nearest `compact` ancestor
   if there is one. Ancestors keep the system prompt of the *new* turn's mode: only one
@@ -431,7 +436,7 @@ Explorer spawns the local CLI in the repository root:
 ```
 claude -p --output-format stream-json --verbose --include-partial-messages \
        --model <model> --effort <effort> \
-       --append-system-prompt <mode prompt + Environment> \
+       --append-system-prompt <mode prompt> \
        --system-prompt-snapshot off \
        --permission-mode bypassPermissions \
        --settings '{"attribution":{"commit":"","pr":""}}' \
@@ -447,6 +452,8 @@ claude -p --output-format stream-json --verbose --include-partial-messages \
 - Prompt snapshotting is turned off: by default a resumed session keeps the system
   prompt of its first request, so a commit turn forked from a feedback node would still
   be told it is in feedback mode.
+- The repository state opens the message here too, not the appended system prompt, so a
+  commit cannot invalidate the cache of the session it is resumed into.
 - Claude Code runs its own loop and its own tools, and keeps its own transcript; no
   `transcript.jsonl` is written. Its default system prompt is kept; ours is appended.
 - The attribution setting removes Claude Code's own commit trailer, in line with the
@@ -879,7 +886,7 @@ Hermetic unit tests:
 - slash expansion: custom, unknown, path-like, `/compact`, `/commit`; command file
   parsing and the hint;
 - context assembly: ancestor walk, compact cut-off, handover, repository-moved note,
-  injected messages preserved;
+  the repository-state note, injected messages preserved;
 - commit-turn closing on a temporary git repository: clean, nudge then clean, nudges
   exhausted then stash, amended history;
 - feedback-turn closing: scratch work discarded, ignored files kept, a clean tree and a
