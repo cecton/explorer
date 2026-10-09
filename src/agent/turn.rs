@@ -44,6 +44,8 @@ pub struct LiveTurn {
     /// Model this turn was sent to, shown next to its outcome.
     pub model: String,
     pub tokens_in: Option<u64>,
+    /// Input tokens of the last request the provider served from its prompt cache.
+    pub cached_in: Option<u64>,
     /// Claude Code session holding this turn, once the CLI has announced it.
     pub session_id: Option<String>,
 }
@@ -78,6 +80,7 @@ pub struct TurnOutcome {
     pub secs: u64,
     pub head_after: Option<String>,
     pub tokens_in: Option<u64>,
+    pub cached_in: Option<u64>,
     /// Commits the turn produced, oldest first.
     pub commits: Vec<String>,
     /// Stash holding what the turn left uncommitted.
@@ -274,6 +277,12 @@ impl Recorder {
         self.live.lock().tokens_in = Some(tokens);
     }
 
+    /// Cache hits of the last request that reported usage. Assigned rather than kept,
+    /// so a request the cache did not serve clears the count of the one before it.
+    pub fn cached_in(&mut self, cached: Option<u64>) {
+        self.live.lock().cached_in = cached;
+    }
+
     pub fn session(&mut self, session_id: String) {
         self.live.lock().session_id = Some(session_id);
     }
@@ -343,9 +352,9 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
                 (commits, stash, false)
             }
         };
-        let (tokens_in, session_id) = {
+        let (tokens_in, cached_in, session_id) = {
             let live = live.lock();
-            (live.tokens_in, live.session_id.clone())
+            (live.tokens_in, live.cached_in, live.session_id.clone())
         };
         let outcome = TurnOutcome {
             status,
@@ -353,6 +362,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             secs: handle.started.elapsed().as_secs(),
             head_after: head_after.clone(),
             tokens_in,
+            cached_in,
             commits,
             stash,
             reset,
@@ -552,6 +562,7 @@ async fn run_own_loop(
         if let Some(tokens) = response.tokens_in {
             recorder.tokens_in(tokens);
         }
+        recorder.cached_in(response.cached_in);
         recorder.message(&Message::Assistant {
             content: response.text,
             tool_calls: Vec::new(),

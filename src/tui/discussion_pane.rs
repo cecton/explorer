@@ -1392,6 +1392,9 @@ fn status_text(node: &Node) -> (String, bool) {
     if let Some(tokens) = node.meta.tokens_in {
         push(&fmt_tokens(tokens));
     }
+    if let Some(cached) = node.meta.cached_in {
+        push(&format!("{} cached", fmt_tokens(cached)));
+    }
     if let Some(secs) = node.meta.secs {
         push(&fmt_elapsed(secs));
     }
@@ -1457,6 +1460,9 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
         };
         if let Some(tokens) = live.tokens_in {
             text.push_str(&format!(" · {}", fmt_tokens(tokens)));
+        }
+        if let Some(cached) = live.cached_in {
+            text.push_str(&format!(" · {} cached", fmt_tokens(cached)));
         }
         text.push_str(" · ");
         text.push_str(queued.as_deref().unwrap_or("Esc:Cancel"));
@@ -2078,10 +2084,20 @@ mod tests {
     #[test]
     fn status_text_does_not_repeat_a_commit_mode() {
         let (_tmp, tree, id) = node_with_metadata(
-            "type: commit\nstatus: done\ncommits: 0123456789abcdef 89abcdef01234567\ntokens-in: 1200\n",
+            "type: commit\nstatus: done\ncommits: 0123456789abcdef 89abcdef01234567\ntokens-in: 1200\ncached-in: 1152\n",
         );
         let (text, failed) = status_text(tree.node(&id).unwrap());
-        assert_eq!(text, "done · 0123456 89abcde · 1k");
+        assert_eq!(text, "done · 0123456 89abcde · 1k · 1k cached");
+        assert!(!failed);
+    }
+
+    #[test]
+    fn status_text_shows_the_cache_hits_of_the_context() {
+        let (_tmp, tree, id) = node_with_metadata(
+            "type: feedback\nstatus: done\ntokens-in: 28937\ncached-in: 28416\n",
+        );
+        let (text, failed) = status_text(tree.node(&id).unwrap());
+        assert_eq!(text, "done · 28k · 28k cached");
         assert!(!failed);
     }
 

@@ -55,6 +55,8 @@ enum StreamEvent {
     ToolsDone,
     /// Size of the context of the request that just completed.
     TokensIn(u64),
+    /// Part of that context the provider served from its prompt cache.
+    CachedIn(u64),
     /// The run is over. `no_turn` is set when it ended before the model was called.
     Result {
         error: Option<String>,
@@ -71,13 +73,22 @@ fn tool_activity(name: &str, input: &Value) -> String {
     format!("{name} {detail}").trim_end().to_string()
 }
 
-fn context_tokens(usage: &Value) -> Option<u64> {
+/// The sizes of one request's context: its total, and how much of it the provider
+/// served from its prompt cache. The cache write is part of the context but not a hit.
+fn context_tokens(usage: &Value) -> Option<(u64, u64)> {
     let field = |key: &str| usage.get(key).and_then(Value::as_u64);
-    Some(
-        field("input_tokens")?
-            + field("cache_creation_input_tokens").unwrap_or(0)
-            + field("cache_read_input_tokens").unwrap_or(0),
-    )
+    let cached = field("cache_read_input_tokens").unwrap_or(0);
+    Some((
+        field("input_tokens")? + field("cache_creation_input_tokens").unwrap_or(0) + cached,
+        cached,
+    ))
+}
+
+fn context_sizes(usage: &Value) -> Vec<StreamEvent> {
+    let Some((total, cached)) = context_tokens(usage) else {
+        return Vec::new();
+    };
+    vec![StreamEvent::TokensIn(total), StreamEvent::CachedIn(cached)]
 }
 
 /// Translates one output line. Lines of subagents and of kinds we do not use yield
@@ -107,9 +118,7 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
             match event.get("type").and_then(Value::as_str).unwrap_or("") {
                 "message_start" => {
                     let mut events = vec![StreamEvent::AnswerStart];
-                    events.extend(
-                        context_tokens(&event["message"]["usage"]).map(StreamEvent::TokensIn),
-                    );
+                    events.extend(context_sizes(&event["message"]["usage"]));
                     events
                 }
                 "content_block_start" if event["content_block"]["type"] == "tool_use" => {
@@ -122,10 +131,7 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
                         .into_iter()
                         .collect()
                 }
-                "message_delta" => context_tokens(&event["usage"])
-                    .map(StreamEvent::TokensIn)
-                    .into_iter()
-                    .collect(),
+                "message_delta" => context_sizes(&event["usage"]),
                 _ => Vec::new(),
             }
         }
@@ -262,6 +268,9 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
                     StreamEvent::ToolCall(call) => recorder.tool_call(call),
                     StreamEvent::ToolsDone => recorder.activity(None),
                     StreamEvent::TokensIn(tokens) => recorder.tokens_in(tokens),
+                    StreamEvent::CachedIn(tokens) => {
+                        recorder.cached_in((tokens > 0).then_some(tokens));
+                    }
                     StreamEvent::Result { error, no_turn } => outcome = Some((error, no_turn)),
                 }
             }
@@ -356,6 +365,7 @@ mod tests {
             2
         );
         assert!(events.contains(&StreamEvent::TokensIn(8 + 170 + 22_382)));
+        assert!(events.contains(&StreamEvent::CachedIn(22_382)));
         assert_eq!(
             &events[events.len() - 2..],
             [
@@ -375,7 +385,8 @@ mod tests {
             parse_line(start),
             [
                 StreamEvent::AnswerStart,
-                StreamEvent::TokensIn(2 + 10352 + 8368)
+                StreamEvent::TokensIn(2 + 10352 + 8368),
+                StreamEvent::CachedIn(8368)
             ]
         );
         let no_usage = r#"{"type":"stream_event","parent_tool_use_id":null,"event":{"type":"message_start"},"session_id":"s"}"#;

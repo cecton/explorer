@@ -1473,6 +1473,7 @@ impl App for AppMain {
                         meta.secs = Some(outcome.secs);
                         meta.head_after = outcome.head_after.clone();
                         meta.tokens_in = outcome.tokens_in;
+                        meta.cached_in = outcome.cached_in;
                         meta.commits = outcome.commits.clone();
                         meta.stash = outcome.stash.clone();
                         meta.scratch_reset = outcome.reset;

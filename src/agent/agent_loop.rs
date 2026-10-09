@@ -34,6 +34,7 @@ pub async fn run(
         if let Some(tokens) = response.tokens_in {
             recorder.tokens_in(tokens);
         }
+        recorder.cached_in(response.cached_in);
         let answer = Message::Assistant {
             content: response.text,
             tool_calls: response.tool_calls.clone(),

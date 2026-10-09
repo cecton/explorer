@@ -177,6 +177,7 @@ command: review               only when a custom command was expanded
 system-prompt: off            only for a command sent without the mode prompt
 session-id: <uuid>            claude-code only
 tokens-in: 84210
+cached-in: 81920
 error: <one line>             only for failed
 ```
 
@@ -748,10 +749,15 @@ window holds its node's prompt, reply and work log in memory only while it is op
   turn still shows what it did. A done node with a reply hides it; `Ctrl+O` shows or
   hides it either way, and the status line of a node that has one says so.
 - Status line: running (the same spinner as in the tree, current tool, elapsed time,
-  context size), done (type, short hashes, stash, context size, elapsed time), failed
-  (error), cancelled, or the reason a send was refused. The context size is abbreviated
-  (`96k`, `1.2M`); of the types only `compact` is named, since a commit node is
-  recognizable by its hashes and every other node is feedback.
+  context size), done (type, short hashes, stash, context size, cache hits, elapsed
+  time), failed (error), cancelled, or the reason a send was refused. The context size is
+  abbreviated (`96k`, `1.2M`); of the types only `compact` is named, since a commit node
+  is recognizable by its hashes and every other node is feedback. Cache hits are the part
+  of the context the provider served from its prompt cache and are shown as
+  `<n> cached`, abbreviated the same way, and only when the last request found something
+  in the cache: the number is there to show what the cache saved, and `0 cached` would
+  only report a cache that had nothing to give. It sits next to the context size because
+  it is a property of that same request.
 - The input is always active, also while a turn runs: the next prompt can be drafted,
   but `Enter` is refused until the node is done. Drafts are kept per window and saved in
   the session.

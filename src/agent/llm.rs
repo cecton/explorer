@@ -32,6 +32,9 @@ pub struct LlmResponse {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
     pub tokens_in: Option<u64>,
+    /// Input tokens of this request the provider served from its prompt cache;
+    /// `None` when it cached nothing, or does not report caching at all.
+    pub cached_in: Option<u64>,
 }
 
 fn client() -> &'static Client {
@@ -154,11 +157,15 @@ pub async fn stream_chat(
             }
             ChatStreamEvent::ReasoningChunk(chunk) => on_chunk(true, &chunk.content),
             ChatStreamEvent::End(end) => {
-                response.tokens_in = end
-                    .captured_usage
-                    .as_ref()
+                let usage = end.captured_usage.as_ref();
+                response.tokens_in = usage
                     .and_then(|usage| usage.prompt_tokens)
                     .and_then(|tokens| u64::try_from(tokens).ok());
+                response.cached_in = usage
+                    .and_then(|usage| usage.prompt_tokens_details.as_ref())
+                    .and_then(|details| details.cached_tokens)
+                    .and_then(|tokens| u64::try_from(tokens).ok())
+                    .filter(|tokens| *tokens > 0);
                 response.tool_calls = end
                     .captured_into_tool_calls()
                     .unwrap_or_default()

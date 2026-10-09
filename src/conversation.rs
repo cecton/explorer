@@ -116,6 +116,8 @@ pub struct Metadata {
     pub no_system_prompt: bool,
     pub session_id: Option<String>,
     pub tokens_in: Option<u64>,
+    /// Input tokens of the node's last request that the provider served from its cache.
+    pub cached_in: Option<u64>,
     pub error: Option<String>,
     /// Wall-clock seconds the turn took.
     pub secs: Option<u64>,
@@ -152,6 +154,7 @@ impl Metadata {
                 "system-prompt" => meta.no_system_prompt = value == "off",
                 "session-id" => meta.session_id = Some(value.to_string()),
                 "tokens-in" => meta.tokens_in = value.parse().ok(),
+                "cached-in" => meta.cached_in = value.parse().ok(),
                 "secs" => meta.secs = value.parse().ok(),
                 "error" => meta.error = Some(value.to_string()),
                 _ => {}
@@ -172,6 +175,7 @@ impl Metadata {
         };
         let commits = self.commits.join(" ");
         let tokens_in = self.tokens_in.map(|n| n.to_string());
+        let cached_in = self.cached_in.map(|n| n.to_string());
         let secs = self.secs.map(|n| n.to_string());
         push("type", self.node_type.map(NodeType::as_str));
         push("endpoint", self.endpoint.as_deref());
@@ -190,6 +194,7 @@ impl Metadata {
         push("system-prompt", self.no_system_prompt.then_some("off"));
         push("session-id", self.session_id.as_deref());
         push("tokens-in", tokens_in.as_deref());
+        push("cached-in", cached_in.as_deref());
         push("secs", secs.as_deref());
         push("error", self.error.as_deref());
         out
@@ -771,6 +776,7 @@ mod tests {
             no_system_prompt: true,
             session_id: Some("1234-uuid".into()),
             tokens_in: Some(84_210),
+            cached_in: Some(81_920),
             secs: Some(95),
             error: Some("rate limited: try later".into()),
         };
