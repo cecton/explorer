@@ -678,13 +678,15 @@ mod tests {
     }
 
     #[test]
-    fn load_log_reports_no_truncation_for_this_repo() {
-        let root = camino::Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+    fn load_log_decorates_head_with_its_branch_and_reports_no_truncation() {
+        let (_tmp, root) = temp_repo();
+        let head = commit(&root, "a.txt", "one", "init");
+        git_output(&root, &["branch", "-M", "main"]).unwrap();
+
         let repo = gix::ThreadSafeRepository::open(root.as_std_path()).expect("open repo");
         let history = load_log(&repo, None).expect("load_log");
         assert!(!history.truncated);
-        assert!(history.entries.len() < MAX_LOG_ENTRIES);
-        assert!(!history.refs.is_empty());
+        assert_eq!(hex::encode(history.entries[0].id), head);
         let head_refs = history.refs.get(&history.entries[0].id).expect("HEAD refs");
         assert!(
             head_refs
@@ -695,18 +697,27 @@ mod tests {
 
     #[test]
     fn load_log_branch_resolves_and_load_refs_lists() {
-        let root = camino::Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let (_tmp, root) = temp_repo();
+        let first = commit(&root, "a.txt", "one", "init");
+        git_output(&root, &["branch", "-M", "main"]).unwrap();
+        git_output(&root, &["checkout", "-q", "-b", "topic"]).unwrap();
+        let second = commit(&root, "a.txt", "two", "more");
+
         let repo = gix::ThreadSafeRepository::open(root.as_std_path()).expect("open repo");
         let head = load_log(&repo, None).expect("load_log");
         let main = load_log(&repo, Some("main")).expect("load_log main");
-        assert_eq!(head.entries.len(), main.entries.len());
-        assert_eq!(head.entries[0].id, main.entries[0].id);
+        assert_eq!(head.entries.len(), 2);
+        assert_eq!(hex::encode(head.entries[0].id), second);
+        assert_eq!(main.entries.len(), 1);
+        assert_eq!(hex::encode(main.entries[0].id), first);
         assert!(load_log(&repo, Some("no-such-ref-xyz")).is_err());
         let refs = load_refs(&repo).expect("load_refs");
-        assert!(
-            refs.iter()
-                .any(|r| r.kind == RefKind::Branch && r.name == "main")
-        );
+        for branch in ["main", "topic"] {
+            assert!(
+                refs.iter()
+                    .any(|r| r.kind == RefKind::Branch && r.name == branch)
+            );
+        }
     }
 
     #[test]
