@@ -2015,7 +2015,7 @@ fn render_status_bar(
     let dirty_style = new_style!(bold color_fg: {error_fg} color_bg: {color_bg});
     let warning_style = new_style!(color_fg: {warning_fg} color_bg: {color_bg});
     let error_style = new_style!(color_fg: {error_fg} color_bg: {color_bg});
-    let dirty_label = state.is_dirty.then(|| " dirty ".to_string());
+    let dirty = state.is_dirty.then_some(("│ ", "dirty "));
     let usage = focused_usage(state);
     let counters = state.show_timers.then(|| {
         let t = &state.time;
@@ -2028,7 +2028,7 @@ fn render_status_bar(
         )
     });
     let width_of = |text: &str| GCStringOwned::from(text).display_width().as_usize();
-    let dirty_width = dirty_label.as_deref().map(width_of).unwrap_or(0);
+    let dirty_width = dirty.map_or(0, |(bar, label)| width_of(bar) + width_of(label));
     let usage_width: usize = usage.iter().map(|(text, _)| width_of(text)).sum();
     let counters_width = counters.as_deref().map(width_of).unwrap_or(0);
     let total_width = size.col_width.as_usize();
@@ -2043,9 +2043,11 @@ fn render_status_bar(
     // Only draw when it fits alongside the left hints (leave a small gap), so narrow
     // terminals keep the shortcut hints rather than being overwritten.
     if combined_width > 0 && total_width > combined_width + 2 {
-        let start_col = total_width - combined_width;
+        let start_col = total_width - combined_width - 1;
         render_ops += RenderOpCommon::MoveCursorPositionAbs(col(start_col as u16) + row_idx);
-        if let Some(label) = dirty_label {
+        render_ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(normal_style));
+        if let Some((bar, label)) = dirty {
+            render_ops += RenderOpIR::PaintTextWithAttributes(bar.into(), Some(normal_style));
             render_ops += RenderOpIR::PaintTextWithAttributes(label.into(), Some(dirty_style));
         }
         if usage_fits {
