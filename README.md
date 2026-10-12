@@ -251,3 +251,21 @@ Explorer is used every day by its owner and by nobody else. Know this before try
 - [`AGENTS.md`](AGENTS.md): the map of the source code, the build commands and the rules
   for working on it.
 - [`prompts/`](prompts): the system prompts of the two modes.
+
+## License
+
+Licensed under either of
+
+- Apache License, Version 2.0 ([LICENSE-APACHE](LICENSE-APACHE) or
+  <https://www.apache.org/licenses/LICENSE-2.0>)
+- MIT license ([LICENSE-MIT](LICENSE-MIT) or <https://opensource.org/licenses/MIT>)
+
+at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for
+inclusion in this work, as defined in the Apache-2.0 license, shall be dual licensed as
+above, without any additional terms or conditions.
+
+Two directories hold other people's work: `vendor/r3bl-open-core`, the TUI framework,
+which is Apache-2.0, and `themes/`, copied from Helix, where each theme keeps its own
+license and names it in its header when it has one.
