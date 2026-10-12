@@ -9,6 +9,26 @@ struct GitHubItem {
     download_url: Option<String>,
 }
 
+/// Themes kept out of `themes/`: ones whose upstream `runtime/themes/licenses/` file is
+/// the Vim License or GNU GPL-3.0, and the ones whose header names a GPL-3.0 project as
+/// their source. A theme no one licensed cannot be redistributed inside a binary that is
+/// released under permissive terms.
+const COPYLEFT_THEMES: &[&str] = &[
+    "kaolin-dark",
+    "kaolin-light",
+    "kaolin-valley-dark",
+    "modus_operandi",
+    "modus_operandi_deuteranopia",
+    "modus_operandi_tinted",
+    "modus_operandi_tritanopia",
+    "modus_vivendi",
+    "modus_vivendi_deuteranopia",
+    "modus_vivendi_tinted",
+    "modus_vivendi_tritanopia",
+    "peachpuff",
+    "zenburn",
+];
+
 pub fn run() -> Result<()> {
     let workspace_root = Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
     let themes_dir = workspace_root.join("themes");
@@ -30,6 +50,11 @@ pub fn run() -> Result<()> {
         if !item.name.ends_with(".toml") {
             continue;
         }
+        let name = item.name.trim_end_matches(".toml");
+        if COPYLEFT_THEMES.contains(&name) {
+            log::info!("  skipping {name} (copyleft)");
+            continue;
+        }
         let Some(url) = &item.download_url else {
             continue;
         };
@@ -37,7 +62,7 @@ pub fn run() -> Result<()> {
         let resp = agent.get(url).call()?;
         let path = themes_dir.join(&item.name);
         fs::write(&path, resp.into_body().read_to_string()?)?;
-        theme_names.push(item.name.trim_end_matches(".toml").to_string());
+        theme_names.push(name.to_string());
     }
     theme_names.sort();
 
