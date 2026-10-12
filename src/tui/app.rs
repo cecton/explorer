@@ -2027,18 +2027,25 @@ fn render_status_bar(
             fmt_duration(t.project_total()),
         )
     });
+    let clock = {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs() as i64);
+        clock_text(now, crate::conversation::local_offset_secs(now))
+    };
     let width_of = |text: &str| GCStringOwned::from(text).display_width().as_usize();
     let dirty_width = dirty.map_or(0, |(bar, label)| width_of(bar) + width_of(label));
     let usage_width: usize = usage.iter().map(|(text, _)| width_of(text)).sum();
     let counters_width = counters.as_deref().map(width_of).unwrap_or(0);
+    let clock_width = width_of(&clock);
     let total_width = size.col_width.as_usize();
-    // The usage is the first to go: a terminal too narrow for it keeps the flag and
-    // the counters.
-    let usage_fits = total_width > dirty_width + usage_width + counters_width + 2;
+    // The usage is the first to go: a terminal too narrow for it keeps the flag, the
+    // counters and the clock.
+    let usage_fits = total_width > dirty_width + usage_width + counters_width + clock_width + 2;
     let combined_width = if usage_fits {
-        dirty_width + usage_width + counters_width
+        dirty_width + usage_width + counters_width + clock_width
     } else {
-        dirty_width + counters_width
+        dirty_width + counters_width + clock_width
     };
     // Only draw when it fits alongside the left hints (leave a small gap), so narrow
     // terminals keep the shortcut hints rather than being overwritten.
@@ -2063,9 +2070,16 @@ fn render_status_bar(
         if let Some(counters) = counters {
             render_ops += RenderOpIR::PaintTextWithAttributes(counters.into(), Some(normal_style));
         }
+        render_ops += RenderOpIR::PaintTextWithAttributes(clock.into(), Some(normal_style));
     }
 
     pipeline.push(ZOrder::Normal, render_ops);
+}
+
+/// The status-bar clock: local time of day, 24h, as a `│ HH:MM ` segment.
+fn clock_text(now: i64, offset_secs: i32) -> String {
+    let minutes = (now + i64::from(offset_secs)).rem_euclid(86_400) / 60;
+    format!("│ {:02}:{:02} ", minutes / 60, minutes % 60)
 }
 
 /// Percent of a subscription window from which the status bar warns about it.
@@ -2248,4 +2262,17 @@ pub async fn run(
         eprintln!("{msg}");
     }
     ok!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::clock_text;
+
+    #[test]
+    fn clock_text_is_local_24h() {
+        assert_eq!(clock_text(0, 0), "│ 00:00 ");
+        assert_eq!(clock_text(86_399, 0), "│ 23:59 ");
+        assert_eq!(clock_text(0, 7_200), "│ 02:00 ");
+        assert_eq!(clock_text(0, -3_600), "│ 23:00 ");
+    }
 }
