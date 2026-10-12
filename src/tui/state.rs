@@ -1,4 +1,5 @@
 use crate::agent::turn::{TurnHandle, TurnOutcome};
+use crate::agent::usage::Usage;
 use crate::agent::{AgentConfig, Effort, ModelSpec};
 use crate::conversation::{ConversationTree, NodeId};
 use crate::git::{DiffLine, GitRef, LogHistory};
@@ -546,6 +547,9 @@ pub struct AppState {
     /// Endpoints, tokens and agent settings from `config.kdl` and `auth.kdl`.
     pub agent: Arc<AgentConfig>,
     pub models: ModelCatalog,
+    /// Last known usage of the subscription behind each endpoint, by endpoint name;
+    /// kept in `<data_dir>/usage.json`.
+    pub usage: HashMap<String, Usage>,
     /// Model last picked during this run, offered to new conversations.
     pub last_picked_model: Option<ModelSpec>,
     /// Model Picker entries are indexes into `models.specs`.
@@ -658,6 +662,7 @@ impl AppState {
             discussion_highlights: HashMap::new(),
             agent: Arc::default(),
             models: ModelCatalog::default(),
+            usage: HashMap::new(),
             last_picked_model: None,
             model_picker: FuzzyPickerState::default(),
             model_picker_purpose: None,
@@ -766,6 +771,12 @@ pub enum AppSignal {
     ModelsFetched {
         endpoint: String,
         result: Result<Vec<String>, String>,
+    },
+    /// How much of the subscription behind `endpoint` is used, as known when a turn
+    /// that spent some of it ended.
+    UsageFetched {
+        endpoint: String,
+        usage: Usage,
     },
     /// A running turn produced output; nothing to apply, only a render.
     TurnProgress,

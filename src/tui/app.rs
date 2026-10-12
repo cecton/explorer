@@ -1452,6 +1452,10 @@ impl App for AppMain {
                             crate::tui::model_picker::run_model_match(&query, state);
                     }
                 }
+                AppSignal::UsageFetched { endpoint, usage } => {
+                    state.usage.insert(endpoint.clone(), usage.clone());
+                    crate::agent::usage::save(&state.usage);
+                }
                 AppSignal::TurnProgress => {}
                 AppSignal::TurnFinished { node, outcome } => {
                     if let Some(handle) = state.running_turns.remove(node) {
@@ -1994,12 +1998,17 @@ fn render_status_bar(
     render_tui_styled_texts_into(&styled_texts, &mut render_ops);
 
     // Right-aligned "dirty" flag (uncommitted staged/unstaged changes), shown in a
-    // bright error-like theme color, followed by the time counters. Each is
-    // independently optional: the flag reflects `state.is_dirty` unconditionally, the
-    // counters are gated on the `show-timers` config option.
+    // bright error-like theme color, followed by the usage of the focused conversation's
+    // subscription and by the time counters. Each is independently optional: the flag
+    // reflects `state.is_dirty` unconditionally, the counters are gated on the
+    // `show-timers` config option.
     let error_fg = TuiColor::from(theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG));
+    let warning_fg = TuiColor::from(theme.ui_fg("warning").unwrap_or(DEFAULT_WARNING_FG));
     let dirty_style = new_style!(bold color_fg: {error_fg} color_bg: {color_bg});
+    let warning_style = new_style!(color_fg: {warning_fg} color_bg: {color_bg});
+    let error_style = new_style!(color_fg: {error_fg} color_bg: {color_bg});
     let dirty_label = state.is_dirty.then(|| " dirty ".to_string());
+    let usage = focused_usage(state);
     let counters = state.show_timers.then(|| {
         let t = &state.time;
         format!(
@@ -2010,23 +2019,36 @@ fn render_status_bar(
             fmt_duration(t.project_total()),
         )
     });
-    let dirty_width = dirty_label
-        .as_deref()
-        .map(|s| GCStringOwned::from(s).display_width().as_usize())
-        .unwrap_or(0);
-    let counters_width = counters
-        .as_deref()
-        .map(|s| GCStringOwned::from(s).display_width().as_usize())
-        .unwrap_or(0);
-    let combined_width = dirty_width + counters_width;
+    let width_of = |text: &str| GCStringOwned::from(text).display_width().as_usize();
+    let dirty_width = dirty_label.as_deref().map(width_of).unwrap_or(0);
+    let usage_width: usize = usage.iter().map(|(text, _)| width_of(text)).sum();
+    let counters_width = counters.as_deref().map(width_of).unwrap_or(0);
+    let total_width = size.col_width.as_usize();
+    // The usage is the first to go: a terminal too narrow for it keeps the flag and
+    // the counters.
+    let usage_fits = total_width > dirty_width + usage_width + counters_width + 2;
+    let combined_width = if usage_fits {
+        dirty_width + usage_width + counters_width
+    } else {
+        dirty_width + counters_width
+    };
     // Only draw when it fits alongside the left hints (leave a small gap), so narrow
     // terminals keep the shortcut hints rather than being overwritten.
-    let total_width = size.col_width.as_usize();
     if combined_width > 0 && total_width > combined_width + 2 {
         let start_col = total_width - combined_width;
         render_ops += RenderOpCommon::MoveCursorPositionAbs(col(start_col as u16) + row_idx);
         if let Some(label) = dirty_label {
             render_ops += RenderOpIR::PaintTextWithAttributes(label.into(), Some(dirty_style));
+        }
+        if usage_fits {
+            for (text, percent) in usage {
+                let style = match percent {
+                    Some(USAGE_ERROR_PERCENT..) => error_style,
+                    Some(USAGE_WARNING_PERCENT..) => warning_style,
+                    _ => normal_style,
+                };
+                render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+            }
         }
         if let Some(counters) = counters {
             render_ops += RenderOpIR::PaintTextWithAttributes(counters.into(), Some(normal_style));
@@ -2034,6 +2056,48 @@ fn render_status_bar(
     }
 
     pipeline.push(ZOrder::Normal, render_ops);
+}
+
+/// Percent of a subscription window from which the status bar warns about it.
+const USAGE_WARNING_PERCENT: u32 = 75;
+const USAGE_ERROR_PERCENT: u32 = 90;
+
+/// The endpoint the focused window spends: the model of a Discussion window, the
+/// endpoint of the Conversation Tree's selected node (for a queued row, the model of
+/// the window holding the prompt), the selected row of the Model Picker.
+fn focused_endpoint(state: &AppState) -> Option<String> {
+    let window_endpoint =
+        |id: &usize| Some(state.discussions.get(id)?.model.as_ref()?.endpoint.clone());
+    match state.pane_manager.focused_window.as_ref()? {
+        Window::Discussion(id) => window_endpoint(id),
+        Window::ConversationTree => match state.tree_view.selected.as_ref()? {
+            RowTarget::Node(node) => state.conversations.read().node(node)?.meta.endpoint.clone(),
+            RowTarget::Queued { window, .. } => window_endpoint(window),
+        },
+        Window::ModelPicker => {
+            let picker = &state.model_picker;
+            let selected = picker
+                .selected
+                .or_else(|| picker.results.first().map(|(idx, _)| *idx))?;
+            Some(state.models.specs.get(selected)?.endpoint.clone())
+        }
+        _ => None,
+    }
+}
+
+/// The status-bar entry for the subscription behind the focused window's endpoint;
+/// empty when that endpoint has no subscription or its usage is not known yet.
+fn focused_usage(state: &AppState) -> Vec<(String, Option<u32>)> {
+    let entry = || {
+        let endpoint = focused_endpoint(state)?;
+        let label = state.agent.endpoint(&endpoint)?.kind.usage_label()?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_or(0, |elapsed| elapsed.as_secs() as i64);
+        let usage = state.usage.get(&endpoint)?;
+        Some(usage.pieces(label, now, crate::conversation::local_offset_secs))
+    };
+    entry().unwrap_or_default()
 }
 
 fn model_picker_hint(state: &AppState) -> String {

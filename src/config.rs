@@ -1,5 +1,7 @@
 use crate::agent::commands::{self, Command};
-use crate::agent::{AgentConfig, CLAUDE_CODE_KIND, Endpoint, EndpointKind, ModelSpec};
+use crate::agent::{
+    AgentConfig, CLAUDE_CODE_KIND, Endpoint, EndpointKind, ModelSpec, OPENCODE_GO_KIND,
+};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -65,11 +67,15 @@ impl Config {
 #[derive(Debug, PartialEq, Eq)]
 pub enum EndpointDecl {
     OpenAi { name: String, url: String },
+    OpenCodeGo { name: String, url: String },
     ClaudeCode { name: String, models: Vec<String> },
 }
 
 /// Models offered for a `claude-code` endpoint that lists none.
 const CLAUDE_CODE_DEFAULT_MODELS: [&str; 3] = ["opus", "sonnet", "haiku"];
+
+/// Where an `opencode-go` endpoint that gives no `url` is reached.
+const OPENCODE_GO_URL: &str = "https://opencode.ai/zen/go/v1";
 
 fn auth_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "explorer").map(|dirs| dirs.data_dir().join("auth.kdl"))
@@ -158,6 +164,13 @@ pub fn resolve_agent(
     tokens: &HashMap<String, String>,
     commands: Vec<Command>,
 ) -> AgentConfig {
+    let token_of = |name: &str| {
+        let token = tokens.get(name).cloned();
+        if token.is_none() {
+            tracing::warn!("endpoint '{name}' has no token in auth.kdl; skipping it");
+        }
+        token
+    };
     let endpoints = settings
         .endpoints
         .into_iter()
@@ -166,19 +179,20 @@ pub fn resolve_agent(
                 name,
                 kind: EndpointKind::ClaudeCode { models },
             }),
-            EndpointDecl::OpenAi { name, url } => match tokens.get(&name) {
-                Some(token) => Some(Endpoint {
+            EndpointDecl::OpenAi { name, url } => {
+                let token = token_of(&name)?;
+                Some(Endpoint {
                     name,
-                    kind: EndpointKind::OpenAi {
-                        url,
-                        token: token.clone(),
-                    },
-                }),
-                None => {
-                    tracing::warn!("endpoint '{name}' has no token in auth.kdl; skipping it");
-                    None
-                }
-            },
+                    kind: EndpointKind::OpenAi { url, token },
+                })
+            }
+            EndpointDecl::OpenCodeGo { name, url } => {
+                let token = token_of(&name)?;
+                Some(Endpoint {
+                    name,
+                    kind: EndpointKind::OpenCodeGo { url, token },
+                })
+            }
         })
         .collect();
     AgentConfig {
@@ -236,6 +250,10 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                 settings.endpoints.push(match kind {
                     "openai" => EndpointDecl::OpenAi {
                         url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
+                        name,
+                    },
+                    OPENCODE_GO_KIND => EndpointDecl::OpenCodeGo {
+                        url: url.unwrap_or_else(|| OPENCODE_GO_URL.to_string()),
                         name,
                     },
                     CLAUDE_CODE_KIND => {
@@ -479,6 +497,49 @@ mod config_tests {
                     models: vec!["opus".into(), "fable".into()],
                 },
             ]
+        );
+    }
+
+    #[test]
+    fn opencode_go_endpoint_has_a_default_url_and_needs_a_token() {
+        let config = parse(
+            r#"
+            agent {
+                endpoint "go" {
+                    kind "opencode-go"
+                }
+                endpoint "mirror" {
+                    kind "opencode-go"
+                    url "https://mirror/v1"
+                }
+            }
+        "#,
+        )
+        .expect("valid config");
+        assert_eq!(
+            config.agent.endpoints,
+            [
+                EndpointDecl::OpenCodeGo {
+                    name: "go".to_string(),
+                    url: "https://opencode.ai/zen/go/v1".to_string()
+                },
+                EndpointDecl::OpenCodeGo {
+                    name: "mirror".to_string(),
+                    url: "https://mirror/v1".to_string()
+                },
+            ]
+        );
+        let tokens = parse_auth("go \"sk-go\"").expect("valid auth");
+        let agent = resolve_agent(config.agent, &tokens, Vec::new());
+        assert_eq!(
+            agent.endpoints,
+            [Endpoint {
+                name: "go".to_string(),
+                kind: EndpointKind::OpenCodeGo {
+                    url: "https://opencode.ai/zen/go/v1".to_string(),
+                    token: "sk-go".to_string()
+                }
+            }]
         );
     }
 

@@ -1,7 +1,8 @@
 use super::claude_code::{self, ClaudeTarget, Invocation, Resume, RunError};
 use super::llm::{self, LlmTarget};
 use super::tools::ToolContext;
-use super::{Backend, Message, Mode, agent_loop, context};
+use super::usage::{self, Usage};
+use super::{Backend, Endpoint, EndpointKind, Message, Mode, agent_loop, context};
 use crate::conversation::{ConversationTree, NodeId, NodeStatus, write_atomic};
 use crate::git::discard_worktree;
 use crate::tui::AppSignal;
@@ -48,6 +49,8 @@ pub struct LiveTurn {
     pub cached_in: Option<u64>,
     /// Claude Code session holding this turn, once the CLI has announced it.
     pub session_id: Option<String>,
+    /// What the CLI last reported of the subscription's limits.
+    pub usage: Option<Usage>,
 }
 
 /// The spinner frame of a turn that has been running for `elapsed`.
@@ -110,6 +113,8 @@ pub struct TurnRequest {
     /// `YYYY-MM-DD`, for the system prompt.
     pub date: String,
     pub backend: Backend,
+    /// The endpoint of `backend`, whose subscription this turn spends.
+    pub endpoint: Endpoint,
     /// `endpoint/model/effort` this turn is sent to, shown in the status line.
     pub model: String,
     /// Model that titles and summarizes the node once its turn is done.
@@ -292,6 +297,36 @@ impl Recorder {
     pub fn session(&mut self, session_id: String) {
         self.live.lock().session_id = Some(session_id);
     }
+
+    pub fn usage(&mut self, usage: Usage) {
+        self.live.lock().usage = Some(usage);
+    }
+}
+
+/// Tells the UI how much of the subscription behind `endpoint` is used once a turn has
+/// spent some of it: what the CLI last `reported`, or what OpenCode Go answers now.
+fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx: MainTx) {
+    tokio::spawn(async move {
+        let usage = match &endpoint.kind {
+            EndpointKind::ClaudeCode { .. } => reported,
+            EndpointKind::OpenCodeGo { url, token } => usage::fetch(url, token)
+                .await
+                .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
+                .ok(),
+            EndpointKind::OpenAi { .. } => None,
+        };
+        let Some(usage) = usage else {
+            return;
+        };
+        let _ = main_tx
+            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                AppSignal::UsageFetched {
+                    endpoint: endpoint.name,
+                    usage,
+                },
+            ))
+            .await;
+    });
 }
 
 /// Starts the turn of a node already created on disk and returns its handle. The
@@ -358,9 +393,14 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
                 (commits, stash, false)
             }
         };
-        let (tokens_in, cached_in, session_id) = {
+        let (tokens_in, cached_in, session_id, reported_usage) = {
             let live = live.lock();
-            (live.tokens_in, live.cached_in, live.session_id.clone())
+            (
+                live.tokens_in,
+                live.cached_in,
+                live.session_id.clone(),
+                live.usage.clone(),
+            )
         };
         let outcome = TurnOutcome {
             status,
@@ -383,6 +423,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             ))
             .await;
         redraw.abort();
+        report_usage(request.endpoint.clone(), reported_usage, main_tx.clone());
         if status == NodeStatus::Done
             && let Some(backend) = &request.summary_backend
         {

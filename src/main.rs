@@ -92,6 +92,7 @@ async fn main() {
         &config::load_auth(),
         config::load_commands(),
     ));
+    initial_state.usage = agent::usage::load();
 
     if let Some(session) = session::load_session(&root) {
         // Seed the time counters with this project's cumulative totals before `apply`

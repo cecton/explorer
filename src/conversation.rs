@@ -717,7 +717,7 @@ pub fn write_atomic(path: &Utf8Path, content: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-fn local_offset_secs(time_secs: i64) -> i32 {
+pub(crate) fn local_offset_secs(time_secs: i64) -> i32 {
     let time = time_secs as libc::time_t;
     // SAFETY: `tm` is plain data that `localtime_r` fully initializes on success, and
     // both pointers outlive the call.

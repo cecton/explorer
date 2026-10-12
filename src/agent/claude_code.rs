@@ -1,5 +1,6 @@
 use super::Effort;
 use super::turn::Recorder;
+use super::usage::{Span, Usage, UsageWindow};
 use camino::Utf8Path;
 use serde_json::Value;
 use std::process::Stdio;
@@ -57,6 +58,8 @@ enum StreamEvent {
     TokensIn(u64),
     /// Part of that context the provider served from its prompt cache.
     CachedIn(u64),
+    /// How much of the subscription is used after the request that just completed.
+    Usage(Usage),
     /// The run is over. `no_turn` is set when it ended before the model was called.
     Result {
         error: Option<String>,
@@ -89,6 +92,28 @@ fn context_sizes(usage: &Value) -> Vec<StreamEvent> {
         return Vec::new();
     };
     vec![StreamEvent::TokensIn(total), StreamEvent::CachedIn(cached)]
+}
+
+/// The subscription's limits in a `rate_limit_event`; a login without a subscription
+/// reports none.
+fn subscription_usage(info: &Value) -> Option<Usage> {
+    let reported = info.get("unifiedWindows")?;
+    let window = |key: &str, span: Span| {
+        let window = reported.get(key)?;
+        Some(UsageWindow {
+            span,
+            percent: (window.get("utilization")?.as_f64()? * 100.0).round() as u32,
+            resets_at: window.get("resetsAt")?.as_i64()?,
+        })
+    };
+    let windows: Vec<UsageWindow> = [
+        window("five_hour", Span::FiveHours),
+        window("seven_day", Span::Week),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    (!windows.is_empty()).then_some(Usage { windows })
 }
 
 /// Translates one output line. Lines of subagents and of kinds we do not use yield
@@ -146,6 +171,10 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
             })
             .collect(),
         "user" => vec![StreamEvent::ToolsDone],
+        "rate_limit_event" => subscription_usage(&message["rate_limit_info"])
+            .map(StreamEvent::Usage)
+            .into_iter()
+            .collect(),
         "result" => {
             let failed = message["is_error"].as_bool().unwrap_or(false);
             let error = failed.then(|| {
@@ -271,6 +300,7 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
                     StreamEvent::CachedIn(tokens) => {
                         recorder.cached_in((tokens > 0).then_some(tokens));
                     }
+                    StreamEvent::Usage(usage) => recorder.usage(usage),
                     StreamEvent::Result { error, no_turn } => outcome = Some((error, no_turn)),
                 }
             }
@@ -419,6 +449,28 @@ mod tests {
         assert!(parse_line(subagent).is_empty());
         assert!(parse_line(r#"{"type":"rate_limit_event"}"#).is_empty());
         assert!(parse_line("not json").is_empty());
+    }
+
+    #[test]
+    fn rate_limit_event_gives_the_usage_of_the_subscription() {
+        let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1791817200,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.22,"resetsAt":1791817200},"seven_day":{"utilization":0.18,"resetsAt":1792018800}}},"uuid":"8c092c44-667f-4329-af9b-b6a6803cb3ba","session_id":"s"}"#;
+        assert_eq!(
+            parse_line(line),
+            [StreamEvent::Usage(Usage {
+                windows: vec![
+                    UsageWindow {
+                        span: Span::FiveHours,
+                        percent: 22,
+                        resets_at: 1_791_817_200
+                    },
+                    UsageWindow {
+                        span: Span::Week,
+                        percent: 18,
+                        resets_at: 1_792_018_800
+                    },
+                ]
+            })]
+        );
     }
 
     #[test]

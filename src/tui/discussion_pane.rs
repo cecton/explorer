@@ -223,11 +223,8 @@ pub(crate) fn start_turn(
             (Mode::Feedback, NodeType::Compact, Some(instructions))
         }
     };
-    let endpoint_kind = state
-        .agent
-        .endpoint(&spec.endpoint)
-        .map(|endpoint| endpoint.kind.label());
-    let (Some(endpoint_kind), Some(backend)) = (endpoint_kind, state.agent.backend(&spec)) else {
+    let endpoint = state.agent.endpoint(&spec.endpoint).cloned();
+    let (Some(endpoint), Some(backend)) = (endpoint, state.agent.backend(&spec)) else {
         return Err(Refusal::Rejected(format!(
             "endpoint '{}' is not configured or has no token",
             spec.endpoint
@@ -262,7 +259,7 @@ pub(crate) fn start_turn(
     let meta = Metadata {
         node_type: Some(node_type),
         endpoint: Some(spec.endpoint.clone()),
-        kind: Some(endpoint_kind.to_string()),
+        kind: Some(endpoint.kind.label().to_string()),
         model: Some(spec.model.clone()),
         effort: Some(spec.effort.as_str().to_string()),
         status: Some(NodeStatus::Running),
@@ -320,6 +317,7 @@ pub(crate) fn start_turn(
         prompt: prompt.clone(),
         date: utc_date(now),
         backend,
+        endpoint,
         summary_backend,
         session,
         parent_session: context.parent_session,

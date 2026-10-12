@@ -41,6 +41,11 @@ pub(crate) const DEFAULT_ERROR_FG: RgbValue = RgbValue {
     green: 80,
     blue: 80,
 };
+pub(crate) const DEFAULT_WARNING_FG: RgbValue = RgbValue {
+    red: 220,
+    green: 170,
+    blue: 80,
+};
 
 pub(crate) fn title_bar_colors(focused: bool, theme: &HelixTheme) -> (RgbValue, RgbValue) {
     if focused {

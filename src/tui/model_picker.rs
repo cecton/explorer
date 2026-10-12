@@ -83,7 +83,9 @@ pub(crate) fn fetch_models(
     let kind = endpoint.kind.clone();
     tokio::spawn(async move {
         let result = match kind {
-            EndpointKind::OpenAi { url, token } => crate::agent::models::fetch(&url, &token).await,
+            EndpointKind::OpenAi { url, token } | EndpointKind::OpenCodeGo { url, token } => {
+                crate::agent::models::fetch(&url, &token).await
+            }
             EndpointKind::ClaudeCode { models } => Ok(models),
         };
         let _ = main_tx
