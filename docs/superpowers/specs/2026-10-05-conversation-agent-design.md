@@ -911,7 +911,10 @@ Real endpoints and the `claude` CLI are verified manually.
 ## 15. Future work
 
 - Architecture-walking tool (MCP or native) so the agent explores structure without
-  reading code.
+  reading code. Two gains are expected: better architectural choices, because the
+  reasoning is no longer cluttered by the code read on the way, and an exploration phase
+  for the developer ("how does this work, how is this connected to that, what is the
+  flow for this").
 - `conversation` tool for `claude-code` nodes.
 - Export of the tree into the repository.
 - Filter (`/`) in the tree; jump from a Git Log row to its node through the commit
