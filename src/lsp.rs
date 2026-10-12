@@ -1088,6 +1088,22 @@ impl LspWorker {
     }
 }
 
+// ── Disabling the worker ─────────────────────────────────────────────────────
+
+static DISABLED: OnceLock<bool> = OnceLock::new();
+
+/// True when `EXPLORER_NO_LSP` asks for no rust-analyzer; read once per process.
+pub fn disabled() -> bool {
+    *DISABLED.get_or_init(|| {
+        let value = std::env::var("EXPLORER_NO_LSP").unwrap_or_default();
+        let value = value.trim();
+        !(value.is_empty()
+            || value == "0"
+            || value.eq_ignore_ascii_case("false")
+            || value.eq_ignore_ascii_case("off"))
+    })
+}
+
 // ── Send file requests via the RRT input channel ─────────────────────────────
 
 /// Buffer for file indices requested before the LSP worker is in Running state.
@@ -1113,6 +1129,10 @@ fn buffer_file_request(input: LspInput) {
 }
 
 fn send_lsp_input(input: LspInput) {
+    if disabled() {
+        tracing::debug!("LSP: disabled, dropping input");
+        return;
+    }
     let generation = LSP_RRT.get_thread_generation();
     let output_receivers = LSP_RRT.get_receiver_count();
     let guard = LSP_RRT.shared_state.lock();

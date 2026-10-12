@@ -476,17 +476,21 @@ impl App for AppMain {
         let files = Arc::clone(&self.files);
         let root = self.root.clone();
 
-        match LSP_RRT.try_subscribe(lsp::LspConfig {
-            root: root.clone(),
-            files: Arc::clone(&files),
-            app_tx: notify_tx.clone(),
-            cargo_features: global_data.state.cargo_features.clone(),
-        }) {
-            Ok(guard) => {
-                self.lsp_guard = Some(guard);
-                tracing::info!("LSP worker started");
+        if lsp::disabled() {
+            tracing::info!("LSP worker disabled (EXPLORER_NO_LSP)");
+        } else {
+            match LSP_RRT.try_subscribe(lsp::LspConfig {
+                root: root.clone(),
+                files: Arc::clone(&files),
+                app_tx: notify_tx.clone(),
+                cargo_features: global_data.state.cargo_features.clone(),
+            }) {
+                Ok(guard) => {
+                    self.lsp_guard = Some(guard);
+                    tracing::info!("LSP worker started");
+                }
+                Err(e) => tracing::warn!("LSP worker failed to start: {e}"),
             }
-            Err(e) => tracing::warn!("LSP worker failed to start: {e}"),
         }
 
         match WATCHER_RRT.try_subscribe(crate::watcher::WatcherConfig {
@@ -1582,6 +1586,9 @@ impl App for AppMain {
                         } if self.lsp_health_skip.is_multiple_of(10) => {
                             tracing::warn!("LSP health: {:?}", health);
                         }
+                        crate::lsp::LspHealth::NotRunning if crate::lsp::disabled() => {
+                            tracing::debug!("LSP health: disabled");
+                        }
                         crate::lsp::LspHealth::NotRunning => {
                             tracing::warn!("LSP health: NotRunning");
                         }
@@ -1598,6 +1605,7 @@ impl App for AppMain {
                     // framework's FastPath and silently rejoin the still-running old
                     // worker instead of spawning a fresh one with the new init options.
                     if self.lsp_restart_pending
+                        && !crate::lsp::disabled()
                         && matches!(health, crate::lsp::LspHealth::NotRunning)
                     {
                         for file in self.files.load().iter() {

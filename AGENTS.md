@@ -70,7 +70,7 @@ Source is organized as:
 - `src/keymap.rs` — configurable top-level shortcuts: `Action` enum, `Keymap` mapping `KeyPress` → action per leader/global context, key-spec parsing, status-bar hint rendering; `<leader>Backspace` (`Action::SendToBack`, dispatched in `app.rs`) sends the focused window to the back; `<leader>f` (`Action::ToggleFavorite`, dispatched in `app.rs`) toggles the favorite of the node in focus: the one a Discussion window shows or the selected row of the Conversation Tree; `<leader>m` (`Action::OpenModelPicker`, dispatched in `app.rs`) opens the Model Picker for the Discussion window in focus
 - `src/loader.rs` — parallel file walking and `LoadedFile` construction
 - `src/session.rs` — session save/restore (pane stack incl. git log windows with branch + query, terminals, highlights of files and of conversation nodes)
-- `src/lsp.rs` — LSP client (JSON-RPC over stdio); public API: `send_file_request`, `health_check`, `try_drain_pending_requests`, `LspHealth` enum
+- `src/lsp.rs` — LSP client (JSON-RPC over stdio); public API: `send_file_request`, `health_check`, `try_drain_pending_requests`, `LspHealth` enum, `disabled` (the `EXPLORER_NO_LSP` environment variable, read once: no rust-analyzer is spawned and every request is dropped)
 - `src/watcher.rs` — filesystem watcher via `notify`; debounces events into `BatchedWatchEvent` and broadcasts via `WATCHER_RRT`
 - `src/tui/mod.rs` — module declarations
 - `src/tui/title_row.rs` — `TitleRow` trait, `render_pane_title` utility, `title_bar_colors`
@@ -131,6 +131,20 @@ cargo xtask watch
 # Regenerate themes/themes.rs from themes/*.toml (run after adding/changing theme files)
 cargo xtask update-themes
 ```
+
+### Running without rust-analyzer
+
+Every Explorer instance spawns its own rust-analyzer. When you start Explorer to test
+something that does not need syntax colors or symbol highlights, set `EXPLORER_NO_LSP`
+(any value but `0`, `false` or `off`) so the run does not stack another one:
+
+```bash
+EXPLORER_NO_LSP=1 cargo run --release
+```
+
+Previews then stay plain text, symbol highlights do nothing, and `:features`,
+`:all-features` and `:default-features` are refused. Prefix every run command with it:
+a shell tool call does not keep exported variables for the next one.
 
 ### Tests
 

@@ -348,6 +348,18 @@ impl FilePreviewComponent {
         }
 
         let trimmed = cmd.trim();
+        if crate::lsp::disabled()
+            && (trimmed == "all-features"
+                || trimmed == "default-features"
+                || trimmed == "features"
+                || trimmed.starts_with("features "))
+        {
+            self.error = Some((
+                "rust-analyzer is disabled (EXPLORER_NO_LSP)".to_string(),
+                Instant::now(),
+            ));
+            return;
+        }
         if trimmed == "all-features" {
             self.error = Some((
                 "cargo features: all (restarting rust-analyzer...)".to_string(),
