@@ -78,7 +78,7 @@ impl Usage {
         offset_of: impl Fn(i64) -> i32,
     ) -> Vec<(String, Option<u32>)> {
         let mut pieces = Vec::with_capacity(self.windows.len() * 3 + 2);
-        pieces.push((format!(" {label}"), None));
+        pieces.push((format!("│ {label}"), None));
         for (index, window) in self.windows.iter().enumerate() {
             let (percent, reset) = window.shown(now, offset_of(window.resets_at));
             let separator = if index == 0 { " " } else { " · " };
@@ -286,7 +286,7 @@ mod tests {
         let pieces = usage.pieces("OpenCode", 1_791_800_000, offset_of);
         assert_eq!(
             text(&pieces),
-            " OpenCode 22% 17:00 · 18% Thu 01:00 · 91% 10th 10:46 "
+            "│ OpenCode 22% 17:00 · 18% Thu 01:00 · 91% 10th 10:46 "
         );
         let percents: Vec<u32> = pieces.iter().filter_map(|(_, percent)| *percent).collect();
         assert_eq!(percents, [22, 18, 91]);
@@ -309,7 +309,7 @@ mod tests {
             ],
         };
         let pieces = usage.pieces("Claude", 1_791_817_200, |_| 7200);
-        assert_eq!(text(&pieces), " Claude 0% · 18% Thu 01:00 ");
+        assert_eq!(text(&pieces), "│ Claude 0% · 18% Thu 01:00 ");
     }
 
     #[test]
