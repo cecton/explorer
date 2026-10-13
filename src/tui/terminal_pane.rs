@@ -50,9 +50,9 @@ impl TitleRow for TerminalPaneComponent {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        theme: &HelixTheme,
-        state: &AppState,
+        state: &mut AppState,
     ) -> usize {
+        let theme = &state.theme;
         let id = self.terminal_id(state).unwrap_or(0);
         let (base, exited, exit_code, exit_signal) = state
             .with_terminal(id, |g| {

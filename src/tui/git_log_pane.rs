@@ -210,17 +210,17 @@ impl GitLogPaneComponent {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        theme: &HelixTheme,
-        state: &AppState,
+        state: &mut AppState,
         window_id: usize,
     ) -> usize {
-        let Some(win) = state.git_logs.get(&window_id) else {
+        let theme = &state.theme;
+        let Some(win) = state.git_logs.get_mut(&window_id) else {
             return 0;
         };
         let input_mode = if win.branch_picking {
-            Some((&win.branch_picker.query, "Show branch:"))
+            Some((&mut win.branch_picker.query, "Show branch:"))
         } else if win.search_active {
-            Some((&win.query, "/"))
+            Some((&mut win.query, "/"))
         } else {
             None
         };
@@ -230,6 +230,7 @@ impl GitLogPaneComponent {
             let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
             let color_bg = TuiColor::from(bg_rgb);
             let color_fg = TuiColor::from(fg_rgb);
+            let color_selection = TuiColor::from(title_selection_bg(focused, theme));
             let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
             *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
             *ops += RenderOpCommon::SetBgColor(color_bg);
@@ -245,7 +246,7 @@ impl GitLogPaneComponent {
                 width,
                 1,
                 focused,
-                (color_bg, color_fg),
+                (color_bg, color_fg, color_selection),
             );
             1
         } else {

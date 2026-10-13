@@ -15,7 +15,7 @@ use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use parking_lot::{Mutex, RwLock};
 use r3bl_tui::core::pty::{ControlledChildTerminationHandle, PtyInputEvent};
-use r3bl_tui::{OfsBufVT100, Size};
+use r3bl_tui::{MouseInput, OfsBufVT100, Size};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
@@ -572,6 +572,8 @@ pub struct AppState {
     /// Prompts waiting for their turn, next to start first. Never saved with the session.
     pub queued_turns: Vec<PendingTurn>,
     pub mouse_drag_active: bool,
+    /// Window whose input holds the mouse selection in progress.
+    pub input_drag: Option<Window>,
     pub terminal_grabbed: bool,
     pub text_selection: Option<TextSelection>,
     pub session_dirty_at: Option<Instant>,
@@ -607,6 +609,59 @@ impl AppState {
 
     pub fn mark_session_dirty(&mut self) {
         self.session_dirty_at = Some(Instant::now());
+    }
+
+    /// The input `window` shows right now, if any.
+    pub fn open_input(&mut self, window: &Window) -> Option<&mut InputLine> {
+        match window {
+            Window::Discussion(id) => self.discussions.get_mut(id).map(|shown| &mut shown.draft),
+            Window::GitLog(id) => {
+                let win = self.git_logs.get_mut(id)?;
+                if win.branch_picking {
+                    Some(&mut win.branch_picker.query)
+                } else if win.search_active {
+                    Some(&mut win.query)
+                } else {
+                    None
+                }
+            }
+            Window::ConversationTree if self.tree_view.search_active => {
+                Some(&mut self.tree_view.query)
+            }
+            Window::FilePreview(key) => {
+                self.preview_inputs.get_mut(key).map(PreviewInput::line_mut)
+            }
+            Window::WindowPicker => Some(&mut self.window_picker.query),
+            Window::ThemePicker => Some(&mut self.theme_picker.query),
+            Window::ModelPicker => Some(&mut self.model_picker.query),
+            Window::ConversationTree | Window::Terminal(_) | Window::CommitDiff(_) => None,
+        }
+    }
+
+    /// Hands a mouse event to the input of `window`: true when the input took it. A
+    /// selection it starts holds the mouse until the button is released.
+    pub fn input_mouse(&mut self, window: Window, mouse: &MouseInput) -> bool {
+        let Some(input) = self.open_input(&window) else {
+            return false;
+        };
+        if !input.handle_mouse(mouse) {
+            return false;
+        }
+        let selecting = input.selecting();
+        self.input_drag = selecting.then_some(window);
+        self.mouse_drag_active = selecting;
+        true
+    }
+
+    /// Drops the input selection in progress, if any.
+    pub fn cancel_input_drag(&mut self) {
+        let Some(window) = self.input_drag.take() else {
+            return;
+        };
+        if let Some(input) = self.open_input(&window) {
+            input.cancel_select();
+        }
+        self.mouse_drag_active = false;
     }
 
     pub fn with_terminal<R>(&self, id: usize, f: impl FnOnce(&TerminalPane) -> R) -> Option<R> {
@@ -681,6 +736,7 @@ impl AppState {
             running_turns: HashMap::new(),
             queued_turns: Vec::new(),
             mouse_drag_active: false,
+            input_drag: None,
             terminal_grabbed: false,
             text_selection: None,
             session_dirty_at: None,

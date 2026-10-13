@@ -135,20 +135,23 @@ impl TitleRow for ModelPickerComponent {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        theme: &HelixTheme,
-        state: &AppState,
+        state: &mut AppState,
     ) -> usize {
         let origin = pane_box.style_adjusted_origin_pos;
         let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
-        let query = &state.model_picker.query;
         let prompt = "Model: ";
         let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
-        let height = query.height(None, prompt, width, max_rows);
+        let height = state
+            .model_picker
+            .query
+            .height(None, prompt, width, max_rows);
 
-        let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
+        let (bg_rgb, fg_rgb) = title_bar_colors(focused, &state.theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
+        let color_selection = TuiColor::from(title_selection_bg(focused, &state.theme));
         let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+        let query = &mut state.model_picker.query;
 
         for row_offset in 0..height {
             *ops +=
@@ -167,7 +170,7 @@ impl TitleRow for ModelPickerComponent {
             width,
             height,
             focused,
-            (color_bg, color_fg),
+            (color_bg, color_fg, color_selection),
         );
         height
     }

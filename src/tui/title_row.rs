@@ -6,8 +6,7 @@ pub(crate) trait TitleRow {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        theme: &HelixTheme,
-        state: &AppState,
+        state: &mut AppState,
     ) -> usize;
 }
 
@@ -63,6 +62,12 @@ pub(crate) fn title_bar_colors(focused: bool, theme: &HelixTheme) -> (RgbValue, 
                 .unwrap_or(DEFAULT_STATUSLINE_FG),
         )
     }
+}
+
+/// Background of a mouse selection in a title-bar input: a focused title bar already
+/// wears `ui.selection`, so the selection takes the other title bar's background.
+pub(crate) fn title_selection_bg(focused: bool, theme: &HelixTheme) -> RgbValue {
+    title_bar_colors(!focused, theme).0
 }
 
 pub(crate) fn render_pane_title(

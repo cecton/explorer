@@ -1,15 +1,47 @@
+use crate::loader::{drag_range, word_bounds};
 use crate::tui::*;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::time::{Duration, Instant};
 use unicode_segmentation::UnicodeSegmentation;
 
-#[derive(Debug, Default)]
+const DOUBLE_CLICK: Duration = Duration::from_millis(400);
+
+#[derive(Clone, Debug, Default)]
 pub struct InputLine {
     text: String,
     cursor: usize,
-    /// Graphemes that fit on one row, as of the last render; drives `Up`/`Down`.
-    row_capacity: AtomicUsize,
     /// First visible row when the text is taller than the rows it is given.
-    scroll: AtomicUsize,
+    scroll: usize,
+    /// Where the input was last painted; drives `Up`/`Down` and the mouse.
+    painted: Option<Painted>,
+    selection: Option<Selection>,
+    /// Time and grapheme of the last press, to recognize a double click.
+    last_press: Option<(Instant, usize)>,
+}
+
+/// The cells an input was painted on: its first one, prompt included, and its size.
+#[derive(Clone, Copy, Debug)]
+struct Painted {
+    row: usize,
+    col: usize,
+    prompt_width: usize,
+    width: usize,
+    rows: usize,
+}
+
+impl Painted {
+    /// Graphemes that fit on one row.
+    fn capacity(&self) -> usize {
+        self.width.saturating_sub(self.prompt_width).max(1)
+    }
+}
+
+/// A mouse selection in progress, in bytes of the text.
+#[derive(Clone, Copy, Debug)]
+struct Selection {
+    /// Byte under the press, and the word around it.
+    anchor: usize,
+    word: (usize, usize),
+    range: (usize, usize),
 }
 
 /// One screen row of a soft-wrapped input: a run of graphemes of the text.
@@ -50,17 +82,6 @@ fn row_of_cursor(rows: &[VisualRow], cursor: usize) -> usize {
         .unwrap_or(0)
 }
 
-impl Clone for InputLine {
-    fn clone(&self) -> Self {
-        Self {
-            text: self.text.clone(),
-            cursor: self.cursor,
-            row_capacity: AtomicUsize::new(self.row_capacity.load(Ordering::Relaxed)),
-            scroll: AtomicUsize::new(self.scroll.load(Ordering::Relaxed)),
-        }
-    }
-}
-
 impl InputLine {
     pub fn new() -> Self {
         Self::default()
@@ -81,20 +102,139 @@ impl InputLine {
     pub fn set_text(&mut self, text: impl Into<String>) {
         self.text = text.into();
         self.cursor = self.text.graphemes(true).count();
+        self.selection = None;
     }
 
     pub fn clear(&mut self) {
         self.text.clear();
         self.cursor = 0;
+        self.selection = None;
+    }
+
+    /// The grapheme a screen position puts the cursor on, and the one it points at:
+    /// they differ past the end of a row. `None` outside the cells the input was last
+    /// painted on, unless `clamp` brings the position back into them.
+    fn locate(&self, pos: Pos, clamp: bool) -> Option<(usize, usize)> {
+        let painted = self.painted?;
+        let (row, col) = (pos.row_index.as_usize(), pos.col_index.as_usize());
+        let inside = (painted.row..painted.row + painted.rows).contains(&row)
+            && (painted.col..painted.col + painted.width).contains(&col);
+        if !inside && !clamp {
+            return None;
+        }
+        let screen_row = row
+            .saturating_sub(painted.row)
+            .min(painted.rows.saturating_sub(1));
+        let column = col.saturating_sub(painted.col + painted.prompt_width);
+        let rows = visual_rows(&self.text, painted.capacity());
+        Some(match rows.get(self.scroll + screen_row) {
+            Some(row) => (
+                row.start + column.min(row.len),
+                row.start + column.min(row.len.saturating_sub(1)),
+            ),
+            None => {
+                let end = self.text.graphemes(true).count();
+                (end, end)
+            }
+        })
+    }
+
+    /// Puts the cursor under the mouse and anchors a selection on the word there; a
+    /// second press on the same grapheme selects that word. False outside the input.
+    fn press(&mut self, pos: Pos, now: Instant) -> bool {
+        let Some((cursor, pointed)) = self.locate(pos, false) else {
+            return false;
+        };
+        self.cursor = cursor;
+        let anchor = grapheme_byte_offset(&self.text, pointed);
+        let word = if anchor < self.text.len() {
+            word_bounds(&self.text, anchor)
+        } else {
+            (anchor, anchor)
+        };
+        let double = self
+            .last_press
+            .is_some_and(|(at, last)| last == pointed && now.duration_since(at) < DOUBLE_CLICK);
+        self.last_press = Some((now, pointed));
+        self.selection = Some(Selection {
+            anchor,
+            word,
+            range: if double { word } else { (anchor, anchor) },
+        });
+        true
+    }
+
+    /// Extends the selection to the word under the mouse, whatever the rows in between.
+    /// A position outside the input stands for the nearest cell of it.
+    fn drag(&mut self, pos: Pos) {
+        let (Some(selection), Some((_, pointed))) = (self.selection, self.locate(pos, true)) else {
+            return;
+        };
+        let cursor = grapheme_byte_offset(&self.text, pointed);
+        let range = if cursor < self.text.len() {
+            drag_range(&self.text, selection.anchor, selection.word, cursor)
+        } else {
+            (selection.word.0, self.text.len())
+        };
+        self.selection = Some(Selection { range, ..selection });
+    }
+
+    /// Ends the selection and returns its text, if it holds any.
+    fn release(&mut self) -> Option<String> {
+        let (lo, hi) = self.selection.take()?.range;
+        self.text
+            .get(lo..hi)
+            .filter(|selected| !selected.is_empty())
+            .map(str::to_string)
+    }
+
+    /// Whether a mouse selection is in progress.
+    pub fn selecting(&self) -> bool {
+        self.selection.is_some()
+    }
+
+    pub fn cancel_select(&mut self) {
+        self.selection = None;
+    }
+
+    /// Takes the mouse events that are the input's: a press on it places the cursor, a
+    /// drag from there selects whole words, and the release copies them to the
+    /// clipboard. Returns false for any other event.
+    pub fn handle_mouse(&mut self, mouse: &MouseInput) -> bool {
+        match mouse {
+            MouseInput {
+                kind: MouseInputKind::MouseDown(Button::Left),
+                pos,
+                ..
+            } => self.press(*pos, Instant::now()),
+            MouseInput {
+                kind: MouseInputKind::MouseDrag(Button::Left),
+                pos,
+                ..
+            } if self.selection.is_some() => {
+                self.drag(*pos);
+                true
+            }
+            MouseInput {
+                kind: MouseInputKind::MouseUp(Button::Left),
+                ..
+            } if self.selection.is_some() => {
+                if let Some(selected) = self.release() {
+                    let mut clipboard = r3bl_tui::SystemClipboard;
+                    let _ = clipboard.try_to_put_content_into_clipboard(selected);
+                }
+                true
+            }
+            _ => false,
+        }
     }
 
     /// Moves the cursor one screen row up or down, keeping its column. Returns false at
     /// the first or last row so the caller can use the key for something else.
     fn move_vertically(&mut self, down: bool) -> bool {
-        let capacity = match self.row_capacity.load(Ordering::Relaxed) {
-            0 => usize::MAX,
-            capacity => capacity,
-        };
+        let capacity = self
+            .painted
+            .map_or(usize::MAX, |painted| painted.capacity());
         let rows = visual_rows(&self.text, capacity);
         let current = row_of_cursor(&rows, self.cursor);
         let target = if down {
@@ -588,10 +728,11 @@ impl InputLine {
     /// Paints the input soft-wrapped to `width` on at most `max_rows` rows, scrolling
     /// inside them so the cursor row stays visible. The prompt stays on the first row
     /// shown and every row starts after it. The placeholder is laid out as text that
-    /// follows the typed text, in its own color; the cursor never enters it.
+    /// follows the typed text, in its own color; the cursor never enters it. `colors`
+    /// are the background, the text and the background of a mouse selection.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
-        &self,
+        &mut self,
         mut ops: &mut RenderOpIRVec,
         placeholder: Option<(&str, TuiColor)>,
         prompt: &str,
@@ -599,12 +740,11 @@ impl InputLine {
         width: u16,
         max_rows: usize,
         focused: bool,
-        colors: (TuiColor, TuiColor),
+        colors: (TuiColor, TuiColor, TuiColor),
     ) {
         let prompt_width = prompt.graphemes(true).count();
         let capacity = (width as usize).saturating_sub(prompt_width).max(1);
-        self.row_capacity.store(capacity, Ordering::Relaxed);
-        let (color_bg, color_text) = colors;
+        let (color_bg, color_text, color_selection) = colors;
         let text_style = new_style!(color_fg: {color_text} color_bg: {color_bg});
         // The compositor takes a painted cell's *colors* from the current pen
         // (`ApplyColors`/`SetBgColor`), not from the style handed to
@@ -613,6 +753,7 @@ impl InputLine {
         // drawn with foreground/background swapped, which stays visible at any pane
         // position (a bare `reverse` attribute inherits the stale pen and can vanish).
         let cursor_style = new_style!(color_fg: {color_bg} color_bg: {color_text});
+        let selection_style = new_style!(color_fg: {color_text} color_bg: {color_selection});
         ops += RenderOpCommon::ApplyColors(Some(text_style));
 
         let typed = self.text.graphemes(true).count();
@@ -621,29 +762,46 @@ impl InputLine {
             None => ("", text_style),
         };
         let shown = format!("{}{placeholder}", self.text);
+        let graphemes: Vec<&str> = shown.graphemes(true).collect();
+        let cursor = self.cursor.min(typed);
+        let selected = self.selection.map_or(0..0, |selection| {
+            let index = |byte| {
+                self.text
+                    .grapheme_indices(true)
+                    .take_while(|(at, _)| *at < byte)
+                    .count()
+            };
+            index(selection.range.0)..index(selection.range.1)
+        });
         let style_at = |index: usize| {
-            if index < typed {
+            if focused && index == cursor {
+                cursor_style
+            } else if selected.contains(&index) {
+                selection_style
+            } else if index < typed {
                 text_style
             } else {
                 placeholder_style
             }
         };
-        let graphemes: Vec<&str> = shown.graphemes(true).collect();
-        let cursor = self.cursor.min(typed);
         let rows = visual_rows(&shown, capacity);
         let cursor_row = row_of_cursor(&rows, cursor);
         let max_rows = max_rows.max(1);
 
-        let mut scroll = self
-            .scroll
-            .load(Ordering::Relaxed)
-            .min(rows.len().saturating_sub(max_rows));
+        let mut scroll = self.scroll.min(rows.len().saturating_sub(max_rows));
         if cursor_row < scroll {
             scroll = cursor_row;
         } else if cursor_row >= scroll + max_rows {
             scroll = cursor_row + 1 - max_rows;
         }
-        self.scroll.store(scroll, Ordering::Relaxed);
+        self.scroll = scroll;
+        self.painted = Some(Painted {
+            row: origin.row_index.as_usize(),
+            col: origin.col_index.as_usize(),
+            prompt_width,
+            width: width as usize,
+            rows: (rows.len() - scroll).min(max_rows),
+        });
 
         if prompt_width > 0 {
             ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
@@ -661,22 +819,17 @@ impl InputLine {
                 origin,
                 col(prompt_width as u16) + row(screen_row as u16),
             );
-            ops += RenderOpCommon::ApplyColors(Some(style_at(visual.start)));
+            let mut pen = None;
             for (column, gr) in graphemes[visual.start..visual.start + visual.len]
                 .iter()
                 .enumerate()
             {
-                let index = visual.start + column;
-                if focused && row_idx == cursor_row && index == cursor {
-                    ops += RenderOpCommon::ApplyColors(Some(cursor_style));
-                    ops += RenderOpIR::PaintTextWithAttributes((*gr).into(), Some(cursor_style));
-                    ops += RenderOpCommon::ApplyColors(Some(style_at(index + 1)));
-                } else {
-                    if index == typed {
-                        ops += RenderOpCommon::ApplyColors(Some(placeholder_style));
-                    }
-                    ops += RenderOpIR::PaintTextWithAttributes((*gr).into(), Some(style_at(index)));
+                let style = style_at(visual.start + column);
+                if pen != Some(style) {
+                    ops += RenderOpCommon::ApplyColors(Some(style));
+                    pen = Some(style);
                 }
+                ops += RenderOpIR::PaintTextWithAttributes((*gr).into(), Some(style));
             }
             if focused && row_idx == cursor_row && cursor == visual.start + visual.len {
                 ops += RenderOpCommon::MoveCursorPositionRelTo(
@@ -701,6 +854,10 @@ fn grapheme_byte_offset(text: &str, grapheme_idx: usize) -> usize {
 #[cfg(test)]
 mod cursor_render_tests {
     use super::*;
+
+    fn selection() -> TuiColor {
+        TuiColor::from(RgbValue::from_u8(90, 60, 20))
+    }
 
     fn colors() -> (TuiColor, TuiColor) {
         // (color_bg, color_text)
@@ -730,7 +887,7 @@ mod cursor_render_tests {
     #[test]
     fn end_of_line_cursor_sets_swapped_pen() {
         let (color_bg, color_text) = colors();
-        let input = InputLine::new();
+        let mut input = InputLine::new();
         let mut ops = RenderOpIRVec::new();
         input.render(
             &mut ops,
@@ -740,7 +897,7 @@ mod cursor_render_tests {
             20,
             1,
             true,
-            (color_bg, color_text),
+            (color_bg, color_text, selection()),
         );
 
         let pen = pen_before_paint(&ops, " ").expect("cursor space must set the pen");
@@ -776,7 +933,7 @@ mod cursor_render_tests {
             20,
             4,
             true,
-            (color_bg, color_text),
+            (color_bg, color_text, selection()),
         );
 
         let painted = painted(&ops);
@@ -811,7 +968,7 @@ mod cursor_render_tests {
             20,
             4,
             true,
-            (color_bg, color_text),
+            (color_bg, color_text, selection()),
         );
 
         // The cursor ends the typed row; the placeholder starts on the next one.
@@ -841,7 +998,7 @@ mod cursor_render_tests {
             20,
             1,
             true,
-            (color_bg, color_text),
+            (color_bg, color_text, selection()),
         );
 
         let pen = pen_before_paint(&ops, "a").expect("cursor grapheme must set the pen");
@@ -852,7 +1009,7 @@ mod cursor_render_tests {
     #[test]
     fn unfocused_input_paints_no_cursor_cell() {
         let (color_bg, color_text) = colors();
-        let input = InputLine::new();
+        let mut input = InputLine::new();
         let mut ops = RenderOpIRVec::new();
         input.render(
             &mut ops,
@@ -862,7 +1019,7 @@ mod cursor_render_tests {
             20,
             1,
             false,
-            (color_bg, color_text),
+            (color_bg, color_text, selection()),
         );
 
         assert!(
@@ -992,7 +1149,13 @@ mod wrap_tests {
     fn ctrl_a_and_ctrl_e_ignore_soft_wrapping() {
         let mut input = InputLine::new();
         input.set_text("abcdefgh\nij");
-        input.row_capacity.store(4, Ordering::Relaxed);
+        input.painted = Some(Painted {
+            row: 0,
+            col: 0,
+            prompt_width: 0,
+            width: 4,
+            rows: 1,
+        });
         input.cursor = 6;
         assert!(input.handle_key(&ctrl('a')));
         assert_eq!(input.cursor, 0);
@@ -1033,7 +1196,13 @@ mod wrap_tests {
     fn ctrl_k_and_ctrl_u_ignore_soft_wrapping() {
         let mut input = InputLine::new();
         input.set_text("abcdefgh\nij");
-        input.row_capacity.store(4, Ordering::Relaxed);
+        input.painted = Some(Painted {
+            row: 0,
+            col: 0,
+            prompt_width: 0,
+            width: 4,
+            rows: 1,
+        });
         input.cursor = 6;
         assert!(input.handle_key(&ctrl('u')));
         assert_eq!(input.text(), "gh\nij");
@@ -1063,6 +1232,7 @@ mod wrap_tests {
         let colors = (
             TuiColor::from(RgbValue::from_u8(0, 0, 0)),
             TuiColor::from(RgbValue::from_u8(255, 255, 255)),
+            TuiColor::from(RgbValue::from_u8(90, 60, 20)),
         );
         input.render(&mut ops, None, "", col(0) + row(0), 4, 3, true, colors);
         input.cursor = 1;
@@ -1078,6 +1248,7 @@ mod wrap_tests {
         let colors = (
             TuiColor::from(RgbValue::from_u8(0, 0, 0)),
             TuiColor::from(RgbValue::from_u8(255, 255, 255)),
+            TuiColor::from(RgbValue::from_u8(90, 60, 20)),
         );
         input.render(&mut ops, None, "", col(0) + row(0), 10, 2, false, colors);
         let painted: Vec<&str> = ops
@@ -1088,5 +1259,183 @@ mod wrap_tests {
             })
             .collect();
         assert_eq!(painted, ["c", "d"]);
+    }
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    fn colors() -> (TuiColor, TuiColor, TuiColor) {
+        (
+            TuiColor::from(RgbValue::from_u8(0, 0, 0)),
+            TuiColor::from(RgbValue::from_u8(255, 255, 255)),
+            TuiColor::from(RgbValue::from_u8(90, 60, 20)),
+        )
+    }
+
+    /// An input holding `text`, painted with `prompt` at row 5 and column 3.
+    fn painted(text: &str, prompt: &str, width: u16, max_rows: usize) -> InputLine {
+        let mut input = InputLine::with_text(text);
+        let mut ops = RenderOpIRVec::new();
+        let origin = col(3) + row(5);
+        input.render(
+            &mut ops,
+            None,
+            prompt,
+            origin,
+            width,
+            max_rows,
+            true,
+            colors(),
+        );
+        input
+    }
+
+    fn at(row_index: u16, col_index: u16) -> Pos {
+        col(col_index) + row(row_index)
+    }
+
+    /// Background of the pen in force when each grapheme of the text is painted.
+    fn backgrounds(input: &mut InputLine) -> Vec<(String, Option<TuiColor>)> {
+        let mut ops = RenderOpIRVec::new();
+        input.render(&mut ops, None, "", col(3) + row(5), 20, 3, false, colors());
+        let mut pen = None;
+        let mut cells = Vec::new();
+        for op in ops.iter() {
+            match op {
+                RenderOpIR::Common(RenderOpCommon::ApplyColors(Some(style))) => {
+                    pen = style.color_bg;
+                }
+                RenderOpIR::PaintTextWithAttributes(text, _) => {
+                    cells.push((text.to_string(), pen));
+                }
+                _ => {}
+            }
+        }
+        cells
+    }
+
+    #[test]
+    fn a_press_puts_the_cursor_under_the_mouse_after_the_prompt() {
+        let mut input = painted("abcdef\ngh", "> ", 12, 3);
+        let now = Instant::now();
+        assert!(input.press(at(5, 9), now));
+        assert_eq!(input.cursor, 4);
+        assert!(input.press(at(5, 3), now), "on the prompt");
+        assert_eq!(input.cursor, 0);
+        assert!(input.press(at(6, 14), now), "past the end of a row");
+        assert_eq!(input.cursor, 9);
+        assert!(!input.press(at(4, 9), now), "above the input");
+        assert!(!input.press(at(7, 9), now), "below its rows");
+        assert!(!input.press(at(5, 15), now), "past its width");
+        assert_eq!(input.cursor, 9);
+    }
+
+    #[test]
+    fn a_press_follows_soft_wrapping_and_the_scroll() {
+        let mut input = painted("abcdefgh", "", 4, 3);
+        assert!(input.press(at(6, 4), Instant::now()));
+        assert_eq!(input.cursor, 5);
+
+        let mut input = painted("a\nb\nc\nd", "", 10, 2);
+        assert!(input.press(at(5, 3), Instant::now()));
+        assert_eq!(input.cursor, 4, "the first row shown is the third one");
+        assert!(!input.press(at(7, 3), Instant::now()));
+    }
+
+    #[test]
+    fn a_drag_selects_whole_words_across_lines_in_both_directions() {
+        let mut input = painted("one two\nthree four", "", 20, 3);
+        let now = Instant::now();
+        assert!(input.press(at(5, 8), now));
+        input.drag(at(6, 4));
+        assert_eq!(input.release().as_deref(), Some("two\nthree"));
+        assert!(!input.selecting());
+
+        assert!(input.press(at(6, 4), now));
+        input.drag(at(5, 4));
+        assert_eq!(input.release().as_deref(), Some("one two\nthree"));
+
+        assert!(input.press(at(5, 8), now));
+        input.drag(at(9, 40));
+        assert_eq!(input.release().as_deref(), Some("two\nthree four"));
+        assert!(input.press(at(6, 4), now));
+        input.drag(at(0, 0));
+        assert_eq!(input.release().as_deref(), Some("one two\nthree"));
+    }
+
+    #[test]
+    fn a_click_copies_nothing_and_a_double_click_takes_the_word() {
+        let mut input = painted("one two", "", 20, 1);
+        let now = Instant::now();
+        assert!(input.press(at(5, 8), now));
+        assert_eq!(input.release(), None);
+        assert!(input.press(at(5, 8), now + Duration::from_millis(100)));
+        assert_eq!(input.release().as_deref(), Some("two"));
+        assert!(input.press(at(5, 8), now + Duration::from_secs(2)));
+        assert_eq!(input.release(), None);
+    }
+
+    #[test]
+    fn a_press_at_the_end_of_the_text_selects_backwards_only() {
+        let mut input = painted("one two", "", 20, 1);
+        assert!(input.press(at(5, 15), Instant::now()));
+        assert_eq!(input.cursor, 7);
+        input.drag(at(5, 4));
+        assert_eq!(input.release().as_deref(), Some("one two"));
+
+        let mut empty = painted("", "", 20, 1);
+        assert!(empty.press(at(5, 3), Instant::now()));
+        empty.drag(at(5, 9));
+        assert_eq!(empty.release(), None);
+    }
+
+    #[test]
+    fn the_selection_is_painted_on_its_own_background() {
+        let (color_bg, _, color_selection) = colors();
+        let mut input = painted("one two", "", 20, 1);
+        assert!(input.press(at(5, 3), Instant::now()));
+        input.drag(at(5, 4));
+        let cells = backgrounds(&mut input);
+        let selected: String = cells
+            .iter()
+            .filter(|(_, bg)| *bg == Some(color_selection))
+            .map(|(text, _)| text.as_str())
+            .collect();
+        assert_eq!(selected, "one");
+        assert_eq!(cells[3], (" ".to_string(), Some(color_bg)));
+    }
+
+    #[test]
+    fn replacing_the_text_drops_the_selection() {
+        let mut input = painted("one two", "", 20, 1);
+        assert!(input.press(at(5, 3), Instant::now()));
+        input.set_text("x");
+        assert!(!input.selecting());
+        assert!(input.press(at(5, 3), Instant::now()));
+        input.clear();
+        assert!(!input.selecting());
+        assert!(input.press(at(5, 3), Instant::now()));
+        input.cancel_select();
+        assert_eq!(input.release(), None);
+    }
+
+    #[test]
+    fn the_mouse_is_the_inputs_only_on_its_cells_or_while_it_selects() {
+        let mut input = painted("one two", "", 20, 1);
+        let mouse = |kind, pos| MouseInput {
+            pos,
+            kind,
+            maybe_modifier_keys: None,
+        };
+        let left = Button::Left;
+        assert!(!input.handle_mouse(&mouse(MouseInputKind::MouseDrag(left), at(5, 4))));
+        assert!(!input.handle_mouse(&mouse(MouseInputKind::MouseUp(left), at(5, 4))));
+        assert!(!input.handle_mouse(&mouse(MouseInputKind::MouseDown(left), at(9, 4))));
+        assert!(input.handle_mouse(&mouse(MouseInputKind::MouseDown(left), at(5, 4))));
+        assert!(input.selecting());
+        assert!(input.handle_mouse(&mouse(MouseInputKind::MouseUp(left), at(9, 40))));
+        assert!(!input.selecting());
     }
 }

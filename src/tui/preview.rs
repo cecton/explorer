@@ -218,7 +218,7 @@ impl FilePreviewComponent {
     #[allow(clippy::too_many_arguments)]
     fn render_input_title(
         ops: &mut RenderOpIRVec,
-        input: &InputLine,
+        input: &mut InputLine,
         prompt: &str,
         origin: Pos,
         width: u16,
@@ -229,6 +229,7 @@ impl FilePreviewComponent {
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
+        let color_selection = TuiColor::from(title_selection_bg(focused, theme));
         let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
         for row_offset in 0..height {
@@ -248,7 +249,7 @@ impl FilePreviewComponent {
             width,
             height,
             focused,
-            (color_bg, color_fg),
+            (color_bg, color_fg, color_selection),
         );
     }
 
@@ -1211,12 +1212,12 @@ impl TitleRow for FilePreviewComponent {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        theme: &HelixTheme,
-        state: &AppState,
+        state: &mut AppState,
     ) -> usize {
+        let theme = &state.theme;
         let input = self
             .file_key(state)
-            .and_then(|key| state.preview_inputs.get(&key));
+            .and_then(|key| state.preview_inputs.get_mut(&key));
         if let Some(input) = input {
             let prompt = match input {
                 PreviewInput::Command(_) => ":",
@@ -1229,7 +1230,7 @@ impl TitleRow for FilePreviewComponent {
             let height = input.line().height(None, prompt, width, max_rows);
             Self::render_input_title(
                 ops,
-                input.line(),
+                input.line_mut(),
                 prompt,
                 origin,
                 width,

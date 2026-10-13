@@ -153,6 +153,22 @@ pub fn word_bounds(content: &str, cursor_byte: usize) -> (usize, usize) {
     }
 }
 
+/// Range covered by a drag from `word`, clicked at `anchor`, to the word under
+/// `cursor`: whole words at both ends, whatever the rows they are on.
+pub(crate) fn drag_range(
+    text: &str,
+    anchor: usize,
+    word: (usize, usize),
+    cursor: usize,
+) -> (usize, usize) {
+    let (start, end) = word_bounds(text, cursor);
+    if cursor >= anchor {
+        (word.0, end.max(word.1))
+    } else {
+        (start.min(word.0), word.1)
+    }
+}
+
 pub struct LoadedFile {
     pub path: Utf8PathBuf,
     pub data: RwLock<FileData>,

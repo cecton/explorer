@@ -637,18 +637,19 @@ impl TitleRow for ConversationTreeComponent {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        theme: &HelixTheme,
-        state: &AppState,
+        state: &mut AppState,
     ) -> usize {
         if !state.tree_view.search_active {
-            render_pane_title(ops, pane_box, &Self::title(state), false, theme, focused);
+            let title = Self::title(state);
+            render_pane_title(ops, pane_box, &title, false, &state.theme, focused);
             return 1;
         }
         let origin = pane_box.style_adjusted_origin_pos;
         let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
-        let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
+        let (bg_rgb, fg_rgb) = title_bar_colors(focused, &state.theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
+        let color_selection = TuiColor::from(title_selection_bg(focused, &state.theme));
         let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
         *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
         *ops += RenderOpCommon::SetBgColor(color_bg);
@@ -664,7 +665,7 @@ impl TitleRow for ConversationTreeComponent {
             width,
             1,
             focused,
-            (color_bg, color_fg),
+            (color_bg, color_fg, color_selection),
         );
         1
     }

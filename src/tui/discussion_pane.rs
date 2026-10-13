@@ -3,7 +3,7 @@ use crate::agent::turn::{self, TurnRequest};
 use crate::agent::{Mode, ModelSpec};
 use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
 use crate::keymap::{Action, Keymap, hint};
-use crate::loader::word_bounds;
+use crate::loader::{drag_range, word_bounds};
 use crate::tui::markdown;
 use crate::tui::pane_component::drag_modifier_from_mouse;
 use crate::tui::text_layout::{display_width, truncate, wrap};
@@ -547,17 +547,6 @@ fn locate(lines: &[DocLine], row: usize, col: usize) -> Option<(DocPart, usize)>
                 .find_map(|line| on(line, usize::MAX))
         })
         .or_else(|| lines[row + 1..].iter().find_map(|line| on(line, 0)))
-}
-
-/// Range covered by a drag from `word`, clicked at `anchor`, to the word under
-/// `cursor`: whole words at both ends, whatever the rows they are on.
-fn drag_range(text: &str, anchor: usize, word: (usize, usize), cursor: usize) -> (usize, usize) {
-    let (start, end) = word_bounds(text, cursor);
-    if cursor >= anchor {
-        (word.0, end.max(word.1))
-    } else {
-        (start.min(word.0), word.1)
-    }
 }
 
 /// `ranges` with `lo..hi` added, overlapping and touching ranges merged.
@@ -1305,10 +1294,10 @@ impl DiscussionComponent {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        theme: &HelixTheme,
-        state: &AppState,
+        state: &mut AppState,
         window_id: usize,
     ) -> usize {
+        let theme = &state.theme;
         let title = Self::title(state, window_id);
         let model = state
             .discussions
@@ -1723,18 +1712,6 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                     Some(input_style),
                 );
             }
-            discussion.draft.render(
-                &mut input_ops,
-                hint.as_deref()
-                    .map(|hint| (hint, TuiColor::from(status_fg))),
-                "",
-                input_origin,
-                pane_width as u16,
-                input_rows,
-                focused,
-                (TuiColor::from(input_bg), TuiColor::from(text_fg)),
-            );
-
             self.doc_origin = (origin.row_index.as_usize(), origin.col_index.as_usize());
             self.doc_rows = doc_rows;
             self.doc_width = doc_width;
@@ -1911,6 +1888,23 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 .pane_manager
                 .set_window_scroll_max(&window, line_count);
             state.pane_manager.set_window_scroll(&window, scroll);
+            if let Some(discussion) = state.discussions.get_mut(&self.window_id) {
+                discussion.draft.render(
+                    &mut input_ops,
+                    hint.as_deref()
+                        .map(|hint| (hint, TuiColor::from(status_fg))),
+                    "",
+                    input_origin,
+                    pane_width as u16,
+                    input_rows,
+                    focused,
+                    (
+                        TuiColor::from(input_bg),
+                        TuiColor::from(text_fg),
+                        TuiColor::from(selection_bg),
+                    ),
+                );
+            }
             global_data.pipeline.push(ZOrder::Normal, render_ops);
             global_data.pipeline.push(ZOrder::Normal, input_ops);
         });
@@ -2591,5 +2585,52 @@ mod tests {
             "hello Xworld"
         );
         assert_eq!(global_data.state.discussions[&1].draft.text(), "ABother");
+    }
+
+    #[test]
+    fn a_window_input_holds_the_mouse_while_it_selects() {
+        let mut state = empty_state();
+        state.discussions.insert(
+            0,
+            DiscussionState {
+                draft: InputLine::with_text("one two"),
+                ..Default::default()
+            },
+        );
+        let color = TuiColor::from(RgbValue::from_u8(0, 0, 0));
+        let mut ops = RenderOpIRVec::new();
+        state.discussions.get_mut(&0).unwrap().draft.render(
+            &mut ops,
+            None,
+            "",
+            col(0) + row(9),
+            20,
+            1,
+            true,
+            (color, color, color),
+        );
+        let mouse = |kind| MouseInput {
+            pos: col(1) + row(9),
+            kind,
+            maybe_modifier_keys: None,
+        };
+        let window = Window::Discussion(0);
+        let down = mouse(MouseInputKind::MouseDown(Button::Left));
+        let up = mouse(MouseInputKind::MouseUp(Button::Left));
+
+        assert!(!state.input_mouse(Window::Discussion(1), &down));
+        assert!(!state.input_mouse(Window::ConversationTree, &down));
+        assert!(state.input_mouse(window, &down));
+        assert_eq!(state.input_drag, Some(window));
+        assert!(state.mouse_drag_active);
+        assert!(state.input_mouse(window, &up));
+        assert_eq!(state.input_drag, None);
+        assert!(!state.mouse_drag_active);
+        assert!(!state.input_mouse(window, &up));
+
+        assert!(state.input_mouse(window, &down));
+        state.cancel_input_drag();
+        assert!(!state.mouse_drag_active);
+        assert!(!state.discussions[&0].draft.selecting());
     }
 }

@@ -256,40 +256,35 @@ impl TitleRow for PaneComponent {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        theme: &HelixTheme,
-        state: &AppState,
+        state: &mut AppState,
     ) -> usize {
         let Some(window) = self.active_window(state) else {
             return 0;
         };
         match window {
-            Window::WindowPicker => self
-                .picker
-                .render_title_row(ops, pane_box, focused, theme, state),
+            Window::WindowPicker => self.picker.render_title_row(ops, pane_box, focused, state),
             Window::ThemePicker => self
                 .theme_picker
-                .render_title_row(ops, pane_box, focused, theme, state),
-            Window::FilePreview(_) => self
-                .preview
-                .render_title_row(ops, pane_box, focused, theme, state),
+                .render_title_row(ops, pane_box, focused, state),
+            Window::FilePreview(_) => self.preview.render_title_row(ops, pane_box, focused, state),
             Window::Terminal(_) => self
                 .terminal
-                .render_title_row(ops, pane_box, focused, theme, state),
+                .render_title_row(ops, pane_box, focused, state),
             Window::GitLog(id) => self
                 .git_log
-                .render_title_row(ops, pane_box, focused, theme, state, id),
+                .render_title_row(ops, pane_box, focused, state, id),
             Window::CommitDiff(_) => self
                 .commit_diff
-                .render_title_row(ops, pane_box, focused, theme, state),
+                .render_title_row(ops, pane_box, focused, state),
             Window::ConversationTree => self
                 .conversation_tree
-                .render_title_row(ops, pane_box, focused, theme, state),
+                .render_title_row(ops, pane_box, focused, state),
             Window::Discussion(id) => self
                 .discussion
-                .render_title_row(ops, pane_box, focused, theme, state, id),
+                .render_title_row(ops, pane_box, focused, state, id),
             Window::ModelPicker => self
                 .model_picker
-                .render_title_row(ops, pane_box, focused, theme, state),
+                .render_title_row(ops, pane_box, focused, state),
         }
     }
 }
@@ -392,6 +387,28 @@ impl Component<AppState, AppSignal> for PaneComponent {
 
         if !matches!(active_window.as_ref(), Some(Window::Discussion(_))) {
             self.discussion.cancel_drag(&mut global_data.state);
+        }
+
+        // An input selection ends with anything but the mouse on its own window.
+        if let Some(window) = global_data.state.input_drag {
+            let selecting = global_data
+                .state
+                .open_input(&window)
+                .is_some_and(|input| input.selecting());
+            if !selecting
+                || active_window != Some(window)
+                || !matches!(input_event, InputEvent::Mouse(_))
+            {
+                global_data.state.cancel_input_drag();
+            }
+        }
+
+        // The window's input takes its clicks and drags before anything else.
+        if let InputEvent::Mouse(mouse) = &input_event
+            && let Some(window) = active_window
+            && global_data.state.input_mouse(window, mouse)
+        {
+            return Ok(EventPropagation::ConsumedRender);
         }
 
         // Check for scrollbar mouse interaction first.
@@ -995,8 +1012,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 &mut title_ops,
                 &current_box,
                 focused,
-                &global_data.state.theme,
-                &global_data.state,
+                &mut global_data.state,
             );
 
             let has_scrollbar = match active_window {

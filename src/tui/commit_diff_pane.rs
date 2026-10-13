@@ -66,9 +66,9 @@ impl TitleRow for CommitDiffPaneComponent {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        theme: &HelixTheme,
-        state: &AppState,
+        state: &mut AppState,
     ) -> usize {
+        let theme = &state.theme;
         let Some(id) = self.active_commit(state) else {
             return 0;
         };
