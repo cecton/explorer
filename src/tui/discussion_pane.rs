@@ -76,9 +76,6 @@ pub struct DiscussionComponent {
     id: FlexBoxId,
     window_id: usize,
     cache: Option<DocCache>,
-    input: InputLine,
-    /// Window the input cursor belongs to; another window's draft resets it.
-    input_window: Option<usize>,
     /// Screen row and column of the document area at last render, and its height, used
     /// for mouse event handling.
     doc_origin: (usize, usize),
@@ -442,7 +439,7 @@ fn move_queued(state: &mut AppState, window: usize, earlier: bool) {
 /// `None` without a draft or a model; a refusal when the draft cannot make a turn.
 fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>> {
     let discussion = state.discussions.get(&id)?;
-    if discussion.draft.trim().is_empty() {
+    if discussion.draft.text().trim().is_empty() {
         return None;
     }
     let spec = discussion.model.clone()?;
@@ -461,7 +458,7 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
             _ => discussion.node.clone(),
         }
     };
-    let typed = discussion.draft.clone();
+    let typed = discussion.draft.text().to_string();
     let (prompt, input, kind, command) = match commands::expand(&typed, &state.agent.commands) {
         Expansion::Compact { instructions } => {
             (typed, None, TurnKind::Compact { instructions }, None)
@@ -664,8 +661,6 @@ impl DiscussionComponent {
             id,
             window_id: 0,
             cache: None,
-            input: InputLine::new(),
-            input_window: None,
             doc_origin: (0, 0),
             doc_rows: 0,
             doc_width: 0,
@@ -977,7 +972,7 @@ impl DiscussionComponent {
             DiscussionState {
                 loaded: parent.is_none(),
                 node: parent,
-                draft,
+                draft: InputLine::with_text(draft),
                 model,
                 ..Default::default()
             },
@@ -1058,7 +1053,7 @@ impl DiscussionComponent {
         let Some(discussion) = state.discussions.get(&id) else {
             return;
         };
-        if discussion.draft.trim().is_empty() {
+        if discussion.draft.text().trim().is_empty() {
             return;
         }
         if discussion.model.is_none() {
@@ -1186,21 +1181,10 @@ impl DiscussionComponent {
         for id in shown {
             drop_queue_entry(state, id);
             if let Some(discussion) = state.discussions.get_mut(&id) {
-                discussion.draft.clone_from(&input);
-                discussion.draft_replaced = true;
+                discussion.draft.set_text(input.as_str());
             }
         }
         state.mark_session_dirty();
-    }
-
-    /// Puts the input cursor at the end of the draft when the input turns to another
-    /// window, or when the draft was replaced from outside.
-    fn sync_input(&mut self, discussion: &mut DiscussionState) {
-        let replaced = std::mem::take(&mut discussion.draft_replaced);
-        if replaced || self.input_window != Some(self.window_id) {
-            self.input.set_cursor_end(&discussion.draft);
-            self.input_window = Some(self.window_id);
-        }
     }
 
     fn doc_lines(
@@ -1505,7 +1489,6 @@ fn model_picker_chord(keymap: &Keymap) -> String {
 impl Component<AppState, AppSignal> for DiscussionComponent {
     fn reset(&mut self) {
         self.cache = None;
-        self.input_window = None;
         self.drag = None;
     }
 
@@ -1529,7 +1512,6 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
         let Some(discussion) = state.discussions.get_mut(&id) else {
             return Ok(EventPropagation::Propagate);
         };
-        self.sync_input(discussion);
         let running = discussion
             .node
             .as_ref()
@@ -1638,7 +1620,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 ..
             }) => scroll + SCROLL_STEP,
             _ => {
-                if self.input.handle_key(&input_event, &mut discussion.draft) {
+                if discussion.draft.handle_key(&input_event) {
                     discussion.notice = None;
                     state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
@@ -1669,9 +1651,6 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let focused = has_focus.get_id() == Some(self.id);
             let state = &mut global_data.state;
 
-            if let Some(discussion) = state.discussions.get_mut(&self.window_id) {
-                self.sync_input(discussion);
-            }
             // A running turn's reply lives in its handle; mirror it while it grows.
             if let Some(discussion) = state.discussions.get_mut(&self.window_id)
                 && let Some(handle) = discussion
@@ -1715,15 +1694,16 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let marker = marker_bg(theme, pane_bg);
 
             let (status, alert) = status_line(state, self.window_id, discussion);
-            let hint = commands::placeholder(&discussion.draft, &state.agent.commands);
-            let input_rows = InputLine::height(
-                &discussion.draft,
-                hint.as_deref(),
-                "",
-                pane_width as u16,
-                (total_rows / 2).max(1),
-            )
-            .min(total_rows);
+            let hint = commands::placeholder(discussion.draft.text(), &state.agent.commands);
+            let input_rows = discussion
+                .draft
+                .height(
+                    hint.as_deref(),
+                    "",
+                    pane_width as u16,
+                    (total_rows / 2).max(1),
+                )
+                .min(total_rows);
             let status_rows = usize::from(total_rows > input_rows);
             let doc_rows = total_rows - input_rows - status_rows;
 
@@ -1743,9 +1723,8 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                     Some(input_style),
                 );
             }
-            self.input.render(
+            discussion.draft.render(
                 &mut input_ops,
-                &discussion.draft,
                 hint.as_deref()
                     .map(|hint| (hint, TuiColor::from(status_fg))),
                 "",
@@ -2286,7 +2265,7 @@ mod tests {
         assert!(compose_launch(&state, 0).is_none());
 
         for discussion in state.discussions.values_mut() {
-            discussion.draft = "/review bar".to_string();
+            discussion.draft.set_text("/review bar");
         }
         let below = compose_launch(&state, 0).unwrap().unwrap();
         assert_eq!(below.parent, Some(NodeId::new("a1")));
@@ -2298,14 +2277,24 @@ mod tests {
         let beside = compose_launch(&state, 1).unwrap().unwrap();
         assert_eq!(beside.parent, Some(NodeId::new("a1")));
 
-        state.discussions.get_mut(&0).unwrap().draft = "/squash main".to_string();
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("/squash main");
         let squash = compose_launch(&state, 0).unwrap().unwrap();
         assert_eq!(squash.prompt, "Squash since:\n\nmain");
         assert_eq!(squash.input.as_deref(), Some("/squash main"));
         assert_eq!(squash.command.as_deref(), Some("squash"));
         assert!(matches!(squash.kind, TurnKind::NoSystemPrompt));
 
-        state.discussions.get_mut(&0).unwrap().draft = "as typed".to_string();
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("as typed");
         let typed = compose_launch(&state, 0).unwrap().unwrap();
         assert_eq!(typed.prompt, "as typed");
         assert!(typed.input.is_none());
@@ -2318,7 +2307,12 @@ mod tests {
     #[test]
     fn commit_command_composes_a_go_ahead_in_commit_mode() {
         let (_tmp, mut state) = state_with_failed_child();
-        state.discussions.get_mut(&0).unwrap().draft = "/commit".to_string();
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("/commit");
         let bare = compose_launch(&state, 0).unwrap().unwrap();
         assert_eq!(bare.parent, Some(NodeId::new("a1")));
         assert_eq!(bare.prompt, "OK, go ahead.");
@@ -2326,7 +2320,12 @@ mod tests {
         assert!(bare.command.is_none());
         assert!(matches!(bare.kind, TurnKind::Prompt(Mode::Commit)));
 
-        state.discussions.get_mut(&0).unwrap().draft = "/commit keep the name".to_string();
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("/commit keep the name");
         let detailed = compose_launch(&state, 0).unwrap().unwrap();
         assert_eq!(
             detailed.prompt,
@@ -2340,7 +2339,12 @@ mod tests {
             compose_launch(&state, 0),
             Some(Ok(Launch { parent: None, .. }))
         ));
-        state.discussions.get_mut(&0).unwrap().draft = "/commit ".to_string();
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("/commit ");
         assert!(matches!(
             compose_launch(&state, 0),
             Some(Err(Refusal::Rejected(_)))
@@ -2351,18 +2355,16 @@ mod tests {
     fn a_failed_turn_gives_its_typed_prompt_back_over_the_draft() {
         let (_tmp, mut state) = state_with_failed_child();
         for discussion in state.discussions.values_mut() {
-            discussion.draft = "a follow-up".to_string();
+            discussion.draft.set_text("a follow-up");
         }
         queue(&mut state, &[1, 0]);
 
         DiscussionComponent::restore_prompt(&mut state, &NodeId::new("a2"));
 
         let shown = &state.discussions[&1];
-        assert_eq!(shown.draft, "/review foo");
-        assert!(shown.draft_replaced);
+        assert_eq!(shown.draft.text(), "/review foo");
         let other = &state.discussions[&0];
-        assert_eq!(other.draft, "a follow-up");
-        assert!(!other.draft_replaced);
+        assert_eq!(other.draft.text(), "a follow-up");
         assert_eq!(queued_windows(&state), [0]);
     }
 
@@ -2387,7 +2389,12 @@ mod tests {
                 ..Default::default()
             },
         );
-        state.discussions.get_mut(&1).unwrap().draft = "queued text".to_string();
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("queued text");
 
         take_back(&mut state, mpsc::channel(1).0, &NodeId::new("a3"));
         assert_eq!(queued_windows(&state), [1, 2]);
@@ -2396,15 +2403,15 @@ mod tests {
         // release then drops the other window's entry, whose draft is empty.
         take_back(&mut state, main_tx, &NodeId::new("a1"));
         assert!(state.queued_turns.is_empty());
-        assert_eq!(state.discussions[&1].draft, "queued text");
+        assert_eq!(state.discussions[&1].draft.text(), "queued text");
     }
 
     #[test]
     fn a_queued_prompt_that_cannot_be_sent_leaves_the_queue() {
         let (_tmp, mut state) = state_with_failed_child();
         let (main_tx, _main_rx) = mpsc::channel(1);
-        state.discussions.get_mut(&0).unwrap().draft = "go".to_string();
-        state.discussions.get_mut(&1).unwrap().draft = "   ".to_string();
+        state.discussions.get_mut(&0).unwrap().draft.set_text("go");
+        state.discussions.get_mut(&1).unwrap().draft.set_text("   ");
         state.queued_turns = vec![
             PendingTurn {
                 window: 5,
@@ -2429,7 +2436,7 @@ mod tests {
             state.discussions[&0].notice.as_deref(),
             Some("this window moved on since the prompt was queued")
         );
-        assert_eq!(state.discussions[&0].draft, "go");
+        assert_eq!(state.discussions[&0].draft.text(), "go");
     }
 
     #[test]
@@ -2487,5 +2494,102 @@ mod tests {
             Launch::replay(&tree, &NodeId::new("a1"), "hi".to_string(), spec).unwrap();
         assert_eq!(root_launch.parent, None);
         assert!(matches!(root_launch.kind, TurnKind::Prompt(Mode::Feedback)));
+    }
+
+    fn key(key: Key) -> InputEvent {
+        InputEvent::Keyboard(KeyPress::Plain { key })
+    }
+
+    /// Sends `events` to `window` through `component`, as the pane slot showing it would.
+    fn type_into(
+        component: &mut DiscussionComponent,
+        global_data: &mut GlobalData<AppState, AppSignal>,
+        window: usize,
+        events: &[InputEvent],
+    ) {
+        component.set_window_id(window);
+        for event in events {
+            component
+                .handle_event(global_data, event.clone(), &mut HasFocus::default())
+                .unwrap();
+        }
+    }
+
+    fn global_data_with_drafts(drafts: &[&str]) -> GlobalData<AppState, AppSignal> {
+        let mut state = empty_state();
+        for (id, draft) in drafts.iter().enumerate() {
+            state.discussions.insert(
+                id,
+                DiscussionState {
+                    draft: InputLine::with_text(*draft),
+                    ..Default::default()
+                },
+            );
+        }
+        let (main_tx, _) = mpsc::channel(8);
+        let size = width(80) + height(24);
+        GlobalData::try_to_create_instance(
+            main_tx,
+            state,
+            size,
+            OutputDevice::new_mock().0,
+            OfsBufPool::new(size),
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn the_input_cursor_follows_its_window_to_another_pane_slot() {
+        let mut global_data = global_data_with_drafts(&["hello world"]);
+        let mut first_slot = DiscussionComponent::new(FlexBoxId::from(1));
+        let mut second_slot = DiscussionComponent::new(FlexBoxId::from(2));
+        let left = key(Key::SpecialKey(SpecialKey::Left));
+
+        let moves = [left.clone(), left.clone(), left.clone(), left.clone(), left];
+        type_into(&mut first_slot, &mut global_data, 0, &moves);
+        type_into(
+            &mut second_slot,
+            &mut global_data,
+            0,
+            &[key(Key::Character('X'))],
+        );
+        assert_eq!(
+            global_data.state.discussions[&0].draft.text(),
+            "hello Xworld"
+        );
+        type_into(
+            &mut first_slot,
+            &mut global_data,
+            0,
+            &[key(Key::Character('Y'))],
+        );
+        assert_eq!(
+            global_data.state.discussions[&0].draft.text(),
+            "hello XYworld"
+        );
+    }
+
+    #[test]
+    fn two_windows_of_one_pane_slot_keep_their_own_input_cursors() {
+        let mut global_data = global_data_with_drafts(&["hello world", "other"]);
+        let mut slot = DiscussionComponent::new(FlexBoxId::from(1));
+        let left = key(Key::SpecialKey(SpecialKey::Left));
+        let home = key(Key::SpecialKey(SpecialKey::Home));
+
+        let moves = [left.clone(), left.clone(), left.clone(), left.clone(), left];
+        type_into(&mut slot, &mut global_data, 0, &moves);
+        type_into(
+            &mut slot,
+            &mut global_data,
+            1,
+            &[home, key(Key::Character('A'))],
+        );
+        type_into(&mut slot, &mut global_data, 0, &[key(Key::Character('X'))]);
+        type_into(&mut slot, &mut global_data, 1, &[key(Key::Character('B'))]);
+        assert_eq!(
+            global_data.state.discussions[&0].draft.text(),
+            "hello Xworld"
+        );
+        assert_eq!(global_data.state.discussions[&1].draft.text(), "ABother");
     }
 }

@@ -7,6 +7,7 @@ use crate::keymap::Keymap;
 use crate::loader::{FileKey, LoadedFile};
 use crate::session::TerminalRestoreInfo;
 use crate::tui::RgbValue;
+use crate::tui::input_line::InputLine;
 use crate::tui::pane_manager::{DocPart, PaneManager, TextSelection, Window};
 use crate::tui::theme::HelixTheme;
 use crate::watcher::BatchedWatchEvent;
@@ -213,17 +214,17 @@ mod session_time_tests {
 
 #[derive(Clone, Debug)]
 pub struct FuzzyPickerState<T> {
-    pub query: String,
+    pub query: InputLine,
     pub results: Vec<(T, Vec<u32>)>,
     pub selected: Option<T>,
 }
 
 // Manual `Default` avoids the `T: Default` bound the derive would add; the
-// picker's fields (`String`, `Vec`, `Option`) are all `Default` for any `T`.
+// picker's fields (`InputLine`, `Vec`, `Option`) are all `Default` for any `T`.
 impl<T> Default for FuzzyPickerState<T> {
     fn default() -> Self {
         Self {
-            query: String::new(),
+            query: InputLine::new(),
             results: Vec::new(),
             selected: None,
         }
@@ -265,7 +266,9 @@ pub struct GitLogWindowState {
     pub entries: Option<Arc<LogHistory>>,
     pub error: Option<String>,
     pub selected: usize,
-    pub query: String,
+    pub query: InputLine,
+    /// Whether the `/` input is open in the title bar.
+    pub search_active: bool,
     /// Some = query active: (entry index, nucleo match positions), relevance order.
     pub filtered: Option<Vec<(usize, Vec<u32>)>>,
     /// Where the history walk starts.
@@ -287,12 +290,16 @@ pub struct TreeViewState {
     /// Last failure to report in the status bar, cleared by the next key.
     pub notice: Option<String>,
     /// The `/` filter: while it holds a word, the window lists the matching nodes flat.
-    pub query: String,
+    pub query: InputLine,
+    /// Whether the `/` input is open in the title bar.
+    pub search_active: bool,
+    /// Row selected when `/` was opened, given back when the filter matches nothing.
+    pub before_search: Option<RowTarget>,
 }
 
 impl TreeViewState {
     pub fn filtering(&self) -> bool {
-        !self.query.trim().is_empty()
+        !self.query.text().trim().is_empty()
     }
 }
 
@@ -313,14 +320,11 @@ pub struct DiscussionState {
     /// False until the node's prompt and reply have been read from disk.
     pub loaded: bool,
     /// The next prompt, as typed so far.
-    pub draft: String,
+    pub draft: InputLine,
     /// Model the next prompt is sent to.
     pub model: Option<ModelSpec>,
     /// Why the last send was refused; cleared by the next edit.
     pub notice: Option<String>,
-    /// Set when the draft was replaced from outside the input, whose cursor then moves
-    /// to its end.
-    pub draft_replaced: bool,
 }
 
 /// A prompt waiting for the running turn to end. Its text is not copied: it stays the
@@ -517,7 +521,6 @@ pub struct AppState {
     /// Per-file highlight ranges (1-indexed, inclusive).
     pub highlight_ranges: HashMap<FileKey, Vec<(usize, usize)>>,
     pub leader_active: bool,
-    pub command_mode_active: bool,
     pub window_picker: FuzzyPickerState<Window>,
     pub theme_picker: FuzzyPickerState<String>,
     pub theme: HelixTheme,
@@ -587,6 +590,8 @@ pub struct AppState {
     /// Per-file regex search (vim-style `/` `?` `n` `N`). Transient — never persisted to the
     /// session file, mirroring `text_selection`.
     pub search: HashMap<FileKey, PreviewSearch>,
+    /// The input open in a file preview's title bar, by file. Transient like `search`.
+    pub preview_inputs: HashMap<FileKey, PreviewInput>,
     /// Configurable top-level (leader + global) key bindings.
     pub keymap: Keymap,
     /// Which Cargo features rust-analyzer analyzes; set via `:features`/`:all-features`/
@@ -648,7 +653,6 @@ impl AppState {
             last_surface_size: Size::default(),
             highlight_ranges: HashMap::new(),
             leader_active: false,
-            command_mode_active: false,
             window_picker: FuzzyPickerState::default(),
             theme_picker: FuzzyPickerState::default(),
             theme,
@@ -687,6 +691,7 @@ impl AppState {
             symbol_highlights: Vec::new(),
             next_palette_index: 0,
             search: HashMap::new(),
+            preview_inputs: HashMap::new(),
             keymap,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
         };
@@ -842,6 +847,29 @@ pub struct SymbolHighlightGroup {
 pub enum SearchDirection {
     Forward,
     Backward,
+}
+
+/// The input open in a file preview's title bar: the `:` command line or the `/` `?`
+/// search, never both.
+#[derive(Clone)]
+pub enum PreviewInput {
+    Command(InputLine),
+    /// Prefilled with the file's active pattern; the direction is the key that opened it.
+    Search(InputLine, SearchDirection),
+}
+
+impl PreviewInput {
+    pub fn line(&self) -> &InputLine {
+        match self {
+            Self::Command(line) | Self::Search(line, _) => line,
+        }
+    }
+
+    pub fn line_mut(&mut self) -> &mut InputLine {
+        match self {
+            Self::Command(line) | Self::Search(line, _) => line,
+        }
+    }
 }
 
 /// Active regex search for a single preview pane. Built on commit (`Enter`); cleared when the

@@ -3,6 +3,7 @@ use crate::loader::{LoadedFile, file_key_for_path, path_for_file_key};
 use crate::tui::AppState;
 use crate::tui::DiscussionState;
 use crate::tui::GitLogWindowState;
+use crate::tui::InputLine;
 use crate::tui::LogSource;
 use crate::tui::NodeHighlights;
 use crate::tui::pane_manager::{PaneSize, Window, WindowState};
@@ -210,7 +211,7 @@ impl Session {
             cargo_features: state.cargo_features.clone(),
             theme: Some(state.theme.name().to_string()),
             conversation_expanded,
-            conversation_query: state.tree_view.query.clone(),
+            conversation_query: state.tree_view.query.text().to_string(),
             discussion_highlights,
         }
     }
@@ -331,7 +332,7 @@ impl Session {
                     state.next_git_log_id = state.next_git_log_id.max(id.saturating_add(1));
                     let mut win = GitLogWindowState {
                         source: source.clone(),
-                        query: query.clone(),
+                        query: InputLine::with_text(query.as_str()),
                         ..Default::default()
                     };
                     if !query.is_empty() {
@@ -393,7 +394,7 @@ impl Session {
                         DiscussionState {
                             loaded: node.is_none(),
                             node: node.as_deref().map(NodeId::new),
-                            draft,
+                            draft: InputLine::with_text(draft),
                             ..Default::default()
                         },
                     );
@@ -406,7 +407,7 @@ impl Session {
             .iter()
             .map(|id| NodeId::new(id))
             .collect();
-        state.tree_view.query = self.conversation_query;
+        state.tree_view.query.set_text(self.conversation_query);
         state.discussion_highlights = self
             .discussion_highlights
             .into_iter()
@@ -481,7 +482,7 @@ fn pane_entry_from_window(
             Some(PaneEntry::GitLog {
                 id: *id,
                 source: win.source.clone(),
-                query: win.query.clone(),
+                query: win.query.text().to_string(),
                 scroll: window_state.scroll,
                 pane_size: window_state.pane_size.into(),
             })
@@ -500,7 +501,7 @@ fn pane_entry_from_window(
                     .node
                     .as_ref()
                     .map(|node| node.as_str().to_string()),
-                draft: discussion.draft.clone(),
+                draft: discussion.draft.text().to_string(),
                 pane_size: window_state.pane_size.into(),
             })
         }
@@ -1079,7 +1080,7 @@ mod tests {
     fn conversation_tree_filter_round_trips_through_session() {
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
-        state.tree_view.query = "queue esc".to_string();
+        state.tree_view.query.set_text("queue esc");
 
         let session = Session::from_state(&state);
         let json = serde_json::to_string(&session).expect("serialize session");
@@ -1087,7 +1088,7 @@ mod tests {
 
         let mut fresh = empty_state(root);
         restored.apply(&mut fresh);
-        assert_eq!(fresh.tree_view.query, "queue esc");
+        assert_eq!(fresh.tree_view.query.text(), "queue esc");
     }
 
     #[test]
@@ -1171,7 +1172,7 @@ mod tests {
         );
         let win = GitLogWindowState {
             source: LogSource::Branch("origin/main".to_string()),
-            query: "fix:".to_string(),
+            query: InputLine::with_text("fix:"),
             ..Default::default()
         };
         state.git_logs.insert(7, win);
@@ -1203,7 +1204,7 @@ mod tests {
             restored_win.source,
             LogSource::Branch("origin/main".to_string())
         );
-        assert_eq!(restored_win.query, "fix:");
+        assert_eq!(restored_win.query.text(), "fix:");
     }
 
     #[test]

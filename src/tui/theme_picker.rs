@@ -6,7 +6,6 @@ use nucleo::{Config, Utf32Str};
 pub struct ThemePickerComponent {
     id: FlexBoxId,
     picker: FuzzyPicker,
-    input_line: InputLine,
 }
 
 impl ThemePickerComponent {
@@ -14,7 +13,6 @@ impl ThemePickerComponent {
         Self {
             id,
             picker: FuzzyPicker::new(),
-            input_line: InputLine::new(),
         }
     }
 }
@@ -32,7 +30,7 @@ impl TitleRow for ThemePickerComponent {
         let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
         let query = &state.theme_picker.query;
         let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
-        let height = InputLine::height(query, None, "", width, max_rows);
+        let height = query.height(None, "", width, max_rows);
 
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
         let color_bg = TuiColor::from(bg_rgb);
@@ -48,9 +46,8 @@ impl TitleRow for ThemePickerComponent {
                 Some(bg_style),
             );
         }
-        self.input_line.render(
+        query.render(
             ops,
-            query,
             None,
             "",
             origin,
@@ -131,11 +128,13 @@ impl Component<AppState, AppSignal> for ThemePickerComponent {
             _ => {}
         }
 
-        if self
-            .input_line
-            .handle_key(&input_event, &mut global_data.state.theme_picker.query)
+        if global_data
+            .state
+            .theme_picker
+            .query
+            .handle_key(&input_event)
         {
-            let query = global_data.state.theme_picker.query.clone();
+            let query = global_data.state.theme_picker.query.text().to_string();
             global_data.state.theme_picker.results = run_theme_name_match(&query);
             if let Some((name, _)) = global_data.state.theme_picker.results.first() {
                 global_data.state.theme_picker.selected = Some(name.clone());

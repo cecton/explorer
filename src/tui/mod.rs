@@ -20,6 +20,7 @@ mod title_row;
 mod window_picker;
 
 pub use app::{build_state, run};
+pub use input_line::InputLine;
 pub use r3bl_tui::core::ansi::RgbValue;
 pub use state::{
     AppSignal, AppState, DiscussionState, GitLogWindowState, LogSource, NodeHighlights,
@@ -34,7 +35,6 @@ use self::conversation_tree_pane::*;
 use self::discussion_pane::*;
 use self::fuzzy_picker::*;
 use self::git_log_pane::*;
-use self::input_line::*;
 use self::model_picker::*;
 use self::window_picker::*;
 

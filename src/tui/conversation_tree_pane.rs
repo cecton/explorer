@@ -394,7 +394,7 @@ fn queued_text(state: &AppState, row: &TreeRow) -> String {
     let draft = state
         .discussions
         .get(window)
-        .map(|discussion| discussion.draft.as_str())
+        .map(|discussion| discussion.draft.text())
         .unwrap_or_default();
     draft
         .lines()
@@ -474,11 +474,6 @@ pub struct ConversationTreeComponent {
     shown_selection: Option<RowTarget>,
     /// Time and row of the last click, to recognize a double click.
     last_click: Option<(Instant, usize)>,
-    /// Whether the `/` input is open in the title bar.
-    search_active: bool,
-    input_line: InputLine,
-    /// Row selected when `/` opened the input, given back when the filter finds nothing.
-    before_search: Option<RowTarget>,
 }
 
 impl ConversationTreeComponent {
@@ -493,15 +488,12 @@ impl ConversationTreeComponent {
             label_zones: Vec::new(),
             shown_selection: None,
             last_click: None,
-            search_active: false,
-            input_line: InputLine::new(),
-            before_search: None,
         }
     }
 
     pub(crate) fn title(state: &AppState) -> String {
         if state.tree_view.filtering() {
-            format!("{} — {}", Self::TITLE, state.tree_view.query.trim())
+            format!("{} — {}", Self::TITLE, state.tree_view.query.text().trim())
         } else {
             Self::TITLE.to_string()
         }
@@ -525,7 +517,7 @@ impl ConversationTreeComponent {
     fn rows(state: &AppState) -> Vec<TreeRow> {
         let tree = state.conversations.read();
         if state.tree_view.filtering() {
-            return flat_rows(&filter_nodes(&tree, &state.tree_view.query));
+            return flat_rows(&filter_nodes(&tree, state.tree_view.query.text()));
         }
         with_queued(
             layout_rows(&tree, &state.tree_view.expanded),
@@ -648,7 +640,7 @@ impl TitleRow for ConversationTreeComponent {
         theme: &HelixTheme,
         state: &AppState,
     ) -> usize {
-        if !self.search_active {
+        if !state.tree_view.search_active {
             render_pane_title(ops, pane_box, &Self::title(state), false, theme, focused);
             return 1;
         }
@@ -664,9 +656,8 @@ impl TitleRow for ConversationTreeComponent {
             " ".repeat(width as usize).as_str().into(),
             Some(bg_style),
         );
-        self.input_line.render(
+        state.tree_view.query.render(
             ops,
-            &state.tree_view.query,
             None,
             "/",
             origin,
@@ -680,9 +671,7 @@ impl TitleRow for ConversationTreeComponent {
 }
 
 impl Component<AppState, AppSignal> for ConversationTreeComponent {
-    fn reset(&mut self) {
-        self.search_active = false;
-    }
+    fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
         self.id
@@ -721,7 +710,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             _ => None,
         };
 
-        if self.search_active && matches!(input_event, InputEvent::Keyboard(_)) {
+        if state.tree_view.search_active && matches!(input_event, InputEvent::Keyboard(_)) {
             match &input_event {
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Up),
@@ -738,8 +727,8 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Enter),
                 }) => {
-                    self.search_active = false;
-                    self.before_search = None;
+                    state.tree_view.search_active = false;
+                    state.tree_view.before_search = None;
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Esc),
@@ -748,26 +737,25 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         let kept = rows
                             .get(index)
                             .map(|row| row.target.clone())
-                            .or_else(|| self.before_search.take());
+                            .or_else(|| state.tree_view.before_search.take());
                         if let Some(target) = kept {
                             Self::reveal(state, target);
                         }
                     }
                     state.tree_view.query.clear();
-                    self.search_active = false;
-                    self.before_search = None;
+                    state.tree_view.search_active = false;
+                    state.tree_view.before_search = None;
                     self.shown_selection = None;
                     state.mark_session_dirty();
                 }
                 _ => {
-                    let before = state.tree_view.query.clone();
-                    self.input_line
-                        .handle_key(&input_event, &mut state.tree_view.query);
-                    if state.tree_view.query != before {
+                    let before = state.tree_view.query.text().to_string();
+                    state.tree_view.query.handle_key(&input_event);
+                    if state.tree_view.query.text() != before {
                         state.tree_view.selected = if state.tree_view.filtering() {
                             Self::rows(state).first().map(|row| row.target.clone())
                         } else {
-                            self.before_search.clone()
+                            state.tree_view.before_search.clone()
                         };
                         self.shown_selection = None;
                         state.mark_session_dirty();
@@ -781,9 +769,8 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('/'),
             }) => {
-                self.search_active = true;
-                self.before_search = rows.get(index).map(|row| row.target.clone());
-                self.input_line.set_cursor_end(&state.tree_view.query);
+                state.tree_view.search_active = true;
+                state.tree_view.before_search = rows.get(index).map(|row| row.target.clone());
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Up),
@@ -1032,7 +1019,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             let tree = tree_handle.read();
             let filtering = state.tree_view.filtering();
             let matches = if filtering {
-                filter_nodes(&tree, &state.tree_view.query)
+                filter_nodes(&tree, state.tree_view.query.text())
             } else {
                 Vec::new()
             };

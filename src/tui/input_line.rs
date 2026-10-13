@@ -2,7 +2,9 @@ use crate::tui::*;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use unicode_segmentation::UnicodeSegmentation;
 
+#[derive(Debug, Default)]
 pub struct InputLine {
+    text: String,
     cursor: usize,
     /// Graphemes that fit on one row, as of the last render; drives `Up`/`Down`.
     row_capacity: AtomicUsize,
@@ -48,23 +50,52 @@ fn row_of_cursor(rows: &[VisualRow], cursor: usize) -> usize {
         .unwrap_or(0)
 }
 
+impl Clone for InputLine {
+    fn clone(&self) -> Self {
+        Self {
+            text: self.text.clone(),
+            cursor: self.cursor,
+            row_capacity: AtomicUsize::new(self.row_capacity.load(Ordering::Relaxed)),
+            scroll: AtomicUsize::new(self.scroll.load(Ordering::Relaxed)),
+        }
+    }
+}
+
 impl InputLine {
     pub fn new() -> Self {
-        Self {
-            cursor: 0,
-            row_capacity: AtomicUsize::new(0),
-            scroll: AtomicUsize::new(0),
-        }
+        Self::default()
+    }
+
+    /// An input holding `text`, with the cursor at its end.
+    pub fn with_text(text: impl Into<String>) -> Self {
+        let mut input = Self::new();
+        input.set_text(text);
+        input
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    /// Replaces the text and puts the cursor at its end.
+    pub fn set_text(&mut self, text: impl Into<String>) {
+        self.text = text.into();
+        self.cursor = self.text.graphemes(true).count();
+    }
+
+    pub fn clear(&mut self) {
+        self.text.clear();
+        self.cursor = 0;
     }
 
     /// Moves the cursor one screen row up or down, keeping its column. Returns false at
     /// the first or last row so the caller can use the key for something else.
-    fn move_vertically(&mut self, query: &str, down: bool) -> bool {
+    fn move_vertically(&mut self, down: bool) -> bool {
         let capacity = match self.row_capacity.load(Ordering::Relaxed) {
             0 => usize::MAX,
             capacity => capacity,
         };
-        let rows = visual_rows(query, capacity);
+        let rows = visual_rows(&self.text, capacity);
         let current = row_of_cursor(&rows, self.cursor);
         let target = if down {
             current + 1
@@ -83,13 +114,13 @@ impl InputLine {
     }
 
     /// The line the cursor is on, from one newline to the next, however many rows it wraps over.
-    fn current_line(&self, query: &str) -> VisualRow {
-        let rows = visual_rows(query, usize::MAX);
+    fn current_line(&self) -> VisualRow {
+        let rows = visual_rows(&self.text, usize::MAX);
         rows[row_of_cursor(&rows, self.cursor)]
     }
 
-    pub fn handle_key(&mut self, input_event: &InputEvent, query: &mut String) -> bool {
-        let grapheme_count = query.graphemes(true).count();
+    pub fn handle_key(&mut self, input_event: &InputEvent) -> bool {
+        let grapheme_count = self.text.graphemes(true).count();
         self.cursor = self.cursor.min(grapheme_count);
 
         match input_event {
@@ -102,7 +133,7 @@ impl InputLine {
                         alt_key_state: KeyState::NotPressed,
                     },
             }) => {
-                self.cursor = self.current_line(query).start;
+                self.cursor = self.current_line().start;
                 true
             }
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -114,7 +145,7 @@ impl InputLine {
                         alt_key_state: KeyState::NotPressed,
                     },
             }) => {
-                let line = self.current_line(query);
+                let line = self.current_line();
                 self.cursor = line.start + line.len;
                 true
             }
@@ -126,7 +157,7 @@ impl InputLine {
                         shift_key_state: KeyState::NotPressed,
                         alt_key_state: KeyState::NotPressed,
                     },
-            }) => self.delete_grapheme(query),
+            }) => self.delete_grapheme(),
             InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::Character('b'),
                 mask:
@@ -167,7 +198,7 @@ impl InputLine {
                         shift_key_state: KeyState::NotPressed,
                         alt_key_state: KeyState::NotPressed,
                     },
-            }) => self.kill_to_end(query),
+            }) => self.kill_to_end(),
             InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::Character('c'),
                 mask:
@@ -177,7 +208,7 @@ impl InputLine {
                         alt_key_state: KeyState::NotPressed,
                     },
             }) => {
-                query.clear();
+                self.text.clear();
                 self.cursor = 0;
                 true
             }
@@ -189,7 +220,7 @@ impl InputLine {
                         shift_key_state: KeyState::NotPressed,
                         alt_key_state: KeyState::NotPressed,
                     },
-            }) => self.kill_to_start(query),
+            }) => self.kill_to_start(),
             InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::Character('w'),
                 mask:
@@ -198,7 +229,7 @@ impl InputLine {
                         shift_key_state: KeyState::NotPressed,
                         alt_key_state: KeyState::NotPressed,
                     },
-            }) => self.kill_word_backward(query),
+            }) => self.kill_word_backward(),
             InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::SpecialKey(SpecialKey::Left),
                 mask:
@@ -207,7 +238,7 @@ impl InputLine {
                         shift_key_state: KeyState::NotPressed,
                         alt_key_state: KeyState::NotPressed,
                     },
-            }) => self.cursor_prev_word(query),
+            }) => self.cursor_prev_word(),
             InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::SpecialKey(SpecialKey::Right),
                 mask:
@@ -216,7 +247,7 @@ impl InputLine {
                         shift_key_state: KeyState::NotPressed,
                         alt_key_state: KeyState::NotPressed,
                     },
-            }) => self.cursor_next_word(query),
+            }) => self.cursor_next_word(),
             InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::Character('b'),
                 mask:
@@ -225,7 +256,7 @@ impl InputLine {
                         shift_key_state: KeyState::NotPressed,
                         ctrl_key_state: KeyState::NotPressed,
                     },
-            }) => self.cursor_prev_word(query),
+            }) => self.cursor_prev_word(),
             InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::Character('f'),
                 mask:
@@ -234,7 +265,7 @@ impl InputLine {
                         shift_key_state: KeyState::NotPressed,
                         ctrl_key_state: KeyState::NotPressed,
                     },
-            }) => self.cursor_next_word(query),
+            }) => self.cursor_next_word(),
             InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::Character('d'),
                 mask:
@@ -243,7 +274,7 @@ impl InputLine {
                         shift_key_state: KeyState::NotPressed,
                         ctrl_key_state: KeyState::NotPressed,
                     },
-            }) => self.kill_word_forward(query),
+            }) => self.kill_word_forward(),
             InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::SpecialKey(SpecialKey::Backspace),
                 mask:
@@ -252,7 +283,7 @@ impl InputLine {
                         shift_key_state: KeyState::NotPressed,
                         ctrl_key_state: KeyState::NotPressed,
                     },
-            }) => self.kill_word_backward(query),
+            }) => self.kill_word_backward(),
             InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::SpecialKey(SpecialKey::Enter),
                 mask:
@@ -262,8 +293,8 @@ impl InputLine {
                         ctrl_key_state: KeyState::NotPressed,
                     },
             }) => {
-                let byte_pos = grapheme_byte_offset(query, self.cursor);
-                query.insert(byte_pos, '\n');
+                let byte_pos = grapheme_byte_offset(&self.text, self.cursor);
+                self.text.insert(byte_pos, '\n');
                 self.cursor += 1;
                 true
             }
@@ -282,8 +313,8 @@ impl InputLine {
                 if ch.is_control() {
                     return false;
                 }
-                let byte_pos = grapheme_byte_offset(query, self.cursor);
-                query.insert(byte_pos, *ch);
+                let byte_pos = grapheme_byte_offset(&self.text, self.cursor);
+                self.text.insert(byte_pos, *ch);
                 self.cursor += 1;
                 true
             }
@@ -291,17 +322,17 @@ impl InputLine {
                 if text.is_empty() {
                     return false;
                 }
-                let byte_pos = grapheme_byte_offset(query, self.cursor);
-                query.insert_str(byte_pos, text);
+                let byte_pos = grapheme_byte_offset(&self.text, self.cursor);
+                self.text.insert_str(byte_pos, text);
                 self.cursor += text.graphemes(true).count();
                 true
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Backspace),
-            }) => self.backspace_grapheme(query),
+            }) => self.backspace_grapheme(),
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Delete),
-            }) => self.delete_grapheme(query),
+            }) => self.delete_grapheme(),
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Home),
             }) => {
@@ -324,10 +355,10 @@ impl InputLine {
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Up),
-            }) => self.move_vertically(query, false),
+            }) => self.move_vertically(false),
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Down),
-            }) => self.move_vertically(query, true),
+            }) => self.move_vertically(true),
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Left),
             }) => {
@@ -352,25 +383,25 @@ impl InputLine {
         }
     }
 
-    fn backspace_grapheme(&mut self, query: &mut String) -> bool {
+    fn backspace_grapheme(&mut self) -> bool {
         if self.cursor == 0 {
             return false;
         }
-        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
+        let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         let target = self.cursor - 1;
         let start = graphemes[target].0;
         let end = if target + 1 < graphemes.len() {
             graphemes[target + 1].0
         } else {
-            query.len()
+            self.text.len()
         };
-        query.replace_range(start..end, "");
+        self.text.replace_range(start..end, "");
         self.cursor = target;
         true
     }
 
-    fn delete_grapheme(&mut self, query: &mut String) -> bool {
-        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
+    fn delete_grapheme(&mut self) -> bool {
+        let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         if self.cursor >= graphemes.len() {
             return false;
         }
@@ -378,60 +409,60 @@ impl InputLine {
         let end = if self.cursor + 1 < graphemes.len() {
             graphemes[self.cursor + 1].0
         } else {
-            query.len()
+            self.text.len()
         };
-        query.replace_range(start..end, "");
+        self.text.replace_range(start..end, "");
         true
     }
 
-    fn kill_to_end(&mut self, query: &mut String) -> bool {
-        let line = self.current_line(query);
+    fn kill_to_end(&mut self) -> bool {
+        let line = self.current_line();
         let line_end = line.start + line.len;
         let end = if self.cursor == line_end {
             line_end + 1
         } else {
             line_end
         };
-        let start_byte = grapheme_byte_offset(query, self.cursor);
-        let end_byte = grapheme_byte_offset(query, end);
+        let start_byte = grapheme_byte_offset(&self.text, self.cursor);
+        let end_byte = grapheme_byte_offset(&self.text, end);
         if start_byte == end_byte {
             return false;
         }
-        query.replace_range(start_byte..end_byte, "");
+        self.text.replace_range(start_byte..end_byte, "");
         true
     }
 
-    fn kill_to_start(&mut self, query: &mut String) -> bool {
-        let start = self.current_line(query).start;
+    fn kill_to_start(&mut self) -> bool {
+        let start = self.current_line().start;
         if self.cursor == start {
             return false;
         }
-        let start_byte = grapheme_byte_offset(query, start);
-        let end_byte = grapheme_byte_offset(query, self.cursor);
-        query.replace_range(start_byte..end_byte, "");
+        let start_byte = grapheme_byte_offset(&self.text, start);
+        let end_byte = grapheme_byte_offset(&self.text, self.cursor);
+        self.text.replace_range(start_byte..end_byte, "");
         self.cursor = start;
         true
     }
 
-    fn kill_word_backward(&mut self, query: &mut String) -> bool {
-        let word_start = self.prev_word_start(query);
+    fn kill_word_backward(&mut self) -> bool {
+        let word_start = self.prev_word_start();
         if word_start >= self.cursor {
             return false;
         }
-        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
+        let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         let start_byte = graphemes[word_start].0;
         let end_byte = if self.cursor < graphemes.len() {
             graphemes[self.cursor].0
         } else {
-            query.len()
+            self.text.len()
         };
-        query.replace_range(start_byte..end_byte, "");
+        self.text.replace_range(start_byte..end_byte, "");
         self.cursor = word_start;
         true
     }
 
-    fn cursor_prev_word(&mut self, query: &str) -> bool {
-        let new = self.prev_word_start(query);
+    fn cursor_prev_word(&mut self) -> bool {
+        let new = self.prev_word_start();
         if new == self.cursor {
             return false;
         }
@@ -439,8 +470,8 @@ impl InputLine {
         true
     }
 
-    fn cursor_next_word(&mut self, query: &str) -> bool {
-        let new = self.next_word_start(query);
+    fn cursor_next_word(&mut self) -> bool {
+        let new = self.next_word_start();
         if new == self.cursor {
             return false;
         }
@@ -454,8 +485,8 @@ impl InputLine {
             .all(|c| c.is_whitespace() || c.is_ascii_punctuation())
     }
 
-    fn prev_word_start(&self, text: &str) -> usize {
-        let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
+    fn prev_word_start(&self) -> usize {
+        let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         let count = graphemes.len();
         if count == 0 || self.cursor == 0 {
             return 0;
@@ -476,8 +507,8 @@ impl InputLine {
         idx
     }
 
-    fn next_word_start(&self, text: &str) -> usize {
-        let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
+    fn next_word_start(&self) -> usize {
+        let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         let count = graphemes.len();
         if count == 0 {
             return 0;
@@ -498,8 +529,8 @@ impl InputLine {
         idx
     }
 
-    fn next_word_end(&self, text: &str) -> usize {
-        let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
+    fn next_word_end(&self) -> usize {
+        let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         let count = graphemes.len();
         if count == 0 {
             return 0;
@@ -520,55 +551,48 @@ impl InputLine {
         idx
     }
 
-    fn kill_word_forward(&mut self, query: &mut String) -> bool {
-        let word_end = self.next_word_end(query);
+    fn kill_word_forward(&mut self) -> bool {
+        let word_end = self.next_word_end();
         if word_end <= self.cursor || word_end == 0 {
             return false;
         }
-        let graphemes: Vec<(usize, &str)> = query.grapheme_indices(true).collect();
+        let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         let start_byte = if self.cursor < graphemes.len() {
             graphemes[self.cursor].0
         } else {
-            query.len()
+            self.text.len()
         };
         let end_byte = if word_end < graphemes.len() {
             graphemes[word_end].0
         } else {
-            query.len()
+            self.text.len()
         };
-        query.replace_range(start_byte..end_byte, "");
+        self.text.replace_range(start_byte..end_byte, "");
         true
     }
 
     /// Rows the input occupies once soft-wrapped to `width`, at most `max_rows`. The
-    /// placeholder counts as text that follows `query`.
+    /// placeholder counts as text that follows the typed one.
     pub fn height(
-        query: &str,
+        &self,
         placeholder: Option<&str>,
         prompt: &str,
         width: u16,
         max_rows: usize,
     ) -> usize {
         let capacity = (width as usize).saturating_sub(prompt.graphemes(true).count());
-        let shown = format!("{query}{}", placeholder.unwrap_or_default());
+        let shown = format!("{}{}", self.text, placeholder.unwrap_or_default());
         visual_rows(&shown, capacity).len().min(max_rows).max(1)
-    }
-
-    /// Places the cursor at the end of `query`. Used when opening an input prefilled with existing
-    /// text (e.g. the preview search box seeded with the active pattern).
-    pub fn set_cursor_end(&mut self, query: &str) {
-        self.cursor = query.graphemes(true).count();
     }
 
     /// Paints the input soft-wrapped to `width` on at most `max_rows` rows, scrolling
     /// inside them so the cursor row stays visible. The prompt stays on the first row
     /// shown and every row starts after it. The placeholder is laid out as text that
-    /// follows `query`, in its own color; the cursor never enters it.
+    /// follows the typed text, in its own color; the cursor never enters it.
     #[allow(clippy::too_many_arguments)]
     pub fn render(
         &self,
         mut ops: &mut RenderOpIRVec,
-        query: &str,
         placeholder: Option<(&str, TuiColor)>,
         prompt: &str,
         origin: Pos,
@@ -591,12 +615,12 @@ impl InputLine {
         let cursor_style = new_style!(color_fg: {color_bg} color_bg: {color_text});
         ops += RenderOpCommon::ApplyColors(Some(text_style));
 
-        let typed = query.graphemes(true).count();
+        let typed = self.text.graphemes(true).count();
         let (placeholder, placeholder_style) = match placeholder {
             Some((text, color)) => (text, new_style!(color_fg: {color} color_bg: {color_bg})),
             None => ("", text_style),
         };
-        let shown = format!("{query}{placeholder}");
+        let shown = format!("{}{placeholder}", self.text);
         let style_at = |index: usize| {
             if index < typed {
                 text_style
@@ -710,7 +734,6 @@ mod cursor_render_tests {
         let mut ops = RenderOpIRVec::new();
         input.render(
             &mut ops,
-            "",
             None,
             "",
             col(0) + row(0),
@@ -741,14 +764,12 @@ mod cursor_render_tests {
     fn placeholder_follows_the_text_in_its_own_color_over_several_rows() {
         let (color_bg, color_text) = colors();
         let weak = TuiColor::from(RgbValue::from_u8(90, 90, 90));
-        let query = "/squash";
         let placeholder = " <ref>\nSquash the commits since a ref";
         let mut input = InputLine::new();
-        input.set_cursor_end(query);
+        input.set_text("/squash");
         let mut ops = RenderOpIRVec::new();
         input.render(
             &mut ops,
-            query,
             Some((placeholder, weak)),
             "",
             col(0) + row(0),
@@ -770,22 +791,20 @@ mod cursor_render_tests {
         assert_eq!(pen.color_fg, Some(weak));
         assert_eq!(pen.color_bg, Some(color_bg));
 
-        assert_eq!(InputLine::height(query, Some(placeholder), "", 20, 4), 3);
-        assert_eq!(InputLine::height(query, Some(placeholder), "", 20, 2), 2);
-        assert_eq!(InputLine::height(query, None, "", 20, 4), 1);
+        assert_eq!(input.height(Some(placeholder), "", 20, 4), 3);
+        assert_eq!(input.height(Some(placeholder), "", 20, 2), 2);
+        assert_eq!(input.height(None, "", 20, 4), 1);
     }
 
     #[test]
     fn cursor_and_keys_ignore_the_placeholder() {
         let (color_bg, color_text) = colors();
         let weak = TuiColor::from(RgbValue::from_u8(90, 90, 90));
-        let mut query = "/squash".to_string();
         let mut input = InputLine::new();
-        input.set_cursor_end(&query);
+        input.set_text("/squash");
         let mut ops = RenderOpIRVec::new();
         input.render(
             &mut ops,
-            &query,
             Some(("\nSquash the commits", weak)),
             "",
             col(0) + row(0),
@@ -802,20 +821,20 @@ mod cursor_render_tests {
         let down = InputEvent::Keyboard(KeyPress::Plain {
             key: Key::SpecialKey(SpecialKey::Down),
         });
-        assert!(!input.handle_key(&down, &mut query));
+        assert!(!input.handle_key(&down));
         assert_eq!(input.cursor, 7);
-        assert_eq!(query, "/squash");
+        assert_eq!(input.text(), "/squash");
     }
 
     #[test]
     fn mid_line_cursor_grapheme_sets_swapped_pen() {
         let (color_bg, color_text) = colors();
-        // Fresh InputLine keeps the cursor at grapheme 0, so 'a' is the cursor cell.
-        let input = InputLine::new();
+        let mut input = InputLine::new();
+        input.set_text("ab");
+        input.cursor = 0;
         let mut ops = RenderOpIRVec::new();
         input.render(
             &mut ops,
-            "ab",
             None,
             "",
             col(0) + row(0),
@@ -837,7 +856,6 @@ mod cursor_render_tests {
         let mut ops = RenderOpIRVec::new();
         input.render(
             &mut ops,
-            "",
             None,
             "",
             col(0) + row(0),
@@ -881,6 +899,19 @@ mod wrap_tests {
     }
 
     #[test]
+    fn replacing_the_text_moves_the_cursor_to_its_end() {
+        let mut input = InputLine::with_text("abc");
+        input.cursor = 1;
+        input.set_text("héllo\nyou");
+        assert_eq!(input.cursor, 9);
+        input.cursor = 4;
+        input.clear();
+        assert_eq!((input.text(), input.cursor), ("", 0));
+        let copy = InputLine::with_text("ab").clone();
+        assert_eq!((copy.text(), copy.cursor), ("ab", 2));
+    }
+
+    #[test]
     fn rows_wrap_at_capacity_and_follow_newlines() {
         assert_eq!(spans("", 4), [(0, 0)]);
         assert_eq!(spans("abcdef", 4), [(0, 4), (4, 2)]);
@@ -895,33 +926,36 @@ mod wrap_tests {
 
     #[test]
     fn height_counts_wrapped_rows_and_respects_the_cap() {
-        assert_eq!(InputLine::height("", None, "> ", 10, 5), 1);
-        assert_eq!(InputLine::height("abcdefghij", None, "> ", 10, 5), 2);
-        assert_eq!(InputLine::height("a\nb\nc\nd", None, "", 10, 3), 3);
+        let mut input = InputLine::new();
+        assert_eq!(input.height(None, "> ", 10, 5), 1);
+        input.set_text("abcdefghij");
+        assert_eq!(input.height(None, "> ", 10, 5), 2);
+        input.set_text("a\nb\nc\nd");
+        assert_eq!(input.height(None, "", 10, 3), 3);
     }
 
     #[test]
     fn vertical_keys_are_not_consumed_on_a_single_row() {
         let mut input = InputLine::new();
-        let mut query = "abc".to_string();
-        assert!(!input.handle_key(&up(), &mut query));
-        assert!(!input.handle_key(&down(), &mut query));
+        input.set_text("abc");
+        assert!(!input.handle_key(&up()));
+        assert!(!input.handle_key(&down()));
     }
 
     #[test]
     fn vertical_keys_move_between_rows_keeping_the_column() {
         let mut input = InputLine::new();
-        let mut query = "abcdef\ngh\nijkl".to_string();
+        input.set_text("abcdef\ngh\nijkl");
         input.cursor = 5;
-        assert!(input.handle_key(&down(), &mut query));
+        assert!(input.handle_key(&down()));
         assert_eq!(input.cursor, 9, "clamped to the end of the shorter row");
-        assert!(input.handle_key(&down(), &mut query));
+        assert!(input.handle_key(&down()));
         assert_eq!(input.cursor, 12);
-        assert!(!input.handle_key(&down(), &mut query));
-        assert!(input.handle_key(&up(), &mut query));
-        assert!(input.handle_key(&up(), &mut query));
+        assert!(!input.handle_key(&down()));
+        assert!(input.handle_key(&up()));
+        assert!(input.handle_key(&up()));
         assert_eq!(input.cursor, 2);
-        assert!(!input.handle_key(&up(), &mut query));
+        assert!(!input.handle_key(&up()));
     }
 
     fn ctrl(ch: char) -> InputEvent {
@@ -940,133 +974,112 @@ mod wrap_tests {
     #[test]
     fn ctrl_a_and_ctrl_e_stay_on_the_line_of_the_cursor() {
         let mut input = InputLine::new();
-        let mut query = "abcdef\ngh\n\nijkl".to_string();
+        input.set_text("abcdef\ngh\n\nijkl");
         input.cursor = 8;
-        assert!(input.handle_key(&ctrl('a'), &mut query));
+        assert!(input.handle_key(&ctrl('a')));
         assert_eq!(input.cursor, 7);
-        assert!(input.handle_key(&ctrl('e'), &mut query));
+        assert!(input.handle_key(&ctrl('e')));
         assert_eq!(input.cursor, 9);
         input.cursor = 10;
-        assert!(input.handle_key(&ctrl('a'), &mut query));
+        assert!(input.handle_key(&ctrl('a')));
         assert_eq!(input.cursor, 10, "an empty line starts at the cursor");
-        assert!(input.handle_key(&ctrl('e'), &mut query));
+        assert!(input.handle_key(&ctrl('e')));
         assert_eq!(input.cursor, 10);
-        assert_eq!(query, "abcdef\ngh\n\nijkl");
+        assert_eq!(input.text(), "abcdef\ngh\n\nijkl");
     }
 
     #[test]
     fn ctrl_a_and_ctrl_e_ignore_soft_wrapping() {
         let mut input = InputLine::new();
-        let mut query = "abcdefgh\nij".to_string();
+        input.set_text("abcdefgh\nij");
         input.row_capacity.store(4, Ordering::Relaxed);
         input.cursor = 6;
-        assert!(input.handle_key(&ctrl('a'), &mut query));
+        assert!(input.handle_key(&ctrl('a')));
         assert_eq!(input.cursor, 0);
         input.cursor = 1;
-        assert!(input.handle_key(&ctrl('e'), &mut query));
+        assert!(input.handle_key(&ctrl('e')));
         assert_eq!(input.cursor, 8);
     }
 
     #[test]
     fn ctrl_k_kills_to_the_end_of_the_line_then_joins_the_next_one() {
         let mut input = InputLine::new();
-        let mut query = "abcdef\ngh\nijkl".to_string();
+        input.set_text("abcdef\ngh\nijkl");
         input.cursor = 2;
-        assert!(input.handle_key(&ctrl('k'), &mut query));
-        assert_eq!(query, "ab\ngh\nijkl");
+        assert!(input.handle_key(&ctrl('k')));
+        assert_eq!(input.text(), "ab\ngh\nijkl");
         assert_eq!(input.cursor, 2);
-        assert!(input.handle_key(&ctrl('k'), &mut query));
-        assert_eq!(query, "abgh\nijkl");
+        assert!(input.handle_key(&ctrl('k')));
+        assert_eq!(input.text(), "abgh\nijkl");
         assert_eq!(input.cursor, 2);
         input.cursor = 9;
-        assert!(!input.handle_key(&ctrl('k'), &mut query));
-        assert_eq!(query, "abgh\nijkl");
+        assert!(!input.handle_key(&ctrl('k')));
+        assert_eq!(input.text(), "abgh\nijkl");
     }
 
     #[test]
     fn ctrl_u_kills_to_the_start_of_the_line_only() {
         let mut input = InputLine::new();
-        let mut query = "abcdef\ngh\nijkl".to_string();
+        input.set_text("abcdef\ngh\nijkl");
         input.cursor = 12;
-        assert!(input.handle_key(&ctrl('u'), &mut query));
-        assert_eq!(query, "abcdef\ngh\nkl");
+        assert!(input.handle_key(&ctrl('u')));
+        assert_eq!(input.text(), "abcdef\ngh\nkl");
         assert_eq!(input.cursor, 10);
-        assert!(!input.handle_key(&ctrl('u'), &mut query));
-        assert_eq!(query, "abcdef\ngh\nkl");
+        assert!(!input.handle_key(&ctrl('u')));
+        assert_eq!(input.text(), "abcdef\ngh\nkl");
     }
 
     #[test]
     fn ctrl_k_and_ctrl_u_ignore_soft_wrapping() {
         let mut input = InputLine::new();
-        let mut query = "abcdefgh\nij".to_string();
+        input.set_text("abcdefgh\nij");
         input.row_capacity.store(4, Ordering::Relaxed);
         input.cursor = 6;
-        assert!(input.handle_key(&ctrl('u'), &mut query));
-        assert_eq!(query, "gh\nij");
-        let mut query = "abcdefgh\nij".to_string();
+        assert!(input.handle_key(&ctrl('u')));
+        assert_eq!(input.text(), "gh\nij");
+        input.set_text("abcdefgh\nij");
         input.cursor = 1;
-        assert!(input.handle_key(&ctrl('k'), &mut query));
-        assert_eq!(query, "a\nij");
+        assert!(input.handle_key(&ctrl('k')));
+        assert_eq!(input.text(), "a\nij");
     }
 
     #[test]
     fn home_and_end_span_the_whole_text() {
         let mut input = InputLine::new();
-        let mut query = "abcdef\ngh\nijkl".to_string();
+        input.set_text("abcdef\ngh\nijkl");
         input.cursor = 8;
-        assert!(input.handle_key(&plain(SpecialKey::Home), &mut query));
+        assert!(input.handle_key(&plain(SpecialKey::Home)));
         assert_eq!(input.cursor, 0);
         input.cursor = 8;
-        assert!(input.handle_key(&plain(SpecialKey::End), &mut query));
+        assert!(input.handle_key(&plain(SpecialKey::End)));
         assert_eq!(input.cursor, 14);
     }
 
     #[test]
     fn vertical_keys_follow_soft_wrapping_after_a_render() {
         let mut input = InputLine::new();
-        let mut query = "abcdefgh".to_string();
+        input.set_text("abcdefgh");
         let mut ops = RenderOpIRVec::new();
         let colors = (
             TuiColor::from(RgbValue::from_u8(0, 0, 0)),
             TuiColor::from(RgbValue::from_u8(255, 255, 255)),
         );
-        input.render(
-            &mut ops,
-            &query,
-            None,
-            "",
-            col(0) + row(0),
-            4,
-            3,
-            true,
-            colors,
-        );
+        input.render(&mut ops, None, "", col(0) + row(0), 4, 3, true, colors);
         input.cursor = 1;
-        assert!(input.handle_key(&down(), &mut query));
+        assert!(input.handle_key(&down()));
         assert_eq!(input.cursor, 5);
     }
 
     #[test]
     fn render_scrolls_to_keep_the_cursor_row_visible() {
         let mut input = InputLine::new();
-        let query = "a\nb\nc\nd";
-        input.set_cursor_end(query);
+        input.set_text("a\nb\nc\nd");
         let mut ops = RenderOpIRVec::new();
         let colors = (
             TuiColor::from(RgbValue::from_u8(0, 0, 0)),
             TuiColor::from(RgbValue::from_u8(255, 255, 255)),
         );
-        input.render(
-            &mut ops,
-            query,
-            None,
-            "",
-            col(0) + row(0),
-            10,
-            2,
-            false,
-            colors,
-        );
+        input.render(&mut ops, None, "", col(0) + row(0), 10, 2, false, colors);
         let painted: Vec<&str> = ops
             .iter()
             .filter_map(|op| match op {

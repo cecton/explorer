@@ -15,9 +15,6 @@ pub struct GitLogPaneComponent {
     window_id: usize,
     content_origin_row: usize,
     content_row_count: usize,
-    search_active: bool,
-    input_line: InputLine,
-    branch_input_line: InputLine,
     branch_fuzzy: FuzzyPicker,
 }
 
@@ -28,9 +25,6 @@ impl GitLogPaneComponent {
             window_id: 0,
             content_origin_row: 0,
             content_row_count: 0,
-            search_active: false,
-            input_line: InputLine::new(),
-            branch_input_line: InputLine::new(),
             branch_fuzzy: FuzzyPicker::new(),
         }
     }
@@ -158,7 +152,7 @@ impl GitLogPaneComponent {
         let Some(refs) = git_refs.as_ref() else {
             return;
         };
-        win.branch_picker.results = run_ref_match(&win.branch_picker.query, refs);
+        win.branch_picker.results = run_ref_match(win.branch_picker.query.text(), refs);
         win.branch_picker.selected = win.branch_picker.results.first().map(|(k, _)| *k);
     }
 
@@ -205,8 +199,8 @@ impl GitLogPaneComponent {
             title.push_str(&format!(" ({})", crate::git::MAX_LOG_ENTRIES));
             title.push('+');
         }
-        if !win.query.is_empty() {
-            title.push_str(&format!(" — {}", win.query));
+        if !win.query.text().is_empty() {
+            title.push_str(&format!(" — {}", win.query.text()));
         }
         title
     }
@@ -224,17 +218,13 @@ impl GitLogPaneComponent {
             return 0;
         };
         let input_mode = if win.branch_picking {
-            Some((
-                &self.branch_input_line,
-                &win.branch_picker.query,
-                "Show branch:",
-            ))
-        } else if self.search_active {
-            Some((&self.input_line, &win.query, "/"))
+            Some((&win.branch_picker.query, "Show branch:"))
+        } else if win.search_active {
+            Some((&win.query, "/"))
         } else {
             None
         };
-        if let Some((input_line, query, prompt)) = input_mode {
+        if let Some((input_line, prompt)) = input_mode {
             let origin = pane_box.style_adjusted_origin_pos;
             let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
             let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
@@ -249,7 +239,6 @@ impl GitLogPaneComponent {
             );
             input_line.render(
                 ops,
-                query,
                 None,
                 prompt,
                 origin,
@@ -267,9 +256,7 @@ impl GitLogPaneComponent {
 }
 
 impl Component<AppState, AppSignal> for GitLogPaneComponent {
-    fn reset(&mut self) {
-        self.search_active = false;
-    }
+    fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
         self.id
@@ -299,12 +286,11 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
         if let InputEvent::Keyboard(KeyPress::Plain {
             key: Key::Character('/'),
         }) = input_event
-            && !self.search_active
+            && !win.search_active
             && !win.branch_picking
         {
-            self.search_active = true;
-            self.input_line.set_cursor_end(&win.query);
-            if win.query.is_empty() {
+            win.search_active = true;
+            if win.query.text().is_empty() {
                 win.filtered = None;
             } else {
                 apply_filter(win);
@@ -315,14 +301,13 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
         if let InputEvent::Keyboard(KeyPress::Plain {
             key: Key::Character('b'),
         }) = input_event
-            && !self.search_active
+            && !win.search_active
             && !win.branch_picking
         {
             win.branch_picking = true;
             win.branch_picker.query.clear();
             win.branch_picker.results.clear();
             win.branch_picker.selected = None;
-            self.branch_input_line.set_cursor_end("");
             if git_refs.is_some() {
                 Self::refresh_branch_results(git_refs, win);
             } else if let Some(repo) = repo.clone() {
@@ -418,10 +403,7 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                 }
                 _ => {}
             }
-            if self
-                .branch_input_line
-                .handle_key(&input_event, &mut win.branch_picker.query)
-            {
+            if win.branch_picker.query.handle_key(&input_event) {
                 Self::refresh_branch_results(git_refs, win);
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -432,23 +414,23 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
         match &input_event {
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Esc),
-            }) if self.search_active => {
+            }) if win.search_active => {
                 win.query.clear();
                 apply_filter(win);
-                self.search_active = false;
+                win.search_active = false;
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Backspace),
-            }) if !self.search_active => {
+            }) if !win.search_active => {
                 pane_manager.send_to_back(&Window::GitLog(window_id));
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Enter),
             }) => {
-                if self.search_active {
-                    self.search_active = false;
+                if win.search_active {
+                    win.search_active = false;
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 open_commit = visible_entry_id(win);
@@ -519,7 +501,7 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
             _ => {}
         }
 
-        if self.search_active && self.input_line.handle_key(&input_event, &mut win.query) {
+        if win.search_active && win.query.handle_key(&input_event) {
             apply_filter(win);
             return Ok(EventPropagation::ConsumedRender);
         }
@@ -935,11 +917,11 @@ pub(crate) fn apply_filter(win: &mut GitLogWindowState) {
         .entries
         .as_ref()
         .map_or(0, |history| history.entries.len());
-    if win.query.is_empty() {
+    if win.query.text().is_empty() {
         win.filtered = None;
     } else {
         let matches = win.entries.as_ref().map_or(Vec::new(), |history| {
-            run_log_match(&win.query, &history.entries)
+            run_log_match(win.query.text(), &history.entries)
         });
         win.filtered = Some(matches);
     }

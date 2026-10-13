@@ -14,14 +14,6 @@ pub enum DragModifier {
 
 pub struct FilePreviewComponent {
     id: FlexBoxId,
-    command_mode: Option<String>,
-    command_input: InputLine,
-    /// `Some(pattern)` while the `/` `?` search input is open. Prefilled with the pane's active
-    /// pattern. Mutually exclusive with `command_mode`.
-    search_mode: Option<String>,
-    /// Direction of the in-progress search input (set by `/` vs `?`).
-    search_direction: SearchDirection,
-    search_input: InputLine,
     error: Option<(String, Instant)>,
     drag_snapshot: Option<Vec<(usize, usize)>>,
     drag_start_line: Option<usize>,
@@ -37,11 +29,6 @@ impl FilePreviewComponent {
     pub fn new(id: FlexBoxId) -> Self {
         Self {
             id,
-            command_mode: None,
-            command_input: InputLine::new(),
-            search_mode: None,
-            search_direction: SearchDirection::Forward,
-            search_input: InputLine::new(),
             error: None,
             drag_snapshot: None,
             drag_start_line: None,
@@ -136,7 +123,10 @@ impl FilePreviewComponent {
     /// an invalid regex shows a transient error and leaves any prior search intact; a valid pattern
     /// becomes the active search and jumps to the first match in the search direction.
     fn commit_search(&mut self, state: &mut AppState, key: FileKey) {
-        let pattern = self.search_mode.clone().unwrap_or_default();
+        let Some(PreviewInput::Search(input, direction)) = state.preview_inputs.get(&key) else {
+            return;
+        };
+        let (pattern, direction) = (input.text().to_string(), *direction);
         if pattern.is_empty() {
             state.search.remove(&key);
             return;
@@ -148,11 +138,11 @@ impl FilePreviewComponent {
                     PreviewSearch {
                         pattern,
                         regex,
-                        direction: self.search_direction,
+                        direction,
                         current: None,
                     },
                 );
-                self.goto_match(state, key, self.search_direction);
+                self.goto_match(state, key, direction);
             }
             Err(e) => {
                 self.error = Some((format!("bad regex: {e}"), Instant::now()));
@@ -225,18 +215,17 @@ impl FilePreviewComponent {
         state.mark_session_dirty();
     }
 
-    fn render_command_title(
-        &self,
+    #[allow(clippy::too_many_arguments)]
+    fn render_input_title(
         ops: &mut RenderOpIRVec,
+        input: &InputLine,
+        prompt: &str,
         origin: Pos,
         width: u16,
         height: usize,
         focused: bool,
         theme: &HelixTheme,
     ) {
-        let Some(cmd) = self.command_mode.as_deref() else {
-            return;
-        };
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
@@ -251,52 +240,8 @@ impl FilePreviewComponent {
                 Some(label_style),
             );
         }
-        self.command_input.render(
+        input.render(
             ops,
-            cmd,
-            None,
-            ":",
-            origin,
-            width,
-            height,
-            focused,
-            (color_bg, color_fg),
-        );
-    }
-
-    fn render_search_title(
-        &self,
-        ops: &mut RenderOpIRVec,
-        origin: Pos,
-        width: u16,
-        height: usize,
-        focused: bool,
-        theme: &HelixTheme,
-    ) {
-        let Some(pattern) = self.search_mode.as_deref() else {
-            return;
-        };
-        let prompt = match self.search_direction {
-            SearchDirection::Forward => "/",
-            SearchDirection::Backward => "?",
-        };
-        let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
-        let color_bg = TuiColor::from(bg_rgb);
-        let color_fg = TuiColor::from(fg_rgb);
-        let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
-
-        for row_offset in 0..height {
-            *ops +=
-                RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset as u16));
-            *ops += RenderOpCommon::SetBgColor(color_bg);
-            *ops += RenderOpIR::PaintTextWithAttributes(
-                " ".repeat(width as usize).as_str().into(),
-                Some(label_style),
-            );
-        }
-        self.search_input.render(
-            ops,
-            pattern,
             None,
             prompt,
             origin,
@@ -315,9 +260,11 @@ impl FilePreviewComponent {
         let Window::FilePreview(file_key) = window else {
             return;
         };
-        let Some(cmd) = self.command_mode.clone() else {
+        let Some(PreviewInput::Command(input)) = global_data.state.preview_inputs.get(file_key)
+        else {
             return;
         };
+        let cmd = input.text().to_string();
 
         if let Some(shell_cmd) = cmd.strip_prefix('!') {
             let file_path = {
@@ -596,8 +543,6 @@ impl FilePreviewComponent {
 
 impl Component<AppState, AppSignal> for FilePreviewComponent {
     fn reset(&mut self) {
-        self.command_mode = None;
-        self.search_mode = None;
         self.drag_snapshot = None;
         self.drag_start_line = None;
         self.drag_modifier = None;
@@ -619,22 +564,20 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             };
             let window = Window::FilePreview(key);
 
-            if self.command_mode.is_some() {
+            if let Some(PreviewInput::Command(_)) = global_data.state.preview_inputs.get(&key) {
                 match input_event {
                     InputEvent::Keyboard(KeyPress::Plain {
                         key: Key::SpecialKey(SpecialKey::Enter),
                     }) => {
                         self.execute_command(global_data, &window);
-                        self.command_mode = None;
-                        global_data.state.command_mode_active = false;
+                        global_data.state.preview_inputs.remove(&key);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     InputEvent::Keyboard(KeyPress::Plain {
                         key: Key::SpecialKey(SpecialKey::Esc),
                     }) => {
                         global_data.state.highlight_ranges.remove(&key);
-                        self.command_mode = None;
-                        global_data.state.command_mode_active = false;
+                        global_data.state.preview_inputs.remove(&key);
                         global_data.state.mark_session_dirty();
                         return Ok(EventPropagation::ConsumedRender);
                     }
@@ -642,8 +585,8 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                         key: Key::Character('c'),
                         mask,
                     }) if mask == ModifierKeysMask::new().with_ctrl() => {
-                        if let Some(query) = &mut self.command_mode {
-                            query.clear();
+                        if let Some(input) = global_data.state.preview_inputs.get_mut(&key) {
+                            input.line_mut().clear();
                         }
                         return Ok(EventPropagation::ConsumedRender);
                     }
@@ -651,44 +594,46 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                         key: Key::Character('d'),
                         mask,
                     }) if mask == ModifierKeysMask::new().with_ctrl()
-                        && self.command_mode.as_deref() == Some("") =>
+                        && global_data
+                            .state
+                            .preview_inputs
+                            .get(&key)
+                            .is_some_and(|input| input.line().text().is_empty()) =>
                     {
-                        self.command_mode = None;
-                        global_data.state.command_mode_active = false;
+                        global_data.state.preview_inputs.remove(&key);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     _ => {
-                        let query = self.command_mode.as_mut().unwrap();
-                        self.command_input.handle_key(&input_event, query);
+                        if let Some(input) = global_data.state.preview_inputs.get_mut(&key) {
+                            input.line_mut().handle_key(&input_event);
+                        }
                         return Ok(EventPropagation::ConsumedRender);
                     }
                 }
             }
 
-            if self.search_mode.is_some() {
+            if let Some(PreviewInput::Search(..)) = global_data.state.preview_inputs.get(&key) {
                 match input_event {
                     InputEvent::Keyboard(KeyPress::Plain {
                         key: Key::SpecialKey(SpecialKey::Enter),
                     }) => {
                         self.commit_search(&mut global_data.state, key);
-                        self.search_mode = None;
-                        global_data.state.command_mode_active = false;
+                        global_data.state.preview_inputs.remove(&key);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     InputEvent::Keyboard(KeyPress::Plain {
                         key: Key::SpecialKey(SpecialKey::Esc),
                     }) => {
                         global_data.state.search.remove(&key);
-                        self.search_mode = None;
-                        global_data.state.command_mode_active = false;
+                        global_data.state.preview_inputs.remove(&key);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     InputEvent::Keyboard(KeyPress::WithModifiers {
                         key: Key::Character('c'),
                         mask,
                     }) if mask == ModifierKeysMask::new().with_ctrl() => {
-                        if let Some(query) = &mut self.search_mode {
-                            query.clear();
+                        if let Some(input) = global_data.state.preview_inputs.get_mut(&key) {
+                            input.line_mut().clear();
                         }
                         return Ok(EventPropagation::ConsumedRender);
                     }
@@ -696,15 +641,19 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                         key: Key::Character('d'),
                         mask,
                     }) if mask == ModifierKeysMask::new().with_ctrl()
-                        && self.search_mode.as_deref() == Some("") =>
+                        && global_data
+                            .state
+                            .preview_inputs
+                            .get(&key)
+                            .is_some_and(|input| input.line().text().is_empty()) =>
                     {
-                        self.search_mode = None;
-                        global_data.state.command_mode_active = false;
+                        global_data.state.preview_inputs.remove(&key);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     _ => {
-                        let query = self.search_mode.as_mut().unwrap();
-                        self.search_input.handle_key(&input_event, query);
+                        if let Some(input) = global_data.state.preview_inputs.get_mut(&key) {
+                            input.line_mut().handle_key(&input_event);
+                        }
                         return Ok(EventPropagation::ConsumedRender);
                     }
                 }
@@ -720,9 +669,10 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                     .get(&key)
                     .map(|ranges| format_highlight_ranges(ranges))
                     .unwrap_or_default();
-                self.command_input.set_cursor_end(&prefill);
-                self.command_mode = Some(prefill);
-                global_data.state.command_mode_active = true;
+                global_data
+                    .state
+                    .preview_inputs
+                    .insert(key, PreviewInput::Command(InputLine::with_text(prefill)));
                 return Ok(EventPropagation::ConsumedRender);
             }
 
@@ -730,7 +680,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 key: Key::Character(c @ ('/' | '?')),
             }) = input_event
             {
-                self.search_direction = if c == '/' {
+                let direction = if c == '/' {
                     SearchDirection::Forward
                 } else {
                     SearchDirection::Backward
@@ -741,9 +691,10 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                     .get(&key)
                     .map(|s| s.pattern.clone())
                     .unwrap_or_default();
-                self.search_input.set_cursor_end(&prefill);
-                self.search_mode = Some(prefill);
-                global_data.state.command_mode_active = true;
+                global_data.state.preview_inputs.insert(
+                    key,
+                    PreviewInput::Search(InputLine::with_text(prefill), direction),
+                );
                 return Ok(EventPropagation::ConsumedRender);
             }
 
@@ -1263,19 +1214,29 @@ impl TitleRow for FilePreviewComponent {
         theme: &HelixTheme,
         state: &AppState,
     ) -> usize {
-        if let Some(cmd) = &self.command_mode {
+        let input = self
+            .file_key(state)
+            .and_then(|key| state.preview_inputs.get(&key));
+        if let Some(input) = input {
+            let prompt = match input {
+                PreviewInput::Command(_) => ":",
+                PreviewInput::Search(_, SearchDirection::Forward) => "/",
+                PreviewInput::Search(_, SearchDirection::Backward) => "?",
+            };
             let origin = pane_box.style_adjusted_origin_pos;
             let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
             let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
-            let height = InputLine::height(cmd, None, ":", width, max_rows);
-            self.render_command_title(ops, origin, width, height, focused, theme);
-            height
-        } else if let Some(pattern) = &self.search_mode {
-            let origin = pane_box.style_adjusted_origin_pos;
-            let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
-            let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
-            let height = InputLine::height(pattern, None, "/", width, max_rows);
-            self.render_search_title(ops, origin, width, height, focused, theme);
+            let height = input.line().height(None, prompt, width, max_rows);
+            Self::render_input_title(
+                ops,
+                input.line(),
+                prompt,
+                origin,
+                width,
+                height,
+                focused,
+                theme,
+            );
             height
         } else {
             let (title, removed) = self

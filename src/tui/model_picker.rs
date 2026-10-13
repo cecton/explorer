@@ -8,7 +8,6 @@ use tokio::sync::mpsc;
 pub struct ModelPickerComponent {
     id: FlexBoxId,
     picker: FuzzyPicker,
-    input_line: InputLine,
 }
 
 impl ModelPickerComponent {
@@ -16,7 +15,6 @@ impl ModelPickerComponent {
         Self {
             id,
             picker: FuzzyPicker::new(),
-            input_line: InputLine::new(),
         }
     }
 
@@ -145,7 +143,7 @@ impl TitleRow for ModelPickerComponent {
         let query = &state.model_picker.query;
         let prompt = "Model: ";
         let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
-        let height = InputLine::height(query, None, prompt, width, max_rows);
+        let height = query.height(None, prompt, width, max_rows);
 
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
         let color_bg = TuiColor::from(bg_rgb);
@@ -161,9 +159,8 @@ impl TitleRow for ModelPickerComponent {
                 Some(bg_style),
             );
         }
-        self.input_line.render(
+        query.render(
             ops,
-            query,
             None,
             prompt,
             origin,
@@ -227,11 +224,8 @@ impl Component<AppState, AppSignal> for ModelPickerComponent {
             _ => {}
         }
 
-        if self
-            .input_line
-            .handle_key(&input_event, &mut state.model_picker.query)
-        {
-            let query = state.model_picker.query.clone();
+        if state.model_picker.query.handle_key(&input_event) {
+            let query = state.model_picker.query.text().to_string();
             state.model_picker.results = run_model_match(&query, state);
             state.model_picker.selected = state.model_picker.results.first().map(|(idx, _)| *idx);
             return Ok(EventPropagation::ConsumedRender);

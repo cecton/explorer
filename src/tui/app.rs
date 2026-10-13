@@ -713,7 +713,7 @@ impl App for AppMain {
                     state.pane_manager.focused_window = Some(Window::WindowPicker);
                     notify_terminal_focus_change(state, old, Some(Window::WindowPicker));
                     state.window_picker.selected = None;
-                    state.window_picker.query = String::new();
+                    state.window_picker.query.clear();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Some(Action::OpenTerminal) => {
@@ -740,7 +740,7 @@ impl App for AppMain {
                         .position(|(n, _)| n == state.theme.name())
                         .and_then(|i| all_themes.get(i).map(|(n, _)| n.clone()));
                     state.theme_picker.results = all_themes;
-                    state.theme_picker.query = String::new();
+                    state.theme_picker.query.clear();
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Some(Action::OpenGitLog) => {
@@ -1136,7 +1136,7 @@ impl App for AppMain {
                         .pane_manager
                         .window_stack
                         .contains(&Window::WindowPicker)
-                        && !state.window_picker.query.is_empty()
+                        && !state.window_picker.query.text().is_empty()
                     {
                         WindowPickerComponent::spawn_match(
                             &*state,
@@ -1451,7 +1451,7 @@ impl App for AppMain {
                         .window_stack
                         .contains(&Window::ModelPicker)
                     {
-                        let query = state.model_picker.query.clone();
+                        let query = state.model_picker.query.text().to_string();
                         state.model_picker.results =
                             crate::tui::model_picker::run_model_match(&query, state);
                     }
@@ -1789,8 +1789,10 @@ pub(super) fn close_window(state: &mut AppState, window: Window) {
             crate::tui::discussion_pane::drop_queue_entry(state, id);
             state.discussions.remove(&id);
         }
-        Window::FilePreview(_)
-        | Window::ConversationTree
+        Window::FilePreview(key) => {
+            state.preview_inputs.remove(&key);
+        }
+        Window::ConversationTree
         | Window::WindowPicker
         | Window::ThemePicker
         | Window::ModelPicker => {}

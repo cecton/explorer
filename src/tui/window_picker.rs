@@ -13,7 +13,6 @@ pub(crate) type PickerResultMsg = (u64, Vec<(Window, Vec<u32>)>);
 pub struct WindowPickerComponent {
     id: FlexBoxId,
     picker: FuzzyPicker,
-    input_line: InputLine,
     generation: Arc<AtomicU64>,
     results_tx: mpsc::Sender<PickerResultMsg>,
 }
@@ -27,7 +26,6 @@ impl WindowPickerComponent {
         Self {
             id,
             picker: FuzzyPicker::new(),
-            input_line: InputLine::new(),
             generation,
             results_tx,
         }
@@ -52,7 +50,7 @@ impl WindowPickerComponent {
         results_tx: mpsc::Sender<PickerResultMsg>,
         main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
     ) {
-        let query = state.window_picker.query.clone();
+        let query = state.window_picker.query.text().to_string();
         let files = Arc::clone(&state.files);
         let root = state.root.clone();
         let window_stack = state.pane_manager.window_stack.clone();
@@ -108,7 +106,7 @@ impl TitleRow for WindowPickerComponent {
         let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
         let query = &state.window_picker.query;
         let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
-        let height = InputLine::height(query, None, "", width, max_rows);
+        let height = query.height(None, "", width, max_rows);
 
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
         let color_bg = TuiColor::from(bg_rgb);
@@ -124,9 +122,8 @@ impl TitleRow for WindowPickerComponent {
                 Some(bg_style),
             );
         }
-        self.input_line.render(
+        query.render(
             ops,
-            query,
             None,
             "",
             origin,
@@ -368,7 +365,7 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 crate::tui::app::close_window(state, window);
-                if state.window_picker.query.is_empty() {
+                if state.window_picker.query.text().is_empty() {
                     state.window_picker.results.remove(index);
                     let results = &state.window_picker.results;
                     state.window_picker.selected = results
@@ -381,11 +378,13 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
             _ => {}
         }
 
-        if self
-            .input_line
-            .handle_key(&input_event, &mut global_data.state.window_picker.query)
+        if global_data
+            .state
+            .window_picker
+            .query
+            .handle_key(&input_event)
         {
-            if !global_data.state.window_picker.query.is_empty() {
+            if !global_data.state.window_picker.query.text().is_empty() {
                 let main_tx = global_data.main_thread_channel_sender.clone();
                 self.on_query_changed(&global_data.state, main_tx);
             }
@@ -426,7 +425,7 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
 
             // Windows open and close while the picker stays up; an empty query lists them.
             let state = &mut global_data.state;
-            if state.window_picker.query.is_empty() {
+            if state.window_picker.query.text().is_empty() {
                 let snapshot = state.files.load();
                 state.window_picker.results =
                     Self::open_windows_results(&snapshot, &state.pane_manager.window_stack);
