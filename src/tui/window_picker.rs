@@ -465,10 +465,9 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
                         CommitDiffPaneComponent::title(state, *id),
                         Some(accents.git),
                     ),
-                    Window::ConversationTree => (
-                        ConversationTreeComponent::TITLE.to_string(),
-                        Some(accents.agent),
-                    ),
+                    Window::ConversationTree => {
+                        (ConversationTreeComponent::title(state), Some(accents.agent))
+                    }
                     Window::Discussion(id) => {
                         (DiscussionComponent::title(state, *id), Some(accents.agent))
                     }

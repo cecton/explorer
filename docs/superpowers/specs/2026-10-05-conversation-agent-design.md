@@ -917,8 +917,7 @@ Real endpoints and the `claude` CLI are verified manually.
   flow for this").
 - `conversation` tool for `claude-code` nodes.
 - Export of the tree into the repository.
-- Filter (`/`) in the tree; jump from a Git Log row to its node through the commit
-  index.
+- Jump from a Git Log row to its node through the commit index.
 - `$ARGUMENTS` placeholders and autocomplete for slash commands.
 - Permission rules for `shell`.
 

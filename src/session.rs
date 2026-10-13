@@ -43,6 +43,9 @@ pub struct Session {
     /// Forks and threads expanded in the Conversation Tree window.
     #[serde(default)]
     pub conversation_expanded: Vec<String>,
+    /// Filter of the Conversation Tree window.
+    #[serde(default)]
+    pub conversation_query: String,
     /// Highlights in the prompts and replies of conversation nodes, by node id.
     #[serde(default)]
     pub discussion_highlights: HashMap<String, NodeHighlights>,
@@ -207,6 +210,7 @@ impl Session {
             cargo_features: state.cargo_features.clone(),
             theme: Some(state.theme.name().to_string()),
             conversation_expanded,
+            conversation_query: state.tree_view.query.clone(),
             discussion_highlights,
         }
     }
@@ -402,6 +406,7 @@ impl Session {
             .iter()
             .map(|id| NodeId::new(id))
             .collect();
+        state.tree_view.query = self.conversation_query;
         state.discussion_highlights = self
             .discussion_highlights
             .into_iter()
@@ -689,6 +694,7 @@ mod tests {
             },
             theme: None,
             conversation_expanded: Vec::new(),
+            conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
         };
 
@@ -808,6 +814,7 @@ mod tests {
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
+            conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
         };
 
@@ -869,6 +876,7 @@ mod tests {
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
+            conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
         };
 
@@ -916,6 +924,7 @@ mod tests {
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
+            conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
         };
 
@@ -949,6 +958,7 @@ mod tests {
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
+            conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
         };
 
@@ -1015,6 +1025,7 @@ mod tests {
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
+            conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
         };
 
@@ -1062,6 +1073,21 @@ mod tests {
                 .expanded
                 .contains(&NodeId::new("2026-10-05T14-32-07Z"))
         );
+    }
+
+    #[test]
+    fn conversation_tree_filter_round_trips_through_session() {
+        let (_dir, root) = temp_root();
+        let mut state = empty_state(root.clone());
+        state.tree_view.query = "queue esc".to_string();
+
+        let session = Session::from_state(&state);
+        let json = serde_json::to_string(&session).expect("serialize session");
+        let restored: Session = serde_json::from_str(&json).expect("deserialize session");
+
+        let mut fresh = empty_state(root);
+        restored.apply(&mut fresh);
+        assert_eq!(fresh.tree_view.query, "queue esc");
     }
 
     #[test]

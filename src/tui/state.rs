@@ -286,6 +286,14 @@ pub struct TreeViewState {
     pub loaded: bool,
     /// Last failure to report in the status bar, cleared by the next key.
     pub notice: Option<String>,
+    /// The `/` filter: while it holds a word, the window lists the matching nodes flat.
+    pub query: String,
+}
+
+impl TreeViewState {
+    pub fn filtering(&self) -> bool {
+        !self.query.trim().is_empty()
+    }
 }
 
 /// State of one Discussion window.

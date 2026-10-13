@@ -296,6 +296,8 @@ pub(crate) fn start_turn(
     let session = lineage.first().unwrap_or(&node).as_str().to_string();
     state.tree_view.expanded.extend(folds);
     state.tree_view.selected = Some(RowTarget::Node(node.clone()));
+    // The new node has no title yet: no filter would list it.
+    state.tree_view.query.clear();
     state.mark_session_dirty();
 
     let summary_backend = state

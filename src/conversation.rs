@@ -342,6 +342,10 @@ impl ConversationTree {
         &self.roots
     }
 
+    pub fn nodes(&self) -> impl Iterator<Item = (&NodeId, &Node)> {
+        self.nodes.iter()
+    }
+
     /// Directory of `id`: the tree root joined with every ancestor's name.
     pub fn node_dir(&self, id: &NodeId) -> Option<Utf8PathBuf> {
         let mut chain = vec![id];

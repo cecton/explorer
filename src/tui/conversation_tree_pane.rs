@@ -3,6 +3,9 @@ use crate::conversation::{ConversationTree, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::state::{PendingTurn, RowTarget};
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
+use nucleo::pattern::{Atom, AtomKind, CaseMatching, Normalization, Pattern};
+use nucleo::{Config, Matcher, Utf32Str};
+use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -173,6 +176,145 @@ fn push_branches(
     }
 }
 
+/// Byte ranges of a text, start inclusive and end exclusive, in order.
+type Ranges = Vec<(usize, usize)>;
+
+/// A node the filter kept, with what matched in its title and in its summary.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct FilterMatch {
+    pub node: NodeId,
+    pub title: Ranges,
+    pub summary: Ranges,
+}
+
+/// The summary shown under a node's title, when it says something else.
+fn shown_summary(node: &Node) -> Option<&str> {
+    node.summary
+        .as_deref()
+        .filter(|summary| *summary != node.display_title())
+}
+
+/// The nodes holding every word of `query` in their title or their summary, in any
+/// order: best match first, then newest first.
+pub(crate) fn filter_nodes(tree: &ConversationTree, query: &str) -> Vec<FilterMatch> {
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Smart,
+        Normalization::Smart,
+        AtomKind::Substring,
+    );
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut chars = Vec::new();
+    let mut scored: Vec<(u32, FilterMatch)> = tree
+        .nodes()
+        .filter_map(|(id, node)| {
+            let title = node.display_title();
+            let text = match shown_summary(node) {
+                Some(summary) => format!("{title}\n{summary}"),
+                None => title.to_string(),
+            };
+            // `Utf32Str::new` indexes by byte or by grapheme depending on the text.
+            chars.clear();
+            chars.extend(text.chars());
+            // Nucleo misses a substring that ends a non-ASCII haystack.
+            chars.push('\n');
+            let score = pattern.score(Utf32Str::Unicode(&chars), &mut matcher)?;
+            let mut indices = Vec::new();
+            for atom in &pattern.atoms {
+                push_occurrences(atom, &chars, &mut matcher, &mut indices);
+            }
+            indices.sort_unstable();
+            indices.dedup();
+            let (title, summary) = matched_ranges(&text, title.len(), &indices);
+            Some((
+                score,
+                FilterMatch {
+                    node: id.clone(),
+                    title,
+                    summary,
+                },
+            ))
+        })
+        .collect();
+    scored.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| b.1.node.cmp(&a.1.node)));
+    scored.into_iter().map(|(_, found)| found).collect()
+}
+
+/// Every place `atom` matches in `chars`, as char indices: an atom alone reports only
+/// the first one.
+fn push_occurrences(atom: &Atom, chars: &[char], matcher: &mut Matcher, indices: &mut Vec<u32>) {
+    let mut from = 0;
+    let mut found = Vec::new();
+    while from < chars.len() {
+        found.clear();
+        let rest = Utf32Str::Unicode(&chars[from..]);
+        if atom.indices(rest, matcher, &mut found).is_none() {
+            break;
+        }
+        let Some(last) = found.iter().max().copied() else {
+            break;
+        };
+        indices.extend(found.iter().map(|index| index + from as u32));
+        from += last as usize + 1;
+    }
+}
+
+/// Turns sorted char indices of `text`, a title of `title_len` bytes then a newline and
+/// a summary, into byte ranges of the title and of the summary.
+fn matched_ranges(text: &str, title_len: usize, indices: &[u32]) -> (Ranges, Ranges) {
+    let mut title = Ranges::new();
+    let mut summary = Ranges::new();
+    let mut wanted = indices.iter().copied().peekable();
+    for (index, (at, ch)) in text.char_indices().enumerate() {
+        if wanted.peek() != Some(&(index as u32)) {
+            continue;
+        }
+        wanted.next();
+        let (ranges, start) = match at.cmp(&title_len) {
+            Ordering::Less => (&mut title, at),
+            Ordering::Equal => continue,
+            Ordering::Greater => (&mut summary, at - title_len - 1),
+        };
+        let end = start + ch.len_utf8();
+        match ranges.last_mut() {
+            Some(last) if last.1 == start => last.1 = end,
+            _ => ranges.push((start, end)),
+        }
+    }
+    (title, summary)
+}
+
+/// Cuts `text`, which starts at byte `offset` of its source, where it enters and leaves
+/// the matched `ranges` of that source. Each piece says whether it is matched.
+fn segments<'a>(text: &'a str, offset: usize, ranges: &[(usize, usize)]) -> Vec<(&'a str, bool)> {
+    let mut pieces = Vec::new();
+    let mut at = 0;
+    for &(start, end) in ranges {
+        let start = start.saturating_sub(offset);
+        let end = end.saturating_sub(offset).min(text.len());
+        if start >= end {
+            continue;
+        }
+        if start > at {
+            pieces.push((&text[at..start], false));
+        }
+        pieces.push((&text[start..end], true));
+        at = end;
+    }
+    if at < text.len() {
+        pieces.push((&text[at..], false));
+    }
+    pieces
+}
+
+/// The rows of a filtered window: its matches, flat.
+fn flat_rows(matches: &[FilterMatch]) -> Vec<TreeRow> {
+    matches
+        .iter()
+        .map(|found| TreeRow::node(&found.node, Vec::new(), Fold::Leaf, Branch::None))
+        .collect()
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum LineKind {
     Head,
@@ -183,6 +325,8 @@ enum LineKind {
 struct Line {
     row: usize,
     kind: LineKind,
+    /// Byte offset of `text` in the title or the summary it is cut from.
+    offset: usize,
     text: String,
 }
 
@@ -330,10 +474,15 @@ pub struct ConversationTreeComponent {
     shown_selection: Option<RowTarget>,
     /// Time and row of the last click, to recognize a double click.
     last_click: Option<(Instant, usize)>,
+    /// Whether the `/` input is open in the title bar.
+    search_active: bool,
+    input_line: InputLine,
+    /// Row selected when `/` opened the input, given back when the filter finds nothing.
+    before_search: Option<RowTarget>,
 }
 
 impl ConversationTreeComponent {
-    pub(crate) const TITLE: &str = "Conversations";
+    const TITLE: &str = "Conversations";
 
     pub fn new(id: FlexBoxId) -> Self {
         Self {
@@ -344,22 +493,56 @@ impl ConversationTreeComponent {
             label_zones: Vec::new(),
             shown_selection: None,
             last_click: None,
+            search_active: false,
+            input_line: InputLine::new(),
+            before_search: None,
         }
     }
 
-    fn selected_index(rows: &[TreeRow], selected: Option<&RowTarget>) -> usize {
+    pub(crate) fn title(state: &AppState) -> String {
+        if state.tree_view.filtering() {
+            format!("{} — {}", Self::TITLE, state.tree_view.query.trim())
+        } else {
+            Self::TITLE.to_string()
+        }
+    }
+
+    /// The row `selected` sits on. Without one, the newest root of the tree, or the
+    /// best match of a filter.
+    fn selected_index(rows: &[TreeRow], selected: Option<&RowTarget>, filtering: bool) -> usize {
         selected
             .and_then(|target| rows.iter().position(|row| &row.target == target))
-            .or_else(|| rows.iter().rposition(|row| row.rails.is_empty()))
+            .or_else(|| {
+                rows.iter()
+                    .rposition(|row| row.rails.is_empty())
+                    .filter(|_| !filtering)
+            })
             .unwrap_or(0)
     }
 
-    /// The rows the pane shows: the tree, plus a provisional row per queued prompt.
+    /// The rows the pane shows: the tree, plus a provisional row per queued prompt; or
+    /// the matches of the filter, flat.
     fn rows(state: &AppState) -> Vec<TreeRow> {
+        let tree = state.conversations.read();
+        if state.tree_view.filtering() {
+            return flat_rows(&filter_nodes(&tree, &state.tree_view.query));
+        }
         with_queued(
-            layout_rows(&state.conversations.read(), &state.tree_view.expanded),
+            layout_rows(&tree, &state.tree_view.expanded),
             &state.queued_turns,
         )
+    }
+
+    /// Selects `target` for the unfiltered tree, opening the folds that hide its node.
+    fn reveal(state: &mut AppState, target: RowTarget) {
+        if let Some(id) = target.node() {
+            let folds = folds_on_the_way(&state.conversations.read(), id);
+            state
+                .tree_view
+                .expanded
+                .extend(folds.into_iter().filter(|fold| fold != id));
+        }
+        state.tree_view.selected = Some(target);
     }
 
     fn select(state: &mut AppState, rows: &[TreeRow], index: usize) {
@@ -449,7 +632,7 @@ impl ConversationTreeComponent {
             state.discussions.remove(&id);
             state.pane_manager.remove_window(&Window::Discussion(id));
         }
-        let rows = layout_rows(&state.conversations.read(), &state.tree_view.expanded);
+        let rows = Self::rows(state);
         state.tree_view.selected = None;
         Self::select(state, &rows, index);
         state.mark_session_dirty();
@@ -463,15 +646,43 @@ impl TitleRow for ConversationTreeComponent {
         pane_box: &FlexBox,
         focused: bool,
         theme: &HelixTheme,
-        _state: &AppState,
+        state: &AppState,
     ) -> usize {
-        render_pane_title(ops, pane_box, Self::TITLE, false, theme, focused);
+        if !self.search_active {
+            render_pane_title(ops, pane_box, &Self::title(state), false, theme, focused);
+            return 1;
+        }
+        let origin = pane_box.style_adjusted_origin_pos;
+        let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
+        let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
+        let color_bg = TuiColor::from(bg_rgb);
+        let color_fg = TuiColor::from(fg_rgb);
+        let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+        *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+        *ops += RenderOpCommon::SetBgColor(color_bg);
+        *ops += RenderOpIR::PaintTextWithAttributes(
+            " ".repeat(width as usize).as_str().into(),
+            Some(bg_style),
+        );
+        self.input_line.render(
+            ops,
+            &state.tree_view.query,
+            None,
+            "/",
+            origin,
+            width,
+            1,
+            focused,
+            (color_bg, color_fg),
+        );
         1
     }
 }
 
 impl Component<AppState, AppSignal> for ConversationTreeComponent {
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.search_active = false;
+    }
 
     fn get_id(&self) -> FlexBoxId {
         self.id
@@ -487,7 +698,11 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
         let state = &mut global_data.state;
         let window = Window::ConversationTree;
         let rows = Self::rows(state);
-        let index = Self::selected_index(&rows, state.tree_view.selected.as_ref());
+        let index = Self::selected_index(
+            &rows,
+            state.tree_view.selected.as_ref(),
+            state.tree_view.filtering(),
+        );
         let page = state
             .pane_manager
             .window_page_size(&window)
@@ -506,7 +721,70 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             _ => None,
         };
 
+        if self.search_active && matches!(input_event, InputEvent::Keyboard(_)) {
+            match &input_event {
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Up),
+                }) => Self::select(state, &rows, index.saturating_sub(1)),
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Down),
+                }) => Self::select(state, &rows, index + 1),
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::PageUp),
+                }) => Self::select(state, &rows, index.saturating_sub(page)),
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::PageDown),
+                }) => Self::select(state, &rows, index + page),
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Enter),
+                }) => {
+                    self.search_active = false;
+                    self.before_search = None;
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Esc),
+                }) => {
+                    if state.tree_view.filtering() {
+                        let kept = rows
+                            .get(index)
+                            .map(|row| row.target.clone())
+                            .or_else(|| self.before_search.take());
+                        if let Some(target) = kept {
+                            Self::reveal(state, target);
+                        }
+                    }
+                    state.tree_view.query.clear();
+                    self.search_active = false;
+                    self.before_search = None;
+                    self.shown_selection = None;
+                    state.mark_session_dirty();
+                }
+                _ => {
+                    let before = state.tree_view.query.clone();
+                    self.input_line
+                        .handle_key(&input_event, &mut state.tree_view.query);
+                    if state.tree_view.query != before {
+                        state.tree_view.selected = if state.tree_view.filtering() {
+                            Self::rows(state).first().map(|row| row.target.clone())
+                        } else {
+                            self.before_search.clone()
+                        };
+                        self.shown_selection = None;
+                        state.mark_session_dirty();
+                    }
+                }
+            }
+            return Ok(EventPropagation::ConsumedRender);
+        }
+
         match &input_event {
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character('/'),
+            }) => {
+                self.search_active = true;
+                self.before_search = rows.get(index).map(|row| row.target.clone());
+                self.input_line.set_cursor_end(&state.tree_view.query);
+            }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Up),
             }) => Self::select(state, &rows, index.saturating_sub(1)),
@@ -752,11 +1030,22 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
 
             let tree_handle = state.conversations.clone();
             let tree = tree_handle.read();
-            let rows = with_queued(
-                layout_rows(&tree, &state.tree_view.expanded),
-                &state.queued_turns,
-            );
-            let selected = Self::selected_index(&rows, state.tree_view.selected.as_ref());
+            let filtering = state.tree_view.filtering();
+            let matches = if filtering {
+                filter_nodes(&tree, &state.tree_view.query)
+            } else {
+                Vec::new()
+            };
+            let rows = if filtering {
+                flat_rows(&matches)
+            } else {
+                with_queued(
+                    layout_rows(&tree, &state.tree_view.expanded),
+                    &state.queued_turns,
+                )
+            };
+            let selected =
+                Self::selected_index(&rows, state.tree_view.selected.as_ref(), filtering);
             let selected_target = rows.get(selected).map(|row| row.target.clone());
             state.tree_view.selected = selected_target.clone();
 
@@ -788,14 +1077,17 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             let favorite_fg = theme
                 .ui_fg("ui.cursor.match")
                 .unwrap_or(RgbValue::from_u8(255, 200, 60));
+            let match_fg = favorite_fg;
 
             let mut render_ops = RenderOpIRVec::new();
 
             if rows.is_empty() {
-                let message = if state.tree_view.loaded {
-                    "(no conversations)"
-                } else {
+                let message = if !state.tree_view.loaded {
                     "Loading conversations…"
+                } else if filtering {
+                    "No matches"
+                } else {
+                    "(no conversations)"
                 };
                 let bg_style = new_style!(color_bg: {TuiColor::from(pane_bg)});
                 let text_style = new_style!(color_fg: {TuiColor::from(text_fg)} color_bg: {TuiColor::from(pane_bg)});
@@ -837,6 +1129,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     lines.push(Line {
                         row: row_idx,
                         kind: LineKind::Head,
+                        offset: 0,
                         text: truncate(&queued_text(state, row), width),
                     });
                     if row_idx == selected {
@@ -854,12 +1147,13 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     lines.push(Line {
                         row: row_idx,
                         kind: LineKind::Head,
+                        offset: 0,
                         text: truncate(node.display_title(), text_width),
                     });
                     continue;
                 }
                 let start = lines.len();
-                for (i, (_, text)) in wrap(node.display_title(), text_width)
+                for (i, (offset, text)) in wrap(node.display_title(), text_width)
                     .into_iter()
                     .enumerate()
                 {
@@ -870,16 +1164,16 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         } else {
                             LineKind::TitleRest
                         },
+                        offset,
                         text,
                     });
                 }
-                if let Some(summary) = node.summary.as_deref()
-                    && summary != node.display_title()
-                {
-                    for (_, text) in wrap(summary, text_width) {
+                if let Some(summary) = shown_summary(node) {
+                    for (offset, text) in wrap(summary, text_width) {
                         lines.push(Line {
                             row: row_idx,
                             kind: LineKind::Summary,
+                            offset,
                             text,
                         });
                     }
@@ -993,6 +1287,29 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
                 };
 
+                // While filtering, the rows are the matches, in the same order.
+                let matched: &[(usize, usize)] = match (matches.get(line.row), line.kind) {
+                    (Some(found), LineKind::Summary) => &found.summary,
+                    (Some(found), _) => &found.title,
+                    (None, _) => &[],
+                };
+                let paint_text = |ops: &mut RenderOpIRVec, fg: RgbValue| {
+                    let mut column = text_column;
+                    for (text, is_match) in segments(&line.text, line.offset, matched) {
+                        let mut style = styled(if is_match { match_fg } else { fg });
+                        if is_match {
+                            style.attribs.underline = Some(tui_style_attrib::Underline);
+                        }
+                        *ops += RenderOpCommon::MoveCursorPositionRelTo(
+                            origin,
+                            col(column as u16) + row(row_offset as u16),
+                        );
+                        *ops += RenderOpCommon::ApplyColors(Some(style));
+                        *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+                        column += display_width(text);
+                    }
+                };
+
                 let running_for = state
                     .running_turns
                     .get(node_id)
@@ -1015,7 +1332,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                                 type_fg,
                             );
                         }
-                        paint(&mut render_ops, text_column, &line.text, type_fg);
+                        paint_text(&mut render_ops, type_fg);
                         if let Some(label) = commit_label(node) {
                             let column = pane_width.saturating_sub(display_width(&label));
                             paint(&mut render_ops, column, &label, hash_fg);
@@ -1039,7 +1356,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                             LineKind::Summary => dim_fg,
                             _ => type_fg,
                         };
-                        paint(&mut render_ops, text_column, &line.text, fg);
+                        paint_text(&mut render_ops, fg);
                     }
                 }
             }
@@ -1102,12 +1419,132 @@ mod tests {
     fn the_newest_root_is_selected_when_nothing_is() {
         let (_tmp, tree) = tree_with(&["a1/a2", "b1/b2"]);
         let rows = layout_rows(&tree, &ids(&["a1", "b1"]));
-        assert_eq!(ConversationTreeComponent::selected_index(&rows, None), 2);
+        assert_eq!(
+            ConversationTreeComponent::selected_index(&rows, None, false),
+            2
+        );
         let known = RowTarget::Node(NodeId::new("a2"));
         assert_eq!(
-            ConversationTreeComponent::selected_index(&rows, Some(&known)),
+            ConversationTreeComponent::selected_index(&rows, Some(&known), false),
             1
         );
+    }
+
+    fn described_tree(nodes: &[(&str, &str, &str)]) -> (tempfile::TempDir, ConversationTree) {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        for (path, title, summary) in nodes {
+            let dir = root.join(path);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("title.md"), title).unwrap();
+            if !summary.is_empty() {
+                std::fs::write(dir.join("summary.md"), summary).unwrap();
+            }
+        }
+        let tree = ConversationTree::load(&root);
+        (tmp, tree)
+    }
+
+    fn matched_ids(matches: &[FilterMatch]) -> Vec<&str> {
+        matches.iter().map(|found| found.node.as_str()).collect()
+    }
+
+    #[test]
+    fn the_filter_wants_every_word_in_any_order_across_title_and_summary() {
+        let (_tmp, tree) = described_tree(&[
+            ("a1", "Queue rows", "Esc takes the prompt back"),
+            ("a1/a2", "Queue badge", "Shown in the gutter"),
+            ("b1", "Spinner frames", "No queued prompt, no escape"),
+        ]);
+        let sorted_ids = |query: &str| {
+            let mut ids: Vec<String> = filter_nodes(&tree, query)
+                .into_iter()
+                .map(|found| found.node.as_str().to_string())
+                .collect();
+            ids.sort();
+            ids
+        };
+        assert_eq!(sorted_ids("esc queue"), ["a1", "b1"]);
+        assert_eq!(sorted_ids("queue esc"), ["a1", "b1"]);
+        assert_eq!(sorted_ids("queue"), ["a1", "a2", "b1"]);
+        // An uppercase letter makes the word case-sensitive.
+        assert_eq!(sorted_ids("Queue"), ["a1", "a2"]);
+        assert!(sorted_ids("qeue").is_empty());
+    }
+
+    #[test]
+    fn a_word_ending_the_text_is_found() {
+        let (_tmp, tree) = described_tree(&[
+            ("a1", "Fix — the queue", ""),
+            ("b1", "Fix the queue", ""),
+            ("c1", "Queue", "Le café"),
+        ]);
+        let matches = filter_nodes(&tree, "queue");
+        assert_eq!(matched_ids(&matches), ["c1", "b1", "a1"]);
+        assert_eq!(matches[2].title, [(12, 17)]);
+        assert_eq!(filter_nodes(&tree, "café")[0].summary, [(3, 8)]);
+    }
+
+    #[test]
+    fn equal_matches_come_newest_first() {
+        let (_tmp, tree) = described_tree(&[
+            ("a1", "Wrap the title", ""),
+            ("a1/a2", "Wrap the title", ""),
+            ("b1", "Wrap the title", ""),
+        ]);
+        for _ in 0..5 {
+            assert_eq!(
+                matched_ids(&filter_nodes(&tree, "wrap")),
+                ["b1", "a2", "a1"]
+            );
+        }
+    }
+
+    #[test]
+    fn matches_are_byte_ranges_of_the_title_and_of_the_summary() {
+        let (_tmp, tree) =
+            described_tree(&[("a1", "Café queue", "Le café: the queue, then the café")]);
+        let matches = filter_nodes(&tree, "café queue");
+        assert_eq!(
+            matches,
+            [FilterMatch {
+                node: NodeId::new("a1"),
+                title: vec![(0, 5), (6, 11)],
+                summary: vec![(3, 8), (14, 19), (30, 35)],
+            }]
+        );
+        let title = tree.node(&NodeId::new("a1")).unwrap().display_title();
+        assert_eq!(&title[0..5], "Café");
+        assert_eq!(&title[6..11], "queue");
+    }
+
+    #[test]
+    fn a_filter_selects_its_best_match_when_nothing_is_selected() {
+        let (_tmp, tree) = described_tree(&[("a1", "Wrap", ""), ("b1", "Wrap", "")]);
+        let rows = flat_rows(&filter_nodes(&tree, "wrap"));
+        assert_eq!(
+            ConversationTreeComponent::selected_index(&rows, None, true),
+            0
+        );
+        assert_eq!(
+            shape(&rows),
+            [("b1", vec![], Fold::Leaf), ("a1", vec![], Fold::Leaf)]
+        );
+    }
+
+    #[test]
+    fn segments_follow_a_wrapped_line_through_its_offset() {
+        let ranges = [(2, 5), (8, 12)];
+        assert_eq!(
+            segments("abcdefgh", 0, &ranges),
+            [("ab", false), ("cde", true), ("fgh", false)]
+        );
+        assert_eq!(
+            segments("efghijkl", 4, &ranges),
+            [("e", true), ("fgh", false), ("ijkl", true)]
+        );
+        assert_eq!(segments("mnop", 12, &ranges), [("mnop", false)]);
+        assert_eq!(segments("abc", 0, &[]), [("abc", false)]);
     }
 
     #[test]
