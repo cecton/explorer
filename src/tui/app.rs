@@ -1921,19 +1921,14 @@ fn render_status_bar(
             .map(|k| crate::keymap::hint(&k))
             .unwrap_or_default()
     };
-    let global_lbl = |a: Action| {
-        state
-            .keymap
-            .global_key_for(a)
-            .map(|k| crate::keymap::hint(&k))
-            .unwrap_or_default()
-    };
+    // Two global keys sharing a modifier read as one chord: `Ctrl+↑/↓`, not `Ctrl+↑/Ctrl+↓`.
+    let global_pair = |a: Action, b: Action| state.keymap.global_pair(a, b);
 
     let (leader_text, rest_text) = if state.leader_active {
         (
             " Leader ".to_string(),
             format!(
-                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Chat  {}:Favorite  {}:Model  {}:To back  {}:Close  {}:Quit  {}:Next  {}:Prev  {}:Cancel",
+                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Chat  {}:Favorite  {}:Model  {}:To back  {}:Close  {}:Quit  {}:Next/Prev  {}:Cancel",
                 leader_lbl(Action::OpenWindowPicker),
                 leader_lbl(Action::OpenTerminal),
                 leader_lbl(Action::OpenThemePicker),
@@ -1944,8 +1939,9 @@ fn render_status_bar(
                 leader_lbl(Action::SendToBack),
                 leader_lbl(Action::ClosePane),
                 leader_lbl(Action::Quit),
-                leader_lbl(Action::FocusNext),
-                leader_lbl(Action::FocusPrev),
+                state
+                    .keymap
+                    .leader_pair(Action::FocusNext, Action::FocusPrev),
                 leader_lbl(Action::DismissLeader),
             ),
         )
@@ -1957,16 +1953,16 @@ fn render_status_bar(
                 }
                 Some(Window::ThemePicker) => "Esc:Cancel  Enter:Save".to_string(),
                 Some(Window::FilePreview(_)) => {
-                    "e:Edit  Backspace:Send to back  ::Command".to_string()
+                    "e:Edit  Bksp:Send to back  ::Command".to_string()
                 }
                 Some(Window::GitLog(_)) => {
-                    "Backspace:Send to back  b:Branch  ↑↓:Select  /:Search  Enter:Diff  Esc:Clear search".to_string()
+                    "Bksp:Send to back  b:Branch  ↑↓:Select  /:Search  Enter:Diff  Esc:Clear search".to_string()
                 }
                 Some(Window::CommitDiff(_)) => {
-                    "Backspace:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll".to_string()
+                    "Bksp:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll".to_string()
                 }
                 Some(Window::ConversationTree) => {
-                    "Backspace:Send to back  ↑↓:Select  ←→:Fold  /:Search  Enter:Open  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  Ctrl+D:Delete  Esc:Clear search"
+                    "Bksp:Send to back  /:Search  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  Ctrl+D:Delete  Esc:Clear search"
                         .to_string()
                 }
                 Some(Window::Discussion(_)) => {
@@ -1975,7 +1971,7 @@ fn render_status_bar(
                 }
                 Some(Window::ModelPicker) => model_picker_hint(state),
                 Some(Window::Terminal(_)) if !state.terminal_grabbed => {
-                    "Backspace:Send to back  Enter:grab  ↑↓PgUp/PgDn:scroll".to_string()
+                    "Bksp:Send to back  Enter:grab  ↑↓PgUp/PgDn:scroll".to_string()
                 }
                 Some(Window::Terminal(_)) | None => String::new(),
             };
@@ -1991,13 +1987,10 @@ fn render_status_bar(
                 && !state.mouse_drag_active
             {
                 format!(
-                    "{}:Next  {}:Prev  {}/{}:Resize  {}/{}:Move  {rest}",
-                    global_lbl(Action::FocusNext),
-                    global_lbl(Action::FocusPrev),
-                    global_lbl(Action::ResizeShrink),
-                    global_lbl(Action::ResizeGrow),
-                    global_lbl(Action::MovePaneForward),
-                    global_lbl(Action::MovePaneBackward),
+                    "{}:Next/Prev  {}:Resize  {}:Move  {rest}",
+                    global_pair(Action::FocusNext, Action::FocusPrev),
+                    global_pair(Action::ResizeShrink, Action::ResizeGrow),
+                    global_pair(Action::MovePaneForward, Action::MovePaneBackward),
                 )
             } else {
                 rest

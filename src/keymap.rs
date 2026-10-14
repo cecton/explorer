@@ -142,6 +142,17 @@ impl Keymap {
             .map(|(k, _)| *k)
     }
 
+    /// The label of two leader actions read together, so that a modifier they share is
+    /// written once. An action that is unbound contributes nothing but its partner's label.
+    pub fn leader_pair(&self, a: Action, b: Action) -> String {
+        pair_of(self.leader_key_for(a), self.leader_key_for(b))
+    }
+
+    /// The label of two global actions read together, as in `Ctrl+↑/↓`.
+    pub fn global_pair(&self, a: Action, b: Action) -> String {
+        pair_of(self.global_key_for(a), self.global_key_for(b))
+    }
+
     /// Applies `(action-slug, key-spec)` overrides from the config file on top of the
     /// defaults. The special slug `leader` rebinds [`Keymap::leader_key`]; every other slug
     /// rebinds its action in whichever context table(s) it appears (so `focus-next` updates
@@ -177,13 +188,53 @@ impl Keymap {
 }
 
 /// Renders a [`KeyPress`] as a compact, human-friendly label for the status bar, e.g.
-/// `Ctrl+↓`, `Shift+Tab`, `Alt+\``, `q`. Distinct from the `Display` impl (which produces
-/// the lowercase config-file spelling like `ctrl+down`).
+/// `Ctrl+↓`, `Shift+Tab`, `Alt+\``, `q`. Distinct from `KeyPress`'s `Display` (which
+/// produces the lowercase config-file spelling like `ctrl+down`), so that `config.kdl`
+/// keeps accepting the long name of a key however the status bar abbreviates it.
 pub fn hint(kp: &KeyPress) -> String {
     let (key, mask) = match kp {
         KeyPress::Plain { key } => (key, None),
         KeyPress::WithModifiers { key, mask } => (key, Some(mask)),
     };
+    let mut out = modifier_prefix(mask);
+    match key {
+        Key::Character(' ') => out.push_str("Space"),
+        Key::Character(c) => out.push(*c),
+        Key::SpecialKey(sk) => out.push_str(special_label(*sk)),
+        Key::FunctionKey(fk) => out.push_str(&format!("F{}", u8::from(*fk))),
+        Key::KittyKeyboardProtocol(_) => out.push('?'),
+    }
+    out
+}
+
+/// Renders two keys read together, writing a modifier they share once: `Ctrl+↑/↓`, never
+/// `Ctrl+↑/Ctrl+↓`. Only whole modifier names are folded away, so keys spelled from the key
+/// name up (`Tab` and `Shift+Tab`) keep both spellings, as do keys with no modifier in
+/// common (`Ctrl+u/Alt+d`).
+fn pair_hint(a: &KeyPress, b: &KeyPress) -> String {
+    let (first, second) = (hint(a), hint(b));
+    let shared = first
+        .char_indices()
+        .zip(second.chars())
+        .take_while(|((_, x), y)| x == y)
+        .last()
+        .filter(|(_, c)| *c == '+')
+        .map_or(0, |((index, _), _)| index + 1);
+    format!("{first}/{}", &second[shared..])
+}
+
+/// [`pair_hint`] over actions that may be unbound: a lone key keeps its plain label,
+/// neither renders empty.
+fn pair_of(a: Option<KeyPress>, b: Option<KeyPress>) -> String {
+    match (a, b) {
+        (Some(a), Some(b)) => pair_hint(&a, &b),
+        (Some(one), None) | (None, Some(one)) => hint(&one),
+        (None, None) => String::new(),
+    }
+}
+
+/// The modifier prefix a label starts with, in a fixed order: `Ctrl+`, `Alt+`, `Shift+`.
+fn modifier_prefix(mask: Option<&ModifierKeysMask>) -> String {
     let mut out = String::new();
     if let Some(m) = mask {
         if m.ctrl_key_state == KeyState::Pressed {
@@ -195,13 +246,6 @@ pub fn hint(kp: &KeyPress) -> String {
         if m.shift_key_state == KeyState::Pressed {
             out.push_str("Shift+");
         }
-    }
-    match key {
-        Key::Character(' ') => out.push_str("Space"),
-        Key::Character(c) => out.push(*c),
-        Key::SpecialKey(sk) => out.push_str(special_label(*sk)),
-        Key::FunctionKey(fk) => out.push_str(&format!("F{}", u8::from(*fk))),
-        Key::KittyKeyboardProtocol(_) => out.push('?'),
     }
     out
 }
@@ -216,7 +260,7 @@ fn special_label(sk: SpecialKey) -> &'static str {
         SpecialKey::BackTab => "Shift+Tab",
         SpecialKey::Enter => "Enter",
         SpecialKey::Esc => "Esc",
-        SpecialKey::Backspace => "Backspace",
+        SpecialKey::Backspace => "Bksp",
         SpecialKey::Delete => "Delete",
         SpecialKey::Insert => "Insert",
         SpecialKey::Home => "Home",
@@ -320,6 +364,57 @@ mod tests {
         assert_eq!(hint(&ctrl_special(SpecialKey::Down)), "Ctrl+↓");
         assert_eq!(hint(&plain_special(SpecialKey::BackTab)), "Shift+Tab");
         assert_eq!(hint(&plain_special(SpecialKey::Tab)), "Tab");
+        assert_eq!(hint(&plain_special(SpecialKey::Backspace)), "Bksp");
+    }
+
+    #[test]
+    fn a_shared_modifier_is_written_once_for_a_pair() {
+        let mut km = Keymap::default();
+        assert_eq!(
+            km.global_pair(Action::FocusNext, Action::FocusPrev),
+            "Tab/Shift+Tab"
+        );
+        assert_eq!(
+            km.global_pair(Action::ResizeShrink, Action::ResizeGrow),
+            "Ctrl+↑/↓"
+        );
+        assert_eq!(
+            km.global_pair(Action::MovePaneForward, Action::MovePaneBackward),
+            "Ctrl+←/→"
+        );
+        assert_eq!(
+            km.leader_pair(Action::FocusNext, Action::FocusPrev),
+            "Tab/Shift+Tab"
+        );
+
+        // A rebound pair folds whatever the two labels have in common.
+        km.apply_overrides(&[
+            ("resize-shrink".to_string(), "ctrl+u".to_string()),
+            ("resize-grow".to_string(), "ctrl+d".to_string()),
+        ])
+        .unwrap();
+        assert_eq!(
+            km.global_pair(Action::ResizeShrink, Action::ResizeGrow),
+            "Ctrl+u/d"
+        );
+        // Nothing in common above the key name: both are spelled in full.
+        km.apply_overrides(&[("resize-grow".to_string(), "alt+d".to_string())])
+            .unwrap();
+        assert_eq!(
+            km.global_pair(Action::ResizeShrink, Action::ResizeGrow),
+            "Ctrl+u/Alt+d"
+        );
+    }
+
+    #[test]
+    fn a_pair_with_one_unbound_action_keeps_the_other_label() {
+        let mut km = Keymap::default();
+        km.global.clear();
+        km.global
+            .push((plain_special(SpecialKey::Tab), Action::FocusNext));
+        assert_eq!(km.global_pair(Action::FocusNext, Action::FocusPrev), "Tab");
+        assert_eq!(km.global_pair(Action::FocusPrev, Action::FocusNext), "Tab");
+        assert_eq!(km.global_pair(Action::ResizeShrink, Action::ResizeGrow), "");
     }
 
     #[test]
