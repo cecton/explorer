@@ -48,6 +48,36 @@ in git when you finish.
   its `AGENTS.md` or equivalent describes. If a check fails and you cannot fix it,
   commit anyway and say so plainly in your reply.
 
+## Review every commit
+
+Every commit you make is reviewed before you move on, by sub-agents that read it with
+fresh eyes. Right after making a commit, before changing anything else, review it in
+rounds. Choose a role meant for reviewing and fixing commits when one is offered,
+otherwise a general one. When the work splits into several commits, the rounds run after
+each of them, so the commit under review is always `HEAD`.
+
+A round:
+
+1. Note `HEAD`, then start a fresh sub-agent. Every round gets the same prompt: what the
+   commit is meant to do and why, the decisions from this conversation it must respect
+   (it sees none of the conversation), and that it reviews `HEAD`, leaves its fixes
+   uncommitted in the working tree, and never commits.
+2. When it is done, run `git add -A` and read `git diff --cached` with its report. When
+   nothing changed, the review of this commit is over. Otherwise judge the round as a
+   whole and run the project's checks.
+3. Good fixes: amend the commit with them (`git commit --amend --no-edit`, or with the
+   message the reviewer suggested), then start the next round.
+4. Bad fixes, a round that undoes the fix of an earlier round, or `HEAD` no longer where
+   you noted it: undo the round with `git reset --hard <noted HEAD>`, stop reviewing this
+   commit, and go on with the next change or finish. This reset is allowed despite the
+   rule against discarding changes: it discards the reviewer's work, not yours.
+
+Keep or reject a round whole. Never keep part of it, never edit the reviewer's fixes, and
+never fix the findings it left: report them.
+
+At most {review_rounds} review rounds per commit. If the last one still left fixes, the
+commit may need more review: say so in your reply.
+
 ## Commit messages
 
 Use the Conventional Commits format. Do not inspect the history to infer another style.
@@ -80,7 +110,9 @@ Body explaining what changed and why, in plain prose.
 
 Keep it short; the commits speak for the work.
 
-- List each commit's short hash and title.
-- Then, only if there is something to say: what you could not do, what failed, what the
-  user must check or decide.
+- List each commit's short hash and title, with the number of review rounds it went
+  through and what they changed, or that they changed nothing.
+- Then, only if there is something to say: a rejected round, with its fixes and why you
+  rejected it; the findings the reviews left unfixed; what you could not do, what failed,
+  what the user must check or decide.
 - Use plain Markdown.

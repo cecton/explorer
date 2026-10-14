@@ -1,7 +1,8 @@
 use crate::agent::commands::{self, Command};
 use crate::agent::subagent::Role;
 use crate::agent::{
-    AgentConfig, CLAUDE_CODE_KIND, Endpoint, EndpointKind, ModelSpec, OPENCODE_GO_KIND,
+    AgentConfig, CLAUDE_CODE_KIND, DEFAULT_REVIEW_ROUNDS, Endpoint, EndpointKind, ModelSpec,
+    OPENCODE_GO_KIND,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -26,6 +27,7 @@ pub struct AgentSettings {
     pub endpoints: Vec<EndpointDecl>,
     pub summary_model: Option<ModelSpec>,
     pub subagent_model: Option<ModelSpec>,
+    pub review_rounds: Option<u32>,
 }
 
 /// Settings for the status-bar session/project time counters.
@@ -243,6 +245,7 @@ pub fn resolve_agent(
         commands,
         subagent_model: settings.subagent_model,
         roles,
+        review_rounds: settings.review_rounds.unwrap_or(DEFAULT_REVIEW_ROUNDS),
     }
 }
 
@@ -324,6 +327,17 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                     format!("subagent-model '{value}' is not of the form endpoint/model/effort")
                 })?;
                 settings.subagent_model = Some(spec);
+            }
+            "review-rounds" => {
+                let rounds = child
+                    .entries()
+                    .iter()
+                    .find(|e| e.name().is_none())
+                    .and_then(|e| e.value().as_integer())
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n >= 1)
+                    .ok_or("agent.review-rounds must have an integer argument of at least 1")?;
+                settings.review_rounds = Some(rounds);
             }
             _ => {}
         }
@@ -642,6 +656,20 @@ mod config_tests {
     }
 
     #[test]
+    fn review_rounds_default_to_three_and_must_be_at_least_one() {
+        let tokens = HashMap::new();
+        let resolve = |content: &str| {
+            let config = parse(content).expect("valid config");
+            resolve_agent(config.agent, &tokens, Vec::new(), Vec::new()).review_rounds
+        };
+        assert_eq!(resolve("theme \"night_owl\""), 3);
+        assert_eq!(resolve("agent {\n review-rounds 5\n}"), 5);
+        assert!(parse("agent {\n review-rounds 0\n}").is_err());
+        assert!(parse("agent {\n review-rounds -2\n}").is_err());
+        assert!(parse("agent {\n review-rounds \"3\"\n}").is_err());
+    }
+
+    #[test]
     fn roles_are_read_from_markdown_files_and_need_a_description() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
@@ -683,6 +711,7 @@ mod config_tests {
             ],
             summary_model: None,
             subagent_model: None,
+            review_rounds: None,
         };
         let tokens = parse_auth("router \"sk-or\"\nunused \"x\"").expect("valid auth");
         let agent = resolve_agent(settings, &tokens, Vec::new(), Vec::new());

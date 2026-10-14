@@ -152,8 +152,11 @@ pub enum Backend {
     ClaudeCode(claude_code::ClaudeTarget),
 }
 
+/// Review rounds of a commit when the `agent` block sets none.
+pub const DEFAULT_REVIEW_ROUNDS: u32 = 3;
+
 /// The `agent` block of `config.kdl`, joined with the tokens of `auth.kdl`.
-#[derive(Clone, Debug, Default, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentConfig {
     /// Only endpoints that have a token; the others were skipped with a warning.
     pub endpoints: Vec<Endpoint>,
@@ -166,6 +169,21 @@ pub struct AgentConfig {
     pub subagent_model: Option<ModelSpec>,
     /// Sub-agent roles the `agent` tool offers.
     pub roles: Vec<subagent::Role>,
+    /// Most review rounds a commit turn runs on each of its commits; at least 1.
+    pub review_rounds: u32,
+}
+
+impl Default for AgentConfig {
+    fn default() -> Self {
+        Self {
+            endpoints: Vec::new(),
+            summary_model: None,
+            commands: Vec::new(),
+            subagent_model: None,
+            roles: Vec::new(),
+            review_rounds: DEFAULT_REVIEW_ROUNDS,
+        }
+    }
 }
 
 impl AgentConfig {

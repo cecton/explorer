@@ -535,8 +535,10 @@ async fn run_claude_code(
     let (system, message, preamble) = {
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
-            let system =
-                context::claude_system_prompt(request.system_prompt.then_some(request.mode));
+            let system = context::claude_system_prompt(
+                request.system_prompt.then_some(request.mode),
+                request.agent.review_rounds,
+            );
             let preamble = context::handover_preamble(&request.ancestor_dirs);
             (system, message_to_send(&request), preamble)
         })
@@ -628,6 +630,7 @@ async fn run_own_loop(
         tokio::task::spawn_blocking(move || {
             let system = context::system_prompt(
                 request.system_prompt.then_some(request.mode),
+                request.agent.review_rounds,
                 &request.root,
             );
             let mut messages: Vec<Message> = request

@@ -9,14 +9,19 @@ const COMPACT_PROMPT: &str = include_str!("../../prompts/compact.md");
 /// System prompt of a sub-agent called without a role.
 pub const SUBAGENT_PROMPT: &str = include_str!("../../prompts/subagent.md");
 
+/// Stands in the commit prompt for the most review rounds of a commit.
+const REVIEW_ROUNDS_PLACEHOLDER: &str = "{review_rounds}";
+
 /// Commits listed in a repository-moved note before it says there are more.
 pub const NOTE_MAX_COMMITS: usize = 20;
 
 /// The system prompt of a turn: mode instructions and the project's own instructions.
-/// Without a `mode`, the mode instructions are left out. It holds nothing that changes
+/// Without a `mode`, the mode instructions are left out. `review_rounds` is the most
+/// review rounds of each commit, from the configuration. It holds nothing that changes
 /// between turns: see [`environment_note`].
-pub fn system_prompt(mode: Option<Mode>, root: &Utf8Path) -> String {
-    with_project(mode.map(mode_prompt), root)
+pub fn system_prompt(mode: Option<Mode>, review_rounds: u32, root: &Utf8Path) -> String {
+    let lead = mode.map(|mode| mode_prompt(mode, review_rounds));
+    with_project(lead.as_deref(), root)
 }
 
 /// The system prompt of a sub-agent: its role's prompt instead of a mode's, and the
@@ -41,16 +46,18 @@ fn with_project(lead: Option<&str>, root: &Utf8Path) -> String {
 
 /// What is appended to Claude Code's own system prompt: it loads the project's
 /// instructions itself, so only the mode instructions are added.
-pub fn claude_system_prompt(mode: Option<Mode>) -> String {
-    mode.map(mode_prompt).unwrap_or_default().to_string()
+pub fn claude_system_prompt(mode: Option<Mode>, review_rounds: u32) -> String {
+    mode.map(|mode| mode_prompt(mode, review_rounds))
+        .unwrap_or_default()
 }
 
-fn mode_prompt(mode: Mode) -> &'static str {
+fn mode_prompt(mode: Mode, review_rounds: u32) -> String {
     match mode {
-        Mode::Feedback => FEEDBACK_PROMPT,
-        Mode::Commit => COMMIT_PROMPT,
+        Mode::Feedback => FEEDBACK_PROMPT.trim_end().to_string(),
+        Mode::Commit => COMMIT_PROMPT
+            .trim_end()
+            .replace(REVIEW_ROUNDS_PLACEHOLDER, &review_rounds.to_string()),
     }
-    .trim_end()
 }
 
 /// The state of the repository when the prompt was sent. It belongs to the message,
@@ -300,11 +307,11 @@ mod tests {
     fn system_prompt_holds_no_state_of_the_repository() {
         let (_tmp, root) = temp_dir();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = system_prompt(Some(Mode::Feedback), &root);
+        let prompt = system_prompt(Some(Mode::Feedback), 3, &root);
         assert!(prompt.starts_with("You are the coding agent inside Explorer"));
         assert!(prompt.contains("**feedback mode**"));
         assert!(prompt.contains("## The conversation tree"));
-        let commit = system_prompt(Some(Mode::Commit), &root);
+        let commit = system_prompt(Some(Mode::Commit), 3, &root);
         assert!(commit.contains("**commit mode**"));
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
         for part in ["HEAD", "Repository root", "Date", "Environment"] {
@@ -317,6 +324,17 @@ mod tests {
             commit.ends_with("Use tabs."),
             "the system prompt ends with the project instructions: {commit}"
         );
+    }
+
+    #[test]
+    fn commit_prompt_states_the_configured_review_rounds() {
+        let (_tmp, root) = temp_dir();
+        let commit = system_prompt(Some(Mode::Commit), 7, &root);
+        assert!(commit.contains("At most 7 review rounds"));
+        assert!(!commit.contains(REVIEW_ROUNDS_PLACEHOLDER));
+        let claude = claude_system_prompt(Some(Mode::Commit), 2);
+        assert!(claude.contains("At most 2 review rounds"));
+        assert!(!claude.contains(REVIEW_ROUNDS_PLACEHOLDER));
     }
 
     #[test]
@@ -335,12 +353,12 @@ mod tests {
     fn system_prompt_without_a_mode_keeps_everything_but_the_mode_prompt() {
         let (_tmp, root) = temp_dir();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = system_prompt(None, &root);
+        let prompt = system_prompt(None, 3, &root);
         assert!(prompt.starts_with("## The conversation tree"));
         assert!(!prompt.contains("You are the coding agent inside Explorer"));
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
 
-        assert_eq!(claude_system_prompt(None), "");
+        assert_eq!(claude_system_prompt(None, 3), "");
     }
 
     #[test]
@@ -365,11 +383,11 @@ mod tests {
     fn claude_prompt_has_the_mode_but_not_project_instructions() {
         let (_tmp, root) = temp_dir();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = claude_system_prompt(Some(Mode::Commit));
+        let prompt = claude_system_prompt(Some(Mode::Commit), 3);
         assert!(prompt.contains("**commit mode**"));
         assert!(!prompt.contains("Use tabs."));
         assert!(!prompt.contains("## The conversation tree"));
-        assert!(!prompt.contains("HEAD"));
+        assert!(!prompt.contains("- HEAD:"));
     }
 
     #[test]
