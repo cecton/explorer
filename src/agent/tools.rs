@@ -154,10 +154,14 @@ pub fn describe(call: &ToolCall) -> String {
     if call.name == subagent::TOOL {
         return subagent::describe(&call.arguments);
     }
-    let detail = ["command", "path", "pattern"]
-        .iter()
-        .find_map(|key| call.arguments.get(key).and_then(Value::as_str))
-        .unwrap_or("");
+    let arg = |key: &str| call.arguments.get(key).and_then(Value::as_str);
+    let detail = match (arg("pattern"), arg("command"), arg("path")) {
+        (Some(pattern), _, Some(path)) => format!("{pattern} in {path}"),
+        (Some(pattern), _, None) => pattern.to_string(),
+        (None, Some(command), _) => command.to_string(),
+        (None, None, Some(path)) => path.to_string(),
+        (None, None, None) => String::new(),
+    };
     let detail = detail.lines().next().unwrap_or("");
     format!("{} {detail}", call.name).trim_end().to_string()
 }
@@ -666,6 +670,17 @@ mod tests {
             "glob *.rs"
         );
         assert_eq!(describe(&call("odd", json!({}))), "odd");
+        let grep = call("grep", json!({"pattern": "struct Recorder", "path": "src"}));
+        assert_eq!(describe(&grep), "grep struct Recorder in src");
+        let grep = call(
+            "grep",
+            json!({"pattern": "struct Recorder", "glob": "*.rs"}),
+        );
+        assert_eq!(describe(&grep), "grep struct Recorder");
+        assert_eq!(
+            describe(&call("read", json!({"path": "src/main.rs"}))),
+            "read src/main.rs"
+        );
     }
 
     #[tokio::test]
