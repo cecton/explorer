@@ -91,6 +91,7 @@ async fn main() {
         agent_settings,
         &config::load_auth(),
         config::load_commands(),
+        config::load_roles(),
     ));
     initial_state.usage = agent::usage::load();
 

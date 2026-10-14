@@ -6,6 +6,8 @@ const COMMIT_PROMPT: &str = include_str!("../../prompts/commit.md");
 const CONVERSATION_TOOL_PROMPT: &str = include_str!("../../prompts/conversation_tool.md");
 pub const TITLE_SUMMARY_PROMPT: &str = include_str!("../../prompts/title_summary.md");
 const COMPACT_PROMPT: &str = include_str!("../../prompts/compact.md");
+/// System prompt of a sub-agent called without a role.
+pub const SUBAGENT_PROMPT: &str = include_str!("../../prompts/subagent.md");
 
 /// Commits listed in a repository-moved note before it says there are more.
 pub const NOTE_MAX_COMMITS: usize = 20;
@@ -14,9 +16,19 @@ pub const NOTE_MAX_COMMITS: usize = 20;
 /// Without a `mode`, the mode instructions are left out. It holds nothing that changes
 /// between turns: see [`environment_note`].
 pub fn system_prompt(mode: Option<Mode>, root: &Utf8Path) -> String {
+    with_project(mode.map(mode_prompt), root)
+}
+
+/// The system prompt of a sub-agent: its role's prompt instead of a mode's, and the
+/// project's own instructions.
+pub fn subagent_system_prompt(role: &str, root: &Utf8Path) -> String {
+    with_project(Some(role.trim_end()), root)
+}
+
+fn with_project(lead: Option<&str>, root: &Utf8Path) -> String {
     let mut out = String::new();
-    if let Some(mode) = mode {
-        out.push_str(mode_prompt(mode));
+    if let Some(lead) = lead {
+        out.push_str(lead);
         out.push_str("\n\n");
     }
     out.push_str(CONVERSATION_TOOL_PROMPT.trim_end());

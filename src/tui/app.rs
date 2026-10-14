@@ -778,6 +778,7 @@ impl App for AppMain {
                         Some(Window::Discussion(id)) => state
                             .discussions
                             .get(&id)
+                            .filter(|discussion| discussion.agent.is_none())
                             .and_then(|discussion| discussion.node.clone()),
                         Some(Window::ConversationTree) => state
                             .tree_view
@@ -806,6 +807,11 @@ impl App for AppMain {
                 Some(Action::OpenModelPicker) => {
                     if let Some(Window::Discussion(id)) =
                         global_data.state.pane_manager.focused_window
+                        && global_data
+                            .state
+                            .discussions
+                            .get(&id)
+                            .is_some_and(|discussion| discussion.agent.is_none())
                     {
                         let main_tx = global_data.main_thread_channel_sender.clone();
                         let purpose = ModelPickerPurpose::Window(id);
@@ -1398,7 +1404,11 @@ impl App for AppMain {
                         .iter()
                         .filter_map(|(id, discussion)| {
                             let node = discussion.node.as_ref()?;
-                            Some((*id, tree.node(node).is_some()))
+                            let exists = match discussion.agent {
+                                Some(index) => tree.agent(node, index).is_some(),
+                                None => tree.node(node).is_some(),
+                            };
+                            Some((*id, exists))
                         })
                         .collect();
                     for (id, exists) in restored {
@@ -1432,11 +1442,15 @@ impl App for AppMain {
                         discussion.thinking.clear();
                         discussion.loaded = true;
                         if discussion.model.is_none() {
-                            discussion.model = state
-                                .conversations
-                                .read()
-                                .node(node)
-                                .and_then(crate::tui::discussion_pane::node_model);
+                            let tree = state.conversations.read();
+                            discussion.model = match discussion.agent {
+                                Some(index) => tree
+                                    .agent(node, index)
+                                    .and_then(|agent| agent.meta.model_spec()),
+                                None => tree
+                                    .node(node)
+                                    .and_then(crate::tui::discussion_pane::node_model),
+                            };
                         }
                     }
                 }
@@ -1461,6 +1475,17 @@ impl App for AppMain {
                     crate::agent::usage::save(&state.usage);
                 }
                 AppSignal::TurnProgress => {}
+                AppSignal::SubagentStarted { node } => {
+                    state.tree_view.shown_agents.insert(node.clone());
+                }
+                AppSignal::SubagentFinished { node, index } => {
+                    DiscussionComponent::reload_agent_windows(
+                        state,
+                        global_data.main_thread_channel_sender.clone(),
+                        node,
+                        Some(*index),
+                    );
+                }
                 AppSignal::TurnFinished { node, outcome } => {
                     if let Some(handle) = state.running_turns.remove(node) {
                         let (reply, work_log) = {
@@ -1468,7 +1493,8 @@ impl App for AppMain {
                             (live.reply.clone(), live.work_log.clone())
                         };
                         for (id, discussion) in state.discussions.iter_mut() {
-                            if discussion.node.as_ref() == Some(node) {
+                            if discussion.node.as_ref() == Some(node) && discussion.agent.is_none()
+                            {
                                 discussion.reply.clone_from(&reply);
                                 discussion.work_log.clone_from(&work_log);
                                 if outcome.status == crate::conversation::NodeStatus::Done {
@@ -1504,6 +1530,8 @@ impl App for AppMain {
                     }
                     // A turn may have moved HEAD or stashed: refresh what shows git state.
                     let main_tx = global_data.main_thread_channel_sender.clone();
+                    // A cancel cuts its sub-agent short, without the signal of its end.
+                    DiscussionComponent::reload_agent_windows(state, main_tx.clone(), node, None);
                     for (id, win) in &state.git_logs {
                         crate::tui::git_log_pane::GitLogPaneComponent::reload_log(
                             state.repo.clone(),
@@ -1938,7 +1966,7 @@ fn render_status_bar(
                     "Backspace:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll".to_string()
                 }
                 Some(Window::ConversationTree) => {
-                    "Backspace:Send to back  ↑↓:Select  ←→:Fold  /:Search  Enter:Open  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  Ctrl+D:Delete  Esc:Clear search"
+                    "Backspace:Send to back  ↑↓:Select  ←→:Fold  /:Search  Enter:Open  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  Ctrl+D:Delete  Esc:Clear search"
                         .to_string()
                 }
                 Some(Window::Discussion(_)) => {
@@ -2089,8 +2117,9 @@ const USAGE_WARNING_PERCENT: u32 = 75;
 const USAGE_ERROR_PERCENT: u32 = 90;
 
 /// The endpoint the focused window spends: the model of a Discussion window, the
-/// endpoint of the Conversation Tree's selected node (for a queued row, the model of
-/// the window holding the prompt), the selected row of the Model Picker.
+/// endpoint of the Conversation Tree's selected node or sub-agent run (for a queued
+/// row, the model of the window holding the prompt), the selected row of the Model
+/// Picker.
 fn focused_endpoint(state: &AppState) -> Option<String> {
     let window_endpoint =
         |id: &usize| Some(state.discussions.get(id)?.model.as_ref()?.endpoint.clone());
@@ -2098,6 +2127,13 @@ fn focused_endpoint(state: &AppState) -> Option<String> {
         Window::Discussion(id) => window_endpoint(id),
         Window::ConversationTree => match state.tree_view.selected.as_ref()? {
             RowTarget::Node(node) => state.conversations.read().node(node)?.meta.endpoint.clone(),
+            RowTarget::Agent { node, index } => state
+                .conversations
+                .read()
+                .agent(node, *index)?
+                .meta
+                .endpoint
+                .clone(),
             RowTarget::Queued { window, .. } => window_endpoint(window),
         },
         Window::ModelPicker => {

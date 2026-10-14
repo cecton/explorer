@@ -106,6 +106,9 @@ pub enum PaneEntry {
     Discussion {
         /// Node shown; `None` for a new conversation not sent yet.
         node: Option<String>,
+        /// Sub-agent run of `node` shown instead of the node itself.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        agent: Option<u32>,
         #[serde(default)]
         draft: String,
         pane_size: SerializablePaneSize,
@@ -375,6 +378,7 @@ impl Session {
 
                 PaneEntry::Discussion {
                     node,
+                    agent,
                     draft,
                     pane_size,
                 } => {
@@ -394,6 +398,7 @@ impl Session {
                         DiscussionState {
                             loaded: node.is_none(),
                             node: node.as_deref().map(NodeId::new),
+                            agent,
                             draft: InputLine::with_text(draft),
                             ..Default::default()
                         },
@@ -501,6 +506,7 @@ fn pane_entry_from_window(
                     .node
                     .as_ref()
                     .map(|node| node.as_str().to_string()),
+                agent: discussion.agent,
                 draft: discussion.draft.text().to_string(),
                 pane_size: window_state.pane_size.into(),
             })

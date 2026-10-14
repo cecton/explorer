@@ -4,6 +4,7 @@ pub mod commands;
 pub mod context;
 pub mod llm;
 pub mod models;
+pub mod subagent;
 pub mod tools;
 pub mod turn;
 pub mod usage;
@@ -160,6 +161,11 @@ pub struct AgentConfig {
     pub summary_model: Option<ModelSpec>,
     /// Custom slash commands.
     pub commands: Vec<commands::Command>,
+    /// Model of the sub-agents whose role names none; without it they run on the model
+    /// of the turn that calls them.
+    pub subagent_model: Option<ModelSpec>,
+    /// Sub-agent roles the `agent` tool offers.
+    pub roles: Vec<subagent::Role>,
 }
 
 impl AgentConfig {

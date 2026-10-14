@@ -1,5 +1,6 @@
 use super::ToolCall;
 use super::llm::ToolSpec;
+use super::subagent::{self, Subagents};
 use crate::conversation::{ConversationTree, NodeId};
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
 use parking_lot::RwLock;
@@ -22,10 +23,21 @@ pub struct ToolContext {
     pub tree: Arc<RwLock<ConversationTree>>,
     /// The node whose turn is running.
     pub node: NodeId,
+    /// What the turn lends to its sub-agents; `None` for a sub-agent, which cannot
+    /// call one in turn.
+    pub subagents: Option<Subagents>,
 }
 
-/// The tools advertised to the model.
-pub fn specs() -> Vec<ToolSpec> {
+/// The tools advertised to the model: the `agent` tool only when sub-agents can run.
+pub fn specs(context: &ToolContext) -> Vec<ToolSpec> {
+    let mut specs = base_specs();
+    if let Some(subagents) = &context.subagents {
+        specs.push(subagent::spec(&subagents.config.roles));
+    }
+    specs
+}
+
+fn base_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
             name: "conversation",
@@ -34,7 +46,8 @@ pub fn specs() -> Vec<ToolSpec> {
                           `toc` lists conversations, or with `node` shows one page of \
                           the tree around that node; `read` returns a node's full \
                           prompt and reply; `commit` finds the node that produced a \
-                          commit.",
+                          commit."
+                .into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -49,7 +62,8 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "read",
             description: "Read a text file of the repository. Lines are returned prefixed \
-                          with their number.",
+                          with their number."
+                .into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -63,7 +77,8 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "glob",
             description: "List the files of the repository whose path matches a glob \
-                          pattern such as `src/**/*.rs`.",
+                          pattern such as `src/**/*.rs`."
+                .into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -75,7 +90,8 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "grep",
             description: "Search file contents with a regular expression. Returns \
-                          `path:line: text` for each match.",
+                          `path:line: text` for each match."
+                .into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -89,7 +105,8 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "shell",
             description: "Run a shell command with `sh -c` in the repository root and \
-                          return its output and exit code.",
+                          return its output and exit code."
+                .into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -102,7 +119,8 @@ pub fn specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "write",
             description: "Create a file or replace its whole content. Missing parent \
-                          directories are created.",
+                          directories are created."
+                .into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -116,7 +134,8 @@ pub fn specs() -> Vec<ToolSpec> {
             name: "edit",
             description: "Replace one exact occurrence of `old_string` in a file with \
                           `new_string`. Fails when the text is absent or appears more \
-                          than once; include enough surrounding lines to make it unique.",
+                          than once; include enough surrounding lines to make it unique."
+                .into(),
             schema: json!({
                 "type": "object",
                 "properties": {
@@ -132,6 +151,9 @@ pub fn specs() -> Vec<ToolSpec> {
 
 /// Short description of a call for the status line, e.g. `shell cargo check`.
 pub fn describe(call: &ToolCall) -> String {
+    if call.name == subagent::TOOL {
+        return subagent::describe(&call.arguments);
+    }
     let detail = ["command", "path", "pattern"]
         .iter()
         .find_map(|key| call.arguments.get(key).and_then(Value::as_str))
@@ -516,6 +538,7 @@ mod tests {
             root: root.to_owned(),
             tree: Arc::default(),
             node: NodeId::new("current"),
+            subagents: None,
         }
     }
 
@@ -648,7 +671,10 @@ mod tests {
     #[tokio::test]
     async fn write_creates_files_inside_the_repository_only() {
         let (_tmp, root) = repo();
-        let names: Vec<&str> = specs().iter().map(|spec| spec.name).collect();
+        let names: Vec<&str> = specs(&context(&root))
+            .iter()
+            .map(|spec| spec.name)
+            .collect();
         assert_eq!(
             names,
             [
@@ -717,6 +743,7 @@ mod tests {
             root: root.clone(),
             tree: Arc::new(RwLock::new(ConversationTree::load(&store))),
             node: NodeId::new("n2"),
+            subagents: None,
         };
         let ask = |arguments| call("conversation", arguments);
 

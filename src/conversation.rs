@@ -121,6 +121,12 @@ pub struct Metadata {
     pub error: Option<String>,
     /// Wall-clock seconds the turn took.
     pub secs: Option<u64>,
+    /// Role a sub-agent ran as; `None` for the default one and for nodes.
+    pub role: Option<String>,
+    /// What the delegating agent called a sub-agent's task.
+    pub description: Option<String>,
+    /// The sub-agent run this one continues, as an agent id.
+    pub resumed_from: Option<String>,
 }
 
 impl Metadata {
@@ -157,6 +163,9 @@ impl Metadata {
                 "cached-in" => meta.cached_in = value.parse().ok(),
                 "secs" => meta.secs = value.parse().ok(),
                 "error" => meta.error = Some(value.to_string()),
+                "role" => meta.role = Some(value.to_string()),
+                "description" => meta.description = Some(value.to_string()),
+                "resumed-from" => meta.resumed_from = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -197,8 +206,96 @@ impl Metadata {
         push("cached-in", cached_in.as_deref());
         push("secs", secs.as_deref());
         push("error", self.error.as_deref());
+        push("role", self.role.as_deref());
+        push("description", self.description.as_deref());
+        push("resumed-from", self.resumed_from.as_deref());
         out
     }
+
+    /// The model the turn ran on, as `endpoint/model (effort)` with `default` effort
+    /// shown bare.
+    pub fn model_label(&self) -> Option<String> {
+        Some(self.model_spec()?.short_label())
+    }
+
+    /// The model the turn ran on, when the metadata names one completely.
+    pub fn model_spec(&self) -> Option<ModelSpec> {
+        ModelSpec::from_parts(
+            self.endpoint.as_deref()?,
+            self.model.as_deref()?,
+            self.effort.as_deref()?,
+        )
+    }
+}
+
+/// Directory of a node holding its sub-agent runs; never a node of its own.
+const AGENTS_DIR: &str = "agents";
+
+/// One sub-agent run of a node's turn, kept in `<node dir>/agents/<index>/` with the
+/// files of a node: `metadata.md`, `prompt.md` (the task), `reply.md`, `activity.md`
+/// and `transcript.jsonl`.
+#[derive(Clone, Debug)]
+pub struct AgentRecord {
+    /// Starts at 1, in the order the runs started.
+    pub index: u32,
+    pub meta: Metadata,
+}
+
+impl AgentRecord {
+    /// `agent reviewer: description`, or `agent: description` for the default role:
+    /// the run as the work log of its node names it.
+    pub fn title(&self) -> String {
+        let description = self
+            .meta
+            .description
+            .as_deref()
+            .unwrap_or("(no description)");
+        match &self.meta.role {
+            Some(role) => format!("agent {role}: {description}"),
+            None => format!("agent: {description}"),
+        }
+    }
+}
+
+/// How the agent tool names a sub-agent run: `<node>/<index>`.
+pub fn agent_id(node: &NodeId, index: u32) -> String {
+    format!("{}/{index}", node.as_str())
+}
+
+/// Reads the metadata of a node or a sub-agent run; one left running by a previous
+/// instance of Explorer is marked interrupted on disk.
+fn read_meta(dir: &Utf8Path) -> Metadata {
+    let mut meta = std::fs::read_to_string(dir.join("metadata.md"))
+        .map(|text| Metadata::parse(&text))
+        .unwrap_or_default();
+    if meta.status == Some(NodeStatus::Running) {
+        meta.status = Some(NodeStatus::Failed);
+        meta.error = Some("interrupted".to_string());
+        if let Err(e) = write_atomic(&dir.join("metadata.md"), &meta.to_text()) {
+            tracing::warn!("failed to rewrite interrupted run {dir}: {e}");
+        }
+    }
+    meta
+}
+
+/// The sub-agent runs recorded under a node's directory, oldest first.
+fn read_agents(node_dir: &Utf8Path) -> Vec<AgentRecord> {
+    let Ok(entries) = std::fs::read_dir(node_dir.join(AGENTS_DIR)) else {
+        return Vec::new();
+    };
+    let mut agents: Vec<AgentRecord> = entries
+        .flatten()
+        .filter_map(|entry| {
+            let index: u32 = entry.file_name().to_str()?.parse().ok()?;
+            let dir = Utf8PathBuf::from_path_buf(entry.path()).ok()?;
+            Some(AgentRecord {
+                index,
+                meta: read_meta(&dir),
+            })
+        })
+        .collect();
+    agents.sort_by_key(|agent| agent.index);
+    agents
 }
 
 #[derive(Clone, Debug)]
@@ -209,6 +306,8 @@ pub struct Node {
     pub meta: Metadata,
     pub title: Option<String>,
     pub summary: Option<String>,
+    /// Sub-agent runs of the node's turn, oldest first.
+    pub agents: Vec<AgentRecord>,
     /// First line of the prompt as typed, kept only when the node has no title.
     prompt_first_line: Option<String>,
     /// Creation time in local time, `YYYY-MM-DD HH:MM`, derived from the id.
@@ -216,17 +315,6 @@ pub struct Node {
 }
 
 impl Node {
-    /// The model the turn ran on, as `endpoint/model (effort)` with `default` effort
-    /// shown bare.
-    pub fn model_label(&self) -> Option<String> {
-        let spec = ModelSpec::from_parts(
-            self.meta.endpoint.as_deref()?,
-            self.meta.model.as_deref()?,
-            self.meta.effort.as_deref()?,
-        )?;
-        Some(spec.short_label())
-    }
-
     pub fn display_title(&self) -> &str {
         self.title
             .as_deref()
@@ -241,16 +329,7 @@ impl Node {
                 .map(|text| text.trim().to_string())
                 .filter(|text| !text.is_empty())
         };
-        let mut meta = read_trimmed("metadata.md")
-            .map(|text| Metadata::parse(&text))
-            .unwrap_or_default();
-        if meta.status == Some(NodeStatus::Running) {
-            meta.status = Some(NodeStatus::Failed);
-            meta.error = Some("interrupted".to_string());
-            if let Err(e) = write_atomic(&dir.join("metadata.md"), &meta.to_text()) {
-                tracing::warn!("failed to rewrite interrupted node {}: {e}", id.as_str());
-            }
-        }
+        let meta = read_meta(dir);
         let title = read_trimmed("title.md").map(|text| single_line(&text));
         let prompt_first_line = match title {
             Some(_) => None,
@@ -269,6 +348,7 @@ impl Node {
             meta,
             title,
             summary: read_trimmed("summary.md"),
+            agents: read_agents(dir),
             prompt_first_line,
             created_display,
         }
@@ -323,6 +403,9 @@ impl ConversationTree {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
+            if name == AGENTS_DIR {
+                continue;
+            }
             let id = NodeId::new(&name);
             let node_dir = dir.join(&name);
             let children = self.load_children(&node_dir, Some(&id));
@@ -444,6 +527,7 @@ impl ConversationTree {
             meta,
             title: None,
             summary: None,
+            agents: Vec::new(),
             prompt_first_line: input
                 .unwrap_or(prompt)
                 .lines()
@@ -474,7 +558,132 @@ impl ConversationTree {
                 _ => {}
             }
         }
+        match std::fs::remove_dir_all(dir.join(AGENTS_DIR)) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+            _ => {}
+        }
+        if let Some(node) = self.nodes.get_mut(id) {
+            node.agents.clear();
+        }
         self.update_meta(id, change)
+    }
+
+    pub fn agent(&self, node: &NodeId, index: u32) -> Option<&AgentRecord> {
+        self.nodes
+            .get(node)?
+            .agents
+            .iter()
+            .find(|agent| agent.index == index)
+    }
+
+    /// Directory of sub-agent run `index` of `node`.
+    pub fn agent_dir(&self, node: &NodeId, index: u32) -> Option<Utf8PathBuf> {
+        self.agent(node, index)?;
+        Some(
+            self.node_dir(node)?
+                .join(AGENTS_DIR)
+                .join(index.to_string()),
+        )
+    }
+
+    /// Records a new sub-agent run of `node`'s turn: its directory, `prompt.md` and
+    /// `metadata.md` are on disk when this returns. Returns its index.
+    pub fn create_agent(
+        &mut self,
+        node: &NodeId,
+        now_secs: i64,
+        mut meta: Metadata,
+        prompt: &str,
+    ) -> std::io::Result<u32> {
+        let node_dir = self.node_dir(node).ok_or_else(unknown_node)?;
+        let owner = self.nodes.get_mut(node).ok_or_else(unknown_node)?;
+        let index = owner.agents.last().map_or(1, |agent| agent.index + 1);
+        let dir = node_dir.join(AGENTS_DIR).join(index.to_string());
+        meta.created = Some(utc_stamp(now_secs));
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join("prompt.md"), prompt)?;
+        write_atomic(&dir.join("metadata.md"), &meta.to_text())?;
+        owner.agents.push(AgentRecord { index, meta });
+        Ok(index)
+    }
+
+    /// Changes the metadata of sub-agent run `index` of `node` and writes it through.
+    pub fn update_agent_meta(
+        &mut self,
+        node: &NodeId,
+        index: u32,
+        change: impl FnOnce(&mut Metadata),
+    ) -> std::io::Result<()> {
+        let dir = self.agent_dir(node, index).ok_or_else(unknown_node)?;
+        let agent = self
+            .nodes
+            .get_mut(node)
+            .and_then(|owner| owner.agents.iter_mut().find(|agent| agent.index == index))
+            .ok_or_else(unknown_node)?;
+        change(&mut agent.meta);
+        write_atomic(&dir.join("metadata.md"), &agent.meta.to_text())
+    }
+
+    /// Marks the runs of `node` still running as cancelled: its turn is over, and a
+    /// sub-agent never outlives the turn that called it.
+    pub fn cancel_running_agents(&mut self, node: &NodeId) {
+        let running: Vec<u32> = self.nodes.get(node).map_or_else(Vec::new, |owner| {
+            owner
+                .agents
+                .iter()
+                .filter(|agent| agent.meta.status == Some(NodeStatus::Running))
+                .map(|agent| agent.index)
+                .collect()
+        });
+        for index in running {
+            let cancelled = self.update_agent_meta(node, index, |meta| {
+                meta.status = Some(NodeStatus::Cancelled);
+            });
+            if let Err(e) = cancelled {
+                tracing::warn!(
+                    "failed to mark sub-agent {} cancelled: {e}",
+                    agent_id(node, index)
+                );
+            }
+        }
+    }
+
+    /// The run an agent id names, when the turn of `current` may continue it: a run of
+    /// `current` itself or of one of its ancestors, the only ones its agent has seen.
+    pub fn resumable_agent(&self, current: &NodeId, id: &str) -> Result<(NodeId, u32), String> {
+        let unknown = || format!("unknown agent_id: {id}");
+        let (node, index) = id.trim().rsplit_once('/').ok_or_else(unknown)?;
+        let node = NodeId::new(node);
+        let index: u32 = index.parse().map_err(|_| unknown())?;
+        if !self.lineage(current).contains(&node) {
+            return Err(format!(
+                "agent_id {id} belongs to another branch of the conversation"
+            ));
+        }
+        self.agent(&node, index).ok_or_else(unknown)?;
+        Ok((node, index))
+    }
+
+    /// The runs that run `index` of `node` continues, oldest first, ending with that run
+    /// itself.
+    pub fn agent_chain(&self, node: &NodeId, index: u32) -> Vec<(NodeId, u32)> {
+        let mut chain = Vec::new();
+        let mut next = Some((node.clone(), index));
+        while let Some((node, index)) = next.take() {
+            if self.agent(&node, index).is_none() {
+                break;
+            }
+            chain.push((node.clone(), index));
+            next = self
+                .agent(&node, index)
+                .and_then(|agent| agent.meta.resumed_from.as_deref())
+                .and_then(|from| {
+                    let (node, index) = from.rsplit_once('/')?;
+                    Some((NodeId::new(node), index.parse().ok()?))
+                });
+        }
+        chain.reverse();
+        chain
     }
 
     /// Changes the metadata of `id` in memory and writes it through.
@@ -783,6 +992,9 @@ mod tests {
             cached_in: Some(81_920),
             secs: Some(95),
             error: Some("rate limited: try later".into()),
+            role: Some("reviewer".into()),
+            description: Some("Review the change".into()),
+            resumed_from: Some("2026-10-05T14-32-07Z/1".into()),
         };
         assert_eq!(Metadata::parse(&meta.to_text()), meta);
     }
@@ -852,6 +1064,133 @@ mod tests {
         assert_eq!(node.meta.error.as_deref(), Some("interrupted"));
         let on_disk = std::fs::read_to_string(dir.join("metadata.md")).unwrap();
         assert_eq!(on_disk, "status: failed\nerror: interrupted\n");
+    }
+
+    #[test]
+    fn sub_agent_runs_are_recorded_under_their_node_and_never_load_as_nodes() {
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+        let parent = tree
+            .create_node(None, 86_401, Metadata::default(), "p", None)
+            .unwrap();
+        let running = Metadata {
+            status: Some(NodeStatus::Running),
+            role: Some("reviewer".into()),
+            description: Some("Review".into()),
+            ..Default::default()
+        };
+        let first = tree
+            .create_agent(&parent, 86_402, running.clone(), "task one")
+            .unwrap();
+        let second = tree
+            .create_agent(&parent, 86_403, running, "task two")
+            .unwrap();
+        assert_eq!((first, second), (1, 2));
+        let dir = tree.agent_dir(&parent, 2).unwrap();
+        assert_eq!(dir, tree.node_dir(&parent).unwrap().join("agents/2"));
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prompt.md")).unwrap(),
+            "task two"
+        );
+        tree.update_agent_meta(&parent, 1, |meta| meta.status = Some(NodeStatus::Done))
+            .unwrap();
+
+        let reloaded = ConversationTree::load(&root);
+        assert_eq!(reloaded.nodes().count(), 1);
+        let node = reloaded.node(&parent).unwrap();
+        assert!(node.children.is_empty());
+        let statuses: Vec<_> = node
+            .agents
+            .iter()
+            .map(|a| (a.index, a.meta.status))
+            .collect();
+        assert_eq!(
+            statuses,
+            [(1, Some(NodeStatus::Done)), (2, Some(NodeStatus::Failed))]
+        );
+        assert_eq!(node.agents[0].title(), "agent reviewer: Review");
+    }
+
+    #[test]
+    fn cancelling_a_turn_cancels_its_running_sub_agents() {
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+        let parent = tree
+            .create_node(None, 86_401, Metadata::default(), "p", None)
+            .unwrap();
+        let running = Metadata {
+            status: Some(NodeStatus::Running),
+            ..Default::default()
+        };
+        tree.create_agent(&parent, 86_402, running, "t").unwrap();
+        tree.cancel_running_agents(&parent);
+        assert_eq!(
+            tree.agent(&parent, 1).unwrap().meta.status,
+            Some(NodeStatus::Cancelled)
+        );
+        let reloaded = ConversationTree::load(&root);
+        assert_eq!(
+            reloaded.agent(&parent, 1).unwrap().meta.status,
+            Some(NodeStatus::Cancelled)
+        );
+    }
+
+    #[test]
+    fn only_runs_of_the_lineage_can_be_resumed_and_their_chain_is_followed() {
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+        let meta = Metadata::default;
+        let root_node = tree.create_node(None, 86_401, meta(), "r", None).unwrap();
+        let child = tree
+            .create_node(Some(&root_node), 86_402, meta(), "c", None)
+            .unwrap();
+        let sibling = tree
+            .create_node(Some(&root_node), 86_403, meta(), "s", None)
+            .unwrap();
+        tree.create_agent(&root_node, 86_404, meta(), "first")
+            .unwrap();
+        tree.create_agent(&sibling, 86_405, meta(), "elsewhere")
+            .unwrap();
+        let resumed = Metadata {
+            resumed_from: Some(agent_id(&root_node, 1)),
+            ..Default::default()
+        };
+        tree.create_agent(&child, 86_406, resumed, "again").unwrap();
+
+        let from_child = |id: &str| tree.resumable_agent(&child, id);
+        assert_eq!(
+            from_child(&agent_id(&root_node, 1)),
+            Ok((root_node.clone(), 1))
+        );
+        assert!(
+            from_child(&agent_id(&sibling, 1))
+                .unwrap_err()
+                .contains("another branch")
+        );
+        assert!(from_child(&agent_id(&root_node, 9)).is_err());
+        assert!(from_child("nonsense").is_err());
+
+        assert_eq!(
+            tree.agent_chain(&child, 1),
+            [(root_node.clone(), 1), (child.clone(), 1)]
+        );
+    }
+
+    #[test]
+    fn restarting_a_node_drops_its_sub_agent_runs() {
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+        let node = tree
+            .create_node(None, 86_401, Metadata::default(), "p", None)
+            .unwrap();
+        tree.create_agent(&node, 86_402, Metadata::default(), "t")
+            .unwrap();
+        let agents = tree.node_dir(&node).unwrap().join("agents");
+        assert!(agents.exists());
+
+        tree.restart_node(&node, |_| {}).unwrap();
+        assert!(!agents.exists());
+        assert!(tree.node(&node).unwrap().agents.is_empty());
     }
 
     #[test]

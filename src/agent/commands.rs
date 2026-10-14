@@ -50,7 +50,7 @@ impl Command {
 
 /// Splits a command file into its metadata block and what follows it. The block opens
 /// with `---` on the first line; without a closing `---` the file has no metadata.
-fn split_metadata(text: &str) -> (&str, &str) {
+pub(super) fn split_metadata(text: &str) -> (&str, &str) {
     let mut offset = 0;
     let mut block_start = None;
     for line in text.split_inclusive('\n') {

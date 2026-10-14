@@ -21,7 +21,7 @@ pub struct LlmTarget {
 /// A tool as advertised to the model.
 pub struct ToolSpec {
     pub name: &'static str,
-    pub description: &'static str,
+    pub description: String,
     pub schema: serde_json::Value,
 }
 
@@ -105,7 +105,7 @@ fn request(system: &str, messages: &[Message], tools: &[ToolSpec]) -> ChatReques
     }
     request.with_tools(tools.iter().map(|tool| {
         Tool::new(tool.name)
-            .with_description(tool.description)
+            .with_description(tool.description.as_str())
             .with_schema(tool.schema.clone())
     }))
 }

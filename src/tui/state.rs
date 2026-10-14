@@ -283,6 +283,9 @@ pub struct TreeViewState {
     pub selected: Option<RowTarget>,
     /// Roots and forks whose children are shown; everything else is collapsed.
     pub expanded: HashSet<NodeId>,
+    /// Nodes whose sub-agent runs are listed under them. Never saved: they are hidden
+    /// at startup.
+    pub shown_agents: HashSet<NodeId>,
     /// Node a first `Ctrl+D` marked for deletion; a second one on it deletes.
     pub armed_delete: Option<NodeId>,
     /// False until the startup load of the tree has finished.
@@ -308,6 +311,8 @@ impl TreeViewState {
 pub struct DiscussionState {
     /// Node shown; `None` for a new conversation whose first prompt is not sent yet.
     pub node: Option<NodeId>,
+    /// Sub-agent run of `node` shown instead of the node itself, read-only.
+    pub agent: Option<u32>,
     pub prompt: String,
     pub reply: String,
     /// Work log of the node's turn: narration and tool calls, never part of the reply.
@@ -336,11 +341,16 @@ pub struct PendingTurn {
     pub parent: Option<NodeId>,
 }
 
-/// What a Conversation Tree row points at: a node, or a queued prompt whose node does
-/// not exist yet.
+/// What a Conversation Tree row points at: a node, a sub-agent run of a node, or a
+/// queued prompt whose node does not exist yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowTarget {
     Node(NodeId),
+    /// Sub-agent run `index` of `node`.
+    Agent {
+        node: NodeId,
+        index: u32,
+    },
     /// A prompt waiting in the queue, by the window that holds it. `position` is its
     /// place in the queue, shown in the gutter.
     Queued {
@@ -354,7 +364,7 @@ impl RowTarget {
     pub fn node(&self) -> Option<&NodeId> {
         match self {
             Self::Node(id) => Some(id),
-            Self::Queued { .. } => None,
+            Self::Agent { .. } | Self::Queued { .. } => None,
         }
     }
 }
@@ -614,7 +624,11 @@ impl AppState {
     /// The input `window` shows right now, if any.
     pub fn open_input(&mut self, window: &Window) -> Option<&mut InputLine> {
         match window {
-            Window::Discussion(id) => self.discussions.get_mut(id).map(|shown| &mut shown.draft),
+            Window::Discussion(id) => self
+                .discussions
+                .get_mut(id)
+                .filter(|shown| shown.agent.is_none())
+                .map(|shown| &mut shown.draft),
             Window::GitLog(id) => {
                 let win = self.git_logs.get_mut(id)?;
                 if win.branch_picking {
@@ -849,6 +863,15 @@ pub enum AppSignal {
     },
     /// A running turn produced output; nothing to apply, only a render.
     TurnProgress,
+    /// The turn of `node` started a sub-agent, already recorded in the tree.
+    SubagentStarted {
+        node: NodeId,
+    },
+    /// Sub-agent run `index` of `node` ended; its outcome is in the tree.
+    SubagentFinished {
+        node: NodeId,
+        index: u32,
+    },
     /// The turn of `node` ended.
     TurnFinished {
         node: NodeId,

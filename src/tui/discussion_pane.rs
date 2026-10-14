@@ -1,5 +1,5 @@
 use crate::agent::commands::{self, Command, Expansion};
-use crate::agent::turn::{self, TurnRequest};
+use crate::agent::turn::{self, LiveSubagent, LiveTurn, TurnRequest};
 use crate::agent::{Mode, ModelSpec};
 use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
 use crate::keymap::{Action, Keymap, hint};
@@ -8,9 +8,10 @@ use crate::tui::markdown;
 use crate::tui::pane_component::drag_modifier_from_mouse;
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
+use parking_lot::Mutex;
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::mpsc;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -303,7 +304,8 @@ pub(crate) fn start_turn(
         .as_ref()
         .and_then(|summary| state.agent.backend(summary));
     let request = TurnRequest {
-        model: spec.to_string(),
+        spec,
+        agent: Arc::clone(&state.agent),
         mode,
         system_prompt: !no_system_prompt,
         node: node.clone(),
@@ -332,11 +334,56 @@ pub(crate) fn start_turn(
 
 /// The model a node was run with, when its metadata names one completely.
 pub(crate) fn node_model(node: &Node) -> Option<ModelSpec> {
-    ModelSpec::from_parts(
-        node.meta.endpoint.as_deref()?,
-        node.meta.model.as_deref()?,
-        node.meta.effort.as_deref()?,
-    )
+    node.meta.model_spec()
+}
+
+/// The sub-agent run window `discussion` shows, while it runs.
+fn running_agent(state: &AppState, discussion: &DiscussionState) -> Option<LiveSubagent> {
+    let index = discussion.agent?;
+    let handle = state.running_turns.get(discussion.node.as_ref()?)?;
+    let running = handle.live.lock().subagent.clone()?;
+    (running.index == index).then_some(running)
+}
+
+/// What the turn or the sub-agent run window `discussion` shows has produced so far,
+/// while it runs.
+fn running_output(state: &AppState, discussion: &DiscussionState) -> Option<Arc<Mutex<LiveTurn>>> {
+    match discussion.agent {
+        Some(_) => running_agent(state, discussion).map(|running| running.live),
+        None => {
+            let handle = state.running_turns.get(discussion.node.as_ref()?)?;
+            Some(Arc::clone(&handle.live))
+        }
+    }
+}
+
+/// Metadata of the node or the sub-agent run window `discussion` shows.
+fn shown_meta<'a>(
+    tree: &'a ConversationTree,
+    discussion: &DiscussionState,
+) -> Option<&'a Metadata> {
+    let node = discussion.node.as_ref()?;
+    match discussion.agent {
+        Some(index) => tree.agent(node, index).map(|agent| &agent.meta),
+        None => tree.node(node).map(|node| &node.meta),
+    }
+}
+
+/// Closes the windows showing sub-agent runs of `node`, which a new run of its turn
+/// has removed.
+fn close_agent_windows(state: &mut AppState, node: &NodeId) {
+    let shown: Vec<usize> = state
+        .discussions
+        .iter()
+        .filter(|(_, discussion)| {
+            discussion.node.as_ref() == Some(node) && discussion.agent.is_some()
+        })
+        .map(|(id, _)| *id)
+        .collect();
+    for id in shown {
+        state.discussions.remove(&id);
+        state.pane_manager.remove_window(&Window::Discussion(id));
+    }
 }
 
 /// The mode a node was sent in; a compact node counts as feedback.
@@ -715,7 +762,12 @@ impl DiscussionComponent {
             return;
         }
         let word = word_bounds(&text, anchor);
-        let kind = match (drag_modifier_from_mouse(mouse), &discussion.node) {
+        // A sub-agent run has no highlights: a modified drag selects too.
+        let highlighted = discussion
+            .node
+            .as_ref()
+            .filter(|_| discussion.agent.is_none());
+        let kind = match (drag_modifier_from_mouse(mouse), highlighted) {
             (Some(modifier), Some(node)) => {
                 let refusal = if part == DocPart::WorkLog {
                     Some("the work log cannot be highlighted")
@@ -892,10 +944,15 @@ impl DiscussionComponent {
         let started = launch
             .map_err(str::to_string)
             .and_then(|launch| start_turn(state, main_tx, launch).map_err(Refusal::into_reason));
+        if started.is_ok() {
+            close_agent_windows(state, &node);
+        }
         let shown: Vec<usize> = state
             .discussions
             .iter()
-            .filter(|(_, discussion)| discussion.node.as_ref() == Some(&node))
+            .filter(|(_, discussion)| {
+                discussion.node.as_ref() == Some(&node) && discussion.agent.is_none()
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in shown {
@@ -976,7 +1033,9 @@ impl DiscussionComponent {
         let existing = state
             .discussions
             .iter()
-            .find(|(_, discussion)| discussion.node.as_ref() == Some(&node))
+            .find(|(_, discussion)| {
+                discussion.node.as_ref() == Some(&node) && discussion.agent.is_none()
+            })
             .map(|(id, _)| *id);
         let id = existing.unwrap_or_else(|| {
             let id = state.next_discussion_id;
@@ -996,6 +1055,63 @@ impl DiscussionComponent {
         Self::show(state, id);
     }
 
+    /// Focuses the window already showing sub-agent run `index` of `node`, or opens a
+    /// new one, read-only, and loads the run's task and answer from disk.
+    pub(crate) fn open_agent(state: &mut AppState, main_tx: MainTx, node: NodeId, index: u32) {
+        let existing = state
+            .discussions
+            .iter()
+            .find(|(_, discussion)| {
+                discussion.node.as_ref() == Some(&node) && discussion.agent == Some(index)
+            })
+            .map(|(id, _)| *id);
+        let id = existing.unwrap_or_else(|| {
+            let id = state.next_discussion_id;
+            state.next_discussion_id += 1;
+            let model = state
+                .conversations
+                .read()
+                .agent(&node, index)
+                .and_then(|agent| agent.meta.model_spec());
+            state.discussions.insert(
+                id,
+                DiscussionState {
+                    node: Some(node),
+                    agent: Some(index),
+                    model,
+                    ..Default::default()
+                },
+            );
+            Self::load_content(state, main_tx, id);
+            id
+        });
+        Self::show(state, id);
+    }
+
+    /// Reads again the windows showing sub-agent runs of `node`, or only run `index`:
+    /// while a run is in progress they follow its live output, which is gone once it
+    /// ends.
+    pub(crate) fn reload_agent_windows(
+        state: &AppState,
+        main_tx: MainTx,
+        node: &NodeId,
+        index: Option<u32>,
+    ) {
+        let shown: Vec<usize> = state
+            .discussions
+            .iter()
+            .filter(|(_, discussion)| {
+                discussion.node.as_ref() == Some(node)
+                    && discussion.agent.is_some()
+                    && index.is_none_or(|index| discussion.agent == Some(index))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in shown {
+            Self::load_content(state, main_tx.clone(), id);
+        }
+    }
+
     /// Opens a window for a new conversation, offering the model last picked.
     pub(crate) fn open_new_root(state: &mut AppState) {
         let id = state.next_discussion_id;
@@ -1011,12 +1127,23 @@ impl DiscussionComponent {
         Self::show(state, id);
     }
 
-    /// Reads the prompt and reply of window `id`'s node off the UI thread.
+    /// Reads the prompt and reply of window `id`'s node or sub-agent run off the UI
+    /// thread.
     pub(crate) fn load_content(state: &AppState, main_tx: MainTx, id: usize) {
-        let Some(node) = state.discussions.get(&id).and_then(|d| d.node.clone()) else {
+        let Some(discussion) = state.discussions.get(&id) else {
             return;
         };
-        let Some(dir) = state.conversations.read().node_dir(&node) else {
+        let Some(node) = discussion.node.clone() else {
+            return;
+        };
+        let dir = {
+            let tree = state.conversations.read();
+            match discussion.agent {
+                Some(index) => tree.agent_dir(&node, index),
+                None => tree.node_dir(&node),
+            }
+        };
+        let Some(dir) = dir else {
             return;
         };
         tokio::task::spawn_blocking(move || {
@@ -1164,7 +1291,9 @@ impl DiscussionComponent {
         let shown: Vec<usize> = state
             .discussions
             .iter()
-            .filter(|(_, discussion)| discussion.node.as_ref() == Some(node))
+            .filter(|(_, discussion)| {
+                discussion.node.as_ref() == Some(node) && discussion.agent.is_none()
+            })
             .map(|(id, _)| *id)
             .collect();
         for id in shown {
@@ -1275,16 +1404,19 @@ impl DiscussionComponent {
     }
 
     pub(crate) fn title(state: &AppState, window_id: usize) -> String {
+        let tree = state.conversations.read();
         state
             .discussions
             .get(&window_id)
-            .and_then(|discussion| discussion.node.as_ref())
-            .and_then(|node| {
-                let tree = state.conversations.read();
-                tree.node(node).map(|node| {
-                    let marker = if node.meta.favorite { "* " } else { "" };
-                    format!("{marker}{}", node.display_title())
-                })
+            .and_then(|discussion| {
+                let node = discussion.node.as_ref()?;
+                match discussion.agent {
+                    Some(index) => tree.agent(node, index).map(|agent| agent.title()),
+                    None => tree.node(node).map(|node| {
+                        let marker = if node.meta.favorite { "* " } else { "" };
+                        format!("{marker}{}", node.display_title())
+                    }),
+                }
             })
             .unwrap_or_else(|| "New conversation".to_string())
     }
@@ -1332,15 +1464,16 @@ impl DiscussionComponent {
     }
 }
 
-/// One-line description of a node's outcome, and whether it reports a failure.
-fn status_text(node: &Node) -> (String, bool) {
-    let kind = match node.meta.node_type {
+/// One-line description of the outcome of a node or a sub-agent run, and whether it
+/// reports a failure.
+fn status_text(meta: &Metadata) -> (String, bool) {
+    let kind = match meta.node_type {
         Some(NodeType::Compact) => "compact",
         _ => "",
     };
-    let (mut text, failed) = match node.meta.status {
+    let (mut text, failed) = match meta.status {
         Some(NodeStatus::Failed) => {
-            let error = node.meta.error.as_deref().unwrap_or("unknown error");
+            let error = meta.error.as_deref().unwrap_or("unknown error");
             (format!("failed: {error}"), true)
         }
         Some(NodeStatus::Cancelled) => ("cancelled".to_string(), true),
@@ -1357,26 +1490,25 @@ fn status_text(node: &Node) -> (String, bool) {
         }
     };
     push(kind);
-    let hashes: Vec<String> = node
-        .meta
+    let hashes: Vec<String> = meta
         .commits
         .iter()
         .map(|hash| hash.chars().take(7).collect())
         .collect();
     push(&hashes.join(" "));
-    if node.meta.stash.is_some() {
+    if meta.stash.is_some() {
         push("uncommitted changes stashed");
     }
-    if let Some(model) = node.model_label() {
+    if let Some(model) = meta.model_label() {
         push(&model);
     }
-    if let Some(tokens) = node.meta.tokens_in {
+    if let Some(tokens) = meta.tokens_in {
         push(&fmt_tokens(tokens));
     }
-    if let Some(cached) = node.meta.cached_in {
+    if let Some(cached) = meta.cached_in {
         push(&format!("{} cached", fmt_tokens(cached)));
     }
-    if let Some(secs) = node.meta.secs {
+    if let Some(secs) = meta.secs {
         push(&fmt_elapsed(secs));
     }
     (text, failed)
@@ -1405,11 +1537,8 @@ fn fmt_elapsed(secs: u64) -> String {
 /// until the node is done and has a reply.
 fn work_log_shown(tree: &ConversationTree, discussion: &DiscussionState) -> bool {
     discussion.show_work_log.unwrap_or_else(|| {
-        let done = discussion
-            .node
-            .as_ref()
-            .and_then(|node| tree.node(node))
-            .is_some_and(|node| node.meta.status == Some(NodeStatus::Done));
+        let done =
+            shown_meta(tree, discussion).is_some_and(|meta| meta.status == Some(NodeStatus::Done));
         !done || discussion.reply.trim().is_empty()
     })
 }
@@ -1424,27 +1553,20 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
     if !discussion.loaded {
         return ("Loading…".to_string(), false);
     }
+    if discussion.agent.is_some()
+        && let Some(running) = running_agent(state, discussion)
+    {
+        return (progress_text(&running.live.lock(), running.started), false);
+    }
     let queued = queue_hint(state, id);
     let Some(node) = &discussion.node else {
         let help = "Enter:Send  Shift+Enter:New line";
         return (queued.unwrap_or_else(|| help.to_string()), false);
     };
-    if let Some(handle) = state.running_turns.get(node) {
-        let live = handle.live.lock();
-        let elapsed = handle.started.elapsed();
-        let spinner = turn::spinner_frame(elapsed);
-        let time = fmt_elapsed(elapsed.as_secs());
-        let mut text = match (&live.activity, live.reply.is_empty()) {
-            (Some(activity), _) => format!("{spinner} running {time} · {activity}"),
-            (None, true) => format!("{spinner} thinking {time}"),
-            (None, false) => format!("{spinner} running {time}"),
-        };
-        if let Some(tokens) = live.tokens_in {
-            text.push_str(&format!(" · {}", fmt_tokens(tokens)));
-        }
-        if let Some(cached) = live.cached_in {
-            text.push_str(&format!(" · {} cached", fmt_tokens(cached)));
-        }
+    if discussion.agent.is_none()
+        && let Some(handle) = state.running_turns.get(node)
+    {
+        let mut text = progress_text(&handle.live.lock(), handle.started);
         text.push_str(" · ");
         text.push_str(queued.as_deref().unwrap_or("Esc:Cancel"));
         return (text, false);
@@ -1452,10 +1574,7 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
     if let Some(queued) = queued {
         return (queued, false);
     }
-    let (mut text, failed) = state
-        .conversations
-        .read()
-        .node(node)
+    let (mut text, failed) = shown_meta(&state.conversations.read(), discussion)
         .map(status_text)
         .unwrap_or_default();
     if !discussion.work_log.is_empty() {
@@ -1465,6 +1584,26 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
         text.push_str("Ctrl+O:Work log");
     }
     (text, failed)
+}
+
+/// The progress of a turn or a sub-agent run started at `started`: spinner, time,
+/// activity and context size.
+fn progress_text(live: &LiveTurn, started: Instant) -> String {
+    let elapsed = started.elapsed();
+    let spinner = turn::spinner_frame(elapsed);
+    let time = fmt_elapsed(elapsed.as_secs());
+    let mut text = match (&live.activity, live.reply.is_empty()) {
+        (Some(activity), _) => format!("{spinner} running {time} · {activity}"),
+        (None, true) => format!("{spinner} thinking {time}"),
+        (None, false) => format!("{spinner} running {time}"),
+    };
+    if let Some(tokens) = live.tokens_in {
+        text.push_str(&format!(" · {}", fmt_tokens(tokens)));
+    }
+    if let Some(cached) = live.cached_in {
+        text.push_str(&format!(" · {} cached", fmt_tokens(cached)));
+    }
+    text
 }
 
 fn model_picker_chord(keymap: &Keymap) -> String {
@@ -1501,9 +1640,12 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
         let Some(discussion) = state.discussions.get_mut(&id) else {
             return Ok(EventPropagation::Propagate);
         };
+        // A sub-agent run is read-only: its window neither sends nor cancels.
+        let read_only = discussion.agent.is_some();
         let running = discussion
             .node
             .as_ref()
+            .filter(|_| !read_only)
             .and_then(|node| state.running_turns.get(node));
         let queued = state.queued_turns.iter().any(|entry| entry.window == id);
         let scroll = state.pane_manager.window_scroll(&window);
@@ -1512,7 +1654,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
         let target = match &input_event {
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Enter),
-            }) => {
+            }) if !read_only => {
                 Self::send(state, main_tx, id);
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -1609,7 +1751,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 ..
             }) => scroll + SCROLL_STEP,
             _ => {
-                if discussion.draft.handle_key(&input_event) {
+                if !read_only && discussion.draft.handle_key(&input_event) {
                     discussion.notice = None;
                     state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
@@ -1641,13 +1783,14 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let state = &mut global_data.state;
 
             // A running turn's reply lives in its handle; mirror it while it grows.
-            if let Some(discussion) = state.discussions.get_mut(&self.window_id)
-                && let Some(handle) = discussion
-                    .node
-                    .as_ref()
-                    .and_then(|node| state.running_turns.get(node))
+            let output = state
+                .discussions
+                .get(&self.window_id)
+                .and_then(|discussion| running_output(state, discussion));
+            if let Some(output) = &output
+                && let Some(discussion) = state.discussions.get_mut(&self.window_id)
             {
-                let live = handle.live.lock();
+                let live = output.lock();
                 if live.reply.len() != discussion.reply.len()
                     || live.work_log.len() != discussion.work_log.len()
                     || live.thinking.len() != discussion.thinking.len()
@@ -1683,16 +1826,21 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let marker = marker_bg(theme, pane_bg);
 
             let (status, alert) = status_line(state, self.window_id, discussion);
+            let read_only = discussion.agent.is_some();
             let hint = commands::placeholder(discussion.draft.text(), &state.agent.commands);
-            let input_rows = discussion
-                .draft
-                .height(
-                    hint.as_deref(),
-                    "",
-                    pane_width as u16,
-                    (total_rows / 2).max(1),
-                )
-                .min(total_rows);
+            let input_rows = if read_only {
+                0
+            } else {
+                discussion
+                    .draft
+                    .height(
+                        hint.as_deref(),
+                        "",
+                        pane_width as u16,
+                        (total_rows / 2).max(1),
+                    )
+                    .min(total_rows)
+            };
             let status_rows = usize::from(total_rows > input_rows);
             let doc_rows = total_rows - input_rows - status_rows;
 
@@ -1735,6 +1883,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let highlights = discussion
                 .node
                 .as_ref()
+                .filter(|_| !read_only)
                 .and_then(|node| state.discussion_highlights.get(node));
             // Each part carries either the selection in progress or the node's highlights,
             // never both: a selection hides the highlights, as in the file preview. A
@@ -1779,10 +1928,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             // turn rides it from its first frame, where the document still fits and its
             // two ends are the same row; a finished one only while the user left it there,
             // so a scroll away from the bottom holds.
-            let running = discussion
-                .node
-                .as_ref()
-                .is_some_and(|node| state.running_turns.contains_key(node));
+            let running = output.is_some();
             let follow = (running || stored > 0) && stored >= old_max;
             let scroll = if follow {
                 max_scroll
@@ -1888,7 +2034,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 .pane_manager
                 .set_window_scroll_max(&window, line_count);
             state.pane_manager.set_window_scroll(&window, scroll);
-            if let Some(discussion) = state.discussions.get_mut(&self.window_id) {
+            if !read_only && let Some(discussion) = state.discussions.get_mut(&self.window_id) {
                 discussion.draft.render(
                     &mut input_ops,
                     hint.as_deref()
@@ -2057,7 +2203,7 @@ mod tests {
     #[test]
     fn status_text_names_the_compact_type() {
         let (_tmp, tree, id) = node_with_metadata("type: compact\nstatus: done\ntokens-in: 1200\n");
-        let (text, failed) = status_text(tree.node(&id).unwrap());
+        let (text, failed) = status_text(&tree.node(&id).unwrap().meta);
         assert_eq!(text, "done · compact · 1k");
         assert!(!failed);
     }
@@ -2067,7 +2213,7 @@ mod tests {
         let (_tmp, tree, id) = node_with_metadata(
             "type: commit\nstatus: done\ncommits: 0123456789abcdef 89abcdef01234567\ntokens-in: 1200\ncached-in: 1152\n",
         );
-        let (text, failed) = status_text(tree.node(&id).unwrap());
+        let (text, failed) = status_text(&tree.node(&id).unwrap().meta);
         assert_eq!(text, "done · 0123456 89abcde · 1k · 1k cached");
         assert!(!failed);
     }
@@ -2077,7 +2223,7 @@ mod tests {
         let (_tmp, tree, id) = node_with_metadata(
             "type: feedback\nstatus: done\ntokens-in: 28937\ncached-in: 28416\n",
         );
-        let (text, failed) = status_text(tree.node(&id).unwrap());
+        let (text, failed) = status_text(&tree.node(&id).unwrap().meta);
         assert_eq!(text, "done · 28k · 28k cached");
         assert!(!failed);
     }
@@ -2086,7 +2232,7 @@ mod tests {
     fn status_text_does_not_repeat_the_feedback_mode() {
         let (_tmp, tree, id) =
             node_with_metadata("type: feedback\nstatus: done\ntokens-in: 28937\n");
-        let (text, failed) = status_text(tree.node(&id).unwrap());
+        let (text, failed) = status_text(&tree.node(&id).unwrap().meta);
         assert_eq!(text, "done · 28k");
         assert!(!failed);
     }
@@ -2095,7 +2241,7 @@ mod tests {
     fn status_text_reports_the_error_of_a_failed_node() {
         let (_tmp, tree, id) =
             node_with_metadata("type: feedback\nstatus: failed\nerror: rate limited\n");
-        let (text, failed) = status_text(tree.node(&id).unwrap());
+        let (text, failed) = status_text(&tree.node(&id).unwrap().meta);
         assert_eq!(text, "failed: rate limited");
         assert!(failed);
     }

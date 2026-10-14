@@ -1,4 +1,5 @@
 use crate::agent::commands::{self, Command};
+use crate::agent::subagent::Role;
 use crate::agent::{
     AgentConfig, CLAUDE_CODE_KIND, Endpoint, EndpointKind, ModelSpec, OPENCODE_GO_KIND,
 };
@@ -24,6 +25,7 @@ pub struct Config {
 pub struct AgentSettings {
     pub endpoints: Vec<EndpointDecl>,
     pub summary_model: Option<ModelSpec>,
+    pub subagent_model: Option<ModelSpec>,
 }
 
 /// Settings for the status-bar session/project time counters.
@@ -157,12 +159,52 @@ fn read_commands(dir: &Path) -> Vec<Command> {
     found
 }
 
+/// Reads the sub-agent roles from `<config_dir>/agents/<name>.md`.
+pub fn load_roles() -> Vec<Role> {
+    directories::ProjectDirs::from("", "", "explorer")
+        .map(|dirs| read_roles(&dirs.config_dir().join("agents")))
+        .unwrap_or_default()
+}
+
+/// The roles of the `.md` files in `dir`, by name. A file that cannot make a role is
+/// logged and skipped; a missing directory yields none.
+fn read_roles(dir: &Path) -> Vec<Role> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<Role> = entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "md" {
+                return None;
+            }
+            let name = path.file_stem()?.to_str()?;
+            if !commands::is_command_name(name) {
+                tracing::warn!(
+                    "ignoring {}: a role name is made of lowercase letters, digits and dashes",
+                    path.display()
+                );
+                return None;
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| tracing::warn!("cannot read {}: {e}", path.display()))
+                .ok()?;
+            Role::parse(name, &text)
+                .map_err(|reason| tracing::warn!("ignoring {}: {reason}", path.display()))
+                .ok()
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
 /// Joins the declared endpoints with their tokens. An endpoint without a token is
 /// logged and left out, so none of its models is ever listed.
 pub fn resolve_agent(
     settings: AgentSettings,
     tokens: &HashMap<String, String>,
     commands: Vec<Command>,
+    roles: Vec<Role>,
 ) -> AgentConfig {
     let token_of = |name: &str| {
         let token = tokens.get(name).cloned();
@@ -199,6 +241,8 @@ pub fn resolve_agent(
         endpoints,
         summary_model: settings.summary_model,
         commands,
+        subagent_model: settings.subagent_model,
+        roles,
     }
 }
 
@@ -272,6 +316,14 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                     format!("summary-model '{value}' is not of the form endpoint/model/effort")
                 })?;
                 settings.summary_model = Some(spec);
+            }
+            "subagent-model" => {
+                let value =
+                    string_arg(child).ok_or("agent.subagent-model must have a string argument")?;
+                let spec = ModelSpec::parse(value).ok_or_else(|| {
+                    format!("subagent-model '{value}' is not of the form endpoint/model/effort")
+                })?;
+                settings.subagent_model = Some(spec);
             }
             _ => {}
         }
@@ -448,6 +500,7 @@ mod config_tests {
                     url "https://openrouter.ai/api/v1"
                 }
                 summary-model "router/openai/gpt-mini/low"
+                subagent-model "kimi/kimi-k2/high"
             }
         "#,
         )
@@ -467,6 +520,8 @@ mod config_tests {
         );
         let summary = config.agent.summary_model.expect("summary model");
         assert_eq!(summary.to_string(), "router/openai/gpt-mini/low");
+        let subagent = config.agent.subagent_model.expect("sub-agent model");
+        assert_eq!(subagent.to_string(), "kimi/kimi-k2/high");
     }
 
     #[test]
@@ -530,7 +585,7 @@ mod config_tests {
             ]
         );
         let tokens = parse_auth("go \"sk-go\"").expect("valid auth");
-        let agent = resolve_agent(config.agent, &tokens, Vec::new());
+        let agent = resolve_agent(config.agent, &tokens, Vec::new(), Vec::new());
         assert_eq!(
             agent.endpoints,
             [Endpoint {
@@ -583,6 +638,30 @@ mod config_tests {
         assert!(parse("agent {\n endpoint \"a/b\" {\n url \"u\"\n }\n}").is_err());
         assert!(parse("agent {\n endpoint \"a\" {\n url \"u\"\n kind \"wat\"\n }\n}").is_err());
         assert!(parse("agent {\n summary-model \"a/b\"\n}").is_err());
+        assert!(parse("agent {\n subagent-model \"a/b\"\n}").is_err());
+    }
+
+    #[test]
+    fn roles_are_read_from_markdown_files_and_need_a_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(
+            dir.join("reviewer.md"),
+            "---\ndescription: Reviews commits\nmodel: claude/opus/high\n---\nYou review.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("vague.md"), "You do things.\n").unwrap();
+        std::fs::write(dir.join("Bad Name.md"), "---\ndescription: x\n---\ny\n").unwrap();
+
+        let roles = read_roles(dir);
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].name, "reviewer");
+        assert_eq!(roles[0].description, "Reviews commits");
+        assert_eq!(roles[0].prompt, "You review.");
+        let model = roles[0].model.as_ref().expect("role model");
+        assert_eq!(model.to_string(), "claude/opus/high");
+
+        assert!(read_roles(&dir.join("missing")).is_empty());
     }
 
     #[test]
@@ -603,9 +682,10 @@ mod config_tests {
                 },
             ],
             summary_model: None,
+            subagent_model: None,
         };
         let tokens = parse_auth("router \"sk-or\"\nunused \"x\"").expect("valid auth");
-        let agent = resolve_agent(settings, &tokens, Vec::new());
+        let agent = resolve_agent(settings, &tokens, Vec::new(), Vec::new());
         let names: Vec<&str> = agent.endpoints.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["router", "claude"]);
         assert_eq!(

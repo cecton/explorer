@@ -1,5 +1,5 @@
 use crate::agent::turn::spinner_frame;
-use crate::conversation::{ConversationTree, Node, NodeId, NodeStatus, NodeType};
+use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::state::{PendingTurn, RowTarget};
 use crate::tui::text_layout::{display_width, truncate, wrap};
 use crate::tui::*;
@@ -330,12 +330,12 @@ struct Line {
     text: String,
 }
 
-fn state_marker(node: &Node, running_for: Option<Duration>) -> Option<char> {
-    match (node.meta.status, node.meta.node_type) {
+fn state_marker(meta: &Metadata, running_for: Option<Duration>) -> Option<char> {
+    match (meta.status, meta.node_type) {
         (Some(NodeStatus::Running), _) => Some(spinner_frame(running_for.unwrap_or_default())),
         (Some(NodeStatus::Failed), _) => Some('✗'),
         (Some(NodeStatus::Cancelled), _) => Some('■'),
-        _ if node.meta.stash.is_some() => Some('±'),
+        _ if meta.stash.is_some() => Some('±'),
         (_, Some(NodeType::Compact)) => Some('≡'),
         _ => None,
     }
@@ -375,6 +375,63 @@ pub(crate) fn with_queued(rows: Vec<TreeRow>, queue: &[PendingTurn]) -> Vec<Tree
         }
     }
     lines
+}
+
+/// The rows with one row per sub-agent run of the turn of each node in `shown`, right
+/// after the node's row and one level below it.
+pub(crate) fn with_agents(
+    rows: Vec<TreeRow>,
+    tree: &ConversationTree,
+    shown: &HashSet<NodeId>,
+) -> Vec<TreeRow> {
+    if shown.is_empty() {
+        return rows;
+    }
+    let mut lines = Vec::with_capacity(rows.len());
+    for (index, row) in rows.iter().enumerate() {
+        lines.push(row.clone());
+        let Some(id) = row.target.node().filter(|id| shown.contains(*id)) else {
+            continue;
+        };
+        let Some(node) = tree.node(id) else {
+            continue;
+        };
+        // Rows hanging from the node below its runs keep the arm going past them.
+        let hangs = rows
+            .get(index + 1)
+            .is_some_and(|next| next.rails.len() > row.rails.len());
+        let last = node.agents.len().saturating_sub(1);
+        for (position, agent) in node.agents.iter().enumerate() {
+            let continues = position != last || hangs;
+            let mut rails = row.rails.clone();
+            rails.push(continues);
+            lines.push(TreeRow {
+                target: RowTarget::Agent {
+                    node: id.clone(),
+                    index: agent.index,
+                },
+                rails,
+                fold: Fold::Leaf,
+                branch: if continues {
+                    Branch::Start
+                } else {
+                    Branch::LastStart
+                },
+            });
+        }
+    }
+    lines
+}
+
+/// How long sub-agent run `index` of `node` has been running, while it runs.
+fn agent_running_for(state: &AppState, node: &NodeId, index: u32) -> Option<Duration> {
+    let handle = state.running_turns.get(node)?;
+    let live = handle.live.lock();
+    let running = live
+        .subagent
+        .as_ref()
+        .filter(|running| running.index == index)?;
+    Some(running.started.elapsed())
 }
 
 /// One column, nine digits.
@@ -519,9 +576,13 @@ impl ConversationTreeComponent {
         if state.tree_view.filtering() {
             return flat_rows(&filter_nodes(&tree, state.tree_view.query.text()));
         }
-        with_queued(
-            layout_rows(&tree, &state.tree_view.expanded),
-            &state.queued_turns,
+        with_agents(
+            with_queued(
+                layout_rows(&tree, &state.tree_view.expanded),
+                &state.queued_turns,
+            ),
+            &tree,
+            &state.tree_view.shown_agents,
         )
     }
 
@@ -606,6 +667,7 @@ impl ConversationTreeComponent {
         };
         for id in &removed {
             state.tree_view.expanded.remove(id);
+            state.tree_view.shown_agents.remove(id);
             state.discussion_highlights.remove(id);
         }
         let closed: Vec<usize> = state
@@ -818,6 +880,10 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let Some(row) = rows.get(index) else {
                     return Ok(EventPropagation::ConsumedRender);
                 };
+                if let RowTarget::Agent { node, .. } = &row.target {
+                    state.tree_view.selected = Some(RowTarget::Node(node.clone()));
+                    return Ok(EventPropagation::ConsumedRender);
+                }
                 let Some(id) = row.target.node().cloned() else {
                     return Ok(EventPropagation::ConsumedRender);
                 };
@@ -840,7 +906,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 Some(RowTarget::Node(id)) => {
                     crate::tui::discussion_pane::take_back(state, main_tx, id);
                 }
-                None => {}
+                Some(RowTarget::Agent { .. }) | None => {}
             },
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Backspace),
@@ -857,8 +923,36 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 Some(RowTarget::Node(id)) => {
                     DiscussionComponent::open_and_recover(state, main_tx, id.clone());
                 }
+                Some(RowTarget::Agent { node, index }) => {
+                    DiscussionComponent::open_agent(state, main_tx, node.clone(), *index);
+                }
                 None => {}
             },
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character('s'),
+            }) => {
+                let node = match rows.get(index).map(|row| &row.target) {
+                    Some(RowTarget::Node(id)) => Some(id.clone()),
+                    Some(RowTarget::Agent { node, .. }) => Some(node.clone()),
+                    Some(RowTarget::Queued { .. }) | None => None,
+                };
+                if let Some(node) = node
+                    && state
+                        .conversations
+                        .read()
+                        .node(&node)
+                        .is_some_and(|shown| !shown.agents.is_empty())
+                {
+                    let view = &mut state.tree_view;
+                    if view.shown_agents.remove(&node) {
+                        if matches!(view.selected, Some(RowTarget::Agent { .. })) {
+                            view.selected = Some(RowTarget::Node(node));
+                        }
+                    } else {
+                        view.shown_agents.insert(node);
+                    }
+                }
+            }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('n'),
             }) => DiscussionComponent::open_new_root(state),
@@ -945,8 +1039,17 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         last == row && now.duration_since(at) < DOUBLE_CLICK
                     });
                     self.last_click = (!double).then_some((now, row));
-                    if double && let RowTarget::Queued { window, .. } = &target.target {
-                        DiscussionComponent::show(state, *window);
+                    if double {
+                        match &target.target {
+                            RowTarget::Queued { window, .. } => {
+                                DiscussionComponent::show(state, *window);
+                            }
+                            RowTarget::Agent { node, index } => {
+                                let (node, index) = (node.clone(), *index);
+                                DiscussionComponent::open_agent(state, main_tx, node, index);
+                            }
+                            RowTarget::Node(_) => {}
+                        }
                     }
                     return Ok(EventPropagation::ConsumedRender);
                 };
@@ -1027,9 +1130,13 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             let rows = if filtering {
                 flat_rows(&matches)
             } else {
-                with_queued(
-                    layout_rows(&tree, &state.tree_view.expanded),
-                    &state.queued_turns,
+                with_agents(
+                    with_queued(
+                        layout_rows(&tree, &state.tree_view.expanded),
+                        &state.queued_turns,
+                    ),
+                    &tree,
+                    &state.tree_view.shown_agents,
                 )
             };
             let selected =
@@ -1113,12 +1220,19 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let Some(id) = row.target.node() else {
                     let prefix_width = gutter_width + display_width(&row_prefix(row));
                     let width = pane_width.saturating_sub(prefix_width).max(1);
+                    let text = match &row.target {
+                        RowTarget::Agent { node, index } => tree
+                            .agent(node, *index)
+                            .map(|agent| agent.title())
+                            .unwrap_or_default(),
+                        RowTarget::Node(_) | RowTarget::Queued { .. } => queued_text(state, row),
+                    };
                     let start = lines.len();
                     lines.push(Line {
                         row: row_idx,
                         kind: LineKind::Head,
                         offset: 0,
-                        text: truncate(&queued_text(state, row), width),
+                        text: truncate(&text, width),
                     });
                     if row_idx == selected {
                         selected_span = (start, lines.len());
@@ -1227,19 +1341,35 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let fold_column = gutter_width + display_width(&rail_prefix);
                 let text_column = fold_column + display_width(fold_text);
 
-                // A queued prompt has no node: nothing to arm, fold or label.
+                // A queued prompt or a sub-agent run is not a node: nothing to arm, fold
+                // or label.
                 let Some(node) = row_info.target.node().and_then(|id| tree.node(id)) else {
-                    let RowTarget::Queued { position, .. } = row_info.target else {
-                        continue;
+                    let (glyph, glyph_fg) = match &row_info.target {
+                        RowTarget::Queued { position, .. } => {
+                            (Some(queue_glyph(*position)), dim_fg)
+                        }
+                        RowTarget::Agent { node, index } => {
+                            let meta = tree.agent(node, *index).map(|agent| &agent.meta);
+                            let running_for = agent_running_for(state, node, *index);
+                            let fg = match meta.and_then(|meta| meta.status) {
+                                Some(NodeStatus::Failed) => error_fg,
+                                Some(NodeStatus::Cancelled) => warning_fg,
+                                _ => running_fg,
+                            };
+                            (meta.and_then(|meta| state_marker(meta, running_for)), fg)
+                        }
+                        RowTarget::Node(_) => continue,
                     };
                     paint_plain(&mut render_ops, gutter_width, &rail_prefix, gutter);
                     paint_plain(&mut render_ops, fold_column, fold_text, gutter);
-                    paint_plain(
-                        &mut render_ops,
-                        gutter_width - 2,
-                        &queue_glyph(position).to_string(),
-                        dim_fg,
-                    );
+                    if let Some(glyph) = glyph {
+                        paint_plain(
+                            &mut render_ops,
+                            gutter_width - 2,
+                            &glyph.to_string(),
+                            glyph_fg,
+                        );
+                    }
                     paint_plain(&mut render_ops, text_column, &line.text, dim_fg);
                     continue;
                 };
@@ -1302,7 +1432,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     .running_turns
                     .get(node_id)
                     .map(|handle| handle.started.elapsed());
-                let marker = state_marker(node, running_for);
+                let marker = state_marker(&node.meta, running_for);
                 match line.kind {
                     LineKind::Head => {
                         paint_plain(&mut render_ops, 0, &node.created_display, gutter);
@@ -1765,6 +1895,51 @@ mod tests {
                     position: 2
                 },
                 &RowTarget::Node(NodeId::new("b1")),
+            ]
+        );
+    }
+
+    #[test]
+    fn sub_agent_runs_hang_from_their_node_only_when_shown() {
+        let (_tmp, tree) = tree_with(&["a1/a2", "a1/agents/1", "a1/agents/2", "b1/agents/1"]);
+        let agent = |index| RowTarget::Agent {
+            node: NodeId::new("a1"),
+            index,
+        };
+        let layout = |expanded: &[&str], shown: &[&str]| {
+            let rows = with_agents(layout_rows(&tree, &ids(expanded)), &tree, &ids(shown));
+            rows.into_iter()
+                .map(|row| (row.target, row.rails, row.branch))
+                .collect::<Vec<_>>()
+        };
+        let node = |name| RowTarget::Node(NodeId::new(name));
+
+        assert_eq!(
+            layout(&["a1"], &[]),
+            [
+                (node("a1"), vec![], Branch::None),
+                (node("a2"), vec![false], Branch::LastStart),
+                (node("b1"), vec![], Branch::None),
+            ]
+        );
+        // The thread below the root keeps the arm going past the runs.
+        assert_eq!(
+            layout(&["a1"], &["a1"]),
+            [
+                (node("a1"), vec![], Branch::None),
+                (agent(1), vec![true], Branch::Start),
+                (agent(2), vec![true], Branch::Start),
+                (node("a2"), vec![false], Branch::LastStart),
+                (node("b1"), vec![], Branch::None),
+            ]
+        );
+        assert_eq!(
+            layout(&[], &["a1"]),
+            [
+                (node("a1"), vec![], Branch::None),
+                (agent(1), vec![true], Branch::Start),
+                (agent(2), vec![false], Branch::LastStart),
+                (node("b1"), vec![], Branch::None),
             ]
         );
     }

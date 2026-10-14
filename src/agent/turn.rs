@@ -1,8 +1,11 @@
 use super::claude_code::{self, ClaudeTarget, Invocation, Resume, RunError};
 use super::llm::{self, LlmTarget};
+use super::subagent::Subagents;
 use super::tools::ToolContext;
 use super::usage::{self, Usage};
-use super::{Backend, Endpoint, EndpointKind, Message, Mode, agent_loop, context};
+use super::{
+    AgentConfig, Backend, Endpoint, EndpointKind, Message, Mode, ModelSpec, agent_loop, context,
+};
 use crate::conversation::{ConversationTree, NodeId, NodeStatus, write_atomic};
 use crate::git::discard_worktree;
 use crate::tui::AppSignal;
@@ -26,6 +29,8 @@ const COMMITS_MAX: usize = 20;
 const MAX_NUDGES: usize = 2;
 /// Opens the line of a tool call in the work log.
 pub const TOOL_LINE_PREFIX: &str = "- ";
+/// Sets a sub-agent's tool calls apart in the work log of the turn that called it.
+const SUBAGENT_INDENT: &str = "  ";
 
 type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
 
@@ -51,6 +56,16 @@ pub struct LiveTurn {
     pub session_id: Option<String>,
     /// What the CLI last reported of the subscription's limits.
     pub usage: Option<Usage>,
+    /// The sub-agent this turn is waiting for.
+    pub subagent: Option<LiveSubagent>,
+}
+
+/// A sub-agent run in progress, as the turn that called it sees it.
+#[derive(Clone)]
+pub struct LiveSubagent {
+    pub index: u32,
+    pub started: Instant,
+    pub live: Arc<Mutex<LiveTurn>>,
 }
 
 /// The spinner frame of a turn that has been running for `elapsed`.
@@ -115,8 +130,10 @@ pub struct TurnRequest {
     pub backend: Backend,
     /// The endpoint of `backend`, whose subscription this turn spends.
     pub endpoint: Endpoint,
-    /// `endpoint/model/effort` this turn is sent to, shown in the status line.
-    pub model: String,
+    /// The model this turn is sent to.
+    pub spec: ModelSpec,
+    /// Endpoints, roles and models the turn's sub-agents can run on.
+    pub agent: Arc<AgentConfig>,
     /// Model that titles and summarizes the node once its turn is done.
     pub summary_backend: Option<Backend>,
     /// Id of the conversation's root node, sent to OpenAI-compatible servers as the
@@ -165,6 +182,9 @@ pub struct Recorder {
     pub(super) live: Arc<Mutex<LiveTurn>>,
     node_dir: Utf8PathBuf,
     main_tx: MainTx,
+    /// The recorder of the turn that called this sub-agent, which logs its tool calls
+    /// too.
+    caller: Option<Caller>,
     /// Where the text of the current answer starts in the live reply.
     answer_start: usize,
     last_flush: Instant,
@@ -174,7 +194,62 @@ pub struct Recorder {
     thinking_start: usize,
 }
 
+/// Where a sub-agent's tool calls are copied: the work log of the calling turn.
+struct Caller {
+    live: Arc<Mutex<LiveTurn>>,
+    node_dir: Utf8PathBuf,
+}
+
+/// Appends one entry to a work log and to the `activity.md` of `dir`.
+fn append_work_log(dir: &Utf8Path, live: &Mutex<LiveTurn>, entry: String) {
+    let appended = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(dir.join("activity.md"))
+        .and_then(|mut file| writeln!(file, "{entry}"));
+    if let Err(e) = appended {
+        tracing::warn!("failed to append to activity.md: {e}");
+    }
+    live.lock().work_log.push(entry);
+}
+
 impl Recorder {
+    fn new(live: Arc<Mutex<LiveTurn>>, node_dir: Utf8PathBuf, main_tx: MainTx) -> Self {
+        Self {
+            live,
+            node_dir,
+            main_tx,
+            caller: None,
+            answer_start: 0,
+            last_flush: Instant::now(),
+            last_signal: Instant::now(),
+            thinking_start: 0,
+        }
+    }
+
+    /// The recorder of a sub-agent run kept in `dir`, whose tool calls also go to this
+    /// turn's work log.
+    pub(super) fn subagent(&self, dir: Utf8PathBuf) -> Self {
+        Self {
+            caller: Some(Caller {
+                live: Arc::clone(&self.live),
+                node_dir: self.node_dir.clone(),
+            }),
+            ..Self::new(Arc::default(), dir, self.main_tx.clone())
+        }
+    }
+
+    pub(super) fn main_tx(&self) -> MainTx {
+        self.main_tx.clone()
+    }
+
+    pub(super) async fn send(&self, signal: AppSignal) {
+        let _ = self
+            .main_tx
+            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
+            .await;
+    }
+
     fn signal(&mut self) {
         self.last_signal = Instant::now();
         let _ = self
@@ -184,7 +259,7 @@ impl Recorder {
             ));
     }
 
-    fn flush_reply(&mut self) {
+    pub(super) fn flush_reply(&mut self) {
         self.last_flush = Instant::now();
         let reply = self.live.lock().reply.clone();
         if let Err(e) = write_atomic(&self.node_dir.join("reply.md"), &reply) {
@@ -228,21 +303,17 @@ impl Recorder {
 
     /// Adds a tool call to the work log and shows it as the activity in progress.
     pub fn tool_call(&mut self, description: String) {
+        if let Some(caller) = &self.caller {
+            let entry = format!("{SUBAGENT_INDENT}{TOOL_LINE_PREFIX}{description}");
+            append_work_log(&caller.node_dir, &caller.live, entry);
+        }
         self.log(format!("{TOOL_LINE_PREFIX}{description}"));
         self.activity(Some(description));
     }
 
     /// Appends one entry to the work log and to `activity.md`.
     fn log(&mut self, entry: String) {
-        let appended = std::fs::OpenOptions::new()
-            .create(true)
-            .append(true)
-            .open(self.node_dir.join("activity.md"))
-            .and_then(|mut file| writeln!(file, "{entry}"));
-        if let Err(e) = appended {
-            tracing::warn!("failed to append to activity.md: {e}");
-        }
-        self.live.lock().work_log.push(entry);
+        append_work_log(&self.node_dir, &self.live, entry);
     }
 
     pub fn text(&mut self, chunk: &str) {
@@ -305,7 +376,7 @@ impl Recorder {
 
 /// Tells the UI how much of the subscription behind `endpoint` is used once a turn has
 /// spent some of it: what the CLI last `reported`, or what OpenCode Go answers now.
-fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx: MainTx) {
+pub(super) fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx: MainTx) {
     tokio::spawn(async move {
         let usage = match &endpoint.kind {
             EndpointKind::ClaudeCode { .. } => reported,
@@ -353,16 +424,9 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
     });
 
     tokio::spawn(async move {
-        let mut recorder = Recorder {
-            live: Arc::clone(&live),
-            node_dir: request.node_dir.clone(),
-            main_tx: main_tx.clone(),
-            answer_start: 0,
-            last_flush: Instant::now(),
-            last_signal: Instant::now(),
-            thinking_start: 0,
-        };
-        live.lock().model = request.model.clone();
+        let mut recorder =
+            Recorder::new(Arc::clone(&live), request.node_dir.clone(), main_tx.clone());
+        live.lock().model = request.spec.to_string();
         let (status, error) = tokio::select! {
             result = run(&request, &mut recorder) => match result {
                 Ok(()) => (NodeStatus::Done, None),
@@ -371,6 +435,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             _ = cancel_rx.wait_for(|cancelled| *cancelled) => (NodeStatus::Cancelled, None),
         };
         recorder.flush_reply();
+        request.tree.write().cancel_running_agents(&request.node);
         let head_after = request.repo.as_ref().and_then(crate::git::head_id);
         let (commits, stash, reset) = match request.mode {
             Mode::Feedback => {
@@ -614,6 +679,13 @@ async fn run_own_loop(
         root: request.root.clone(),
         tree: Arc::clone(&request.tree),
         node: request.node.clone(),
+        subagents: Some(Subagents {
+            config: Arc::clone(&request.agent),
+            mode: request.mode,
+            date: request.date.clone(),
+            repo: request.repo.clone(),
+            spec: request.spec.clone(),
+        }),
     };
     agent_loop::run(
         &tool_context,
@@ -694,7 +766,11 @@ fn close_feedback_turn(root: &Utf8Path) -> bool {
 }
 
 /// The repository-moved note, when HEAD is no longer where the parent's turn left it.
-fn moved_note(root: &Utf8Path, parent_head: Option<&str>, head: Option<&str>) -> Option<String> {
+pub(super) fn moved_note(
+    root: &Utf8Path,
+    parent_head: Option<&str>,
+    head: Option<&str>,
+) -> Option<String> {
     let (parent_head, head) = (parent_head?, head?);
     if parent_head == head {
         return None;
@@ -862,15 +938,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let node_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let (main_tx, _main_rx) = mpsc::channel(8);
-        let mut recorder = Recorder {
-            live: Arc::new(Mutex::new(LiveTurn::default())),
-            node_dir: node_dir.clone(),
-            main_tx,
-            answer_start: 0,
-            last_flush: Instant::now(),
-            last_signal: Instant::now(),
-            thinking_start: 0,
-        };
+        let mut recorder = Recorder::new(Arc::default(), node_dir.clone(), main_tx);
 
         recorder.begin_answer();
         recorder.text("Let me look.\n");
@@ -899,18 +967,40 @@ mod tests {
     }
 
     #[test]
+    fn a_sub_agent_logs_its_tool_calls_in_the_work_log_of_its_caller_too() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let agent_dir = node_dir.join("agents/1");
+        std::fs::create_dir_all(&agent_dir).unwrap();
+        let (main_tx, _main_rx) = mpsc::channel(8);
+        let mut recorder = Recorder::new(Arc::default(), node_dir.clone(), main_tx);
+        recorder.tool_call("agent reviewer: Review".to_string());
+        let mut child = recorder.subagent(agent_dir.clone());
+
+        child.begin_answer();
+        child.text("Reading.");
+        child.answer_calls_tools();
+        child.tool_call("read a.txt".to_string());
+        child.begin_answer();
+        child.text("Looks fine.");
+        child.flush_reply();
+
+        let read = |dir: &Utf8Path, name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+        assert_eq!(read(&agent_dir, "activity.md"), "Reading.\n- read a.txt\n");
+        assert_eq!(read(&agent_dir, "reply.md"), "Looks fine.");
+        assert_eq!(
+            read(&node_dir, "activity.md"),
+            "- agent reviewer: Review\n  - read a.txt\n"
+        );
+        assert!(recorder.live.lock().reply.is_empty());
+    }
+
+    #[test]
     fn thinking_of_tool_calling_answers_is_dropped_and_the_last_one_kept() {
         let tmp = tempfile::tempdir().unwrap();
         let (main_tx, _main_rx) = mpsc::channel(8);
-        let mut recorder = Recorder {
-            live: Arc::new(Mutex::new(LiveTurn::default())),
-            node_dir: Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap(),
-            main_tx,
-            answer_start: 0,
-            last_flush: Instant::now(),
-            last_signal: Instant::now(),
-            thinking_start: 0,
-        };
+        let node_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let mut recorder = Recorder::new(Arc::default(), node_dir, main_tx);
 
         recorder.begin_answer();
         recorder.reasoning("should I look?");
