@@ -484,6 +484,18 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::ScrollUp,
+                ..
+            }) if Self::move_selection(win, win.selected.saturating_sub(1), visible_len(win)) => {
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::ScrollDown,
+                ..
+            }) if Self::move_selection(win, win.selected + 1, visible_len(win)) => {
+                return Ok(EventPropagation::ConsumedRender);
+            }
+            InputEvent::Mouse(MouseInput {
                 kind: MouseInputKind::MouseDown(Button::Left),
                 pos,
                 ..

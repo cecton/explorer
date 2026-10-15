@@ -2,6 +2,8 @@ use crate::git::{DiffKind, short_id};
 use crate::tui::pane_component::pane_slot;
 use crate::tui::*;
 
+const SCROLL_STEP: usize = 3;
+
 pub struct CommitDiffPaneComponent {
     id: FlexBoxId,
 }
@@ -124,6 +126,27 @@ impl Component<AppState, AppSignal> for CommitDiffPaneComponent {
             }
 
             let mut consumed = false;
+            if let InputEvent::Mouse(mouse) = &input_event {
+                match mouse.kind {
+                    MouseInputKind::ScrollUp => {
+                        consumed = true;
+                        let current = state.pane_manager.window_scroll(&window);
+                        state
+                            .pane_manager
+                            .set_window_scroll(&window, current.saturating_sub(SCROLL_STEP));
+                        state.pane_manager.clamp_scroll(&window);
+                    }
+                    MouseInputKind::ScrollDown => {
+                        consumed = true;
+                        let current = state.pane_manager.window_scroll(&window);
+                        state
+                            .pane_manager
+                            .set_window_scroll(&window, current + SCROLL_STEP);
+                        state.pane_manager.clamp_scroll(&window);
+                    }
+                    _ => {}
+                }
+            }
             if let InputEvent::Keyboard(KeyPress::Plain { key: kb_key }) = input_event {
                 match kb_key {
                     Key::SpecialKey(SpecialKey::PageUp) => {
