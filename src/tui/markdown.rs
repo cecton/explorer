@@ -1,4 +1,4 @@
-use crate::tui::text_layout::{display_width, truncate};
+use crate::tui::text_layout::{display_width, wrap};
 use crate::tui::{HelixTheme, RgbValue};
 use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
 use unicode_segmentation::UnicodeSegmentation;
@@ -448,13 +448,15 @@ impl Renderer<'_> {
             ..self.plain
         };
         for (at, line) in lines_with_offsets(text) {
-            self.lines.push(MdLine {
-                spans: vec![Span {
-                    src: src.map(|start| start + at),
-                    ..Span::of(truncate(line, self.width), style)
-                }],
-                bg: Some(bg),
-            });
+            for (piece_at, piece) in wrap(line, self.width) {
+                self.lines.push(MdLine {
+                    spans: vec![Span {
+                        src: src.map(|start| start + at + piece_at),
+                        ..Span::of(piece, style)
+                    }],
+                    bg: Some(bg),
+                });
+            }
         }
     }
 
@@ -988,13 +990,30 @@ mod tests {
     }
 
     #[test]
-    fn code_block_lines_are_truncated_and_colored() {
+    fn code_block_lines_wrap_and_keep_their_color() {
         let ruler = theme().ui_bg("ui.virtual.ruler");
         let lines = render_md("```\nlet x = 1234567890;\n```", 10);
-        assert_eq!(lines.len(), 1);
-        assert_eq!(text(&lines[0]), "let x = 12");
-        assert_eq!(lines[0].bg, ruler);
-        assert!(display_width(&text(&lines[0])) <= 10);
+        assert_eq!(
+            lines.iter().map(text).collect::<Vec<_>>(),
+            ["let x =", "1234567890", ";"]
+        );
+        assert!(lines.iter().all(|l| l.bg == ruler));
+        // Each wrapped piece carries the byte offset of its own slice of the source.
+        assert_eq!(lines[1].spans[0].src, Some(12));
+    }
+
+    #[test]
+    fn code_block_lines_never_exceed_the_width() {
+        let src = "```\n进行文档注释）；在 `answer_calls_tools()` 中，在设置 `live.thinking.truncate(self.thinking_start)` 的\n```";
+        for width in [10, 40, 80, 96] {
+            for line in render_md(src, width) {
+                assert!(
+                    display_width(&text(&line)) <= width,
+                    "{width}: {:?}",
+                    text(&line)
+                );
+            }
+        }
     }
 
     #[test]
