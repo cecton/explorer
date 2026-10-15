@@ -998,6 +998,17 @@ mod tests {
     }
 
     #[test]
+    fn an_unclosed_fence_closes_at_the_end_of_input() {
+        // CommonMark closes an unclosed fence at end of input; pin that, so an upgrade can't bleed the code background across replies.
+        let ruler = theme().ui_bg("ui.virtual.ruler").unwrap();
+        let lines = render_md("```sh\ncargo test\n```\n\nplain\n```\nnever closed", 40);
+        assert_eq!(ruler, lines[0].bg.unwrap());
+        assert_eq!(None, lines[2].bg);
+        assert_eq!("never closed", text(&lines[4]));
+        assert_eq!(ruler, lines[4].bg.unwrap());
+    }
+
+    #[test]
     fn ordered_list_numbers_and_hangs_continuations() {
         let lines = render_md("1. alpha beta", 10);
         assert_eq!(text(&lines[0]), "1. alpha");
