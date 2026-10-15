@@ -42,6 +42,9 @@ pub struct LiveTurn {
     /// What led to the reply, in order: the text of answers that called tools, and
     /// one [`TOOL_LINE_PREFIX`] line per tool call.
     pub work_log: Vec<String>,
+    /// First work-log entry of the answer in progress; entries before this are from
+    /// dropped tool-calling answers whose thinking is no longer shown.
+    log_start: usize,
     /// The tool call in progress, as shown on the status line.
     pub activity: Option<String>,
     /// The thinking streamed so far in the answer in progress; shown dimmed in the
@@ -86,6 +89,13 @@ pub struct TurnHandle {
 impl TurnHandle {
     pub fn cancel(&self) {
         let _ = self.cancel.send(true);
+    }
+}
+
+impl LiveTurn {
+    /// Work log entries from the current answer in progress.
+    pub fn visible_work_log(&self) -> &[String] {
+        &self.work_log[self.log_start.min(self.work_log.len())..]
     }
 }
 
@@ -298,6 +308,10 @@ impl Recorder {
         if !text.is_empty() {
             self.log(text.to_string());
             self.flush_reply();
+        }
+        {
+            let mut live = self.live.lock();
+            live.log_start = live.work_log.len();
         }
     }
 
@@ -1018,6 +1032,39 @@ mod tests {
         let live = recorder.live.lock();
         assert_eq!(live.thinking, "deep thought");
         assert_eq!(live.reply, "Done.");
+        assert_eq!(live.visible_work_log().len(), 1);
+        assert_eq!(live.log_start, 1);
+    }
+
+    #[test]
+    fn the_running_log_hides_the_dropped_rounds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (main_tx, _main_rx) = mpsc::channel(8);
+        let node_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let mut recorder = Recorder::new(Arc::default(), node_dir, main_tx);
+
+        // First tool-calling round
+        recorder.begin_answer();
+        recorder.reasoning("think 1");
+        recorder.text("answer 1");
+        recorder.answer_calls_tools();
+        recorder.tool_call("tool 1".to_string());
+        // Second tool-calling round
+        recorder.begin_answer();
+        recorder.reasoning("think 2");
+        recorder.text("answer 2");
+        recorder.answer_calls_tools();
+        recorder.tool_call("tool 2".to_string());
+        // Final answer
+        recorder.begin_answer();
+        recorder.reasoning("think 3");
+        recorder.text("Done.");
+        recorder.flush_reply();
+
+        let live = recorder.live.lock();
+        assert_eq!(live.work_log.len(), 4);
+        assert_eq!(live.log_start, 3);
+        assert_eq!(live.visible_work_log().len(), 1);
     }
 
     #[test]

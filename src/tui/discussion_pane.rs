@@ -36,8 +36,10 @@ struct DocCache {
     prompt_len: usize,
     reply_len: usize,
     work_log_len: usize,
+    visible_log_len: usize,
     thinking_len: usize,
     work_log_shown: bool,
+    running_turn: bool,
     lines: Vec<DocLine>,
 }
 
@@ -961,6 +963,7 @@ impl DiscussionComponent {
                     if let Some(discussion) = state.discussions.get_mut(&id) {
                         discussion.reply.clear();
                         discussion.work_log.clear();
+                        discussion.visible_work_log.clear();
                         discussion.thinking.clear();
                         discussion.notice = None;
                     }
@@ -1215,6 +1218,7 @@ impl DiscussionComponent {
         discussion.prompt = prompt;
         discussion.reply.clear();
         discussion.work_log.clear();
+        discussion.visible_work_log.clear();
         discussion.thinking.clear();
         discussion.show_work_log = None;
         discussion.draft.clear();
@@ -1311,6 +1315,7 @@ impl DiscussionComponent {
         work_log_shown: bool,
         theme: &HelixTheme,
         width: usize,
+        running_turn: bool,
     ) -> &[DocLine] {
         let fresh = self.cache.as_ref().is_some_and(|cache| {
             cache.window_id == self.window_id
@@ -1318,8 +1323,10 @@ impl DiscussionComponent {
                 && cache.prompt_len == discussion.prompt.len()
                 && cache.reply_len == discussion.reply.len()
                 && cache.work_log_len == discussion.work_log.len()
+                && cache.visible_log_len == discussion.visible_work_log.len()
                 && cache.thinking_len == discussion.thinking.len()
                 && cache.work_log_shown == work_log_shown
+                && cache.running_turn == running_turn
         });
         if !fresh {
             let text_fg = theme
@@ -1360,9 +1367,15 @@ impl DiscussionComponent {
                         bg: None,
                     });
                 }
-                if work_log_shown && !discussion.work_log.is_empty() {
+                let hiding_dropped_rounds = running_turn && discussion.show_work_log != Some(true);
+                let work_log_to_show = if hiding_dropped_rounds {
+                    &discussion.visible_work_log
+                } else {
+                    &discussion.work_log
+                };
+                if work_log_shown && !work_log_to_show.is_empty() {
                     let mut base = 0;
-                    for entry in &discussion.work_log {
+                    for entry in work_log_to_show {
                         for (start, text) in wrap(entry, width) {
                             lines.push(DocLine {
                                 part: Some(DocPart::WorkLog),
@@ -1395,8 +1408,10 @@ impl DiscussionComponent {
                 prompt_len: discussion.prompt.len(),
                 reply_len: discussion.reply.len(),
                 work_log_len: discussion.work_log.len(),
+                visible_log_len: discussion.visible_work_log.len(),
                 thinking_len: discussion.thinking.len(),
                 work_log_shown,
+                running_turn,
                 lines,
             });
         }
@@ -1569,6 +1584,12 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
         let mut text = progress_text(&handle.live.lock(), handle.started);
         text.push_str(" · ");
         text.push_str(queued.as_deref().unwrap_or("Esc:Cancel"));
+        let hiding_dropped = discussion.show_work_log != Some(true)
+            && !discussion.work_log.is_empty()
+            && discussion.work_log.len() > discussion.visible_work_log.len();
+        if hiding_dropped {
+            text.push_str(" · Ctrl+O:Full log");
+        }
         return (text, false);
     }
     if let Some(queued) = queued {
@@ -1793,10 +1814,15 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 let live = output.lock();
                 if live.reply.len() != discussion.reply.len()
                     || live.work_log.len() != discussion.work_log.len()
+                    || live.visible_work_log().len() != discussion.visible_work_log.len()
                     || live.thinking.len() != discussion.thinking.len()
                 {
                     discussion.reply.clone_from(&live.reply);
                     discussion.work_log.clone_from(&live.work_log);
+                    discussion.visible_work_log.clear();
+                    discussion
+                        .visible_work_log
+                        .extend_from_slice(live.visible_work_log());
                     discussion.thinking.clone_from(&live.thinking);
                 }
             }
@@ -1915,7 +1941,8 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             };
 
             let shown = work_log_shown(&state.conversations.read(), discussion);
-            let lines = self.doc_lines(discussion, shown, theme, doc_width);
+            let running = output.is_some();
+            let lines = self.doc_lines(discussion, shown, theme, doc_width, running);
             let line_count = lines.len();
             let max_scroll = line_count.saturating_sub(doc_rows);
             let stored = state.pane_manager.window_scroll(&window);
@@ -1928,7 +1955,6 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             // turn rides it from its first frame, where the document still fits and its
             // two ends are the same row; a finished one only while the user left it there,
             // so a scroll away from the bottom holds.
-            let running = output.is_some();
             let follow = (running || stored > 0) && stored >= old_max;
             let scroll = if follow {
                 max_scroll

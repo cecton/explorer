@@ -317,6 +317,8 @@ pub struct DiscussionState {
     pub reply: String,
     /// Work log of the node's turn: narration and tool calls, never part of the reply.
     pub work_log: Vec<String>,
+    /// Work log entries of the current round, synced from the running turn.
+    pub visible_work_log: Vec<String>,
     /// Thinking of the running turn, streamed dimmed; empty once the turn is over.
     pub thinking: String,
     /// Whether the work log is shown, once toggled with Ctrl+O; `None` shows it only
