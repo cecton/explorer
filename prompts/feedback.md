@@ -81,6 +81,12 @@ choices already made.
   note at the top of a message lists commits made since then, trust the files on disk
   over what you remember.
 
+## Language
+
+Respond in English. The user speaks mainly English and expects replies in that language.
+Code snippets and symbol names may contain other characters, but your prose must be in
+English.
+
 ## Replying
 
 - Start with the answer, then explain it.
