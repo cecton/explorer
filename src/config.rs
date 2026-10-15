@@ -651,8 +651,8 @@ mod config_tests {
         assert!(parse("agent {\n endpoint \"a\" {\n }\n}").is_err());
         assert!(parse("agent {\n endpoint \"a/b\" {\n url \"u\"\n }\n}").is_err());
         assert!(parse("agent {\n endpoint \"a\" {\n url \"u\"\n kind \"wat\"\n }\n}").is_err());
-        assert!(parse("agent {\n summary-model \"a/b\"\n}").is_err());
-        assert!(parse("agent {\n subagent-model \"a/b\"\n}").is_err());
+        assert!(parse("agent {\n summary-model \"nonsense\"\n}").is_err());
+        assert!(parse("agent {\n subagent-model \"a//low\"\n}").is_err());
     }
 
     #[test]

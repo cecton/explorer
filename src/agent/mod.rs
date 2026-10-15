@@ -58,10 +58,29 @@ pub struct ModelSpec {
 }
 
 impl ModelSpec {
+    /// `endpoint/model/effort`, where the effort may also be left out: `endpoint/model`
+    /// means the same model with a `default` effort. The model id may itself contain
+    /// `/`, so a last segment that is no effort keyword stays part of it.
     pub fn parse(text: &str) -> Option<Self> {
         let (endpoint, rest) = text.split_once('/')?;
-        let (model, effort) = rest.rsplit_once('/')?;
-        Self::from_parts(endpoint, model, effort)
+        if endpoint.is_empty() || rest.is_empty() || rest.starts_with('/') || rest.ends_with('/') {
+            return None;
+        }
+        if let Some((model, effort)) = rest.rsplit_once('/')
+            && let Some(spec) = Self::from_parts(endpoint, model, effort)
+        {
+            return Some(spec);
+        }
+        Some(Self::bare(endpoint, rest))
+    }
+
+    /// `endpoint/model` with no effort: the same as a `default` effort.
+    pub fn bare(endpoint: &str, model: &str) -> Self {
+        Self {
+            endpoint: endpoint.to_string(),
+            model: model.to_string(),
+            effort: Effort::Default,
+        }
     }
 
     pub fn from_parts(endpoint: &str, model: &str, effort: &str) -> Option<Self> {
@@ -262,12 +281,31 @@ mod tests {
     }
 
     #[test]
-    fn model_spec_rejects_missing_parts_and_unknown_efforts() {
-        assert!(ModelSpec::parse("kimi/kimi-k2").is_none());
-        assert!(ModelSpec::parse("kimi/kimi-k2/extreme").is_none());
+    fn model_spec_rejects_missing_parts() {
+        assert!(ModelSpec::parse("kimi/").is_none());
         assert!(ModelSpec::parse("/kimi-k2/low").is_none());
         assert!(ModelSpec::parse("kimi//low").is_none());
+        assert!(ModelSpec::parse("kimi//").is_none());
         assert!(ModelSpec::parse("nonsense").is_none());
+    }
+
+    #[test]
+    fn an_effort_may_be_left_out_and_the_last_segment_is_not_always_one() {
+        let spec = ModelSpec::parse("opencode-go/deepseek-v4.1-flash").unwrap();
+        assert_eq!(spec.endpoint, "opencode-go");
+        assert_eq!(spec.model, "deepseek-v4.1-flash");
+        assert_eq!(spec.effort, Effort::Default);
+        assert_eq!(spec.to_string(), "opencode-go/deepseek-v4.1-flash/default");
+
+        // A trailing non-effort word stays part of the model id.
+        let spec = ModelSpec::parse("kimi/kimi-k2/extreme").unwrap();
+        assert_eq!(spec.model, "kimi-k2/extreme");
+        assert_eq!(spec.effort, Effort::Default);
+
+        // A real effort is still honoured.
+        let spec = ModelSpec::parse("claude/opus/high").unwrap();
+        assert_eq!(spec.model, "opus");
+        assert_eq!(spec.effort, Effort::High);
     }
 
     #[test]
