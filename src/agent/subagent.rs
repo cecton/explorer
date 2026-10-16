@@ -117,7 +117,7 @@ pub fn spec(roles: &[Role]) -> ToolSpec {
         });
     }
     ToolSpec {
-        name: TOOL,
+        name: TOOL.to_string(),
         description,
         schema: json!({
             "type": "object",
@@ -416,6 +416,7 @@ async fn run_own_loop(
         node: context.node.clone(),
         subagents: None,
         background: Arc::clone(&context.background),
+        mcp: context.mcp.clone(),
     };
     agent_loop::run(
         &tool_context,
@@ -440,6 +441,7 @@ async fn run_claude_code(
         system: &launch.system,
         prompt,
         resume,
+        mcp: &context.mcp,
     };
     // Fork the session of the run continued; when it is gone, start a fresh one that
     // opens with the earlier runs as plain text.

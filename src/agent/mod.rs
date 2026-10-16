@@ -3,6 +3,7 @@ pub mod claude_code;
 pub mod commands;
 pub mod context;
 pub mod llm;
+pub mod mcp;
 pub mod models;
 pub mod subagent;
 pub mod tools;

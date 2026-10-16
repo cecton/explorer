@@ -1,3 +1,4 @@
+use crate::agent::mcp::{McpStatus, Notify};
 use crate::keymap::Action;
 use crate::loader::LoadedFile;
 use crate::lsp::{self, LSP_RRT};
@@ -418,6 +419,23 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
     }
 }
 
+/// Tells the main thread that the status of an MCP server changed.
+pub(crate) fn mcp_notify(
+    main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+) -> Notify {
+    Arc::new(move |name| {
+        let main_tx = main_tx.clone();
+        let name = name.to_string();
+        tokio::spawn(async move {
+            let _ = main_tx
+                .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                    AppSignal::McpStatus { name },
+                ))
+                .await;
+        });
+    })
+}
+
 const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
 
 // save_session is intentionally a synchronous fast JSON write on the main thread.
@@ -491,6 +509,11 @@ impl App for AppMain {
                 }
                 Err(e) => tracing::warn!("LSP worker failed to start: {e}"),
             }
+        }
+
+        let notify = mcp_notify(notify_tx.clone());
+        for decl in &global_data.state.mcp_servers {
+            global_data.state.mcp.start(decl, Arc::clone(&notify));
         }
 
         match WATCHER_RRT.try_subscribe(crate::watcher::WatcherConfig {
@@ -1475,6 +1498,20 @@ impl App for AppMain {
                     crate::agent::usage::save(&state.usage);
                 }
                 AppSignal::TurnProgress => {}
+                AppSignal::McpStatus { name } => {
+                    let reported = match state.mcp.status(name) {
+                        Some(McpStatus::Starting) | None => None,
+                        Some(McpStatus::Failed(reason)) => {
+                            Some(format!("{name}: failed: {reason}"))
+                        }
+                        Some(ready) => Some(format!("{name}: {}", ready.label())),
+                    };
+                    if let Some(notice) = reported
+                        && state.tree_view.announced_starts.remove(name)
+                    {
+                        state.tree_view.notice = Some(notice);
+                    }
+                }
                 AppSignal::SubagentStarted { node } => {
                     state.tree_view.shown_agents.insert(node.clone());
                 }
@@ -1820,10 +1857,10 @@ pub(super) fn close_window(state: &mut AppState, window: Window) {
         Window::FilePreview(key) => {
             state.preview_inputs.remove(&key);
         }
-        Window::ConversationTree
-        | Window::WindowPicker
-        | Window::ThemePicker
-        | Window::ModelPicker => {}
+        Window::ConversationTree => {
+            state.tree_view.command = None;
+        }
+        Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => {}
     }
     state.pane_manager.remove_window(&window);
     notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
@@ -1962,7 +1999,7 @@ fn render_status_bar(
                     "Bksp:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll".to_string()
                 }
                 Some(Window::ConversationTree) => {
-                    "Bksp:Send to back  /:Search  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  Ctrl+D:Delete  Esc:Clear search"
+                    "Bksp:Send to back  /:Search  ::Command  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  Ctrl+D:Delete  Esc:Clear search"
                         .to_string()
                 }
                 Some(Window::Discussion(_)) => {

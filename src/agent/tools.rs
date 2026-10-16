@@ -1,5 +1,6 @@
 use super::ToolCall;
 use super::llm::ToolSpec;
+use super::mcp::McpTools;
 use super::subagent::{self, Subagents};
 use crate::conversation::{ConversationTree, NodeId, PROCESSES_DIR};
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
@@ -16,6 +17,7 @@ const GREP_MAX_LINE_CHARS: usize = 300;
 const SHELL_DEFAULT_TIMEOUT_SECS: u64 = 120;
 const SHELL_MAX_TIMEOUT_SECS: u64 = 600;
 const SHELL_MAX_OUTPUT_BYTES: usize = 30_000;
+const DESCRIBE_MAX_CHARS: usize = 200;
 
 /// What the tools of one turn act on.
 pub struct ToolContext {
@@ -28,6 +30,8 @@ pub struct ToolContext {
     pub subagents: Option<Subagents>,
     /// Background commands of the turn, shared with its sub-agents.
     pub background: Arc<Background>,
+    /// Tools of the MCP servers running when the turn started.
+    pub mcp: McpTools,
 }
 
 /// The process groups of a turn's background commands, killed when the turn ends.
@@ -50,19 +54,21 @@ impl Drop for Background {
     }
 }
 
-/// The tools advertised to the model: the `agent` tool only when sub-agents can run.
+/// The tools advertised to the model: the `agent` tool only when sub-agents can run,
+/// then the tools of the MCP servers.
 pub fn specs(context: &ToolContext) -> Vec<ToolSpec> {
     let mut specs = base_specs();
     if let Some(subagents) = &context.subagents {
         specs.push(subagent::spec(&subagents.config.roles));
     }
+    specs.extend(context.mcp.specs());
     specs
 }
 
 fn base_specs() -> Vec<ToolSpec> {
     vec![
         ToolSpec {
-            name: "conversation",
+            name: "conversation".into(),
             description: "Consult the conversation tree of this repository: every \
                           message the user ever sent here, with the agent's replies. \
                           `toc` lists conversations, or with `node` shows one page of \
@@ -82,7 +88,7 @@ fn base_specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "read",
+            name: "read".into(),
             description: "Read a text file of the repository. Lines are returned prefixed \
                           with their number."
                 .into(),
@@ -97,7 +103,7 @@ fn base_specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "glob",
+            name: "glob".into(),
             description: "List the files of the repository whose path matches a glob \
                           pattern such as `src/**/*.rs`."
                 .into(),
@@ -110,7 +116,7 @@ fn base_specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "grep",
+            name: "grep".into(),
             description: "Search file contents with a regular expression. Returns \
                           `path:line: text` for each match."
                 .into(),
@@ -125,7 +131,7 @@ fn base_specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "shell",
+            name: "shell".into(),
             description: "Run a shell command with `sh -c` in the repository root and \
                           return its output and exit code. With `background`, return at \
                           once with the pid and the file receiving the output, for a \
@@ -143,7 +149,7 @@ fn base_specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "write",
+            name: "write".into(),
             description: "Create a file or replace its whole content. Missing parent \
                           directories are created."
                 .into(),
@@ -157,7 +163,7 @@ fn base_specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
-            name: "edit",
+            name: "edit".into(),
             description: "Replace one exact occurrence of `old_string` in a file with \
                           `new_string`. Fails when the text is absent or appears more \
                           than once; include enough surrounding lines to make it unique."
@@ -186,10 +192,22 @@ pub fn describe(call: &ToolCall) -> String {
         (Some(pattern), _, None) => pattern.to_string(),
         (None, Some(command), _) => command.to_string(),
         (None, None, Some(path)) => path.to_string(),
-        (None, None, None) => String::new(),
+        (None, None, None) => arguments_detail(&call.arguments),
     };
     let detail = detail.lines().next().unwrap_or("");
     format!("{} {detail}", call.name).trim_end().to_string()
+}
+
+/// The arguments of a call as compact JSON, cut short; empty when there are none.
+pub(super) fn arguments_detail(arguments: &Value) -> String {
+    if arguments.is_null() || arguments.as_object().is_some_and(|map| map.is_empty()) {
+        return String::new();
+    }
+    let text = arguments.to_string();
+    match text.char_indices().nth(DESCRIBE_MAX_CHARS) {
+        Some((end, _)) => format!("{}…", &text[..end]),
+        None => text,
+    }
 }
 
 /// Runs one tool call. A failure is returned as text for the model, never raised.
@@ -221,6 +239,7 @@ pub async fn run(context: &ToolContext, call: &ToolCall) -> String {
             }
         }
         "shell" => shell(root, &args).await,
+        name if McpTools::is_tool(name) => context.mcp.call(name, args).await,
         other => Err(format!("unknown tool: {other}")),
     };
     result.unwrap_or_else(|error| format!("error: {error}"))
@@ -483,7 +502,7 @@ impl Drop for GroupKiller {
 }
 
 /// Keeps the head and the tail of an output that is too long.
-fn truncate_middle(text: &str, max_bytes: usize) -> String {
+pub(super) fn truncate_middle(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
         return text.to_string();
     }
@@ -617,6 +636,7 @@ mod tests {
             node: NodeId::new("current"),
             subagents: None,
             background: Arc::default(),
+            mcp: McpTools::default(),
         }
     }
 
@@ -738,6 +758,7 @@ mod tests {
             node: NodeId::new("n1"),
             subagents: None,
             background: Arc::default(),
+            mcp: McpTools::default(),
         };
         let start = std::time::Instant::now();
         let started = run(
@@ -801,6 +822,10 @@ mod tests {
             "glob *.rs"
         );
         assert_eq!(describe(&call("odd", json!({}))), "odd");
+        assert_eq!(
+            describe(&call("mcp__egui__click", json!({"id": 4}))),
+            r#"mcp__egui__click {"id":4}"#
+        );
         let grep = call("grep", json!({"pattern": "struct Recorder", "path": "src"}));
         assert_eq!(describe(&grep), "grep struct Recorder in src");
         let grep = call(
@@ -817,8 +842,8 @@ mod tests {
     #[tokio::test]
     async fn write_creates_files_inside_the_repository_only() {
         let (_tmp, root) = repo();
-        let names: Vec<&str> = specs(&context(&root))
-            .iter()
+        let names: Vec<String> = specs(&context(&root))
+            .into_iter()
             .map(|spec| spec.name)
             .collect();
         assert_eq!(
@@ -891,6 +916,7 @@ mod tests {
             node: NodeId::new("n2"),
             subagents: None,
             background: Arc::default(),
+            mcp: McpTools::default(),
         };
         let ask = |arguments| call("conversation", arguments);
 

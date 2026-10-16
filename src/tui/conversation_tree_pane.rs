@@ -1,3 +1,4 @@
+use crate::agent::mcp::{McpServerDecl, McpStatus};
 use crate::agent::turn::spinner_frame;
 use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::state::{PendingTurn, RowTarget};
@@ -548,6 +549,54 @@ impl ConversationTreeComponent {
         }
     }
 
+    /// Paints the `:` command line over the title bar, the hint after what is typed,
+    /// and returns the rows it takes.
+    fn render_command(
+        ops: &mut RenderOpIRVec,
+        pane_box: &FlexBox,
+        focused: bool,
+        state: &mut AppState,
+    ) -> usize {
+        let statuses = state.mcp.statuses();
+        let theme = &state.theme;
+        let Some(command) = state.tree_view.command.as_mut() else {
+            return 0;
+        };
+        let hint = mcp_hint(command.text(), &statuses);
+        let origin = pane_box.style_adjusted_origin_pos;
+        let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
+        let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
+        let rows = command.height(hint.as_deref(), ":", width, max_rows);
+        let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
+        let color_bg = TuiColor::from(bg_rgb);
+        let color_fg = TuiColor::from(fg_rgb);
+        let color_selection = TuiColor::from(title_selection_bg(focused, theme));
+        let color_hint = theme
+            .color_for_scope("comment")
+            .map_or(color_fg, TuiColor::from);
+        let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+        for row_offset in 0..rows {
+            *ops +=
+                RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset as u16));
+            *ops += RenderOpCommon::SetBgColor(color_bg);
+            *ops += RenderOpIR::PaintTextWithAttributes(
+                " ".repeat(width as usize).as_str().into(),
+                Some(bg_style),
+            );
+        }
+        command.render(
+            ops,
+            hint.as_deref().map(|hint| (hint, color_hint)),
+            ":",
+            origin,
+            width,
+            rows,
+            focused,
+            (color_bg, color_fg, color_selection),
+        );
+        rows
+    }
+
     pub(crate) fn title(state: &AppState) -> String {
         if state.tree_view.filtering() {
             format!("{} — {}", Self::TITLE, state.tree_view.query.text().trim())
@@ -693,6 +742,95 @@ impl ConversationTreeComponent {
     }
 }
 
+/// Hint for the `:` command line, continuing what is typed: what a command expects
+/// and, after a bare `mcp`, the servers of the repository.
+fn mcp_hint(typed: &str, statuses: &[(String, McpStatus)]) -> Option<String> {
+    let words: Vec<&str> = typed.split_whitespace().collect();
+    let gap = if typed.ends_with(char::is_whitespace) {
+        ""
+    } else {
+        " "
+    };
+    match words.as_slice() {
+        ["mcp"] => {
+            let installed: Vec<String> = statuses
+                .iter()
+                .map(|(name, status)| format!("{name} ({})", status.label()))
+                .collect();
+            let installed = if installed.is_empty() {
+                "none".to_string()
+            } else {
+                installed.join(", ")
+            };
+            Some(format!("{gap}[add|remove]\n\nInstalled: {installed}"))
+        }
+        ["mcp", "add"] => Some(format!("{gap}[name] [program]")),
+        ["mcp", "remove"] if statuses.is_empty() => Some(format!("{gap}(no server installed)")),
+        ["mcp", "remove"] => {
+            let names: Vec<&str> = statuses.iter().map(|(name, _)| name.as_str()).collect();
+            Some(format!("{gap}[{}]", names.join("|")))
+        }
+        _ => None,
+    }
+}
+
+/// Why `name` cannot name a new MCP server: its tools are called `mcp__<name>__<tool>`,
+/// and the endpoints accept only letters, digits, `_` and `-` in a tool name.
+fn check_server_name(name: &str, servers: &[McpServerDecl]) -> Result<(), String> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    if !name.chars().all(allowed) || name.contains("__") {
+        return Err(format!(
+            "{name}: a server name holds only letters, digits, `_` and `-`, and no `__`"
+        ));
+    }
+    if servers.iter().any(|server| server.name == name) {
+        return Err(format!("{name}: a server has this name already"));
+    }
+    Ok(())
+}
+
+/// Runs a line of the `:` command line; what it did or why it failed goes to the
+/// notice.
+fn run_command(
+    state: &mut AppState,
+    line: &str,
+    main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+) {
+    let words: Vec<&str> = line.split_whitespace().collect();
+    state.tree_view.notice = match words.as_slice() {
+        [] => None,
+        ["mcp", "add", name, program] => match check_server_name(name, &state.mcp_servers) {
+            Ok(()) => {
+                let decl = McpServerDecl {
+                    name: name.to_string(),
+                    program: program.to_string(),
+                };
+                state.mcp.start(&decl, crate::tui::app::mcp_notify(main_tx));
+                state.mcp_servers.push(decl);
+                state.tree_view.announced_starts.insert(name.to_string());
+                state.mark_session_dirty();
+                Some(format!("{name}: starting"))
+            }
+            Err(error) => Some(error),
+        },
+        ["mcp", "add", ..] => Some("usage: mcp add <name> <program>".to_string()),
+        ["mcp", "remove", name] => {
+            if state.mcp_servers.iter().any(|server| server.name == *name) {
+                state.mcp_servers.retain(|server| server.name != *name);
+                state.mcp.remove(name);
+                state.tree_view.announced_starts.remove(*name);
+                state.mark_session_dirty();
+                Some(format!("{name}: removed"))
+            } else {
+                Some(format!("{name}: no such server"))
+            }
+        }
+        ["mcp", "remove", ..] => Some("usage: mcp remove <name>".to_string()),
+        ["mcp", ..] => Some("usage: mcp add <name> <program> | mcp remove <name>".to_string()),
+        [command, ..] => Some(format!("unknown command: {command}")),
+    };
+}
+
 impl TitleRow for ConversationTreeComponent {
     fn render_title_row(
         &self,
@@ -701,6 +839,9 @@ impl TitleRow for ConversationTreeComponent {
         focused: bool,
         state: &mut AppState,
     ) -> usize {
+        if state.tree_view.command.is_some() {
+            return Self::render_command(ops, pane_box, focused, state);
+        }
         if !state.tree_view.search_active {
             let title = Self::title(state);
             render_pane_title(ops, pane_box, &title, false, &state.theme, focused);
@@ -773,6 +914,31 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             _ => None,
         };
 
+        if state.tree_view.command.is_some()
+            && matches!(
+                input_event,
+                InputEvent::Keyboard(_) | InputEvent::BracketedPaste(_)
+            )
+        {
+            match &input_event {
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Enter),
+                }) => {
+                    let line = state.tree_view.command.take().unwrap_or_default();
+                    run_command(state, line.text(), main_tx);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Esc),
+                }) => state.tree_view.command = None,
+                _ => {
+                    if let Some(command) = state.tree_view.command.as_mut() {
+                        command.handle_key(&input_event);
+                    }
+                }
+            }
+            return Ok(EventPropagation::ConsumedRender);
+        }
+
         if state.tree_view.search_active && matches!(input_event, InputEvent::Keyboard(_)) {
             match &input_event {
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -829,6 +995,9 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
         }
 
         match &input_event {
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::Character(':'),
+            }) => state.tree_view.command = Some(InputLine::new()),
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('/'),
             }) => {
@@ -1488,6 +1657,54 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
 mod tests {
     use super::*;
     use camino::Utf8PathBuf;
+
+    #[test]
+    fn mcp_hint_follows_the_command_typed() {
+        let statuses = vec![
+            ("egui".to_string(), McpStatus::Ready(15)),
+            (
+                "foo".to_string(),
+                McpStatus::Failed("not found".to_string()),
+            ),
+        ];
+        assert_eq!(
+            mcp_hint("mcp", &statuses).as_deref(),
+            Some(" [add|remove]\n\nInstalled: egui (15 tools), foo (failed)")
+        );
+        assert_eq!(
+            mcp_hint("mcp ", &[]).as_deref(),
+            Some("[add|remove]\n\nInstalled: none")
+        );
+        assert_eq!(
+            mcp_hint("mcp add", &statuses).as_deref(),
+            Some(" [name] [program]")
+        );
+        assert_eq!(
+            mcp_hint("mcp remove ", &statuses).as_deref(),
+            Some("[egui|foo]")
+        );
+        assert_eq!(
+            mcp_hint("mcp remove", &[]).as_deref(),
+            Some(" (no server installed)")
+        );
+        assert_eq!(mcp_hint("mcp add egui", &statuses), None);
+        assert_eq!(mcp_hint("", &statuses), None);
+        assert_eq!(mcp_hint("other", &statuses), None);
+    }
+
+    #[test]
+    fn server_names_are_unique_and_fit_tool_names() {
+        let servers = vec![McpServerDecl {
+            name: "egui".to_string(),
+            program: "egui-mcp".to_string(),
+        }];
+        assert!(check_server_name("doneward", &servers).is_ok());
+        assert!(check_server_name("egui", &servers).is_err());
+        assert!(check_server_name("a__b", &servers).is_err());
+        assert!(check_server_name("a/b", &servers).is_err());
+        assert!(check_server_name("egui.v2", &servers).is_err());
+        assert!(check_server_name("egui-v2_", &servers).is_ok());
+    }
 
     fn tree_with(paths: &[&str]) -> (tempfile::TempDir, ConversationTree) {
         let tmp = tempfile::tempdir().unwrap();

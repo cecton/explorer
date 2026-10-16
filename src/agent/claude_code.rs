@@ -1,4 +1,6 @@
 use super::Effort;
+use super::mcp::McpTools;
+use super::tools::arguments_detail;
 use super::turn::Recorder;
 use super::usage::{Span, Usage, UsageWindow};
 use camino::Utf8Path;
@@ -33,6 +35,8 @@ pub struct Invocation<'a> {
     pub system: &'a str,
     pub prompt: &'a str,
     pub resume: Resume<'a>,
+    /// The MCP servers of the turn; the CLI starts them itself.
+    pub mcp: &'a McpTools,
 }
 
 pub enum RunError {
@@ -71,7 +75,7 @@ fn tool_activity(name: &str, input: &Value) -> String {
     let detail = ["command", "file_path", "pattern", "description"]
         .iter()
         .find_map(|key| input.get(key).and_then(Value::as_str))
-        .unwrap_or("");
+        .map_or_else(|| arguments_detail(input), str::to_string);
     let detail = detail.lines().next().unwrap_or("");
     format!("{name} {detail}").trim_end().to_string()
 }
@@ -231,6 +235,12 @@ fn arguments(invocation: &Invocation<'_>) -> Vec<String> {
         }
         Resume::Continue(session) => args.extend(["--resume", session].map(str::to_string)),
     }
+    if let Some(config) = invocation.mcp.claude_config() {
+        args.push("--mcp-config".to_string());
+        args.push(config);
+    }
+    // Only the servers of this repository, never those of the user's own setup.
+    args.push("--strict-mcp-config".to_string());
     args
 }
 
@@ -334,7 +344,13 @@ pub async fn complete(target: &ClaudeTarget, system: &str, user: &str) -> Result
     let mut command = tokio::process::Command::new("claude");
     command
         .args(["-p", "--output-format", "text", "--no-session-persistence"])
-        .args(["--tools", "", "--system-prompt", system])
+        .args([
+            "--tools",
+            "",
+            "--strict-mcp-config",
+            "--system-prompt",
+            system,
+        ])
         .args(["--model", &target.model]);
     if target.effort != Effort::Default {
         command.args(["--effort", target.effort.as_str()]);
@@ -479,25 +495,28 @@ mod tests {
             model: "opus".to_string(),
             effort: Effort::High,
         };
+        let mcp = McpTools::default();
         let invocation = |resume| Invocation {
             target: &target,
             root: Utf8Path::new("/repo"),
             system: "SYSTEM",
             prompt: "hi",
             resume,
+            mcp: &mcp,
         };
         let joined = |invocation: &Invocation<'_>| arguments(invocation).join(" ");
 
         let forked = joined(&invocation(Resume::Fork("abc")));
         assert!(forked.contains("--model opus --effort high"));
         assert!(!forked.contains("--disallowedTools"));
-        assert!(forked.ends_with("--resume abc --fork-session"));
+        assert!(forked.ends_with("--resume abc --fork-session --strict-mcp-config"));
+        assert!(!forked.contains("--mcp-config"));
         assert!(forked.contains("--append-system-prompt SYSTEM"));
         assert!(forked.contains("--system-prompt-snapshot off"));
         assert!(!forked.contains("--bare"));
 
         let continued = joined(&invocation(Resume::Continue("abc")));
-        assert!(continued.ends_with("--resume abc"));
+        assert!(continued.ends_with("--resume abc --strict-mcp-config"));
 
         let default_effort = ClaudeTarget {
             model: "haiku".to_string(),

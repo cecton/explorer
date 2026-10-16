@@ -7,6 +7,7 @@ use genai::chat::{
 };
 use genai::resolver::{AuthData, Endpoint};
 use genai::{Client, ModelIden, ServiceTarget};
+use serde_json::{Value, json};
 use std::sync::OnceLock;
 
 /// Where and how to run one model: an OpenAI-compatible server, a model and an effort.
@@ -20,7 +21,7 @@ pub struct LlmTarget {
 
 /// A tool as advertised to the model.
 pub struct ToolSpec {
-    pub name: &'static str,
+    pub name: String,
     pub description: String,
     pub schema: serde_json::Value,
 }
@@ -104,7 +105,7 @@ fn request(system: &str, messages: &[Message], tools: &[ToolSpec]) -> ChatReques
         return request;
     }
     request.with_tools(tools.iter().map(|tool| {
-        Tool::new(tool.name)
+        Tool::new(tool.name.as_str())
             .with_description(tool.description.as_str())
             .with_schema(tool.schema.clone())
     }))
@@ -173,7 +174,7 @@ pub async fn stream_chat(
                     .map(|call| ToolCall {
                         id: call.call_id,
                         name: call.fn_name,
-                        arguments: call.fn_arguments,
+                        arguments: tool_arguments(call.fn_arguments),
                     })
                     .collect();
             }
@@ -181,6 +182,15 @@ pub async fn stream_chat(
         }
     }
     Ok(response)
+}
+
+/// genai hands over unparsable arguments as a string, `""` for a call without any.
+fn tool_arguments(arguments: Value) -> Value {
+    match arguments {
+        Value::Null => json!({}),
+        Value::String(text) if text.trim().is_empty() => json!({}),
+        other => other,
+    }
 }
 
 /// One non-streaming call without tools; returns the answer text.
@@ -212,6 +222,14 @@ pub async fn complete(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn calls_without_arguments_get_an_empty_object() {
+        assert_eq!(tool_arguments(json!("")), json!({}));
+        assert_eq!(tool_arguments(Value::Null), json!({}));
+        assert_eq!(tool_arguments(json!({"id": 4})), json!({"id": 4}));
+        assert_eq!(tool_arguments(json!("{oops")), json!("{oops"));
+    }
 
     #[test]
     fn one_line_flattens_and_caps_error_text() {

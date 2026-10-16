@@ -1,5 +1,6 @@
 use super::claude_code::{self, ClaudeTarget, Invocation, Resume, RunError};
 use super::llm::{self, LlmTarget};
+use super::mcp::{McpHost, McpTools};
 use super::subagent::Subagents;
 use super::tools::ToolContext;
 use super::usage::{self, Usage};
@@ -158,6 +159,9 @@ pub struct TurnRequest {
     pub compacted_parent: Option<Utf8PathBuf>,
     /// The conversation tree, for the `conversation` tool.
     pub tree: Arc<RwLock<ConversationTree>>,
+    /// The MCP servers of the repository; the turn takes the tools of those running
+    /// when it starts.
+    pub mcp: Arc<McpHost>,
 }
 
 /// The text to send for `request`: what the turn asks, preceded by the notes Explorer
@@ -526,9 +530,10 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
 }
 
 async fn run(request: &TurnRequest, recorder: &mut Recorder) -> Result<(), String> {
+    let mcp = request.mcp.snapshot().await;
     match &request.backend {
-        Backend::OpenAi(target) => run_own_loop(request, target, recorder).await,
-        Backend::ClaudeCode(target) => run_claude_code(request, target, recorder).await,
+        Backend::OpenAi(target) => run_own_loop(request, &mcp, target, recorder).await,
+        Backend::ClaudeCode(target) => run_claude_code(request, &mcp, target, recorder).await,
     }
 }
 
@@ -543,6 +548,7 @@ async fn uncommitted(request: &TurnRequest) -> Result<Option<String>, String> {
 
 async fn run_claude_code(
     request: &TurnRequest,
+    mcp: &McpTools,
     target: &ClaudeTarget,
     recorder: &mut Recorder,
 ) -> Result<(), String> {
@@ -564,7 +570,14 @@ async fn run_claude_code(
     let forked = match request.parent_session.as_deref() {
         Some(session) => {
             match claude_code::run(
-                &invocation(request, target, &system, &message, Resume::Fork(session)),
+                &invocation(
+                    request,
+                    mcp,
+                    target,
+                    &system,
+                    &message,
+                    Resume::Fork(session),
+                ),
                 recorder,
             )
             .await
@@ -582,7 +595,7 @@ async fn run_claude_code(
             None => message,
         };
         claude_code::run(
-            &invocation(request, target, &system, &opening, Resume::Fresh),
+            &invocation(request, mcp, target, &system, &opening, Resume::Fresh),
             recorder,
         )
         .await
@@ -602,7 +615,14 @@ async fn run_claude_code(
             break;
         };
         claude_code::run(
-            &invocation(request, target, &system, &nudge, Resume::Continue(&session)),
+            &invocation(
+                request,
+                mcp,
+                target,
+                &system,
+                &nudge,
+                Resume::Continue(&session),
+            ),
             recorder,
         )
         .await
@@ -613,6 +633,7 @@ async fn run_claude_code(
 
 fn invocation<'a>(
     request: &'a TurnRequest,
+    mcp: &'a McpTools,
     target: &'a ClaudeTarget,
     system: &'a str,
     prompt: &'a str,
@@ -624,6 +645,7 @@ fn invocation<'a>(
         system,
         prompt,
         resume,
+        mcp,
     }
 }
 
@@ -636,6 +658,7 @@ fn run_error_text(error: RunError) -> String {
 
 async fn run_own_loop(
     request: &TurnRequest,
+    mcp: &McpTools,
     target: &LlmTarget,
     recorder: &mut Recorder,
 ) -> Result<(), String> {
@@ -704,6 +727,7 @@ async fn run_own_loop(
             spec: request.spec.clone(),
         }),
         background: Arc::default(),
+        mcp: mcp.clone(),
     };
     agent_loop::run(
         &tool_context,

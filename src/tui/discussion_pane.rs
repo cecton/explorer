@@ -327,6 +327,7 @@ pub(crate) fn start_turn(
         compact,
         compacted_parent: context.compacted_parent,
         tree: Arc::clone(&state.conversations),
+        mcp: Arc::clone(&state.mcp),
     };
     let handle = turn::spawn(request, main_tx.clone());
     state.running_turns.insert(node.clone(), handle);

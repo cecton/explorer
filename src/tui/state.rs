@@ -1,3 +1,4 @@
+use crate::agent::mcp::{McpHost, McpServerDecl};
 use crate::agent::turn::{TurnHandle, TurnOutcome};
 use crate::agent::usage::Usage;
 use crate::agent::{AgentConfig, Effort, ModelSpec};
@@ -298,6 +299,10 @@ pub struct TreeViewState {
     pub search_active: bool,
     /// Row selected when `/` was opened, given back when the filter matches nothing.
     pub before_search: Option<RowTarget>,
+    /// The `:` command line, while it is open.
+    pub command: Option<InputLine>,
+    /// MCP servers added from the command line whose start is still to be reported.
+    pub announced_starts: HashSet<String>,
 }
 
 impl TreeViewState {
@@ -573,6 +578,10 @@ pub struct AppState {
     /// Last known usage of the subscription behind each endpoint, by endpoint name;
     /// kept in `<data_dir>/usage.json`.
     pub usage: HashMap<String, Usage>,
+    /// MCP servers of the repository, as saved in its session.
+    pub mcp_servers: Vec<McpServerDecl>,
+    /// The running MCP servers, shared with the turns.
+    pub mcp: Arc<McpHost>,
     /// Model last picked during this run, offered to new conversations.
     pub last_picked_model: Option<ModelSpec>,
     /// Model Picker entries are indexes into `models.specs`.
@@ -644,6 +653,9 @@ impl AppState {
             Window::ConversationTree if self.tree_view.search_active => {
                 Some(&mut self.tree_view.query)
             }
+            Window::ConversationTree if self.tree_view.command.is_some() => {
+                self.tree_view.command.as_mut()
+            }
             Window::FilePreview(key) => {
                 self.preview_inputs.get_mut(key).map(PreviewInput::line_mut)
             }
@@ -714,6 +726,7 @@ impl AppState {
         pane_manager.push_window(Window::WindowPicker);
         pane_manager.focused_window = Some(Window::WindowPicker);
         let repo = gix::ThreadSafeRepository::open(root.as_std_path()).ok();
+        let mcp = Arc::new(McpHost::new(root.clone()));
 
         let mut state = Self {
             files,
@@ -746,6 +759,8 @@ impl AppState {
             agent: Arc::default(),
             models: ModelCatalog::default(),
             usage: HashMap::new(),
+            mcp_servers: Vec::new(),
+            mcp,
             last_picked_model: None,
             model_picker: FuzzyPickerState::default(),
             model_picker_purpose: None,
@@ -873,6 +888,10 @@ pub enum AppSignal {
     SubagentFinished {
         node: NodeId,
         index: u32,
+    },
+    /// The MCP server `name` started, failed or is starting again.
+    McpStatus {
+        name: String,
     },
     /// The turn of `node` ended.
     TurnFinished {

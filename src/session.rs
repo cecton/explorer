@@ -1,3 +1,4 @@
+use crate::agent::mcp::McpServerDecl;
 use crate::conversation::NodeId;
 use crate::loader::{LoadedFile, file_key_for_path, path_for_file_key};
 use crate::tui::AppState;
@@ -50,6 +51,9 @@ pub struct Session {
     /// Highlights in the prompts and replies of conversation nodes, by node id.
     #[serde(default)]
     pub discussion_highlights: HashMap<String, NodeHighlights>,
+    /// MCP servers of this repository, started with Explorer.
+    #[serde(default)]
+    pub mcp_servers: Vec<McpServerDecl>,
 }
 
 /// Persisted symbol-highlight identity. Byte-offset locations are never saved —
@@ -216,6 +220,7 @@ impl Session {
             conversation_expanded,
             conversation_query: state.tree_view.query.text().to_string(),
             discussion_highlights,
+            mcp_servers: state.mcp_servers.clone(),
         }
     }
 
@@ -418,6 +423,7 @@ impl Session {
             .into_iter()
             .map(|(node, highlights)| (NodeId::new(&node), highlights))
             .collect();
+        state.mcp_servers = self.mcp_servers;
 
         if !new_stack.is_empty() {
             state.pane_manager.window_stack = new_stack;
@@ -703,6 +709,7 @@ mod tests {
             conversation_expanded: Vec::new(),
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
+            mcp_servers: Vec::new(),
         };
 
         let value = serde_json::to_value(&session).unwrap();
@@ -823,6 +830,7 @@ mod tests {
             conversation_expanded: Vec::new(),
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
+            mcp_servers: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -885,6 +893,7 @@ mod tests {
             conversation_expanded: Vec::new(),
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
+            mcp_servers: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -933,6 +942,7 @@ mod tests {
             conversation_expanded: Vec::new(),
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
+            mcp_servers: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -967,6 +977,7 @@ mod tests {
             conversation_expanded: Vec::new(),
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
+            mcp_servers: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -1034,6 +1045,7 @@ mod tests {
             conversation_expanded: Vec::new(),
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
+            mcp_servers: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -1095,6 +1107,24 @@ mod tests {
         let mut fresh = empty_state(root);
         restored.apply(&mut fresh);
         assert_eq!(fresh.tree_view.query.text(), "queue esc");
+    }
+
+    #[test]
+    fn mcp_servers_round_trip_through_session() {
+        let (_dir, root) = temp_root();
+        let mut state = empty_state(root.clone());
+        let egui = McpServerDecl {
+            name: "egui".to_string(),
+            program: "egui-mcp".to_string(),
+        };
+        state.mcp_servers.push(egui.clone());
+
+        let json = serde_json::to_string(&Session::from_state(&state)).expect("serialize");
+        let restored: Session = serde_json::from_str(&json).expect("deserialize session");
+
+        let mut fresh = empty_state(root);
+        restored.apply(&mut fresh);
+        assert_eq!(fresh.mcp_servers, [egui]);
     }
 
     #[test]
