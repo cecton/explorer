@@ -703,6 +703,7 @@ async fn run_own_loop(
             repo: request.repo.clone(),
             spec: request.spec.clone(),
         }),
+        background: Arc::default(),
     };
     agent_loop::run(
         &tool_context,

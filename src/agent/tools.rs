@@ -1,9 +1,9 @@
 use super::ToolCall;
 use super::llm::ToolSpec;
 use super::subagent::{self, Subagents};
-use crate::conversation::{ConversationTree, NodeId};
+use crate::conversation::{ConversationTree, NodeId, PROCESSES_DIR};
 use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
-use parking_lot::RwLock;
+use parking_lot::{Mutex, RwLock};
 use serde_json::{Value, json};
 use std::process::Stdio;
 use std::sync::Arc;
@@ -26,6 +26,28 @@ pub struct ToolContext {
     /// What the turn lends to its sub-agents; `None` for a sub-agent, which cannot
     /// call one in turn.
     pub subagents: Option<Subagents>,
+    /// Background commands of the turn, shared with its sub-agents.
+    pub background: Arc<Background>,
+}
+
+/// The process groups of a turn's background commands, killed when the turn ends.
+#[derive(Default)]
+pub struct Background {
+    // Never waited for: a zombie leader keeps the group id from being reused.
+    leaders: Mutex<Vec<tokio::process::Child>>,
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        for leader in self.leaders.get_mut().iter() {
+            if let Some(pid) = leader.id() {
+                // SAFETY: plain syscall on a process group this process created.
+                unsafe {
+                    libc::killpg(pid as libc::pid_t, libc::SIGKILL);
+                }
+            }
+        }
+    }
 }
 
 /// The tools advertised to the model: the `agent` tool only when sub-agents can run.
@@ -105,13 +127,17 @@ fn base_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "shell",
             description: "Run a shell command with `sh -c` in the repository root and \
-                          return its output and exit code."
+                          return its output and exit code. With `background`, return at \
+                          once with the pid and the file receiving the output, for a \
+                          command that keeps running, such as an app to test; it is \
+                          killed when the turn ends."
                 .into(),
             schema: json!({
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
-                    "timeout": {"type": "integer", "description": "Seconds before the command is killed (default 120, maximum 600)"}
+                    "timeout": {"type": "integer", "description": "Seconds before the command is killed (default 120, maximum 600); ignored in the background"},
+                    "background": {"type": "boolean", "description": "Run without waiting for the command to end (default false)"}
                 },
                 "required": ["command"]
             }),
@@ -186,6 +212,13 @@ pub async fn run(context: &ToolContext, call: &ToolCall) -> String {
         "grep" => {
             let root = root.to_owned();
             blocking(move || grep(&root, &args)).await
+        }
+        "shell" if args.get("background").and_then(Value::as_bool) == Some(true) => {
+            let dir = context.tree.read().node_dir(&context.node);
+            match dir {
+                Some(dir) => shell_background(root, &dir, &context.background, &args),
+                None => Err("this turn has no node directory for the output".to_string()),
+            }
         }
         "shell" => shell(root, &args).await,
         other => Err(format!("unknown tool: {other}")),
@@ -521,6 +554,46 @@ async fn shell(root: &Utf8Path, args: &Value) -> Result<String, String> {
     Ok(text)
 }
 
+/// Starts a command that outlives the call, its output going to
+/// `<node dir>/processes/<n>.log`.
+fn shell_background(
+    root: &Utf8Path,
+    node_dir: &Utf8Path,
+    background: &Background,
+    args: &Value,
+) -> Result<String, String> {
+    let command = str_arg(args, "command")?;
+    let dir = node_dir.join(PROCESSES_DIR);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{dir}: {e}"))?;
+    let mut index = 1;
+    let (log, file) = loop {
+        let log = dir.join(format!("{index}.log"));
+        match std::fs::File::create_new(&log) {
+            Ok(file) => break (log, file),
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => index += 1,
+            Err(e) => return Err(format!("{log}: {e}")),
+        }
+    };
+    let stderr = file.try_clone().map_err(|e| format!("{log}: {e}"))?;
+    let child = tokio::process::Command::new("sh")
+        .arg("-c")
+        .arg(command)
+        .current_dir(root)
+        .stdin(Stdio::null())
+        .stdout(file)
+        .stderr(stderr)
+        .process_group(0)
+        .spawn()
+        .map_err(|e| format!("failed to start sh: {e}"))?;
+    let pid = child.id().expect("a child never waited for has a pid");
+    background.leaders.lock().push(child);
+    Ok(format!(
+        "started in the background: pid {pid}, output in {log}\n\
+         Read the output with the shell tool, e.g. `tail -n 50 {log}`. Stop the command \
+         with `kill -- -{pid}` (its process group); it is killed when the turn ends.\n"
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -543,6 +616,7 @@ mod tests {
             tree: Arc::default(),
             node: NodeId::new("current"),
             subagents: None,
+            background: Arc::default(),
         }
     }
 
@@ -653,6 +727,63 @@ mod tests {
         assert_eq!(slow, "command killed after 1s timeout\n");
     }
 
+    #[tokio::test]
+    async fn background_shell_returns_at_once_and_dies_with_the_turn() {
+        let (_tmp, root) = repo();
+        let store = root.join("store");
+        std::fs::create_dir_all(store.join("n1")).unwrap();
+        let context = ToolContext {
+            root: root.clone(),
+            tree: Arc::new(RwLock::new(ConversationTree::load(&store))),
+            node: NodeId::new("n1"),
+            subagents: None,
+            background: Arc::default(),
+        };
+        let start = std::time::Instant::now();
+        let started = run(
+            &context,
+            &call(
+                "shell",
+                json!({"command": "echo up; exec sleep 30", "background": true}),
+            ),
+        )
+        .await;
+        assert!(start.elapsed() < Duration::from_secs(5), "{started}");
+        let log = store.join("n1/processes/1.log");
+        assert!(started.contains(&format!("output in {log}")), "{started}");
+        let pid: u32 = started
+            .split("pid ")
+            .nth(1)
+            .and_then(|rest| rest.split(',').next())
+            .and_then(|pid| pid.parse().ok())
+            .unwrap();
+        // A killed child stays a zombie until tokio reaps it.
+        let alive = || {
+            std::fs::read_to_string(format!("/proc/{pid}/stat"))
+                .is_ok_and(|stat| !stat.contains(") Z "))
+        };
+        for _ in 0..250 {
+            if std::fs::read_to_string(&log).unwrap_or_default() == "up\n" {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert_eq!(std::fs::read_to_string(&log).unwrap(), "up\n");
+        assert!(alive());
+        let second = call("shell", json!({"command": "true", "background": true}));
+        let second = run(&context, &second).await;
+        assert!(second.contains("n1/processes/2.log"), "{second}");
+
+        drop(context);
+        for _ in 0..250 {
+            if !alive() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(!alive(), "the background command outlived its turn");
+    }
+
     #[test]
     fn truncate_middle_keeps_head_and_tail() {
         let text = "a".repeat(50) + &"b".repeat(50);
@@ -759,6 +890,7 @@ mod tests {
             tree: Arc::new(RwLock::new(ConversationTree::load(&store))),
             node: NodeId::new("n2"),
             subagents: None,
+            background: Arc::default(),
         };
         let ask = |arguments| call("conversation", arguments);
 

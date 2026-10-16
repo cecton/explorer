@@ -231,6 +231,10 @@ impl Metadata {
 /// Directory of a node holding its sub-agent runs; never a node of its own.
 const AGENTS_DIR: &str = "agents";
 
+/// Directory of a node holding the output logs of its background commands; never a
+/// node of its own.
+pub const PROCESSES_DIR: &str = "processes";
+
 /// One sub-agent run of a node's turn, kept in `<node dir>/agents/<index>/` with the
 /// files of a node: `metadata.md`, `prompt.md` (the task), `reply.md`, `activity.md`
 /// and `transcript.jsonl`.
@@ -403,7 +407,7 @@ impl ConversationTree {
             let Ok(name) = entry.file_name().into_string() else {
                 continue;
             };
-            if name == AGENTS_DIR {
+            if name == AGENTS_DIR || name == PROCESSES_DIR {
                 continue;
             }
             let id = NodeId::new(&name);
@@ -558,9 +562,11 @@ impl ConversationTree {
                 _ => {}
             }
         }
-        match std::fs::remove_dir_all(dir.join(AGENTS_DIR)) {
-            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-            _ => {}
+        for name in [AGENTS_DIR, PROCESSES_DIR] {
+            match std::fs::remove_dir_all(dir.join(name)) {
+                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
+                _ => {}
+            }
         }
         if let Some(node) = self.nodes.get_mut(id) {
             node.agents.clear();

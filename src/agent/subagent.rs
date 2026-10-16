@@ -415,6 +415,7 @@ async fn run_own_loop(
         tree: Arc::clone(&context.tree),
         node: context.node.clone(),
         subagents: None,
+        background: Arc::clone(&context.background),
     };
     agent_loop::run(
         &tool_context,
