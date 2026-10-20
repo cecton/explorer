@@ -53,24 +53,35 @@ in git when you finish.
 Every commit you make is reviewed before you move on, by sub-agents that read it with
 fresh eyes. Right after making a commit, before changing anything else, review it in
 rounds. Choose a role meant for reviewing and fixing commits when one is offered,
-otherwise a general one. When the work splits into several commits, the rounds run after
-each of them, so the commit under review is always `HEAD`.
+otherwise a general one. When the work splits into several commits, the reviews run after
+each of them, so the commit under review is normally `HEAD`; the cases below also work
+when it is not, so never get ahead of an unfinished review.
 
 A round:
 
-1. Note `HEAD`, then start a fresh sub-agent. Every round gets the same prompt: what the
-   commit is meant to do and why, the decisions from this conversation it must respect
-   (it sees none of the conversation), and that it reviews `HEAD`, leaves its fixes
-   uncommitted in the working tree, and never commits.
+1. Note the hash of the commit under review — `git rev-parse HEAD` in the usual case,
+   where it is `HEAD` —, then start a fresh sub-agent. Every round gets the same prompt:
+   what the commit is meant to do and why, the decisions from this conversation it must
+   respect (it sees none of the conversation), and that it reviews that commit, leaves
+   its fixes uncommitted in the working tree, and never commits.
 2. When it is done, run `git add -A` and read `git diff --cached` with its report. When
    nothing changed, the review of this commit is over. Otherwise judge the round as a
    whole and run the project's checks.
-3. Good fixes: amend the commit with them (`git commit --amend --no-edit`, or with the
-   message the reviewer suggested), then start the next round.
-4. Bad fixes, a round that undoes the fix of an earlier round, or `HEAD` no longer where
-   you noted it: undo the round with `git reset --hard <noted HEAD>`, stop reviewing this
-   commit, and go on with the next change or finish. This reset is allowed despite the
-   rule against discarding changes: it discards the reviewer's work, not yours.
+3. Good fixes: fold them into the commit under review, then start the next round:
+   - `HEAD` is still the commit under review — the usual case, the newest commit of the
+     turn. Amend the fixes into it (`git commit --amend --no-edit`, or with the message
+     the reviewer suggested).
+   - `HEAD` is past the commit under review: other commits of the turn landed on top of
+     it, so amending would attach the fixes to the wrong commit. Do not rebase,
+     soft-reset or re-split to reach it. Commit the fixes as one additional commit on top
+     (`fix` type and scope, the body naming the commit it repairs), and treat that commit
+     as the one under review from then on: note its hash, and later rounds of its review
+     amend it as above.
+4. Bad fixes, or a round that undoes the fix of an earlier round: undo the round with
+   `git reset --hard` with no arguments — this discards the reviewer's work only, and
+   never moves the branch or rewrites anything —, stop reviewing this commit, and go on
+   with the next change or finish. This reset is allowed despite the rule against
+   discarding changes: it discards the reviewer's work, not yours.
 
 Keep or reject a round whole. Never keep part of it, never edit the reviewer's fixes, and
 never fix the findings it left: report them.
