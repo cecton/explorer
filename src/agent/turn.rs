@@ -352,7 +352,7 @@ impl Recorder {
     }
 
     /// Appends one entry to the work log and to `activity.md`.
-    fn log(&mut self, entry: String) {
+    pub(super) fn log(&mut self, entry: String) {
         append_work_log(&self.node_dir, &self.live, entry);
     }
 

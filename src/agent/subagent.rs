@@ -3,8 +3,10 @@ use super::commands::split_metadata;
 use super::llm::{LlmTarget, ToolSpec};
 use super::tools::ToolContext;
 use super::turn::{self, LiveSubagent, Recorder};
+use super::usage::Usage;
 use super::{
-    AgentConfig, Backend, Endpoint, Message, Mode, ModelSpec, ToolCall, agent_loop, context,
+    AgentConfig, Backend, Endpoint, EndpointKind, Message, Mode, ModelSpec, ToolCall, agent_loop,
+    context,
 };
 use crate::conversation::{self, ConversationTree, Metadata, NodeId, NodeStatus};
 use crate::tui::AppSignal;
@@ -146,8 +148,15 @@ struct Launch {
     dir: Utf8PathBuf,
     backend: Backend,
     endpoint: Endpoint,
+    /// Model of this run, named in the notes of a retry.
+    spec: ModelSpec,
+    /// The role's name, for the retry's metadata.
+    role: Option<String>,
     /// The role's prompt, or the default one.
     system: String,
+    /// The task as typed, for the retry's `prompt.md`.
+    prompt: String,
+    description: String,
     /// The task, preceded by the notes Explorer adds.
     message: String,
     /// Directories of the runs this one continues, oldest first.
@@ -156,6 +165,10 @@ struct Launch {
     session: String,
     /// Claude Code session of the run this one continues.
     claude_session: Option<String>,
+    /// Model to rerun on when this one fails: the caller's, for a fresh run on an
+    /// OpenAI-compatible endpoint. `claude` has no such failures to recover from, and
+    /// a continued run keeps its own model.
+    fallback: Option<ModelSpec>,
 }
 
 fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
@@ -228,6 +241,19 @@ fn prepare(
             (role, spec)
         }
     };
+    // A failure worth retrying comes from an OpenAI-compatible server. A rerun lands on
+    // the caller's model unless the run is on it already.
+    let fallback = match config
+        .endpoint(&spec.endpoint)
+        .map(|endpoint| &endpoint.kind)
+    {
+        Some(EndpointKind::OpenAi { .. } | EndpointKind::OpenCodeGo { .. })
+            if source.is_none() && spec != subagents.spec =>
+        {
+            Some(subagents.spec.clone())
+        }
+        _ => None,
+    };
     let endpoint = config.endpoint(&spec.endpoint).cloned();
     let (Some(endpoint), Some(backend)) = (endpoint, config.backend(&spec)) else {
         return Err(format!(
@@ -281,9 +307,13 @@ fn prepare(
         dir,
         backend,
         endpoint,
+        spec: spec.clone(),
+        role: role.map(|role| role.name.clone()),
         system: role
             .map_or(context::SUBAGENT_PROMPT, |role| &role.prompt)
             .to_string(),
+        prompt: prompt.to_string(),
+        description: description.to_string(),
         message,
         chain: chain
             .iter()
@@ -291,6 +321,143 @@ fn prepare(
             .collect(),
         session,
         claude_session,
+        fallback,
+    })
+}
+
+/// Runs one sub-agent run to its end, recording its live output and work-log
+/// entries; whatever streamed before a failure stays in the record's `reply.md` and
+/// `transcript.jsonl`.
+async fn execute(
+    context: &ToolContext,
+    recorder: &mut Recorder,
+    launch: &Launch,
+    backend: &Backend,
+) -> Outcome {
+    let mut child = recorder.subagent(launch.dir.clone());
+    let started = Instant::now();
+    recorder.live.lock().subagent = Some(LiveSubagent {
+        index: launch.index,
+        started,
+        live: Arc::clone(&child.live),
+    });
+    let result = match backend {
+        Backend::OpenAi(target) => run_own_loop(context, launch, target, &mut child).await,
+        Backend::ClaudeCode(target) => run_claude_code(context, launch, target, &mut child).await,
+    };
+    child.flush_reply();
+    recorder.live.lock().subagent = None;
+
+    let (reply, tokens_in, cached_in, session_id, usage) = {
+        let live = child.live.lock();
+        (
+            live.reply.trim().to_string(),
+            live.tokens_in,
+            live.cached_in,
+            live.session_id.clone(),
+            live.usage.clone(),
+        )
+    };
+    Outcome {
+        index: launch.index,
+        spec: launch.spec.clone(),
+        endpoint: launch.endpoint.clone(),
+        result,
+        reply,
+        secs: started.elapsed().as_secs(),
+        tokens_in,
+        cached_in,
+        session_id,
+        usage,
+    }
+}
+
+/// What one run left: where it is recorded, whether it ended cleanly, and what the
+/// record's metadata keeps.
+struct Outcome {
+    index: u32,
+    spec: ModelSpec,
+    endpoint: Endpoint,
+    result: Result<(), String>,
+    reply: String,
+    secs: u64,
+    tokens_in: Option<u64>,
+    cached_in: Option<u64>,
+    session_id: Option<String>,
+    usage: Option<Usage>,
+}
+
+impl Outcome {
+    /// The sub-agent's error, if any; the metadata records it.
+    fn error(&self) -> Option<&str> {
+        self.result.as_ref().err().map(String::as_str)
+    }
+}
+
+/// The fallback run of a failed OpenAI-backed launch: a fresh record on `spec`'s
+/// backend, same role, prompt and notes, keeping no chain. Reads and writes only the
+/// tree, like `prepare` does; the backend resolution happens on the caller's side,
+/// where `config` lives.
+async fn prepare_retry(
+    context: &ToolContext,
+    launch: &Launch,
+    spec: &ModelSpec,
+    config: &AgentConfig,
+) -> Result<Launch, String> {
+    let (endpoint, backend) = (
+        config.endpoint(&spec.endpoint).cloned(),
+        config.backend(spec),
+    );
+    let (Some(endpoint), Some(backend)) = (endpoint, backend) else {
+        return Err(format!(
+            "the fallback endpoint '{}' is not configured or has no token",
+            spec.endpoint
+        ));
+    };
+    let tree = Arc::clone(&context.tree);
+    let node = context.node.clone();
+    let spec = spec.clone();
+    let meta = Metadata {
+        endpoint: Some(spec.endpoint.clone()),
+        kind: Some(endpoint.kind.label().to_string()),
+        model: Some(spec.model.clone()),
+        effort: Some(spec.effort.as_str().to_string()),
+        status: Some(NodeStatus::Running),
+        role: launch.role.clone(),
+        description: Some(launch.description.clone()),
+        ..Default::default()
+    };
+    let prompt = launch.prompt.clone();
+    let message = launch.message.clone();
+    let system = launch.system.clone();
+    let recorded = tokio::task::spawn_blocking(move || {
+        let mut tree = tree.write();
+        let index = tree
+            .create_agent(&node, now_secs(), meta, &prompt)
+            .map_err(|e| format!("could not record the sub-agent: {e}"))?;
+        let dir = tree
+            .agent_dir(&node, index)
+            .ok_or("the new sub-agent has no directory")?;
+        Ok::<_, String>((index, dir))
+    })
+    .await
+    .map_err(|e| e.to_string())?;
+    let (index, dir) = recorded?;
+    Ok(Launch {
+        index,
+        dir,
+        backend,
+        endpoint,
+        spec: spec.clone(),
+        role: launch.role.clone(),
+        system,
+        prompt: launch.prompt.clone(),
+        description: launch.description.clone(),
+        message,
+        chain: Vec::new(),
+        session: conversation::agent_id(&context.node, index),
+        claude_session: None,
+        fallback: None,
     })
 }
 
@@ -318,53 +485,96 @@ pub async fn run(
         Ok(launch) => launch,
         Err(error) => return format!("error: {error}"),
     };
-    let id = conversation::agent_id(&context.node, launch.index);
     recorder
         .send(AppSignal::SubagentStarted {
             node: context.node.clone(),
         })
         .await;
 
-    let mut child = recorder.subagent(launch.dir.clone());
-    let started = Instant::now();
-    recorder.live.lock().subagent = Some(LiveSubagent {
-        index: launch.index,
-        started,
-        live: Arc::clone(&child.live),
-    });
-    let result = match &launch.backend {
-        Backend::OpenAi(target) => run_own_loop(context, &launch, target, &mut child).await,
-        Backend::ClaudeCode(target) => run_claude_code(context, &launch, target, &mut child).await,
-    };
-    child.flush_reply();
-    recorder.live.lock().subagent = None;
+    let mut outcome = execute(context, recorder, &launch, &launch.backend).await;
+    // A failed run is concluded at once, so a cancel mid-retry cannot leave it Running;
+    // the combined error is only what the caller model reads, never a record's.
+    let first_error = outcome.result.as_ref().err().cloned();
+    match (first_error.as_deref(), launch.fallback.as_ref()) {
+        (Some(error), Some(spec)) => {
+            conclude(context, subagents.repo.as_ref(), &outcome, recorder).await;
+            match prepare_retry(context, &launch, spec, &subagents.config).await {
+                Ok(retry) => {
+                    recorder.log(format!(
+                        "first run on {} failed ({error}); retrying on {}",
+                        launch.spec, retry.spec
+                    ));
+                    let retried = execute(context, recorder, &retry, &retry.backend).await;
+                    conclude(context, subagents.repo.as_ref(), &retried, recorder).await;
+                    let retry_spec = retried.spec.clone();
+                    let retry_error = retried.result.as_ref().err().cloned();
+                    outcome = match retry_error {
+                        Some(retry_error) => Outcome {
+                            result: Err(format!(
+                                "{error}; the rerun on {retry_spec} failed: {retry_error}"
+                            )),
+                            ..retried
+                        },
+                        None => retried,
+                    };
+                }
+                Err(e) => {
+                    recorder.log(format!(
+                        "first run on {} failed ({error}); no fallback: {e}",
+                        launch.spec
+                    ));
+                }
+            }
+        }
+        _ => conclude(context, subagents.repo.as_ref(), &outcome, recorder).await,
+    }
+    turn::report_usage(
+        outcome.endpoint.clone(),
+        outcome.usage.clone(),
+        recorder.main_tx(),
+    );
 
-    let (reply, tokens_in, cached_in, session_id, usage) = {
-        let live = child.live.lock();
-        (
-            live.reply.trim().to_string(),
-            live.tokens_in,
-            live.cached_in,
-            live.session_id.clone(),
-            live.usage.clone(),
-        )
-    };
-    let head_after = subagents.repo.as_ref().and_then(crate::git::head_id);
-    let error = result.as_ref().err().cloned();
+    let id = conversation::agent_id(&context.node, outcome.index);
+    match &outcome.result {
+        Err(error) => format!("agent_id: {id}\n\nerror: the sub-agent failed: {error}"),
+        Ok(()) => {
+            let note = first_error
+                .as_deref()
+                .and_then(|error| retry_note(&launch, error))
+                .unwrap_or_default();
+            let answer = if outcome.reply.is_empty() {
+                "(the sub-agent gave no answer)"
+            } else {
+                outcome.reply.as_str()
+            };
+            format!("agent_id: {id}\n\n{note}{answer}")
+        }
+    }
+}
+
+/// Closes the record of `outcome`: its final status, error, size of its requests and
+/// session on disk, and a `SubagentFinished` for the tree and open windows.
+async fn conclude(
+    context: &ToolContext,
+    repo: Option<&gix::ThreadSafeRepository>,
+    outcome: &Outcome,
+    recorder: &mut Recorder,
+) {
+    let id = conversation::agent_id(&context.node, outcome.index);
     let updated = context
         .tree
         .write()
-        .update_agent_meta(&context.node, launch.index, |meta| {
-            meta.status = Some(match error {
-                Some(_) => NodeStatus::Failed,
-                None => NodeStatus::Done,
+        .update_agent_meta(&context.node, outcome.index, |meta| {
+            meta.status = Some(match &outcome.result {
+                Err(_) => NodeStatus::Failed,
+                Ok(()) => NodeStatus::Done,
             });
-            meta.error = error;
-            meta.secs = Some(started.elapsed().as_secs());
-            meta.head_after = head_after;
-            meta.tokens_in = tokens_in;
-            meta.cached_in = cached_in;
-            meta.session_id = session_id;
+            meta.error = outcome.error().map(str::to_string);
+            meta.secs = Some(outcome.secs);
+            meta.head_after = repo.and_then(crate::git::head_id);
+            meta.tokens_in = outcome.tokens_in;
+            meta.cached_in = outcome.cached_in;
+            meta.session_id = outcome.session_id.clone();
         });
     if let Err(e) = updated {
         tracing::warn!("failed to save the outcome of sub-agent {id}: {e}");
@@ -372,16 +582,21 @@ pub async fn run(
     recorder
         .send(AppSignal::SubagentFinished {
             node: context.node.clone(),
-            index: launch.index,
+            index: outcome.index,
         })
         .await;
-    turn::report_usage(launch.endpoint, usage, recorder.main_tx());
+}
 
-    match result {
-        Err(error) => format!("agent_id: {id}\n\nerror: the sub-agent failed: {error}"),
-        Ok(()) if reply.is_empty() => format!("agent_id: {id}\n\n(the sub-agent gave no answer)"),
-        Ok(()) => format!("agent_id: {id}\n\n{reply}"),
-    }
+/// What the caller gets back before a fallback run's answer: the primary spec, its
+/// error and the spec that answered. `None` when the answer is the first run's own.
+fn retry_note(launch: &Launch, first_error: &str) -> Option<String> {
+    launch.fallback.as_ref().map(|fallback| {
+        format!(
+            "[Note from Explorer: the first run on {} failed: {first_error}. This answer \
+             comes from a rerun on {fallback}.]\n\n",
+            launch.spec
+        )
+    })
 }
 
 async fn run_own_loop(
