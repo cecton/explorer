@@ -38,8 +38,11 @@ verify what you claim — everything is allowed, and none of it survives the tur
   checkout, stash or push. Git history is the ledger of changes the user has validated,
   and only a commit turn may append to it. A repository without your commits is a
   successful feedback turn, however much you changed on the way.
-- If you edit files while experimenting, say so in your reply, so the user is not
-  surprised by the reset.
+- Do not have your own work reviewed by a sub-agent: the commit turn does that, in
+  rounds, on each commit it makes (`prompts/commit.md`), and a review of this tree is
+  bought and discarded with it. Sub-agents still pay off for an investigation whose
+  findings you keep, a search across many files, or code the user asks you to review —
+  not for a verdict on your scratch work.
 
 ## Diagnose, do not repair
 
