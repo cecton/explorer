@@ -1,4 +1,5 @@
 use crate::agent::commands::{self, Command, Expansion};
+use crate::agent::context;
 use crate::agent::turn::{self, LiveSubagent, LiveTurn, TurnRequest};
 use crate::agent::{Mode, ModelSpec};
 use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
@@ -97,6 +98,9 @@ pub(crate) enum TurnKind {
     NoSystemPrompt,
     /// The built-in `/compact`: summarize the branch so far.
     Compact { instructions: String },
+    /// The built-in `/continue`: resume the turn of an interrupted node, replaying
+    /// its transcript and adding a note of how it ended.
+    Continue,
 }
 
 /// A turn to start: a new node under `parent`, or a new root.
@@ -125,7 +129,9 @@ impl Launch {
         let kind = match source.meta.node_type {
             Some(NodeType::Compact) => match commands::expand(&prompt, &[]) {
                 Expansion::Compact { instructions } => TurnKind::Compact { instructions },
-                Expansion::Prompt { .. } | Expansion::Commit { .. } => TurnKind::Compact {
+                Expansion::Prompt { .. }
+                | Expansion::Commit { .. }
+                | Expansion::Continue { .. } => TurnKind::Compact {
                     instructions: String::new(),
                 },
             },
@@ -209,6 +215,7 @@ pub(crate) fn start_turn(
         spec,
     } = launch;
     let no_system_prompt = matches!(kind, TurnKind::NoSystemPrompt);
+    let continuing = matches!(kind, TurnKind::Continue);
     // A compact turn changes nothing, so it runs under the shared lock like feedback.
     let (mode, node_type, compact) = match kind {
         TurnKind::Prompt(Mode::Feedback) => (Mode::Feedback, NodeType::Feedback, None),
@@ -218,6 +225,7 @@ pub(crate) fn start_turn(
         TurnKind::Compact { instructions } => {
             (Mode::Feedback, NodeType::Compact, Some(instructions))
         }
+        TurnKind::Continue => (Mode::Feedback, NodeType::Feedback, None),
     };
     let endpoint = state.agent.endpoint(&spec.endpoint).cloned();
     let (Some(endpoint), Some(backend)) = (endpoint, state.agent.backend(&spec)) else {
@@ -229,14 +237,29 @@ pub(crate) fn start_turn(
     let parent_status = parent
         .as_ref()
         .and_then(|parent| state.conversations.read().node(parent)?.meta.status);
-    match parent_status {
-        Some(NodeStatus::Done) | None => {}
-        Some(NodeStatus::Running) => return Err(Refusal::Busy("this node is still running")),
-        Some(_) => {
-            return Err(Refusal::Rejected(
-                "this node is not complete; continue from its parent".to_string(),
-            ));
-        }
+    let parent_has_children = parent.as_ref().is_some_and(|parent| {
+        state
+            .conversations
+            .read()
+            .node(parent)
+            .is_some_and(|node| !node.children.is_empty())
+    });
+    if parent_status == Some(NodeStatus::Running) {
+        return Err(Refusal::Busy("this node is still running"));
+    }
+    // A continue turn replays the interrupted node's transcript: it is the one prompt
+    // that may build on an incomplete node, and only while it is a leaf.
+    let allowed = match parent_status {
+        None | Some(NodeStatus::Done) => !continuing || !parent_has_children,
+        Some(NodeStatus::Failed | NodeStatus::Cancelled) => continuing,
+        Some(NodeStatus::Running) => false,
+    };
+    if !allowed {
+        return Err(Refusal::Rejected(if continuing {
+            "this node already has follow-ups; continue from its last reply".to_string()
+        } else {
+            "this node is not complete; continue from its parent".to_string()
+        }));
     }
     let running: Vec<Mode> = state
         .running_turns
@@ -305,7 +328,10 @@ pub(crate) fn start_turn(
         endpoint,
         summary_backend,
         session,
-        parent_session: context.parent_session,
+        parent_session: context.parent_session.clone(),
+        // A continue turn on a claude-code node resumes the node's own session, which
+        // turn_context reports as the parent's.
+        continue_session: continuing.then_some(context.parent_session).flatten(),
         compact,
         compacted_parent: context.compacted_parent,
         tree: Arc::clone(&state.conversations),
@@ -409,6 +435,12 @@ fn lock_refusal(running: &[Mode]) -> Option<&'static str> {
     (!running.is_empty()).then_some("another turn is running; wait for it to finish")
 }
 
+/// What the stash of `node` holds, from its metadata. A failed commit turn's
+/// uncommitted work sits in one.
+fn stash_message(state: &AppState, node: &NodeId) -> Option<String> {
+    state.conversations.read().node(node)?.meta.stash.clone()
+}
+
 fn ordinal(rank: usize) -> String {
     let suffix = match (rank % 10, rank % 100) {
         (_, 11..=13) => "th",
@@ -458,6 +490,8 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
         return None;
     }
     let spec = discussion.model.clone()?;
+    let expansion = commands::expand(discussion.draft.text(), &state.agent.commands);
+    let continue_on_node = expansion.matches_command(commands::CONTINUE);
     let parent = {
         let tree = state.conversations.read();
         match discussion.node.as_ref().and_then(|node| tree.node(node)) {
@@ -469,14 +503,43 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
                         ..
                     },
                 ..
-            }) => parent.clone(),
+            }) if !continue_on_node => parent.clone(),
             _ => discussion.node.clone(),
         }
     };
     let typed = discussion.draft.text().to_string();
-    let (prompt, input, kind, command) = match commands::expand(&typed, &state.agent.commands) {
+    let (prompt, input, kind, command) = match expansion {
         Expansion::Compact { instructions } => {
             (typed, None, TurnKind::Compact { instructions }, None)
+        }
+        Expansion::Continue { instructions } => {
+            let Some(node) = &discussion.node else {
+                return Some(Err(Refusal::Rejected(
+                    "/continue has nothing to resume in a new conversation".to_string(),
+                )));
+            };
+            let interrupted = {
+                let tree = state.conversations.read();
+                let meta = &tree.node(node)?.meta;
+                match meta.status {
+                    Some(NodeStatus::Failed) => meta
+                        .error
+                        .clone()
+                        .unwrap_or_else(|| "the turn ended without an error message".to_string()),
+                    Some(NodeStatus::Cancelled) => "cancelled by the user".to_string(),
+                    _ => "the turn stopped before an answer".to_string(),
+                }
+            };
+            (
+                context::continue_request(
+                    &interrupted,
+                    stash_message(state, node).as_deref(),
+                    &instructions,
+                ),
+                Some(typed),
+                TurnKind::Continue,
+                None,
+            )
         }
         Expansion::Commit { instructions } if instructions.is_empty() && parent.is_none() => {
             return Some(Err(Refusal::Rejected(
@@ -2370,6 +2433,69 @@ mod tests {
 
         state.discussions.get_mut(&0).unwrap().model = None;
         assert!(compose_launch(&state, 0).is_none());
+    }
+
+    #[test]
+    fn continue_composes_a_child_of_the_node_shown() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("/continue");
+        let launch = compose_launch(&state, 1).unwrap().unwrap();
+        assert_eq!(launch.parent, Some(NodeId::new("a2")));
+        assert!(matches!(launch.kind, TurnKind::Continue));
+        assert!(launch.command.is_none());
+        // The note carries the recorded error and the prompt as typed.
+        assert!(launch.prompt.contains("was interrupted"));
+        assert!(launch.prompt.contains("[Note from Explorer:"));
+        assert!(launch.input.as_deref() == Some("/continue"));
+
+        // Bare, in a new conversation: nothing to resume.
+        state.discussions.get_mut(&0).unwrap().node = None;
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("/continue");
+        assert!(matches!(
+            compose_launch(&state, 0),
+            Some(Err(Refusal::Rejected(reason))) if reason.contains("nothing to resume")
+        ));
+    }
+
+    #[test]
+    fn continue_note_carries_the_error_and_the_stash() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state
+            .conversations
+            .write()
+            .update_meta(&NodeId::new("a2"), |meta| {
+                meta.error = Some("rate limited".into());
+                meta.stash = Some("explorer: left uncommitted by a2".into());
+            })
+            .unwrap();
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("/continue finish it");
+        let launch = compose_launch(&state, 1).unwrap().unwrap();
+        assert!(launch.prompt.contains("was interrupted: rate limited"));
+        assert!(
+            launch
+                .prompt
+                .contains("stashed as \"explorer: left uncommitted by a2\"")
+        );
+        assert!(
+            launch
+                .prompt
+                .ends_with("Additional instructions from the user: finish it")
+        );
     }
 
     #[test]

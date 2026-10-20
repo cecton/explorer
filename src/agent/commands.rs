@@ -78,19 +78,39 @@ pub enum Expansion<'a> {
     Compact { instructions: String },
     /// The built-in `/commit`, with the additional instructions typed after it.
     Commit { instructions: String },
+    /// The built-in `/continue`, with the instructions typed after it.
+    Continue { instructions: String },
+}
+
+impl<'a> Expansion<'a> {
+    /// Whether the typed text expanded the built-in command `name`.
+    pub fn matches_command(&self, name: &str) -> bool {
+        match self {
+            Expansion::Compact { .. } => name == COMPACT,
+            Expansion::Commit { .. } => name == COMMIT,
+            Expansion::Continue { .. } => name == CONTINUE,
+            Expansion::Prompt { .. } => false,
+        }
+    }
 }
 
 /// Names of the built-in commands, which a custom command cannot take.
 pub const COMPACT: &str = "compact";
 pub const COMMIT: &str = "commit";
+pub const CONTINUE: &str = "continue";
 
 /// Each built-in command with what it expects after its name and what it does.
-const BUILT_INS: [(&str, &str, Option<&str>); 2] = [
+const BUILT_INS: [(&str, &str, Option<&str>); 3] = [
     (COMMIT, "[additional instructions]", None),
     (
         COMPACT,
         "[instructions]",
         Some("Summarize the conversation into a node to continue from"),
+    ),
+    (
+        CONTINUE,
+        "[instructions]",
+        Some("Resume the node shown, keeping everything its turn did"),
     ),
 ];
 
@@ -181,6 +201,11 @@ pub fn expand<'a>(typed: &str, commands: &'a [Command]) -> Expansion<'a> {
     }
     if name == COMMIT {
         return Expansion::Commit {
+            instructions: rest.to_string(),
+        };
+    }
+    if name == CONTINUE {
+        return Expansion::Continue {
             instructions: rest.to_string(),
         };
     }
@@ -364,6 +389,31 @@ mod tests {
         assert_eq!(
             commit_prompt("but keep the old name"),
             "OK, go ahead.\n\nAdditional instructions:\n\nbut keep the old name"
+        );
+    }
+
+    #[test]
+    fn continue_is_built_in_and_keeps_its_instructions() {
+        assert_eq!(
+            expand("/continue", &commands()),
+            Expansion::Continue {
+                instructions: String::new()
+            }
+        );
+        assert_eq!(
+            expand("/continue try the other parser", &commands()),
+            Expansion::Continue {
+                instructions: "try the other parser".to_string()
+            }
+        );
+        assert_eq!(
+            expand("/continues", &commands()),
+            prompt("/continues", None)
+        );
+        assert!(
+            placeholder("/continue", &[])
+                .unwrap()
+                .starts_with(" [instructions]\n")
         );
     }
 }

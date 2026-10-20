@@ -152,6 +152,9 @@ pub struct TurnRequest {
     pub session: String,
     /// Claude Code session of the parent node, to fork when the backend is the CLI.
     pub parent_session: Option<String>,
+    /// Claude Code session of the node itself, for a continue turn on it: the session
+    /// holds everything its interrupted turn did.
+    pub continue_session: Option<String>,
     /// Instructions of a `/compact` turn; such a turn asks for a summary instead of
     /// sending `prompt`.
     pub compact: Option<String>,
@@ -317,6 +320,25 @@ impl Recorder {
             let mut live = self.live.lock();
             live.log_start = live.work_log.len();
         }
+    }
+
+    /// The answer in progress died mid-stream: what it streamed stays in the reply and
+    /// joins the transcript as an assistant message without tool calls, so a replay
+    /// continues from it instead of repeating it. A second call records nothing.
+    pub fn flush_partial_answer(&mut self) {
+        let text = {
+            let live = self.live.lock();
+            let start = self.answer_start.min(live.reply.len());
+            self.answer_start = live.reply.len();
+            live.reply[start..].to_string()
+        };
+        if text.trim().is_empty() {
+            return;
+        }
+        self.message(&Message::Assistant {
+            content: text,
+            tool_calls: Vec::new(),
+        });
     }
 
     /// Adds a tool call to the work log and shows it as the activity in progress.
@@ -565,6 +587,39 @@ async fn run_claude_code(
         .await
         .map_err(|e| e.to_string())?
     };
+    // A continue turn owns the node's own session: the CLI kept its thinking and its
+    // tool state, so resuming it is the whole point. When it is gone, the fresh path
+    // below opens with the ancestors as plain text.
+    if let Some(continue_session) = &request.continue_session {
+        let run = claude_code::run(
+            &invocation(
+                request,
+                mcp,
+                target,
+                &system,
+                &message,
+                Resume::Continue(continue_session),
+            ),
+            recorder,
+        )
+        .await;
+        return match run {
+            Ok(()) => Ok(()),
+            Err(RunError::SessionGone) => {
+                let opening = match preamble {
+                    Some(preamble) => format!("{preamble}\n\n{message}"),
+                    None => message,
+                };
+                claude_code::run(
+                    &invocation(request, mcp, target, &system, &opening, Resume::Fresh),
+                    recorder,
+                )
+                .await
+                .map_err(run_error_text)
+            }
+            Err(RunError::Failed(error)) => Err(error),
+        };
+    }
     // Fork the parent's session when there is one; otherwise, or when it is gone, start
     // a fresh session that opens with the ancestors as plain text.
     let forked = match request.parent_session.as_deref() {
@@ -690,7 +745,7 @@ async fn run_own_loop(
     if request.compact.is_some() {
         // A compact turn is a single answer, without tools.
         recorder.begin_answer();
-        let response = llm::stream_chat(
+        let response = match llm::stream_chat(
             target,
             &request.session,
             &system,
@@ -704,7 +759,14 @@ async fn run_own_loop(
                 }
             },
         )
-        .await?;
+        .await
+        {
+            Ok(response) => response,
+            Err(error) => {
+                recorder.flush_partial_answer();
+                return Err(error);
+            }
+        };
         if let Some(tokens) = response.tokens_in {
             recorder.tokens_in(tokens);
         }

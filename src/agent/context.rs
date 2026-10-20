@@ -87,9 +87,11 @@ fn read_transcript(dir: &Utf8Path) -> Option<Vec<Message>> {
 }
 
 /// What an ancestor contributes to the context: its exact transcript, or, when it has
-/// none, its prompt and reply as plain text.
+/// none, its prompt and reply as plain text. A transcript cut inside a round is
+/// repaired, so replaying it is a valid sequence.
 pub fn ancestor_messages(dir: &Utf8Path) -> Vec<Message> {
-    if let Some(messages) = read_transcript(dir) {
+    if let Some(mut messages) = read_transcript(dir) {
+        super::agent_loop::repair_tail(&mut messages);
         return messages;
     }
     let (prompt, reply) = crate::conversation::read_prompt_and_reply(dir);
@@ -178,6 +180,29 @@ pub fn compact_request(instructions: &str) -> String {
     match instructions.trim() {
         "" => base.to_string(),
         extra => format!("{base}\n\nAdditional instructions from the user: {extra}"),
+    }
+}
+
+/// What a `/continue` turn asks the model: the state of the interrupted turn of the
+/// node it replays, then how to go on. `interrupted` is how the turn ended, `stash`
+/// the message of the stash holding what the turn left uncommitted.
+pub fn continue_request(interrupted: &str, stash: Option<&str>, instructions: &str) -> String {
+    let mut note = format!(
+        "[Note from Explorer: your previous turn on this conversation was interrupted: \
+         {interrupted}. Everything above is what you did and said before the \
+         interruption. Continue where you left off; if the failure came from something \
+         in your approach, adapt."
+    );
+    if let Some(stash) = stash {
+        note.push_str(&format!(
+            " Your uncommitted changes were stashed as \"{stash}\"; restore them with \
+             git stash pop if you still need them."
+        ));
+    }
+    note.push(']');
+    match instructions.trim() {
+        "" => note,
+        extra => format!("{note}\n\nAdditional instructions from the user: {extra}"),
     }
 }
 
@@ -301,6 +326,21 @@ mod tests {
         let note = compaction_note("\nWe chose KDL.\n");
         assert!(note.starts_with("[Note from Explorer:"));
         assert!(note.ends_with("We chose KDL.\n\n[End of the summary.]"));
+    }
+
+    #[test]
+    fn continue_request_reports_the_interruption_and_the_stash() {
+        let bare = continue_request("rate limited", None, "  ");
+        assert!(bare.starts_with("[Note from Explorer:"));
+        assert!(bare.contains("was interrupted: rate limited."));
+        assert!(bare.ends_with("adapt.]"));
+        assert!(!bare.contains("stashed"));
+
+        let stashed = continue_request("boom", Some("explorer: left uncommitted by a2"), "");
+        assert!(stashed.contains("stashed as \"explorer: left uncommitted by a2\""));
+
+        let extra = continue_request("boom", None, " skip the refactor");
+        assert!(extra.ends_with("Additional instructions from the user: skip the refactor"));
     }
 
     #[test]
