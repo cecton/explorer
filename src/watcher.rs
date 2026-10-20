@@ -64,6 +64,8 @@ pub struct WatcherWorker {
     // Set when notify reports an event-queue overflow (`need_rescan`). On the
     // next flush we re-walk the tree and reconcile, recovering dropped events.
     pending_rescan: bool,
+    // A git history trigger fired since the last flush, sent as one GitHistoryChanged on it.
+    pending_git: bool,
     // Held to keep the watcher alive for the duration of the worker.
     _watcher: RecommendedWatcher,
 }
@@ -107,6 +109,7 @@ impl RRTWorker for WatcherWorker {
                 rx,
                 pending: HashMap::new(),
                 pending_rescan: false,
+                pending_git: false,
                 _watcher: watcher,
             },
             NoOpInterrupt,
@@ -129,6 +132,7 @@ impl RRTWorker for WatcherWorker {
                 if event.need_rescan() {
                     tracing::warn!("watcher: event-queue overflow, scheduling rescan");
                     self.pending_rescan = true;
+                    self.pending_git = true;
                     return Continuation::Continue;
                 }
                 let kind = match event.kind {
@@ -144,6 +148,10 @@ impl RRTWorker for WatcherWorker {
                     let Ok(rel) = utf8.strip_prefix(&self.root) else {
                         continue;
                     };
+                    if is_git_history_trigger(rel.components()) {
+                        self.pending_git = true;
+                        continue;
+                    }
                     let first = rel.components().next().map(|c| c.as_str());
                     if first.is_some_and(|f| crate::loader::IGNORED_DIRS.contains(&f)) {
                         continue;
@@ -171,6 +179,19 @@ impl RRTWorker for WatcherWorker {
                 Continuation::Restart
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
+                if self.pending_git {
+                    self.pending_git = false;
+                    if self
+                        .app_tx
+                        .blocking_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                            AppSignal::GitHistoryChanged,
+                        ))
+                        .is_err()
+                    {
+                        tracing::warn!("watcher: app_tx closed, stopping");
+                        return Continuation::Stop;
+                    }
+                }
                 if self.pending.is_empty() && !self.pending_rescan {
                     return Continuation::Continue;
                 }
@@ -265,5 +286,55 @@ impl WatcherWorker {
             batch.created.len(),
             batch.removed.len()
         );
+    }
+}
+
+/// Whether a path under `.git`, relative to it, can change what the git log
+/// windows show: `HEAD`, `refs/**` or `packed-refs`. Deliberately not
+/// `objects/**` (written by every commit and many non-history operations, the
+/// ref update is the authoritative event) and not `index` (git status rewrites
+/// it for its stat cache; nothing the log renders depends on it).
+fn is_git_history_trigger(components: camino::Utf8Components<'_>) -> bool {
+    let mut comps = components.map(|c| c.as_os_str());
+    let Some(first) = comps.next() else {
+        return false;
+    };
+    if first != crate::loader::GIT_DIR {
+        return false;
+    }
+    match comps.next() {
+        Some(second) => second == "HEAD" || second == "packed-refs" || second == "refs",
+        None => false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn git_history_trigger_matches_head_refs_and_packed_refs() {
+        for path in [".git/refs", ".git/refs/heads/main", ".git/packed-refs"] {
+            let rel = Utf8PathBuf::from(path);
+            assert!(
+                is_git_history_trigger(rel.components()),
+                "expected trigger: {path}"
+            );
+        }
+        for path in [
+            ".git",
+            ".git/config",
+            ".git/objects/ab/cdef",
+            ".git/logs/HEAD",
+            ".git/index",
+            ".git/refs.lock",
+            "src/main.rs",
+        ] {
+            let rel = Utf8PathBuf::from(path);
+            assert!(
+                !is_git_history_trigger(rel.components()),
+                "expected no trigger: {path}"
+            );
+        }
     }
 }

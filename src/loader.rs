@@ -242,10 +242,14 @@ fn find_git_root_from(start: PathBuf) -> PathBuf {
     }
 }
 
+/// Dot-name of the git directory, by the single-source-of-truth convention of
+/// [`IGNORED_DIRS`], so the walk, the watcher filter and the trigger check agree.
+pub const GIT_DIR: &str = ".git";
+
 /// Directory names skipped everywhere we enumerate or watch repo files.
 /// Single source of truth for both the walk (`walk_repo_files`) and the
 /// watcher's live event filter (`watcher.rs`).
-pub const IGNORED_DIRS: [&str; 2] = ["target", ".git"];
+pub const IGNORED_DIRS: [&str; 2] = ["target", GIT_DIR];
 
 /// Walk `root` recursively and return every regular-file path, skipping the
 /// [`IGNORED_DIRS`]. Shared by the initial load (`main.rs`) and the watcher's

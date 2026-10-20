@@ -865,6 +865,10 @@ pub enum AppSignal {
     },
     /// Result of an async `git::is_dirty` check.
     DirtyStatusLoaded(Result<bool, String>),
+    /// The watcher saw `.git/HEAD`, `.git/refs/**` or `.git/packed-refs` change:
+    /// the git history or the refs moved since the last knowledge of it, the git
+    /// log windows and the branch picker list are stale until reloaded.
+    GitHistoryChanged,
     /// The startup load filled `AppState::conversations`.
     ConversationsLoaded,
     /// Result of fetching the model list of `endpoint`.

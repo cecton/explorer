@@ -1377,6 +1377,34 @@ impl App for AppMain {
                         }
                     }
                 }
+                AppSignal::GitHistoryChanged => {
+                    // Every open log window now holds stale entries; reload each from its own source.
+                    let main_tx = global_data.main_thread_channel_sender.clone();
+                    for (id, source) in state
+                        .git_logs
+                        .iter()
+                        .map(|(id, win)| (*id, win.source.clone()))
+                        .collect::<Vec<_>>()
+                    {
+                        crate::tui::git_log_pane::GitLogPaneComponent::reload_log(
+                            state.repo.clone(),
+                            main_tx.clone(),
+                            id,
+                            &source,
+                        );
+                    }
+                    if let Some(repo) = state.repo.clone() {
+                        tokio::task::spawn_blocking(move || {
+                            let result = crate::git::load_refs(&repo).map(Arc::new);
+                            send_signal!(
+                                main_tx,
+                                TerminalWindowMainThreadSignal::ApplyAppSignal(
+                                    AppSignal::GitRefsLoaded(result)
+                                )
+                            );
+                        });
+                    }
+                }
                 AppSignal::GitRefsLoaded(result) => {
                     if let Ok(refs) = result {
                         state.git_refs = Some(refs.clone());
