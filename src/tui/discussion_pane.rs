@@ -486,11 +486,12 @@ fn move_queued(state: &mut AppState, window: usize, earlier: bool) {
 /// `None` without a draft or a model; a refusal when the draft cannot make a turn.
 fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>> {
     let discussion = state.discussions.get(&id)?;
-    if discussion.draft.text().trim().is_empty() {
+    let typed = discussion.draft.text().trim().to_string();
+    if typed.is_empty() {
         return None;
     }
     let spec = discussion.model.clone()?;
-    let expansion = commands::expand(discussion.draft.text(), &state.agent.commands);
+    let expansion = commands::expand(&typed, &state.agent.commands);
     let continue_on_node = expansion.matches_command(commands::CONTINUE);
     let parent = {
         let tree = state.conversations.read();
@@ -507,7 +508,6 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
             _ => discussion.node.clone(),
         }
     };
-    let typed = discussion.draft.text().to_string();
     let (prompt, input, kind, command) = match expansion {
         Expansion::Compact { instructions } => {
             (typed, None, TurnKind::Compact { instructions }, None)
@@ -2433,6 +2433,24 @@ mod tests {
 
         state.discussions.get_mut(&0).unwrap().model = None;
         assert!(compose_launch(&state, 0).is_none());
+    }
+
+    #[test]
+    fn a_whitespace_padded_draft_is_trimmed_and_the_draft_keeps_its_text() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("\n  review the parser  \n");
+        let launch = compose_launch(&state, 0).unwrap().unwrap();
+        assert_eq!(launch.prompt, "review the parser");
+        assert!(launch.input.is_none());
+        assert_eq!(
+            state.discussions[&0].draft.text(),
+            "\n  review the parser  \n"
+        );
     }
 
     #[test]
