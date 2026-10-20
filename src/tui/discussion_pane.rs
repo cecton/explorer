@@ -110,8 +110,6 @@ pub(crate) struct Launch {
     /// Custom slash command the prompt was expanded from.
     pub command: Option<String>,
     pub spec: ModelSpec,
-    /// An incomplete child of `parent` to run again in place, instead of a new node.
-    pub rerun: Option<NodeId>,
 }
 
 impl Launch {
@@ -141,7 +139,6 @@ impl Launch {
             kind,
             command: source.meta.command.clone(),
             spec,
-            rerun: None,
         })
     }
 }
@@ -210,7 +207,6 @@ pub(crate) fn start_turn(
         kind,
         command,
         spec,
-        rerun,
     } = launch;
     let no_system_prompt = matches!(kind, TurnKind::NoSystemPrompt);
     // A compact turn changes nothing, so it runs under the shared lock like feedback.
@@ -270,23 +266,9 @@ pub(crate) fn start_turn(
     };
     let (node, lineage, folds, context) = {
         let mut tree = state.conversations.write();
-        let node = match rerun {
-            Some(node) => {
-                tree.restart_node(&node, |previous| {
-                    *previous = Metadata {
-                        created: previous.created.take(),
-                        favorite: previous.favorite,
-                        ..meta
-                    };
-                })
-                .map_err(|e| Refusal::Rejected(format!("could not restart the node: {e}")))?;
-                state.discussion_highlights.remove(&node);
-                node
-            }
-            None => tree
-                .create_node(parent.as_ref(), now, meta, &prompt, input.as_deref())
-                .map_err(|e| Refusal::Rejected(format!("could not create the node: {e}")))?,
-        };
+        let node = tree
+            .create_node(parent.as_ref(), now, meta, &prompt, input.as_deref())
+            .map_err(|e| Refusal::Rejected(format!("could not create the node: {e}")))?;
         let context = tree
             .turn_context(&node)
             .ok_or_else(|| Refusal::Rejected("the new node has no directory".to_string()))?;
@@ -372,24 +354,7 @@ fn shown_meta<'a>(
     }
 }
 
-/// Closes the windows showing sub-agent runs of `node`, which a new run of its turn
-/// has removed.
-fn close_agent_windows(state: &mut AppState, node: &NodeId) {
-    let shown: Vec<usize> = state
-        .discussions
-        .iter()
-        .filter(|(_, discussion)| {
-            discussion.node.as_ref() == Some(node) && discussion.agent.is_some()
-        })
-        .map(|(id, _)| *id)
-        .collect();
-    for id in shown {
-        state.discussions.remove(&id);
-        state.pane_manager.remove_window(&Window::Discussion(id));
-    }
-}
-
-/// The mode a node was sent in; a compact node counts as feedback.
+/// The mode a node was run in; a compact node counts as feedback.
 fn node_mode(node: &Node) -> Mode {
     match node.meta.node_type {
         Some(NodeType::Commit) => Mode::Commit,
@@ -543,7 +508,6 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
         kind,
         command,
         spec,
-        rerun: None,
     }))
 }
 
@@ -915,70 +879,6 @@ impl DiscussionComponent {
         state.mark_session_dirty();
     }
 
-    /// Opens `node` like [`Self::open`], then runs its turn again in place when it is
-    /// incomplete: failed, cancelled or interrupted. It is run as it was sent, with the
-    /// model it was sent to. A refusal is shown in the window, over the old reply.
-    pub(crate) fn open_and_recover(state: &mut AppState, main_tx: MainTx, node: NodeId) {
-        Self::open(state, main_tx.clone(), node.clone());
-        let launch = {
-            let tree = state.conversations.read();
-            let Some(shown) = tree.node(&node) else {
-                return;
-            };
-            let incomplete = matches!(
-                shown.meta.status,
-                Some(NodeStatus::Failed | NodeStatus::Cancelled)
-            );
-            if !incomplete || !shown.children.is_empty() {
-                return;
-            }
-            let prompt = tree
-                .node_dir(&node)
-                .map(|dir| crate::conversation::read_prompt_and_reply(&dir).0)
-                .unwrap_or_default();
-            node_model(shown)
-                .and_then(|spec| Launch::replay(&tree, &node, prompt, spec))
-                .map(|launch| Launch {
-                    rerun: Some(node.clone()),
-                    ..launch
-                })
-                .ok_or("this node does not record the model it was sent to")
-        };
-        let started = launch
-            .map_err(str::to_string)
-            .and_then(|launch| start_turn(state, main_tx, launch).map_err(Refusal::into_reason));
-        if started.is_ok() {
-            close_agent_windows(state, &node);
-        }
-        let shown: Vec<usize> = state
-            .discussions
-            .iter()
-            .filter(|(_, discussion)| {
-                discussion.node.as_ref() == Some(&node) && discussion.agent.is_none()
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in shown {
-            match &started {
-                Ok(_) => {
-                    if let Some(discussion) = state.discussions.get_mut(&id) {
-                        discussion.reply.clear();
-                        discussion.work_log.clear();
-                        discussion.visible_work_log.clear();
-                        discussion.thinking.clear();
-                        discussion.notice = None;
-                    }
-                    start_view(state, id);
-                }
-                Err(reason) => {
-                    if let Some(discussion) = state.discussions.get_mut(&id) {
-                        discussion.notice = Some(reason.clone());
-                    }
-                }
-            }
-        }
-    }
-
     /// Runs the prompt of `node` again as a new sibling, with the model `spec`, and
     /// opens it. A refusal is reported in the tree.
     pub(crate) fn duplicate(state: &mut AppState, main_tx: MainTx, node: &NodeId, spec: ModelSpec) {
@@ -1032,7 +932,8 @@ impl DiscussionComponent {
     }
 
     /// Focuses the window already showing `node`, or opens a new one and loads the
-    /// node's prompt and reply from disk. The window starts with the node's model.
+    /// node's prompt and reply from disk. The window starts with the node's model and
+    /// an empty draft: opening never runs anything.
     pub(crate) fn open(state: &mut AppState, main_tx: MainTx, node: NodeId) {
         let existing = state
             .discussions
@@ -2644,7 +2545,6 @@ mod tests {
         assert_eq!(launch.prompt, "do it");
         assert!(matches!(launch.kind, TurnKind::Prompt(Mode::Commit)));
         assert_eq!(launch.command.as_deref(), Some("review"));
-        assert!(launch.rerun.is_none());
 
         let typed = "/compact keep names".to_string();
         let launch = Launch::replay(&tree, &NodeId::new("a3"), typed, spec.clone()).unwrap();
@@ -2661,6 +2561,46 @@ mod tests {
             Launch::replay(&tree, &NodeId::new("a1"), "hi".to_string(), spec).unwrap();
         assert_eq!(root_launch.parent, None);
         assert!(matches!(root_launch.kind, TurnKind::Prompt(Mode::Feedback)));
+    }
+
+    #[tokio::test]
+    async fn opening_a_node_starts_nothing_and_keeps_what_the_attempt_left() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let dir = root.join("a1").join("a2");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(root.join("a1").join("metadata.md"), "status: done\n").unwrap();
+        // No endpoint, model or effort: opening must not need them.
+        let metadata = "status: failed\nerror: boom\n";
+        std::fs::write(dir.join("metadata.md"), metadata).unwrap();
+        std::fs::write(dir.join("prompt.md"), "do it").unwrap();
+        std::fs::write(dir.join("reply.md"), "partial").unwrap();
+        std::fs::write(dir.join("activity.md"), "- shell ls\n").unwrap();
+        std::fs::write(dir.join("transcript.jsonl"), "{}\n").unwrap();
+        std::fs::create_dir_all(dir.join("agents").join("1")).unwrap();
+        std::fs::create_dir_all(dir.join("processes")).unwrap();
+
+        let mut state = empty_state();
+        *state.conversations.write() = ConversationTree::load(&root);
+        let (main_tx, _main_rx) = mpsc::channel(1);
+        DiscussionComponent::open(&mut state, main_tx, NodeId::new("a2"));
+
+        assert_eq!(state.discussions.len(), 1);
+        let discussion = state.discussions.values().next().unwrap();
+        assert_eq!(discussion.node, Some(NodeId::new("a2")));
+        assert!(discussion.draft.text().is_empty());
+        assert!(discussion.notice.is_none());
+        assert!(state.running_turns.is_empty());
+        for name in ["reply.md", "activity.md", "transcript.jsonl"] {
+            assert!(dir.join(name).exists(), "{name} was deleted");
+        }
+        for name in ["agents", "processes"] {
+            assert!(dir.join(name).exists(), "{name}/ was deleted");
+        }
+        assert_eq!(
+            std::fs::read_to_string(dir.join("metadata.md")).unwrap(),
+            metadata
+        );
     }
 
     fn key(key: Key) -> InputEvent {

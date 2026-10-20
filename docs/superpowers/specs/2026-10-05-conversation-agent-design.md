@@ -17,7 +17,7 @@ ends) or **commit** (the agent executes an instruction and commits the result).
 Three windows make up the feature:
 
 - **Conversation Tree** — the whole tree of the repository; navigation, fork points,
-  favorites, recovery, deletion.
+  favorites, deletion.
 - **Discussion** — one node: its prompt, its reply, and an input field for the next
   prompt.
 - **Model Picker** — fuzzy list of `endpoint/model/effort` entries.
@@ -343,8 +343,8 @@ a node whose own turn is still running. Every other refusal is immediate.
   text replaced as described under Cancel in 8.2.
 - Closing a window, or deleting its node, removes its entry.
 
-Recovering a node and replaying one with another model (section 9) start from the tree,
-not from an input: they are not queued and are refused while a turn runs.
+Replaying a node with another model (section 9) starts from the tree, not from an
+input: it is not queued and is refused while a turn runs.
 
 A refused send keeps the input and shows the reason on the status line.
 
@@ -563,8 +563,8 @@ error and its partial reply; sending from it creates a sibling.
 resumable and is not part of session restore.
 
 **Title and summary.** Until a turn ends, a node has no title or summary files and the
-tree shows the first line of its prompt. When a turn ends `done` (new nodes, reruns and
-recovered nodes alike), one non-streaming call to `summary-model` without tools
+tree shows the first line of its prompt. When a turn ends `done`, one non-streaming
+call to `summary-model` without tools
 (`prompts/title_summary.md`; on `claude-code`, `claude -p --tools ""`) reads a record of
 the turn: the prompt in `<prompt>`, the reply (cut at 8000 characters) in `<reply>` and,
 in commit mode, the subjects of the commits made in `<commits>`, closed by one line asking
@@ -578,19 +578,17 @@ cancelled turns keep the prompt-based display, and failures are silent: the file
 they were. Without a `summary-model` the call is skipped and nodes keep the prompt-based
 display.
 
-## 9. Recovering, replaying and editing nodes
+## 9. Opening, replaying and editing nodes
 
 A node whose status is not `done` (failed, cancelled, interrupted) is **incomplete**.
 Incomplete nodes are always leaves: a prompt sent from a window showing one becomes its
 sibling. Three tree keys
 deal with them and with second opinions:
 
-- **`Enter` — open, and recover if incomplete.** Opens the node in a Discussion window.
-  If the node is incomplete, its turn is run again **in place**: same directory, same
-  prompt, same mode, and the endpoint, model and effort it was originally asked with.
-  `reply.md`, `activity.md` and `transcript.jsonl` start over. The guards of section 8
-  apply; if one fails (dirty tree, another turn running, endpoint or model no longer
-  available) the window opens on the old partial reply and shows the reason.
+- **`Enter` — open.** Opens the node in a Discussion window, passively: it starts no
+  turn and deletes nothing, so the window shows what the attempt left and the input
+  starts empty. What happens next is the user's choice: a prompt sent from the window
+  becomes a sibling of the incomplete node, and `m` and `e` are the other two keys.
 - **`m` — same prompt, another model.** Opens the Model Picker; on `Enter` Explorer
   creates a **sibling** of the node with the same prompt and mode, run with the chosen
   model spec, and opens it. The pick belongs to that sibling only; it does not become
@@ -636,8 +634,7 @@ the end of the text, is looked up among the commands:
     (the rest of the system prompt stays) and no workspace note. Since nothing tells it
     that the tree is a lab, its work is kept: the turn runs and closes as a commit turn
     (commits recorded, nudge, leftovers stashed) and its node has type `commit`. The
-    node records `system-prompt: off`, so a replay or a rerun leaves the mode prompt
-    out again.
+    node records `system-prompt: off`, so a replay leaves the mode prompt out again.
   - `argument` and `description` are display only, see the hint below.
 
   A file whose name is not `[a-z0-9-]+`, that takes the name of a built-in, or that has
@@ -724,7 +721,7 @@ suggests `/compact` from the parent node.
     the thread ends in one), whether the thread was collapsed or already open: that is
     the node to read the outcome from and to continue. `Left` elsewhere jumps to the
     thread head or fork the row hangs from. The expanded set is saved in the session.
-  - `Enter` — open the node; recover it if incomplete (section 9).
+  - `Enter` — open the node (section 9).
   - `m` — same prompt with another model (section 9).
   - `e` — edit as a new sibling (section 9).
   - `n` — new root: opens a Discussion window with no node, only the input.
@@ -798,7 +795,7 @@ window holds its node's prompt, reply and work log in memory only while it is op
   - Highlights are byte ranges of the node's prompt and reply, kept per node and saved
     in the session, so they survive a resize, closing the window and a restart. They
     are refused while the node's turn runs (its reply is still changing) and on the work
-    log, and dropped when the node is deleted or run again in place.
+    log, and dropped when the node is deleted.
   - Selected text is painted on the regular selection color, `ui.selection`, with its
     foreground auto-contrasted, like the file preview. A highlight is painted on the
     theme's `warning` color mixed at 40% over the pane background (`marker_bg`), keeping
@@ -865,7 +862,7 @@ picker was opened:
 
 - Endpoint errors (auth, rate limit, context length, network) end the turn as `failed`
   with the provider's message on the status line and in `metadata.md`. No automatic
-  retry; the node is recovered with `Enter` in the tree.
+  retry; the node is opened with `Enter` in the tree and its prompt resent as a sibling.
 - A tool error is returned to the model as the tool result, not raised.
 - `claude` missing from `PATH`, or not logged in: the turn fails with that message.
 - Config errors (unknown kind, missing url, malformed model spec) are reported like
@@ -894,7 +891,7 @@ Hermetic unit tests:
 - recorder: the text of an answer that calls tools moves from the reply to the work
   log, with one line per tool call;
 - Markdown rendering: styles, wrapping, nested and tight lists, code blocks;
-- recover in place, sibling with another model, edit-as-sibling target;
+- opening a node passively, sibling with another model, edit-as-sibling target;
 - `conversation` pages: roots paging, path, straight-line segment cap, branches, commit
   lookup;
 - tree row layout (indentation only at forks, selected node expanded with wrapped title
@@ -945,9 +942,10 @@ Defaults chosen without an explicit answer; change freely.
    hidden from the user (the request was to save the nudge nowhere).
 4. `conversation` pages are generated on demand from memory rather than maintained as
    files.
-5. Incomplete nodes cannot be continued; they are recovered, edited as a sibling, or
-   re-run with another model.
-6. `Enter` re-runs a **cancelled** node too, although it was stopped on purpose.
+5. Incomplete nodes cannot be continued; they are edited as a sibling, or re-run with
+   another model.
+6. `Enter` on a **cancelled** node only opens it, like on any incomplete node: nothing
+   runs again in place, not even on a turn stopped on purpose.
 7. A pick made through `m` is not offered to new roots afterwards.
 8. A commit node with no commits (nothing to change, or a question back) is valid.
 9. `metadata.md` is flat `key: value` lines rather than KDL or JSON.
@@ -960,8 +958,7 @@ Defaults chosen without an explicit answer; change freely.
 14. `AGENTS.md` is injected into the system prompt of the own loop.
 15. `claude-code` runs with `--permission-mode bypassPermissions`.
 16. A turn found dirty after a commit turn is stashed with
-    `git stash push --include-untracked`; the stash of an earlier attempt of the same
-    node is no longer referenced by its metadata once the node is run again.
+    `git stash push --include-untracked`.
 17. Key choices: `<leader>c`, `n`, `f`, `c`, `Ctrl+O`; in the Discussion window `Esc`
     cancels or takes back and `Ctrl+C` only clears the input. The favorite of the node
     in focus is on `<leader>f` rather than `Ctrl+F`, which stays the input's forward-char.

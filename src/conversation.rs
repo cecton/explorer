@@ -548,32 +548,6 @@ impl ConversationTree {
         Ok(id)
     }
 
-    /// Prepares `id` for running its turn again in place: the previous attempt's reply,
-    /// work log and transcript are removed, and `change` rewrites the metadata.
-    pub fn restart_node(
-        &mut self,
-        id: &NodeId,
-        change: impl FnOnce(&mut Metadata),
-    ) -> std::io::Result<()> {
-        let dir = self.node_dir(id).ok_or_else(unknown_node)?;
-        for name in ["reply.md", "activity.md", "transcript.jsonl"] {
-            match std::fs::remove_file(dir.join(name)) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-                _ => {}
-            }
-        }
-        for name in [AGENTS_DIR, PROCESSES_DIR] {
-            match std::fs::remove_dir_all(dir.join(name)) {
-                Err(e) if e.kind() != std::io::ErrorKind::NotFound => return Err(e),
-                _ => {}
-            }
-        }
-        if let Some(node) = self.nodes.get_mut(id) {
-            node.agents.clear();
-        }
-        self.update_meta(id, change)
-    }
-
     pub fn agent(&self, node: &NodeId, index: u32) -> Option<&AgentRecord> {
         self.nodes
             .get(node)?
@@ -1183,23 +1157,6 @@ mod tests {
     }
 
     #[test]
-    fn restarting_a_node_drops_its_sub_agent_runs() {
-        let (_tmp, root) = temp_root();
-        let mut tree = ConversationTree::load(&root);
-        let node = tree
-            .create_node(None, 86_401, Metadata::default(), "p", None)
-            .unwrap();
-        tree.create_agent(&node, 86_402, Metadata::default(), "t")
-            .unwrap();
-        let agents = tree.node_dir(&node).unwrap().join("agents");
-        assert!(agents.exists());
-
-        tree.restart_node(&node, |_| {}).unwrap();
-        assert!(!agents.exists());
-        assert!(tree.node(&node).unwrap().agents.is_empty());
-    }
-
-    #[test]
     fn toggle_favorite_writes_through() {
         let (_tmp, root) = temp_root();
         let dir = root.join("2026-10-05T14-32-07Z");
@@ -1351,44 +1308,6 @@ mod tests {
         let first = tree.turn_context(&NodeId::new("a1")).unwrap();
         assert!(first.ancestor_dirs.is_empty());
         assert_eq!(first.parent_head, None);
-    }
-
-    #[test]
-    fn restart_node_drops_the_previous_attempt_but_keeps_the_prompt() {
-        let (_tmp, root) = temp_root();
-        let dir = root.join("a1");
-        write_node(
-            &dir,
-            &[
-                (
-                    "metadata.md",
-                    "status: failed\nerror: boom\nfavorite: true\n",
-                ),
-                ("prompt.md", "do it"),
-                ("reply.md", "partial"),
-                ("activity.md", "- shell ls\n"),
-                ("transcript.jsonl", "{}\n"),
-            ],
-        );
-        let mut tree = ConversationTree::load(&root);
-        let id = NodeId::new("a1");
-        tree.restart_node(&id, |meta| {
-            meta.status = Some(NodeStatus::Running);
-            meta.error = None;
-        })
-        .unwrap();
-
-        assert!(!dir.join("reply.md").exists());
-        assert!(!dir.join("activity.md").exists());
-        assert!(!dir.join("transcript.jsonl").exists());
-        assert_eq!(
-            std::fs::read_to_string(dir.join("prompt.md")).unwrap(),
-            "do it"
-        );
-        assert_eq!(
-            std::fs::read_to_string(dir.join("metadata.md")).unwrap(),
-            "status: running\nfavorite: true\n"
-        );
     }
 
     fn toc_tree() -> (tempfile::TempDir, ConversationTree) {

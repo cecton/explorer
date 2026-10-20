@@ -1090,7 +1090,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     DiscussionComponent::show(state, *window);
                 }
                 Some(RowTarget::Node(id)) => {
-                    DiscussionComponent::open_and_recover(state, main_tx, id.clone());
+                    DiscussionComponent::open(state, main_tx, id.clone());
                 }
                 Some(RowTarget::Agent { node, index }) => {
                     DiscussionComponent::open_agent(state, main_tx, node.clone(), *index);
@@ -1240,7 +1240,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     .is_some_and(|(at, last)| last == row && now.duration_since(at) < DOUBLE_CLICK);
                 self.last_click = (!double).then_some((now, row));
                 if double {
-                    DiscussionComponent::open_and_recover(state, main_tx, id);
+                    DiscussionComponent::open(state, main_tx, id);
                 }
             }
             InputEvent::Mouse(MouseInput {
