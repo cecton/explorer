@@ -335,7 +335,6 @@ fn state_marker(meta: &Metadata, running_for: Option<Duration>) -> Option<char> 
     match (meta.status, meta.node_type) {
         (Some(NodeStatus::Running), _) => Some(spinner_frame(running_for.unwrap_or_default())),
         (Some(NodeStatus::Failed), _) => Some('✗'),
-        (Some(NodeStatus::Cancelled), _) => Some('■'),
         _ if meta.stash.is_some() => Some('±'),
         (_, Some(NodeType::Compact)) => Some('≡'),
         _ => None,
@@ -1334,9 +1333,6 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             let running_fg = theme
                 .color_for_scope("diff.delta")
                 .unwrap_or(RgbValue::from_u8(250, 200, 90));
-            let warning_fg = theme
-                .ui_fg("warning")
-                .unwrap_or(RgbValue::from_u8(250, 170, 80));
             let error_fg = theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG);
             let favorite_fg = theme
                 .ui_fg("ui.cursor.match")
@@ -1522,7 +1518,6 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                             let running_for = agent_running_for(state, node, *index);
                             let fg = match meta.and_then(|meta| meta.status) {
                                 Some(NodeStatus::Failed) => error_fg,
-                                Some(NodeStatus::Cancelled) => warning_fg,
                                 _ => running_fg,
                             };
                             (meta.and_then(|meta| state_marker(meta, running_for)), fg)
@@ -1549,7 +1544,6 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let type_fg = match (node.meta.status, node.meta.node_type) {
                     _ if armed => error_fg,
                     (Some(NodeStatus::Failed), _) => error_fg,
-                    (Some(NodeStatus::Cancelled), _) => warning_fg,
                     (Some(NodeStatus::Running), _) => running_fg,
                     _ if favorite => favorite_fg,
                     (_, Some(NodeType::Commit)) => commit_fg,

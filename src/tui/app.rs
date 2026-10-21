@@ -1586,11 +1586,7 @@ impl App for AppMain {
                     if let Err(e) = updated {
                         tracing::warn!("failed to save the outcome of {}: {e}", node.as_str());
                     }
-                    if matches!(
-                        outcome.status,
-                        crate::conversation::NodeStatus::Failed
-                            | crate::conversation::NodeStatus::Cancelled
-                    ) {
+                    if outcome.status == crate::conversation::NodeStatus::Failed {
                         DiscussionComponent::restore_prompt(state, node);
                     }
                     // A turn may have moved HEAD or stashed: refresh what shows git state.
@@ -2327,17 +2323,26 @@ pub async fn run(
     });
     let _ = global_data.output_device.flush();
 
-    // Stop running turns: keep what they produced and record them as cancelled.
+    // Stop running turns: keep what they produced. One with a reply or commits is
+    // cancelled, part of the discussion; one without has nothing to show and fails.
     for (node, handle) in &global_data.state.running_turns {
         handle.cancel();
         let mut tree = global_data.state.conversations.write();
         if let Some(dir) = tree.node_dir(node) {
             let reply = handle.live.lock().reply.clone();
             let _ = crate::conversation::write_atomic(&dir.join("reply.md"), &reply);
+            let status = if crate::conversation::has_content(&reply) {
+                crate::conversation::NodeStatus::Cancelled
+            } else {
+                crate::conversation::NodeStatus::Failed
+            };
+            let _ = tree.update_meta(node, |meta| {
+                meta.status = Some(status);
+                if status == crate::conversation::NodeStatus::Failed {
+                    meta.error = Some(crate::conversation::CANCELLED_ERROR.to_string());
+                }
+            });
         }
-        let _ = tree.update_meta(node, |meta| {
-            meta.status = Some(crate::conversation::NodeStatus::Cancelled);
-        });
     }
 
     // Kill all terminal children gracefully.

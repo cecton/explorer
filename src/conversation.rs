@@ -81,6 +81,9 @@ pub enum NodeStatus {
     Cancelled,
 }
 
+/// What a turn cancelled before it said anything records as its error.
+pub const CANCELLED_ERROR: &str = "cancelled by the user";
+
 impl NodeStatus {
     fn parse(value: &str) -> Option<Self> {
         match value {
@@ -612,20 +615,27 @@ impl ConversationTree {
     }
 
     /// Marks the runs of `node` still running as cancelled: its turn is over, and a
-    /// sub-agent never outlives the turn that called it. Such a run never got to
-    /// record its duration, so its `created` stamp stands in for one.
+    /// sub-agent never outlives the turn that called it. A run with nothing to show
+    /// records as failed instead; one with a reply stays cancelled. A run cut short
+    /// never got to record its duration, so its `created` stamp stands in for one.
     pub fn cancel_running_agents(&mut self, node: &NodeId, now_secs: i64) {
-        let running: Vec<u32> = self.nodes.get(node).map_or_else(Vec::new, |owner| {
-            owner
-                .agents
-                .iter()
-                .filter(|agent| agent.meta.status == Some(NodeStatus::Running))
-                .map(|agent| agent.index)
-                .collect()
-        });
-        for index in running {
+        let running: Vec<(u32, Utf8PathBuf)> =
+            self.nodes.get(node).map_or_else(Vec::new, |owner| {
+                owner
+                    .agents
+                    .iter()
+                    .filter(|agent| agent.meta.status == Some(NodeStatus::Running))
+                    .filter_map(|agent| Some((agent.index, self.agent_dir(node, agent.index)?)))
+                    .collect()
+            });
+        for (index, dir) in running {
             let cancelled = self.update_agent_meta(node, index, |meta| {
-                meta.status = Some(NodeStatus::Cancelled);
+                if has_content(&std::fs::read_to_string(dir.join("reply.md")).unwrap_or_default()) {
+                    meta.status = Some(NodeStatus::Cancelled);
+                } else {
+                    meta.status = Some(NodeStatus::Failed);
+                    meta.error = Some(CANCELLED_ERROR.to_string());
+                }
                 if let Some(created) = meta.created.as_deref().and_then(parse_stamp) {
                     meta.secs = Some((now_secs - created).max(0) as u64);
                 }
@@ -742,6 +752,13 @@ impl ConversationTree {
 pub fn read_prompt_and_reply(dir: &Utf8Path) -> (String, String) {
     let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
     (read("prompt.md"), read("reply.md"))
+}
+
+/// Whether a turn left anything of its own: reply text or commits. A turn with
+/// content is part of the discussion even when its run was cut short; one without
+/// has nothing to say and nothing to build on.
+pub fn has_content(reply: &str) -> bool {
+    !reply.trim().is_empty()
 }
 
 /// A node's `input.md`: its prompt as typed, kept only when a slash command expanded it.
@@ -1114,14 +1131,39 @@ mod tests {
             ..Default::default()
         };
         tree.create_agent(&parent, 86_402, running, "t").unwrap();
-        tree.cancel_running_agents(&parent, 86_652);
-        let cancelled = tree.agent(&parent, 1).unwrap();
+        // A run with a reply stays cancelled: it has something to show.
+        let dir = tree.agent_dir(&parent, 1).unwrap();
+        std::fs::write(dir.join("reply.md"), "a partial answer").unwrap();
+        let cancelled = {
+            tree.cancel_running_agents(&parent, 86_652);
+            tree.agent(&parent, 1).unwrap()
+        };
         assert_eq!(cancelled.meta.status, Some(NodeStatus::Cancelled));
         assert_eq!(cancelled.meta.secs, Some(250));
         let reloaded = ConversationTree::load(&root);
         let reloaded = reloaded.agent(&parent, 1).unwrap();
         assert_eq!(reloaded.meta.status, Some(NodeStatus::Cancelled));
         assert_eq!(reloaded.meta.secs, Some(250));
+    }
+
+    #[test]
+    fn a_cancelled_run_without_a_reply_records_as_failed() {
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+        let parent = tree
+            .create_node(None, 86_401, Metadata::default(), "p", None)
+            .unwrap();
+        let running = Metadata {
+            status: Some(NodeStatus::Running),
+            ..Default::default()
+        };
+        tree.create_agent(&parent, 86_402, running, "t").unwrap();
+        tree.cancel_running_agents(&parent, 86_652);
+        let agent = tree.agent(&parent, 1).unwrap();
+        assert_eq!(agent.meta.status, Some(NodeStatus::Failed));
+        assert_eq!(agent.meta.error.as_deref(), Some(CANCELLED_ERROR));
+        // A run starting at 86_402 cut at 86_652 keeps its duration.
+        assert_eq!(agent.meta.secs, Some(250));
     }
 
     #[test]

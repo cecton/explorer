@@ -254,10 +254,13 @@ pub(crate) fn start_turn(
         return Err(Refusal::Busy("this node is still running"));
     }
     // A continue turn replays the interrupted node's transcript: it is the one prompt
-    // that may build on an incomplete node, and only while it is a leaf.
+    // that may build on an incomplete node, and only while it is a leaf. A cancelled
+    // node always cut short with something to show, so it is complete like a done one.
     let allowed = match parent_status {
-        None | Some(NodeStatus::Done) => !continuing || !parent_has_children,
-        Some(NodeStatus::Failed | NodeStatus::Cancelled) => continuing,
+        None | Some(NodeStatus::Done | NodeStatus::Cancelled) => {
+            !continuing || !parent_has_children
+        }
+        Some(NodeStatus::Failed) => continuing,
         Some(NodeStatus::Running) => false,
     };
     if !allowed {
@@ -488,8 +491,9 @@ fn move_queued(state: &mut AppState, window: usize, earlier: bool) {
 }
 
 /// The turn the draft of window `id` asks for, as the window stands now: a new node
-/// below the node shown, or a sibling of it when its turn failed or was cancelled.
-/// `None` without a draft or a model; a refusal when the draft cannot make a turn.
+/// below the node shown, or a sibling of it when its turn failed. A cancelled node
+/// cut short with something to show, so follow-ups build on it. `None` without a
+/// draft or a model; a refusal when the draft cannot make a turn.
 fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>> {
     let discussion = state.discussions.get(&id)?;
     let typed = discussion.draft.text().trim().to_string();
@@ -506,7 +510,7 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
                 parent,
                 meta:
                     Metadata {
-                        status: Some(NodeStatus::Failed | NodeStatus::Cancelled),
+                        status: Some(NodeStatus::Failed),
                         ..
                     },
                 ..
@@ -533,7 +537,7 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
                         .error
                         .clone()
                         .unwrap_or_else(|| "the turn ended without an error message".to_string()),
-                    Some(NodeStatus::Cancelled) => "cancelled by the user".to_string(),
+                    Some(NodeStatus::Cancelled) => crate::conversation::CANCELLED_ERROR.to_string(),
                     _ => "the turn stopped before an answer".to_string(),
                 };
                 (interrupted, node_mode(resumed))
@@ -1253,9 +1257,8 @@ impl DiscussionComponent {
         }
     }
 
-    /// Gives the prompt of `node`, whose turn failed or was cancelled, back to the
-    /// windows showing it: as it was typed, over whatever their input held, a queued
-    /// follow-up included.
+    /// Gives the prompt of `node`, whose turn failed, back to the windows showing it:
+    /// as it was typed, over whatever their input held, a queued follow-up included.
     pub(crate) fn restore_prompt(state: &mut AppState, node: &NodeId) {
         let Some(input) = state
             .conversations
@@ -1479,7 +1482,7 @@ fn status_text(meta: &Metadata) -> (String, bool) {
             let error = meta.error.as_deref().unwrap_or("unknown error");
             (format!("failed: {error}"), true)
         }
-        Some(NodeStatus::Cancelled) => ("cancelled".to_string(), true),
+        Some(NodeStatus::Cancelled) => ("cancelled".to_string(), false),
         Some(NodeStatus::Running) => ("running".to_string(), false),
         Some(NodeStatus::Done) => ("done".to_string(), false),
         None => (String::new(), false),

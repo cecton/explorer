@@ -7,7 +7,7 @@ use super::usage::{self, Usage};
 use super::{
     AgentConfig, Backend, Endpoint, EndpointKind, Message, Mode, ModelSpec, agent_loop, context,
 };
-use crate::conversation::{ConversationTree, NodeId, NodeStatus, write_atomic};
+use crate::conversation::{CANCELLED_ERROR, ConversationTree, NodeId, NodeStatus, write_atomic};
 use crate::git::discard_worktree;
 use crate::tui::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -451,6 +451,16 @@ pub(super) fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx:
     });
 }
 
+/// What a turn cut short records: one with content stays cancelled, part of the
+/// discussion; one with none has nothing to show and fails.
+fn cancelled_status(reply: &str, commits: &[String]) -> (NodeStatus, Option<String>) {
+    if !crate::conversation::has_content(reply) && commits.is_empty() {
+        (NodeStatus::Failed, Some(CANCELLED_ERROR.to_string()))
+    } else {
+        (NodeStatus::Cancelled, None)
+    }
+}
+
 /// Starts the turn of a node already created on disk and returns its handle. The
 /// outcome arrives as `AppSignal::TurnFinished`.
 pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
@@ -478,7 +488,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
         let mut recorder =
             Recorder::new(Arc::clone(&live), request.node_dir.clone(), main_tx.clone());
         live.lock().model = request.spec.to_string();
-        let (status, error) = tokio::select! {
+        let (mut status, mut error) = tokio::select! {
             result = run(&request, &mut recorder) => match result {
                 Ok(()) => (NodeStatus::Done, None),
                 Err(error) => (NodeStatus::Failed, Some(with_compact_hint(error))),
@@ -512,6 +522,12 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
                 (commits, stash, false)
             }
         };
+        // A turn cut short before it said anything has nothing to show and nothing to
+        // build on: it fails. One with a reply or commits stays cancelled, part of the
+        // discussion.
+        if status == NodeStatus::Cancelled {
+            (status, error) = cancelled_status(&recorder.live.lock().reply, &commits);
+        }
         let (tokens_in, cached_in, session_id, reported_usage) = {
             let live = live.lock();
             (
@@ -528,7 +544,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             head_after: head_after.clone(),
             tokens_in,
             cached_in,
-            commits,
+            commits: commits.clone(),
             stash,
             reset,
             session_id,
@@ -543,7 +559,8 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             .await;
         redraw.abort();
         report_usage(request.endpoint.clone(), reported_usage, main_tx.clone());
-        if status == NodeStatus::Done
+        let reply_blank = recorder.live.lock().reply.trim().is_empty();
+        if (status == NodeStatus::Done || !reply_blank || !commits.is_empty())
             && let Some(backend) = &request.summary_backend
         {
             let root = request.root.clone();
@@ -1029,6 +1046,19 @@ mod tests {
         assert_eq!(spinner_frame(REDRAW_INTERVAL), '⠙');
         assert_eq!(spinner_frame(REDRAW_INTERVAL * 9), '⠏');
         assert_eq!(spinner_frame(REDRAW_INTERVAL * 10), '⠋');
+    }
+
+    #[test]
+    fn a_cancel_with_content_stays_cancelled() {
+        let (status, error) = cancelled_status("a partial answer", &[]);
+        assert_eq!(status, NodeStatus::Cancelled);
+        assert_eq!(error, None);
+        let (status, error) = cancelled_status("", &["abc1234".to_string()]);
+        assert_eq!(status, NodeStatus::Cancelled);
+        assert_eq!(error, None);
+        let (status, error) = cancelled_status("  \n  ", &[]);
+        assert_eq!(status, NodeStatus::Failed);
+        assert_eq!(error.as_deref(), Some(crate::conversation::CANCELLED_ERROR));
     }
 
     fn git(root: &Utf8Path, args: &[&str]) -> String {
