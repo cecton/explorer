@@ -602,8 +602,8 @@ async fn run_claude_code(
         .map_err(|e| e.to_string())?
     };
     // A continue turn owns the node's own session: the CLI kept its thinking and its
-    // tool state, so resuming it is the whole point. When it is gone, the fresh path
-    // below opens with the ancestors as plain text.
+    // tool state, so resuming it is the whole point. When it is gone, a fresh session
+    // opens with the ancestors as plain text.
     if let Some(continue_session) = &request.continue_session {
         let run = claude_code::run(
             &invocation(
@@ -617,8 +617,8 @@ async fn run_claude_code(
             recorder,
         )
         .await;
-        return match run {
-            Ok(()) => Ok(()),
+        match run {
+            Ok(()) => {}
             Err(RunError::SessionGone) => {
                 let opening = match preamble {
                     Some(preamble) => format!("{preamble}\n\n{message}"),
@@ -629,46 +629,47 @@ async fn run_claude_code(
                     recorder,
                 )
                 .await
-                .map_err(run_error_text)
+                .map_err(run_error_text)?;
             }
-            Err(RunError::Failed(error)) => Err(error),
+            Err(RunError::Failed(error)) => return Err(error),
+        }
+    } else {
+        // Fork the parent's session when there is one; otherwise, or when it is gone, start
+        // a fresh session that opens with the ancestors as plain text.
+        let forked = match request.parent_session.as_deref() {
+            Some(session) => {
+                match claude_code::run(
+                    &invocation(
+                        request,
+                        mcp,
+                        target,
+                        &system,
+                        &message,
+                        Resume::Fork(session),
+                    ),
+                    recorder,
+                )
+                .await
+                {
+                    Ok(()) => true,
+                    Err(RunError::SessionGone) => false,
+                    Err(RunError::Failed(error)) => return Err(error),
+                }
+            }
+            None => false,
         };
-    }
-    // Fork the parent's session when there is one; otherwise, or when it is gone, start
-    // a fresh session that opens with the ancestors as plain text.
-    let forked = match request.parent_session.as_deref() {
-        Some(session) => {
-            match claude_code::run(
-                &invocation(
-                    request,
-                    mcp,
-                    target,
-                    &system,
-                    &message,
-                    Resume::Fork(session),
-                ),
+        if !forked {
+            let opening = match preamble {
+                Some(preamble) => format!("{preamble}\n\n{message}"),
+                None => message,
+            };
+            claude_code::run(
+                &invocation(request, mcp, target, &system, &opening, Resume::Fresh),
                 recorder,
             )
             .await
-            {
-                Ok(()) => true,
-                Err(RunError::SessionGone) => false,
-                Err(RunError::Failed(error)) => return Err(error),
-            }
+            .map_err(run_error_text)?;
         }
-        None => false,
-    };
-    if !forked {
-        let opening = match preamble {
-            Some(preamble) => format!("{preamble}\n\n{message}"),
-            None => message,
-        };
-        claude_code::run(
-            &invocation(request, mcp, target, &system, &opening, Resume::Fresh),
-            recorder,
-        )
-        .await
-        .map_err(run_error_text)?;
     }
     if request.mode == Mode::Feedback {
         return Ok(());

@@ -98,9 +98,9 @@ pub(crate) enum TurnKind {
     NoSystemPrompt,
     /// The built-in `/compact`: summarize the branch so far.
     Compact { instructions: String },
-    /// The built-in `/continue`: resume the turn of an interrupted node, replaying
-    /// its transcript and adding a note of how it ended.
-    Continue,
+    /// The built-in `/continue`: resume the turn of an interrupted node in the mode it
+    /// ran, replaying its transcript and adding a note of how it ended.
+    Continue(Mode),
 }
 
 /// A turn to start: a new node under `parent`, or a new root.
@@ -214,18 +214,24 @@ pub(crate) fn start_turn(
         command,
         spec,
     } = launch;
-    let no_system_prompt = matches!(kind, TurnKind::NoSystemPrompt);
-    let continuing = matches!(kind, TurnKind::Continue);
+    // A resumed commit turn is closed as a commit but gets no mode prompt, like a custom
+    // command with `system-prompt: off`; a resumed feedback turn keeps its prompt.
+    let no_system_prompt = matches!(
+        kind,
+        TurnKind::NoSystemPrompt | TurnKind::Continue(Mode::Commit)
+    );
+    let continuing = matches!(kind, TurnKind::Continue(_));
     // A compact turn changes nothing, so it runs under the shared lock like feedback.
     let (mode, node_type, compact) = match kind {
-        TurnKind::Prompt(Mode::Feedback) => (Mode::Feedback, NodeType::Feedback, None),
-        TurnKind::Prompt(Mode::Commit) | TurnKind::NoSystemPrompt => {
-            (Mode::Commit, NodeType::Commit, None)
+        TurnKind::Prompt(Mode::Feedback) | TurnKind::Continue(Mode::Feedback) => {
+            (Mode::Feedback, NodeType::Feedback, None)
         }
+        TurnKind::Prompt(Mode::Commit)
+        | TurnKind::NoSystemPrompt
+        | TurnKind::Continue(Mode::Commit) => (Mode::Commit, NodeType::Commit, None),
         TurnKind::Compact { instructions } => {
             (Mode::Feedback, NodeType::Compact, Some(instructions))
         }
-        TurnKind::Continue => (Mode::Feedback, NodeType::Feedback, None),
     };
     let endpoint = state.agent.endpoint(&spec.endpoint).cloned();
     let (Some(endpoint), Some(backend)) = (endpoint, state.agent.backend(&spec)) else {
@@ -518,17 +524,19 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
                     "/continue has nothing to resume in a new conversation".to_string(),
                 )));
             };
-            let interrupted = {
+            let (interrupted, mode) = {
                 let tree = state.conversations.read();
-                let meta = &tree.node(node)?.meta;
-                match meta.status {
+                let resumed = tree.node(node)?;
+                let meta = &resumed.meta;
+                let interrupted = match meta.status {
                     Some(NodeStatus::Failed) => meta
                         .error
                         .clone()
                         .unwrap_or_else(|| "the turn ended without an error message".to_string()),
                     Some(NodeStatus::Cancelled) => "cancelled by the user".to_string(),
                     _ => "the turn stopped before an answer".to_string(),
-                }
+                };
+                (interrupted, node_mode(resumed))
             };
             (
                 context::continue_request(
@@ -537,7 +545,7 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
                     &instructions,
                 ),
                 Some(typed),
-                TurnKind::Continue,
+                TurnKind::Continue(mode),
                 None,
             )
         }
@@ -2495,8 +2503,18 @@ mod tests {
             .set_text("/continue");
         let launch = compose_launch(&state, 1).unwrap().unwrap();
         assert_eq!(launch.parent, Some(NodeId::new("a2")));
-        assert!(matches!(launch.kind, TurnKind::Continue));
+        assert!(matches!(launch.kind, TurnKind::Continue(Mode::Feedback)));
         assert!(launch.command.is_none());
+
+        state
+            .conversations
+            .write()
+            .update_meta(&NodeId::new("a2"), |meta| {
+                meta.node_type = Some(NodeType::Commit);
+            })
+            .unwrap();
+        let launch = compose_launch(&state, 1).unwrap().unwrap();
+        assert!(matches!(launch.kind, TurnKind::Continue(Mode::Commit)));
         // The note carries the recorded error and the prompt as typed.
         assert!(launch.prompt.contains("was interrupted"));
         assert!(launch.prompt.contains("[Note from Explorer:"));
