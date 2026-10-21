@@ -15,7 +15,7 @@ use parking_lot::{Mutex, RwLock};
 use r3bl_tui::TerminalWindowMainThreadSignal;
 use std::io::Write;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
 
 const REPLY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
@@ -475,7 +475,10 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             _ = cancel_rx.wait_for(|cancelled| *cancelled) => (NodeStatus::Cancelled, None),
         };
         recorder.flush_reply();
-        request.tree.write().cancel_running_agents(&request.node);
+        request
+            .tree
+            .write()
+            .cancel_running_agents(&request.node, now_secs());
         let head_after = request.repo.as_ref().and_then(crate::git::head_id);
         let (commits, stash, reset) = match request.mode {
             Mode::Feedback => {
@@ -895,6 +898,12 @@ fn with_compact_hint(error: String) -> String {
     } else {
         error
     }
+}
+
+fn now_secs() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |e| e.as_secs() as i64)
 }
 
 fn single_line(text: &str) -> String {

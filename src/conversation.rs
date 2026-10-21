@@ -18,26 +18,33 @@ impl NodeId {
 
     /// Creation time encoded in the id, as seconds since the Unix epoch (UTC).
     fn created_secs(&self) -> Option<i64> {
-        let stamp = self.0.get(..20)?;
-        let bytes = stamp.as_bytes();
-        if bytes[4] != b'-'
-            || bytes[7] != b'-'
-            || bytes[10] != b'T'
-            || bytes[13] != b'-'
-            || bytes[16] != b'-'
-            || bytes[19] != b'Z'
-        {
-            return None;
-        }
-        let year: i64 = stamp.get(0..4)?.parse().ok()?;
-        let month: u32 = stamp.get(5..7)?.parse().ok()?;
-        let day: u32 = stamp.get(8..10)?.parse().ok()?;
-        let hour: i64 = stamp.get(11..13)?.parse().ok()?;
-        let minute: i64 = stamp.get(14..16)?.parse().ok()?;
-        let second: i64 = stamp.get(17..19)?.parse().ok()?;
-        let days = crate::git::days_from_civil(year, month, day);
-        Some(days * 86_400 + hour * 3600 + minute * 60 + second)
+        parse_stamp(&self.0)
     }
+}
+
+/// Seconds since the Unix epoch of a `YYYY-MM-DDTHH:MM:SSZ` stamp, as in a node id
+/// (`:` written as `-`) or a `created` metadata value.
+fn parse_stamp(stamp: &str) -> Option<i64> {
+    let stamp = stamp.get(..20)?;
+    let bytes = stamp.as_bytes();
+    if bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes[10] != b'T'
+        || [bytes[13], bytes[16]]
+            .iter()
+            .any(|b| *b != b'-' && *b != b':')
+        || bytes[19] != b'Z'
+    {
+        return None;
+    }
+    let year: i64 = stamp.get(0..4)?.parse().ok()?;
+    let month: u32 = stamp.get(5..7)?.parse().ok()?;
+    let day: u32 = stamp.get(8..10)?.parse().ok()?;
+    let hour: i64 = stamp.get(11..13)?.parse().ok()?;
+    let minute: i64 = stamp.get(14..16)?.parse().ok()?;
+    let second: i64 = stamp.get(17..19)?.parse().ok()?;
+    let days = crate::git::days_from_civil(year, month, day);
+    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -605,8 +612,9 @@ impl ConversationTree {
     }
 
     /// Marks the runs of `node` still running as cancelled: its turn is over, and a
-    /// sub-agent never outlives the turn that called it.
-    pub fn cancel_running_agents(&mut self, node: &NodeId) {
+    /// sub-agent never outlives the turn that called it. Such a run never got to
+    /// record its duration, so its `created` stamp stands in for one.
+    pub fn cancel_running_agents(&mut self, node: &NodeId, now_secs: i64) {
         let running: Vec<u32> = self.nodes.get(node).map_or_else(Vec::new, |owner| {
             owner
                 .agents
@@ -618,6 +626,9 @@ impl ConversationTree {
         for index in running {
             let cancelled = self.update_agent_meta(node, index, |meta| {
                 meta.status = Some(NodeStatus::Cancelled);
+                if let Some(created) = meta.created.as_deref().and_then(parse_stamp) {
+                    meta.secs = Some((now_secs - created).max(0) as u64);
+                }
             });
             if let Err(e) = cancelled {
                 tracing::warn!(
@@ -1103,16 +1114,14 @@ mod tests {
             ..Default::default()
         };
         tree.create_agent(&parent, 86_402, running, "t").unwrap();
-        tree.cancel_running_agents(&parent);
-        assert_eq!(
-            tree.agent(&parent, 1).unwrap().meta.status,
-            Some(NodeStatus::Cancelled)
-        );
+        tree.cancel_running_agents(&parent, 86_652);
+        let cancelled = tree.agent(&parent, 1).unwrap();
+        assert_eq!(cancelled.meta.status, Some(NodeStatus::Cancelled));
+        assert_eq!(cancelled.meta.secs, Some(250));
         let reloaded = ConversationTree::load(&root);
-        assert_eq!(
-            reloaded.agent(&parent, 1).unwrap().meta.status,
-            Some(NodeStatus::Cancelled)
-        );
+        let reloaded = reloaded.agent(&parent, 1).unwrap();
+        assert_eq!(reloaded.meta.status, Some(NodeStatus::Cancelled));
+        assert_eq!(reloaded.meta.secs, Some(250));
     }
 
     #[test]
@@ -1429,5 +1438,9 @@ mod tests {
         assert_eq!(id.created_secs(), Some(86_401));
         assert_eq!(NodeId::new("nonsense").created_secs(), None);
         assert_eq!(NodeId::new("2026x10-05T14-32-07Z").created_secs(), None);
+        assert_eq!(parse_stamp("2026-10-21T03:51:21Z"), Some(1_792_554_681));
+        assert_eq!(parse_stamp("1970-01-02T00:00:01Z"), Some(86_401));
+        assert_eq!(parse_stamp("1970-01-02 00:00:01Z"), None);
+        assert_eq!(parse_stamp("too short"), None);
     }
 }
