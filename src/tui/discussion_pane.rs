@@ -1305,7 +1305,6 @@ impl DiscussionComponent {
                 && cache.running_turn == running_turn
         });
         if !fresh {
-            let rebuild = Instant::now();
             let text_fg = theme
                 .ui_fg("ui.text")
                 .unwrap_or(RgbValue::from_u8(170, 170, 200));
@@ -1371,16 +1370,7 @@ impl DiscussionComponent {
                         bg: None,
                     });
                 }
-                let rendering = Instant::now();
-                let rendered = markdown::render(&discussion.reply, theme, width);
-                tracing::debug!(
-                    target: "perf",
-                    reply_bytes = discussion.reply.len(),
-                    width,
-                    markdown_us = rendering.elapsed().as_micros() as u64,
-                    "markdown render"
-                );
-                for md in rendered {
+                for md in markdown::render(&discussion.reply, theme, width) {
                     lines.push(DocLine {
                         part: Some(DocPart::Reply),
                         spans: md.spans,
@@ -1388,11 +1378,6 @@ impl DiscussionComponent {
                     });
                 }
             }
-            tracing::debug!(
-                target: "perf",
-                rebuild_us = rebuild.elapsed().as_micros() as u64,
-                "document rebuild"
-            );
             self.cache = Some(DocCache {
                 window_id: self.window_id,
                 width,
@@ -1802,12 +1787,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             if let Some(output) = &output
                 && let Some(discussion) = state.discussions.get_mut(&self.window_id)
             {
-                let waiting = Instant::now();
                 let live = output.lock();
-                let lock_wait = waiting.elapsed();
-                let holding = Instant::now();
-                let reply_bytes = live.reply.len();
-                let mut copied = false;
                 if live.reply.len() != discussion.reply.len()
                     || live.work_log.len() != discussion.work_log.len()
                     || live.visible_work_log().len() != discussion.visible_work_log.len()
@@ -1820,18 +1800,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                         .visible_work_log
                         .extend_from_slice(live.visible_work_log());
                     discussion.thinking.clone_from(&live.thinking);
-                    copied = true;
                 }
-                drop(live);
-                let held = holding.elapsed();
-                tracing::debug!(
-                    target: "perf",
-                    lock_wait_us = lock_wait.as_micros() as u64,
-                    held_us = held.as_micros() as u64,
-                    copied,
-                    reply_bytes,
-                    "render live turn"
-                );
             }
             let Some(discussion) = state.discussions.get(&self.window_id) else {
                 return Ok(());

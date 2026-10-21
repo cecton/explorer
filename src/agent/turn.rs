@@ -206,7 +206,6 @@ pub struct Recorder {
     answer_start: usize,
     last_flush: Instant,
     last_signal: Instant,
-    last_text: Option<Instant>,
     /// Chars of thinking recorded for the answer in progress; lets the recorder drop
     /// the live thinking when the answer turns out to call tools.
     thinking_start: usize,
@@ -241,7 +240,6 @@ impl Recorder {
             answer_start: 0,
             last_flush: Instant::now(),
             last_signal: Instant::now(),
-            last_text: None,
             thinking_start: 0,
         }
     }
@@ -359,16 +357,7 @@ impl Recorder {
     }
 
     pub fn text(&mut self, chunk: &str) {
-        let now = Instant::now();
-        let gap = self.last_text.replace(now).map(|last| last.elapsed());
         self.live.lock().reply.push_str(chunk);
-        tracing::debug!(
-            target: "perf",
-            chunk_bytes = chunk.len(),
-            gap_us = gap.map(|gap| gap.as_micros() as u64),
-            lock_us = now.elapsed().as_micros() as u64,
-            "stream chunk"
-        );
         if self.last_flush.elapsed() >= REPLY_FLUSH_INTERVAL {
             self.flush_reply();
         }
