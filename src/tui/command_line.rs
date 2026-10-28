@@ -1,3 +1,4 @@
+use crate::tui::after_agents::{self, AfterAgents};
 use crate::tui::*;
 use camino::{Utf8Path, Utf8PathBuf};
 
@@ -35,16 +36,33 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
         state.command_line = None;
         return;
     }
-    let outcome = match text.strip_prefix('!') {
-        Some(shell_cmd) => {
-            let file = match command_line.origin {
-                Some(Window::FilePreview(key)) => {
-                    state.files.load().get(key.0).map(|file| file.path.clone())
-                }
-                _ => None,
-            };
-            shell_signal(shell_cmd, file.as_deref(), &state.root)
+    let file = match command_line.origin {
+        Some(Window::FilePreview(key)) => {
+            state.files.load().get(key.0).map(|file| file.path.clone())
         }
+        _ => None,
+    };
+    if let Some(rest) = after_agents_argument(&text) {
+        let command = rest.trim();
+        if command.is_empty() {
+            state.after_agents = None;
+        } else {
+            let command = resolve_alias(&state.after_agents_aliases, command);
+            match expand_placeholders(&command, file.as_deref(), &state.root) {
+                Ok(expanded) => state.after_agents = Some(AfterAgents::Pending(expanded)),
+                Err(error) => {
+                    if let Some(command_line) = state.command_line.as_mut() {
+                        command_line.error = Some(error);
+                    }
+                    return;
+                }
+            }
+        }
+        state.command_line = None;
+        return;
+    }
+    let outcome = match text.strip_prefix('!') {
+        Some(shell_cmd) => shell_signal(shell_cmd, file.as_deref(), &state.root),
         None => Err(format!(
             "unknown command: {}",
             text.trim().lines().next().unwrap_or_default()
@@ -66,11 +84,33 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
     }
 }
 
+/// The typed `after-agents` argument with its first word replaced by the alias it names.
+fn resolve_alias(aliases: &[(String, String)], text: &str) -> String {
+    let text = text.trim();
+    let (word, rest) = match text.split_once(char::is_whitespace) {
+        Some((word, rest)) => (word, rest.trim_start()),
+        None => (text, ""),
+    };
+    match aliases.iter().find(|(name, _)| name == word) {
+        Some((_, template)) if rest.is_empty() => template.clone(),
+        Some((_, template)) => format!("{template} {rest}"),
+        None => text.to_string(),
+    }
+}
+
+/// What follows `after-agents` in `text`, or `None` for another command.
+fn after_agents_argument(text: &str) -> Option<&str> {
+    let rest = text.trim_start().strip_prefix(after_agents::NAME)?;
+    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some(rest)
+}
+
 /// Paints over the bottom rows, growing upward: the panes are not resized while typing.
 pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mut AppState) {
     let AppState {
         command_line: Some(command_line),
         theme,
+        after_agents,
+        after_agents_aliases,
         ..
     } = state
     else {
@@ -81,10 +121,27 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mu
     let color_fg = TuiColor::from(fg_rgb);
     let color_selection = TuiColor::from(title_selection_bg(false, theme));
     let after_bang = command_line.input.text() == "!";
+    let typed = command_line.input.text();
+    let after_agents_hint =
+        (after_agents_argument(typed).is_some_and(|rest| rest.trim().is_empty())).then(|| {
+            let gap = if typed.ends_with(char::is_whitespace) {
+                ""
+            } else {
+                " "
+            };
+            format!(
+                "{gap}{}",
+                after_agents::hint(after_agents.as_ref(), after_agents_aliases)
+            )
+        });
     let placeholder = match &command_line.error {
         Some(error) => {
             let error_fg = TuiColor::from(theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG));
             Some((format!("  {error}"), error_fg))
+        }
+        None if after_agents_hint.is_some() => {
+            let weak = theme.color_for_scope("comment").unwrap_or(fg_rgb);
+            after_agents_hint.map(|hint| (hint, TuiColor::from(weak)))
         }
         None if after_bang => {
             let weak = theme.color_for_scope("comment").unwrap_or(fg_rgb);
@@ -179,9 +236,10 @@ fn find_repo_root(file_path: &Utf8Path) -> Option<Utf8PathBuf> {
     }
 }
 
-/// Expands `%%`, `%`, `%c`/`%crate`, and `%r`/`%repo` placeholders in `cmd`.
+/// Expands `%%`, `%`, `%c`/`%crate`, `%r`/`%repo` and `%project` placeholders in `cmd`.
 ///
 /// - `%%`           → a literal `%`
+/// - `%project`     → shell-quoted name of the directory of `root`; needs no file
 /// - `%`            → shell-quoted relative path of `file` from `root`
 /// - `%d` / `%dir`   → shell-quoted directory of `file` (relative to `root`)
 /// - `%c` / `%crate` → shell-quoted path to the nearest `Cargo.toml` ancestor directory
@@ -207,6 +265,11 @@ fn expand_placeholders(
         if let Some(rest) = s.strip_prefix('%') {
             result.push('%');
             s = rest;
+            continue;
+        }
+        if s.starts_with("project") && is_word_end(&s[7..]) {
+            result.push_str(&sh_quote(root.file_name().unwrap_or_default()));
+            s = &s[7..];
             continue;
         }
         let file_path = file.ok_or_else(|| "% needs a file preview in focus".to_string())?;
@@ -264,6 +327,35 @@ mod tests {
             expand_placeholders("printf '%%s\\n' x", None, root),
             Ok("printf '%s\\n' x".to_string())
         );
+    }
+
+    #[test]
+    fn project_is_the_root_directory_name_and_needs_no_file() {
+        let root = Utf8Path::new("/home/me/my repo");
+        let file = Utf8Path::new("/home/me/my repo/src/main.rs");
+        assert_eq!(
+            expand_placeholders("notify-send %project", None, root),
+            Ok("notify-send 'my repo'".to_string())
+        );
+        assert_eq!(
+            expand_placeholders("echo %project %", Some(file), root),
+            Ok("echo 'my repo' 'src/main.rs'".to_string())
+        );
+    }
+
+    #[test]
+    fn alias_takes_the_rest_as_typed() {
+        let aliases = [
+            ("poweroff".to_string(), "systemctl poweroff".to_string()),
+            ("notify".to_string(), "notify-send %project".to_string()),
+        ];
+        assert_eq!(resolve_alias(&aliases, "poweroff"), "systemctl poweroff");
+        assert_eq!(
+            resolve_alias(&aliases, "notify  \"build done\" now "),
+            "notify-send %project \"build done\" now"
+        );
+        assert_eq!(resolve_alias(&aliases, "notifying x"), "notifying x");
+        assert_eq!(resolve_alias(&aliases, "git push"), "git push");
     }
 
     #[test]

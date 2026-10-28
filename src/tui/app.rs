@@ -703,6 +703,10 @@ impl App for AppMain {
         // Any other input event counts as activity for the "active" time counter.
         global_data.state.time.on_input();
 
+        if after_agents::cancel_on_input(&mut global_data.state, &input_event) {
+            return Ok(EventPropagation::ConsumedRender);
+        }
+
         // The command line takes every key while it is open, ahead of the leader key.
         if let Some(command_line) = global_data.state.command_line.as_mut() {
             if !matches!(input_event, InputEvent::Mouse(_)) && command_line.input.selecting() {
@@ -1674,7 +1678,8 @@ impl App for AppMain {
                             &win.source,
                         );
                     }
-                    DiscussionComponent::release_queue(state, main_tx);
+                    DiscussionComponent::release_queue(state, main_tx.clone());
+                    after_agents::arm(state, main_tx);
                     self.dirty_check_ticks = 4;
                 }
                 AppSignal::NodeTitleReady { node, title } => {
@@ -1693,7 +1698,9 @@ impl App for AppMain {
                         state.is_dirty = *dirty;
                     }
                 }
+                AppSignal::AfterAgentsExited { run } => after_agents::exited(state, *run),
                 AppSignal::Noop | AppSignal::TerminalOutput => {
+                    after_agents::tick(state, global_data.main_thread_channel_sender.clone());
                     // Streaming terminal output counts as activity when the option is on,
                     // so a running command keeps the active counter alive without input.
                     // Polled from per-pane `last_output` timestamps rather than tied to
@@ -2179,6 +2186,10 @@ fn render_status_bar(
     let error_style = new_style!(color_fg: {error_fg} color_bg: {color_bg});
     let dirty = state.is_dirty.then_some(("│ ", "dirty "));
     let usage = focused_usage(state);
+    let after_agents = state
+        .after_agents
+        .as_ref()
+        .map(|after| after_agents::status_text(after, Instant::now()));
     let counters = state.show_timers.then(|| {
         let t = &state.time;
         format!(
@@ -2198,17 +2209,17 @@ fn render_status_bar(
     let width_of = |text: &str| GCStringOwned::from(text).display_width().as_usize();
     let dirty_width = dirty.map_or(0, |(bar, label)| width_of(bar) + width_of(label));
     let usage_width: usize = usage.iter().map(|(text, _)| width_of(text)).sum();
+    let after_width = after_agents.as_ref().map_or(0, |(text, _)| width_of(text));
     let counters_width = counters.as_deref().map(width_of).unwrap_or(0);
     let clock_width = width_of(&clock);
     let total_width = size.col_width.as_usize();
-    // The usage is the first to go: a terminal too narrow for it keeps the flag, the
-    // counters and the clock.
-    let usage_fits = total_width > dirty_width + usage_width + counters_width + clock_width + 2;
-    let combined_width = if usage_fits {
-        dirty_width + usage_width + counters_width + clock_width
-    } else {
-        dirty_width + counters_width + clock_width
-    };
+    // Usage goes first, then after-agents: a narrow terminal keeps the flag, counters and clock.
+    let base_width = dirty_width + counters_width + clock_width;
+    let usage_fits = total_width > base_width + after_width + usage_width + 2;
+    let after_fits = total_width > base_width + after_width + 2;
+    let combined_width = base_width
+        + if after_fits { after_width } else { 0 }
+        + if usage_fits { usage_width } else { 0 };
     // Only draw when it fits alongside the left hints (leave a small gap), so narrow
     // terminals keep the shortcut hints rather than being overwritten.
     if combined_width > 0 && total_width > combined_width + 2 {
@@ -2218,6 +2229,14 @@ fn render_status_bar(
         if let Some((bar, label)) = dirty {
             render_ops += RenderOpIR::PaintTextWithAttributes(bar.into(), Some(normal_style));
             render_ops += RenderOpIR::PaintTextWithAttributes(label.into(), Some(dirty_style));
+        }
+        if after_fits && let Some((text, counting_down)) = after_agents {
+            let style = if counting_down {
+                warning_style
+            } else {
+                normal_style
+            };
+            render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
         }
         if usage_fits {
             for (text, percent) in usage {

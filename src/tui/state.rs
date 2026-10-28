@@ -8,6 +8,7 @@ use crate::keymap::Keymap;
 use crate::loader::{FileKey, LoadedFile};
 use crate::session::TerminalRestoreInfo;
 use crate::tui::RgbValue;
+use crate::tui::after_agents::AfterAgents;
 use crate::tui::command_line::CommandLine;
 use crate::tui::input_line::InputLine;
 use crate::tui::pane_manager::{DocPart, PaneManager, TextSelection, Window};
@@ -593,6 +594,11 @@ pub struct AppState {
     pub running_turns: HashMap<NodeId, TurnHandle>,
     /// Prompts waiting for their turn, next to start first. Never saved with the session.
     pub queued_turns: Vec<PendingTurn>,
+    /// The `after-agents` command, in memory only; replacing or clearing it kills a running one.
+    pub after_agents: Option<AfterAgents>,
+    pub after_agents_grace: Duration,
+    pub after_agents_aliases: Vec<(String, String)>,
+    pub next_after_agents_run: u64,
     pub mouse_drag_active: bool,
     /// Window whose input holds the mouse selection in progress.
     pub input_drag: Option<Window>,
@@ -769,6 +775,10 @@ impl AppState {
             model_picker_purpose: None,
             running_turns: HashMap::new(),
             queued_turns: Vec::new(),
+            after_agents: None,
+            after_agents_aliases: Vec::new(),
+            after_agents_grace: Duration::from_secs(crate::config::DEFAULT_GRACE_SECONDS),
+            next_after_agents_run: 0,
             mouse_drag_active: false,
             input_drag: None,
             terminal_grabbed: false,
@@ -900,6 +910,10 @@ pub enum AppSignal {
     /// The MCP server `name` started, failed or is starting again.
     McpStatus {
         name: String,
+    },
+    /// The `after-agents` command of run `run` ended.
+    AfterAgentsExited {
+        run: u64,
     },
     /// The turn of `node` ended.
     TurnFinished {

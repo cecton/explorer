@@ -69,7 +69,8 @@ A file opens as a read-only view with line numbers.
 - **Selection**: drag to select and copy, by word; triple-click takes the line.
 - **Editing**: `e` opens the file in `$VISUAL` or `$EDITOR` in a terminal window.
   `:!cmd` runs a command in a new terminal, with `%` standing for the file, `%dir` for
-  its directory, `%crate` and `%repo` for the nearest `Cargo.toml` and `.git`.
+  its directory, `%crate` and `%repo` for the nearest `Cargo.toml` and `.git`, and
+  `%project` for the name of the repository directory; `%%` is a literal `%`.
 
 The syntax colors and the symbol references come from rust-analyzer, through an LSP
 client in `src/lsp.rs`. That client is what an IDE's code intelligence runs on, and here
@@ -123,6 +124,20 @@ link, no mention of a tool. Since everything the agent does either ends up in gi
 thrown away, it works without permission prompts. The price is two rules: a prompt needs
 a clean working tree, and one turn runs at a time. Prompts sent meanwhile are queued.
 
+**Run something when the agents are done.** `<leader>:` opens a command line over the
+status bar. `!<command>` runs a command in a new terminal, and
+`after-agents <command>` keeps one for later: once a turn has run and the whole queue
+has finished, it runs in the background, with no terminal and no focus change, so it
+cannot ask for input. A countdown (5 seconds by default) shows in the status bar first,
+and any key press, paste or mouse event cancels it. `after-agents notify-send "agents
+done"` is the typical use. The command is one-shot and kept in memory only: a new
+`after-agents` replaces the pending one, a bare `after-agents` clears it, and a command
+already running is killed when it is replaced or cleared, or when Explorer exits. `%`
+placeholders work as in `:!` (plus `%project`, the name of the repository directory, which
+needs no file) and are filled in when you press Enter. Aliases from the config
+(`alias poweroff "systemctl poweroff"`) stand for a command: what you type after the
+alias is appended to it as is.
+
 **Plain files.** The tree is a directory tree of Markdown files, kept outside the
 repository in `~/.local/share/explorer/conversations/`. It can be read, searched and
 backed up without Explorer, and the agent itself can consult all of it, not only the
@@ -173,6 +188,12 @@ keybindings {
     open-git-log "ctrl+g"
 }
 
+after-agents {
+    grace-seconds 5
+    alias poweroff "systemctl poweroff"
+    alias notify "notify-send %project"
+}
+
 agent {
     endpoint "claude" {
         kind "claude-code"
@@ -193,6 +214,11 @@ agent {
   and saves it for the repository.
 - `keybindings`: rebinds a shortcut by the name of its action (`open-git-log`,
   `send-to-back`, …). The names are listed at the top of `src/keymap.rs`.
+- `after-agents`: `grace-seconds` is the time during which a key press, paste or mouse
+  event cancels the command once the agents are done. The default is 5, and 0 runs it at once.
+  Each `alias <name> "<command>"` line names a command for `after-agents`: the text typed
+  after the name is appended unquoted, so `after-agents notify build done` runs
+  `notify-send 'repo' build done`. An alias shadows a program of the same name.
 - `agent`: the endpoints, and the model that writes the titles and summaries of the
   tree. Without `summary-model` a node is titled by the first line of its prompt.
 

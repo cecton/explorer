@@ -19,6 +19,28 @@ pub struct Config {
     pub counters: CountersConfig,
     /// The `agent { … }` block.
     pub agent: AgentSettings,
+    /// The `after-agents { … }` block.
+    pub after_agents: AfterAgentsConfig,
+}
+
+/// Settings for the `after-agents` command line command.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AfterAgentsConfig {
+    /// Seconds any input can still cancel the command after the agents end; 0 runs it at once.
+    pub grace_seconds: u64,
+    /// `(name, shell command)` pairs from the `alias` lines; the typed remainder is appended.
+    pub aliases: Vec<(String, String)>,
+}
+
+pub const DEFAULT_GRACE_SECONDS: u64 = 5;
+
+impl Default for AfterAgentsConfig {
+    fn default() -> Self {
+        Self {
+            grace_seconds: DEFAULT_GRACE_SECONDS,
+            aliases: Vec::new(),
+        }
+    }
 }
 
 /// The `agent` block as written in `config.kdl`: endpoints still without their tokens.
@@ -360,9 +382,54 @@ fn parse(content: &str) -> Result<Config, String> {
     let mut keybindings = Vec::new();
     let mut counters = CountersConfig::default();
     let mut agent = AgentSettings::default();
+    let mut after_agents = AfterAgentsConfig::default();
 
     for node in doc.nodes() {
         match node.name().value() {
+            "after-agents" => {
+                let Some(children) = node.children() else {
+                    continue;
+                };
+                for child in children.nodes() {
+                    if child.name().value() == "alias" {
+                        let mut arguments = child
+                            .entries()
+                            .iter()
+                            .filter(|e| e.name().is_none())
+                            .map(|e| e.value().as_string());
+                        let (Some(Some(name)), Some(Some(command)), None) =
+                            (arguments.next(), arguments.next(), arguments.next())
+                        else {
+                            return Err(
+                                "after-agents.alias must have a name and a command, both strings"
+                                    .to_string(),
+                            );
+                        };
+                        if name.is_empty() || name.contains(char::is_whitespace) {
+                            return Err(format!(
+                                "after-agents.alias name '{name}' must be one word"
+                            ));
+                        }
+                        if after_agents.aliases.iter().any(|(known, _)| known == name) {
+                            return Err(format!("after-agents.alias '{name}' is defined twice"));
+                        }
+                        after_agents
+                            .aliases
+                            .push((name.to_string(), command.to_string()));
+                    }
+                    if child.name().value() == "grace-seconds" {
+                        after_agents.grace_seconds = child
+                            .entries()
+                            .iter()
+                            .find(|e| e.name().is_none())
+                            .and_then(|e| e.value().as_integer())
+                            .and_then(|seconds| u64::try_from(seconds).ok())
+                            .ok_or(
+                                "after-agents.grace-seconds must have a non-negative integer argument",
+                            )?;
+                    }
+                }
+            }
             "agent" => agent = parse_agent(node)?,
             "counters" => {
                 let Some(children) = node.children() else {
@@ -420,6 +487,7 @@ fn parse(content: &str) -> Result<Config, String> {
         keybindings,
         counters,
         agent,
+        after_agents,
     })
 }
 
@@ -736,5 +804,43 @@ mod config_tests {
     #[test]
     fn keybinding_without_key_argument_is_an_error() {
         assert!(parse("keybindings {\n quit\n }").is_err());
+    }
+
+    #[test]
+    fn after_agents_grace_defaults_to_five_seconds_and_must_be_an_integer() {
+        assert_eq!(
+            parse("").unwrap().after_agents.grace_seconds,
+            DEFAULT_GRACE_SECONDS
+        );
+        let config = parse("after-agents { grace-seconds 0 }").unwrap();
+        assert_eq!(config.after_agents.grace_seconds, 0);
+        assert!(parse("after-agents { grace-seconds \"x\" }").is_err());
+        assert!(parse("after-agents { grace-seconds -1 }").is_err());
+    }
+
+    #[test]
+    fn after_agents_aliases_are_read_in_order() {
+        let config = parse(
+            "after-agents {\n alias poweroff \"systemctl poweroff\"\n alias notify \"notify-send %project\"\n}",
+        )
+        .unwrap();
+        assert_eq!(
+            config.after_agents.aliases,
+            vec![
+                ("poweroff".to_string(), "systemctl poweroff".to_string()),
+                ("notify".to_string(), "notify-send %project".to_string()),
+            ]
+        );
+        assert!(parse("").unwrap().after_agents.aliases.is_empty());
+    }
+
+    #[test]
+    fn after_agents_aliases_reject_bad_declarations() {
+        let twice = "after-agents {\n alias a \"x\"\n alias a \"y\"\n}";
+        assert!(parse(twice).is_err());
+        assert!(parse("after-agents { alias \"\" \"x\" }").is_err());
+        assert!(parse("after-agents { alias \"a b\" \"x\" }").is_err());
+        assert!(parse("after-agents { alias a }").is_err());
+        assert!(parse("after-agents { alias a 3 }").is_err());
     }
 }

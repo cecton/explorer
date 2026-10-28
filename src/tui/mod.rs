@@ -1,3 +1,4 @@
+mod after_agents;
 mod app;
 mod command_line;
 mod commit_diff_pane;
