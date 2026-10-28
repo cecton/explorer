@@ -10,7 +10,7 @@
 //! `focus-prev`, `open-window-picker`, `open-terminal`, `open-theme-picker`,
 //! `open-git-log`, `open-conversations`, `toggle-favorite`, `open-model-picker`,
 //! `close-pane`, `resize-grow`, `resize-shrink`, `move-pane-forward`, `move-pane-backward`,
-//! `send-to-back`.
+//! `send-to-back`, `open-command-line`.
 
 use r3bl_tui::{Key, KeyPress, KeyState, ModifierKeysMask, SpecialKey};
 
@@ -37,6 +37,7 @@ pub enum Action {
     MovePaneForward,
     MovePaneBackward,
     SendToBack,
+    OpenCommandLine,
 }
 
 impl Action {
@@ -59,6 +60,7 @@ impl Action {
             "move-pane-forward" => Action::MovePaneForward,
             "move-pane-backward" => Action::MovePaneBackward,
             "send-to-back" => Action::SendToBack,
+            "open-command-line" => Action::OpenCommandLine,
             _ => return None,
         })
     }
@@ -92,6 +94,7 @@ impl Default for Keymap {
                 (plain_char('c'), Action::OpenConversations),
                 (plain_char('f'), Action::ToggleFavorite),
                 (plain_char('m'), Action::OpenModelPicker),
+                (plain_char(':'), Action::OpenCommandLine),
                 (plain_char('q'), Action::Quit),
                 (plain_char('x'), Action::ClosePane),
                 (plain_special(SpecialKey::Tab), Action::FocusNext),
@@ -315,6 +318,10 @@ mod tests {
         assert_eq!(
             km.leader_action(&plain_char('m')),
             Some(Action::OpenModelPicker)
+        );
+        assert_eq!(
+            km.leader_action(&plain_char(':')),
+            Some(Action::OpenCommandLine)
         );
         assert_eq!(km.leader_action(&plain_char('z')), None);
         assert_eq!(

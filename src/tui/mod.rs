@@ -1,4 +1,5 @@
 mod app;
+mod command_line;
 mod commit_diff_pane;
 mod conversation_tree_pane;
 pub(crate) mod discussion_pane;
@@ -30,6 +31,7 @@ pub use state::{
 pub use theme::HelixTheme;
 
 use self::app::*;
+use self::command_line::*;
 use self::commit_diff_pane::*;
 use self::conversation_tree_pane::*;
 use self::discussion_pane::*;

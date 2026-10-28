@@ -182,7 +182,14 @@ impl AppMain {
             ofs_buf.terminal_mode.cursor_key_mode = CursorKeyMode::Normal;
             let pty_input_tx = Arc::new(session.tx_input_event.clone());
             let child_killer = session.child_process_termination_handle;
-            let initial_title = cmd.as_ref().filter(|s| !s.is_empty()).cloned();
+            let initial_title = cmd.as_deref().filter(|s| !s.is_empty()).map(|cmd| {
+                let mut lines = cmd.lines();
+                let first = lines.next().unwrap_or_default();
+                match lines.next() {
+                    Some(_) => format!("{first} …"),
+                    None => first.to_string(),
+                }
+            });
             let pane_cwd = cwd.clone().unwrap_or_else(|| self.root.clone());
             let pane_command = if is_command_pane { cmd.clone() } else { None };
             let pane = Arc::new(Mutex::new(TerminalPane {
@@ -696,6 +703,68 @@ impl App for AppMain {
         // Any other input event counts as activity for the "active" time counter.
         global_data.state.time.on_input();
 
+        // The command line takes every key while it is open, ahead of the leader key.
+        if let Some(command_line) = global_data.state.command_line.as_mut() {
+            if !matches!(input_event, InputEvent::Mouse(_)) && command_line.input.selecting() {
+                command_line.input.cancel_select();
+                global_data.state.mouse_drag_active = false;
+            }
+            match &input_event {
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Enter),
+                }) => {
+                    run_command_line(global_data);
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Esc),
+                }) => {
+                    global_data.state.command_line = None;
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::Character('c'),
+                    mask:
+                        ModifierKeysMask {
+                            ctrl_key_state: KeyState::Pressed,
+                            shift_key_state: KeyState::NotPressed,
+                            alt_key_state: KeyState::NotPressed,
+                        },
+                }) => {
+                    command_line.input.clear();
+                    command_line.error = None;
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::WithModifiers {
+                    key: Key::Character('d'),
+                    mask:
+                        ModifierKeysMask {
+                            ctrl_key_state: KeyState::Pressed,
+                            shift_key_state: KeyState::NotPressed,
+                            alt_key_state: KeyState::NotPressed,
+                        },
+                }) if command_line.input.text().is_empty() => {
+                    global_data.state.command_line = None;
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(_) | InputEvent::BracketedPaste(_) => {
+                    command_line.input.handle_key(&input_event);
+                    command_line.error = None;
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Mouse(mouse) if command_line.input.handle_mouse(mouse) => {
+                    global_data.state.mouse_drag_active = command_line.input.selecting();
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                // A mouse event the input does not take means its release was lost.
+                InputEvent::Mouse(_) if command_line.input.selecting() => {
+                    command_line.input.cancel_select();
+                    global_data.state.mouse_drag_active = false;
+                }
+                _ => {}
+            }
+        }
+
         // The single KeyPress driving all top-level (leader + global) shortcuts, resolved
         // against the configurable keymap below.
         let keyboard = match input_event {
@@ -741,6 +810,11 @@ impl App for AppMain {
                 }
                 Some(Action::OpenTerminal) => {
                     return self.open_terminal(global_data, None, None, None, None, None);
+                }
+                Some(Action::OpenCommandLine) => {
+                    let state = &mut global_data.state;
+                    state.command_line = Some(CommandLine::new(state.pane_manager.focused_window));
+                    return Ok(EventPropagation::ConsumedRender);
                 }
                 Some(Action::OpenThemePicker) => {
                     let state = &mut global_data.state;
@@ -1823,12 +1897,16 @@ impl App for AppMain {
             fill_pipeline.join_into(pipeline);
             pipeline = fill_pipeline;
 
-            render_status_bar(
-                &mut pipeline,
-                window_size,
-                &global_data.state,
-                &global_data.state.theme,
-            );
+            if global_data.state.command_line.is_some() {
+                render_command_line(&mut pipeline, window_size, &mut global_data.state);
+            } else {
+                render_status_bar(
+                    &mut pipeline,
+                    window_size,
+                    &global_data.state,
+                    &global_data.state.theme,
+                );
+            }
 
             global_data.pipeline = pipeline;
         });
@@ -1988,9 +2066,10 @@ fn render_status_bar(
         (
             " Leader ".to_string(),
             format!(
-                "{}:Picker  {}:Term  {}:Theme  {}:Git  {}:Chat  {}:Favorite  {}:Model  {}:To back  {}:Close  {}:Quit  {}:Next/Prev  {}:Cancel",
+                "{}:Picker  {}:Term  {}:Cmd  {}:Theme  {}:Git  {}:Chat  {}:Favorite  {}:Model  {}:To back  {}:Close  {}:Quit  {}:Next/Prev  {}:Cancel",
                 leader_lbl(Action::OpenWindowPicker),
                 leader_lbl(Action::OpenTerminal),
+                leader_lbl(Action::OpenCommandLine),
                 leader_lbl(Action::OpenThemePicker),
                 leader_lbl(Action::OpenGitLog),
                 leader_lbl(Action::OpenConversations),

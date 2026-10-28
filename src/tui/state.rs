@@ -8,6 +8,7 @@ use crate::keymap::Keymap;
 use crate::loader::{FileKey, LoadedFile};
 use crate::session::TerminalRestoreInfo;
 use crate::tui::RgbValue;
+use crate::tui::command_line::CommandLine;
 use crate::tui::input_line::InputLine;
 use crate::tui::pane_manager::{DocPart, PaneManager, TextSelection, Window};
 use crate::tui::theme::HelixTheme;
@@ -615,6 +616,8 @@ pub struct AppState {
     pub search: HashMap<FileKey, PreviewSearch>,
     /// The input open in a file preview's title bar, by file. Transient like `search`.
     pub preview_inputs: HashMap<FileKey, PreviewInput>,
+    /// The `<leader>:` command line, open over the status bar. Transient.
+    pub command_line: Option<CommandLine>,
     /// Configurable top-level (leader + global) key bindings.
     pub keymap: Keymap,
     /// Which Cargo features rust-analyzer analyzes; set via `:features`/`:all-features`/
@@ -779,6 +782,7 @@ impl AppState {
             next_palette_index: 0,
             search: HashMap::new(),
             preview_inputs: HashMap::new(),
+            command_line: None,
             keymap,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
         };

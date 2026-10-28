@@ -1,7 +1,6 @@
 use crate::loader::{FileData, FileKey};
 use crate::tui::pane_component::pane_slot;
 use crate::tui::*;
-use camino::{Utf8Path, Utf8PathBuf};
 use std::time::{Duration, Instant};
 
 const GUTTER_GAP: &str = "   ";
@@ -272,20 +271,11 @@ impl FilePreviewComponent {
                 let snapshot = global_data.state.files.load();
                 snapshot[file_key.0].path.clone()
             };
-            let cwd = global_data.state.root.clone();
-            let open_cmd = if shell_cmd.is_empty() {
-                Ok(None)
-            } else {
-                expand_placeholders(shell_cmd, &file_path, &global_data.state.root).map(Some)
-            };
-            match open_cmd {
-                Ok(cmd_opt) => {
+            match shell_signal(shell_cmd, Some(&file_path), &global_data.state.root) {
+                Ok(signal) => {
                     send_signal!(
                         global_data.main_thread_channel_sender,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::OpenTerminal {
-                            cmd: cmd_opt,
-                            cwd,
-                        })
+                        TerminalWindowMainThreadSignal::ApplyAppSignal(signal)
                     );
                 }
                 Err(msg) => {
@@ -1425,98 +1415,6 @@ fn compute_single_block_scroll(
             .saturating_sub(1)
             .saturating_sub(page_size * 20 / 100)
     }
-}
-
-// ── Shell command helpers ─────────────────────────────────────────────────────
-
-/// Wraps a string in single quotes for safe embedding in a `/bin/sh -c` command string.
-fn sh_quote(s: &str) -> String {
-    format!("'{}'", s.replace('\'', "'\\''"))
-}
-
-/// Returns true if `s` does not start with an alphanumeric character or `_`,
-/// i.e. the previous token ended at a word boundary.
-fn is_word_end(s: &str) -> bool {
-    !s.starts_with(|c: char| c.is_alphanumeric() || c == '_')
-}
-
-/// Finds the nearest ancestor directory of `file_path` that contains a `Cargo.toml`.
-fn find_crate_root(file_path: &Utf8Path) -> Option<Utf8PathBuf> {
-    let mut dir = file_path.parent()?;
-    loop {
-        if dir.join("Cargo.toml").exists() {
-            return Some(dir.to_path_buf());
-        }
-        dir = dir.parent()?;
-    }
-}
-
-/// Finds the nearest ancestor directory of `file_path` that contains a `.git` directory.
-fn find_repo_root(file_path: &Utf8Path) -> Option<Utf8PathBuf> {
-    let mut dir = file_path.parent()?;
-    loop {
-        if dir.join(".git").exists() {
-            return Some(dir.to_path_buf());
-        }
-        dir = dir.parent()?;
-    }
-}
-
-/// Expands `%`, `%c`/`%crate`, and `%r`/`%repo` placeholders in `cmd`.
-///
-/// - `%`            → shell-quoted relative path of `file_path` from `root`
-/// - `%d` / `%dir`   → shell-quoted directory of `file_path` (relative to `root`)
-/// - `%c` / `%crate` → shell-quoted path to the nearest `Cargo.toml` ancestor directory
-/// - `%r` / `%repo`  → shell-quoted path to the nearest `.git` ancestor directory
-///
-/// Returns an error string if a placeholder is used but its root cannot be found.
-fn expand_placeholders(cmd: &str, file_path: &Utf8Path, root: &Utf8Path) -> Result<String, String> {
-    let mut result = String::with_capacity(cmd.len());
-    let mut s = cmd;
-    while !s.is_empty() {
-        let Some(pct) = s.find('%') else {
-            result.push_str(s);
-            break;
-        };
-        result.push_str(&s[..pct]);
-        s = &s[pct + 1..];
-
-        if s.starts_with("crate") && is_word_end(&s[5..]) {
-            let root = find_crate_root(file_path)
-                .ok_or_else(|| "no Cargo.toml found (needed by %crate)".to_string())?;
-            result.push_str(&sh_quote(root.as_str()));
-            s = &s[5..];
-        } else if s.starts_with("repo") && is_word_end(&s[4..]) {
-            let root = find_repo_root(file_path)
-                .ok_or_else(|| "no .git found (needed by %repo)".to_string())?;
-            result.push_str(&sh_quote(root.as_str()));
-            s = &s[4..];
-        } else if s.starts_with('c') && is_word_end(&s[1..]) {
-            let root = find_crate_root(file_path)
-                .ok_or_else(|| "no Cargo.toml found (needed by %c)".to_string())?;
-            result.push_str(&sh_quote(root.as_str()));
-            s = &s[1..];
-        } else if s.starts_with("dir") && is_word_end(&s[3..]) {
-            let parent = file_path.parent().unwrap_or(file_path);
-            let rel = parent.strip_prefix(root).unwrap_or(parent);
-            result.push_str(&sh_quote(rel.as_str()));
-            s = &s[3..];
-        } else if s.starts_with('r') && is_word_end(&s[1..]) {
-            let root = find_repo_root(file_path)
-                .ok_or_else(|| "no .git found (needed by %r)".to_string())?;
-            result.push_str(&sh_quote(root.as_str()));
-            s = &s[1..];
-        } else if s.starts_with('d') && is_word_end(&s[1..]) {
-            let parent = file_path.parent().unwrap_or(file_path);
-            let rel = parent.strip_prefix(root).unwrap_or(parent);
-            result.push_str(&sh_quote(rel.as_str()));
-            s = &s[1..];
-        } else {
-            let rel = file_path.strip_prefix(root).unwrap_or(file_path);
-            result.push_str(&sh_quote(rel.as_str()));
-        }
-    }
-    Ok(result)
 }
 
 #[cfg(test)]
