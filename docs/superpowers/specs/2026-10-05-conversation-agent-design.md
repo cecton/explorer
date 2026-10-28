@@ -774,10 +774,11 @@ window holds its node's prompt, reply and work log in memory only while it is op
   abbreviated (`96k`, `1.2M`); of the types only `compact` is named, since a commit node
   is recognizable by its hashes and every other node is feedback. Cache hits are the part
   of the context the provider served from its prompt cache and are shown as
-  `<n> cached`, abbreviated the same way, and only when the last request found something
-  in the cache: the number is there to show what the cache saved, and `0 cached` would
-  only report a cache that had nothing to give. It sits next to the context size because
-  it is a property of that same request.
+  `<n> cached`, abbreviated the same way, and only when the provider reports caching. The
+  count is that of the turn's first request, how much of the conversation was already
+  cached when the prompt was sent: later requests find the previous round cached, so
+  their count only tracks the context size. A cold cache shows `0 cached`. It sits next
+  to the context size, which is that of the turn's last request.
 - The input is always active, also while a turn runs: the next prompt can be drafted,
   but `Enter` is refused until the node is done. Drafts are kept per window and saved in
   the session.

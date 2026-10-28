@@ -34,7 +34,7 @@ pub struct LlmResponse {
     pub tool_calls: Vec<ToolCall>,
     pub tokens_in: Option<u64>,
     /// Input tokens of this request the provider served from its prompt cache;
-    /// `None` when it cached nothing, or does not report caching at all.
+    /// `None` when the provider does not report caching at all.
     pub cached_in: Option<u64>,
 }
 
@@ -165,8 +165,7 @@ pub async fn stream_chat(
                 response.cached_in = usage
                     .and_then(|usage| usage.prompt_tokens_details.as_ref())
                     .and_then(|details| details.cached_tokens)
-                    .and_then(|tokens| u64::try_from(tokens).ok())
-                    .filter(|tokens| *tokens > 0);
+                    .and_then(|tokens| u64::try_from(tokens).ok());
                 response.tool_calls = end
                     .captured_into_tool_calls()
                     .unwrap_or_default()

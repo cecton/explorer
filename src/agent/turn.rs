@@ -54,7 +54,7 @@ pub struct LiveTurn {
     /// Model this turn was sent to, shown next to its outcome.
     pub model: String,
     pub tokens_in: Option<u64>,
-    /// Input tokens of the last request the provider served from its prompt cache.
+    /// Input tokens of the turn's first request the provider served from its prompt cache.
     pub cached_in: Option<u64>,
     /// Claude Code session holding this turn, once the CLI has announced it.
     pub session_id: Option<String>,
@@ -397,10 +397,14 @@ impl Recorder {
         self.live.lock().tokens_in = Some(tokens);
     }
 
-    /// Cache hits of the last request that reported usage. Assigned rather than kept,
-    /// so a request the cache did not serve clears the count of the one before it.
+    /// Cache hits of the first request of the turn that reported them: how much of
+    /// the context was already cached when the prompt was sent. Later requests find
+    /// the whole previous round cached, which says nothing about the conversation.
     pub fn cached_in(&mut self, cached: Option<u64>) {
-        self.live.lock().cached_in = cached;
+        let mut live = self.live.lock();
+        if live.cached_in.is_none() {
+            live.cached_in = cached;
+        }
     }
 
     pub fn session(&mut self, session_id: String) {
@@ -1062,6 +1066,19 @@ mod tests {
         git(root, &["add", "-A"]);
         git(root, &["commit", "-q", "-m", message]);
         git(root, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn cache_hits_are_those_of_the_first_request() {
+        let tmp = tempfile::tempdir().unwrap();
+        let node_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let (main_tx, _main_rx) = mpsc::channel(8);
+        let live = Arc::default();
+        let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
+
+        recorder.cached_in(Some(0));
+        recorder.cached_in(Some(20_000));
+        assert_eq!(live.lock().cached_in, Some(0));
     }
 
     #[test]

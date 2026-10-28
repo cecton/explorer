@@ -307,9 +307,7 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
                     StreamEvent::ToolCall(call) => recorder.tool_call(call),
                     StreamEvent::ToolsDone => recorder.activity(None),
                     StreamEvent::TokensIn(tokens) => recorder.tokens_in(tokens),
-                    StreamEvent::CachedIn(tokens) => {
-                        recorder.cached_in((tokens > 0).then_some(tokens));
-                    }
+                    StreamEvent::CachedIn(tokens) => recorder.cached_in(Some(tokens)),
                     StreamEvent::Usage(usage) => recorder.usage(usage),
                     StreamEvent::Result { error, no_turn } => outcome = Some((error, no_turn)),
                 }

@@ -125,7 +125,7 @@ pub struct Metadata {
     pub no_system_prompt: bool,
     pub session_id: Option<String>,
     pub tokens_in: Option<u64>,
-    /// Input tokens of the node's last request that the provider served from its cache.
+    /// Input tokens of the node's first request that the provider served from its cache.
     pub cached_in: Option<u64>,
     pub error: Option<String>,
     /// Wall-clock seconds the turn took.
