@@ -1,9 +1,11 @@
+use crate::config::Alias;
 use crate::tui::after_agents::{self, AfterAgents};
 use crate::tui::*;
 use camino::{Utf8Path, Utf8PathBuf};
 
 const PROMPT: &str = ":";
 const PLACEHOLDER: &str = "<shell command>";
+const ALIAS: &str = "alias";
 const MAX_ROWS: usize = 10;
 
 /// The global command line opened with `<leader>:`, painted over the status bar.
@@ -42,39 +44,30 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
         }
         _ => None,
     };
-    if let Some(rest) = after_agents_argument(&text) {
-        let command = rest.trim();
-        if command.is_empty() {
-            state.after_agents = None;
-        } else {
-            let command = resolve_alias(&state.after_agents_aliases, command);
-            match expand_placeholders(&command, file.as_deref(), &state.root) {
-                Ok(expanded) => state.after_agents = Some(AfterAgents::Pending(expanded)),
-                Err(error) => {
-                    if let Some(command_line) = state.command_line.as_mut() {
-                        command_line.error = Some(error);
-                    }
-                    return;
-                }
-            }
+    let word = text.split_whitespace().next().unwrap_or_default();
+    let argument = text.trim_start().strip_prefix(word).unwrap_or_default();
+    let outcome = match word {
+        after_agents::NAME => {
+            set_after_agents(state, argument.trim(), file.as_deref()).map(|()| None)
         }
-        state.command_line = None;
-        return;
-    }
-    let outcome = match text.strip_prefix('!') {
-        Some(shell_cmd) => shell_signal(shell_cmd, file.as_deref(), &state.root),
-        None => Err(format!(
-            "unknown command: {}",
-            text.trim().lines().next().unwrap_or_default()
-        )),
+        ALIAS => set_alias(state, argument.trim()).map(|()| None),
+        _ => match text.strip_prefix('!') {
+            Some(shell_cmd) => shell_signal(shell_cmd, file.as_deref(), state).map(Some),
+            None => Err(format!(
+                "unknown command: {}",
+                text.trim().lines().next().unwrap_or_default()
+            )),
+        },
     };
     match outcome {
         Ok(signal) => {
             state.command_line = None;
-            send_signal!(
-                global_data.main_thread_channel_sender,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(signal)
-            );
+            if let Some(signal) = signal {
+                send_signal!(
+                    global_data.main_thread_channel_sender,
+                    TerminalWindowMainThreadSignal::ApplyAppSignal(signal)
+                );
+            }
         }
         Err(error) => {
             if let Some(command_line) = state.command_line.as_mut() {
@@ -84,33 +77,154 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
     }
 }
 
-/// The typed `after-agents` argument with its first word replaced by the alias it names.
-fn resolve_alias(aliases: &[(String, String)], text: &str) -> String {
-    let text = text.trim();
-    let (word, rest) = match text.split_once(char::is_whitespace) {
-        Some((word, rest)) => (word, rest.trim_start()),
-        None => (text, ""),
+fn set_after_agents(
+    state: &mut AppState,
+    command: &str,
+    file: Option<&Utf8Path>,
+) -> Result<(), String> {
+    if command.is_empty() {
+        state.after_agents = None;
+        return Ok(());
+    }
+    let command = resolve_alias(state, command);
+    let expanded = expand_placeholders(&command, file, &state.root)?;
+    state.after_agents = Some(AfterAgents::Pending(expanded));
+    Ok(())
+}
+
+/// Sets, replaces or (with no command) removes a project alias.
+fn set_alias(state: &mut AppState, argument: &str) -> Result<(), String> {
+    let Some((name, command)) = argument
+        .split_once(char::is_whitespace)
+        .map(|(name, command)| (name, command.trim()))
+        .or((!argument.is_empty()).then_some((argument, "")))
+    else {
+        return Ok(());
     };
-    match aliases.iter().find(|(name, _)| name == word) {
-        Some((_, template)) if rest.is_empty() => template.clone(),
-        Some((_, template)) => format!("{template} {rest}"),
+    if command.is_empty() {
+        if state.project_aliases.iter().any(|alias| alias.name == name) {
+            state.project_aliases.retain(|alias| alias.name != name);
+        } else if state.config_aliases.iter().any(|alias| alias.name == name) {
+            return Err(format!("{name} is defined in config.kdl"));
+        } else {
+            return Err(format!("no alias {name}"));
+        }
+    } else if let Some(alias) = state
+        .project_aliases
+        .iter_mut()
+        .find(|alias| alias.name == name)
+    {
+        alias.command = command.to_string();
+    } else {
+        state.project_aliases.push(Alias {
+            name: name.to_string(),
+            command: command.to_string(),
+        });
+    }
+    state.mark_session_dirty();
+    Ok(())
+}
+
+/// `text` with its first word replaced by the alias it names, the project's before the
+/// config's; the rest is appended as typed. A miss returns `text` unchanged.
+pub fn resolve_alias(state: &AppState, text: &str) -> String {
+    let trimmed = text.trim_start();
+    let (word, rest) = match trimmed.split_once(char::is_whitespace) {
+        Some((word, rest)) => (word, rest.trim_start()),
+        None => (trimmed, ""),
+    };
+    let alias = state
+        .project_aliases
+        .iter()
+        .chain(&state.config_aliases)
+        .find(|alias| alias.name == word);
+    match alias {
+        Some(alias) if rest.is_empty() => alias.command.clone(),
+        Some(alias) => format!("{} {rest}", alias.command),
         None => text.to_string(),
     }
 }
 
-/// What follows `after-agents` in `text`, or `None` for another command.
-fn after_agents_argument(text: &str) -> Option<&str> {
-    let rest = text.trim_start().strip_prefix(after_agents::NAME)?;
-    (rest.is_empty() || rest.starts_with(char::is_whitespace)).then_some(rest)
+/// ` · aliases: a, b` for the placeholder of the commands that take a shell command.
+fn aliases_suffix(state: &AppState) -> String {
+    let mut names: Vec<&str> = Vec::new();
+    for alias in state.project_aliases.iter().chain(&state.config_aliases) {
+        if !names.contains(&alias.name.as_str()) {
+            names.push(&alias.name);
+        }
+    }
+    if names.is_empty() {
+        String::new()
+    } else {
+        format!(" · aliases: {}", names.join(", "))
+    }
+}
+
+/// The placeholder for a command typed alone (`!`, `after-agents`, `alias [name]`).
+fn command_hint(typed: &str, state: &AppState) -> Option<String> {
+    let mut words = typed.split_whitespace();
+    let hint = match (words.next()?, words.next(), words.next()) {
+        ("!", None, _) if typed == "!" => {
+            format!("{PLACEHOLDER}{}", aliases_suffix(state))
+        }
+        (after_agents::NAME, None, _) => format!(
+            "{}{}",
+            after_agents::hint(state.after_agents.as_ref()),
+            aliases_suffix(state)
+        ),
+        (ALIAS, None, _) => {
+            let entries: Vec<String> = state
+                .project_aliases
+                .iter()
+                .map(|alias| format!("{} = {}", alias.name, alias.command))
+                .chain(
+                    state
+                        .config_aliases
+                        .iter()
+                        .filter(|alias| {
+                            !state
+                                .project_aliases
+                                .iter()
+                                .any(|own| own.name == alias.name)
+                        })
+                        .map(|alias| format!("{} = {} (config)", alias.name, alias.command)),
+                )
+                .collect();
+            if entries.is_empty() {
+                "no aliases · alias <name> <shell command>".to_string()
+            } else {
+                entries.join(" · ")
+            }
+        }
+        (ALIAS, Some(name), None) => {
+            match state
+                .project_aliases
+                .iter()
+                .find(|alias| alias.name == name)
+            {
+                Some(alias) => format!("Enter removes {name} (was: {})", alias.command),
+                None => PLACEHOLDER.to_string(),
+            }
+        }
+        _ => return None,
+    };
+    let gap = if typed.ends_with(char::is_whitespace) {
+        ""
+    } else {
+        " "
+    };
+    Some(format!("{gap}{hint}"))
 }
 
 /// Paints over the bottom rows, growing upward: the panes are not resized while typing.
 pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mut AppState) {
+    let hint = state
+        .command_line
+        .as_ref()
+        .and_then(|command_line| command_hint(command_line.input.text(), state));
     let AppState {
         command_line: Some(command_line),
         theme,
-        after_agents,
-        after_agents_aliases,
         ..
     } = state
     else {
@@ -120,34 +234,15 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mu
     let color_bg = TuiColor::from(bg_rgb);
     let color_fg = TuiColor::from(fg_rgb);
     let color_selection = TuiColor::from(title_selection_bg(false, theme));
-    let after_bang = command_line.input.text() == "!";
-    let typed = command_line.input.text();
-    let after_agents_hint =
-        (after_agents_argument(typed).is_some_and(|rest| rest.trim().is_empty())).then(|| {
-            let gap = if typed.ends_with(char::is_whitespace) {
-                ""
-            } else {
-                " "
-            };
-            format!(
-                "{gap}{}",
-                after_agents::hint(after_agents.as_ref(), after_agents_aliases)
-            )
-        });
     let placeholder = match &command_line.error {
         Some(error) => {
             let error_fg = TuiColor::from(theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG));
             Some((format!("  {error}"), error_fg))
         }
-        None if after_agents_hint.is_some() => {
+        None => hint.map(|hint| {
             let weak = theme.color_for_scope("comment").unwrap_or(fg_rgb);
-            after_agents_hint.map(|hint| (hint, TuiColor::from(weak)))
-        }
-        None if after_bang => {
-            let weak = theme.color_for_scope("comment").unwrap_or(fg_rgb);
-            Some((PLACEHOLDER.to_string(), TuiColor::from(weak)))
-        }
-        None => None,
+            (hint, TuiColor::from(weak))
+        }),
     };
 
     let width = size.col_width.as_u16();
@@ -190,16 +285,20 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mu
 pub fn shell_signal(
     shell_cmd: &str,
     file: Option<&Utf8Path>,
-    root: &Utf8Path,
+    state: &AppState,
 ) -> Result<AppSignal, String> {
     let cmd = if shell_cmd.is_empty() {
         None
     } else {
-        Some(expand_placeholders(shell_cmd, file, root)?)
+        Some(expand_placeholders(
+            &resolve_alias(state, shell_cmd),
+            file,
+            &state.root,
+        )?)
     };
     Ok(AppSignal::OpenTerminal {
         cmd,
-        cwd: root.to_path_buf(),
+        cwd: state.root.to_path_buf(),
     })
 }
 
@@ -343,19 +442,86 @@ mod tests {
         );
     }
 
+    fn alias(name: &str, command: &str) -> Alias {
+        Alias {
+            name: name.to_string(),
+            command: command.to_string(),
+        }
+    }
+
+    fn state_with_aliases() -> AppState {
+        AppState {
+            config_aliases: vec![
+                alias("poweroff", "systemctl poweroff"),
+                alias("notify", "notify-send %project"),
+            ],
+            project_aliases: vec![alias("notify", "echo project")],
+            ..AppState::default()
+        }
+    }
+
     #[test]
     fn alias_takes_the_rest_as_typed() {
-        let aliases = [
-            ("poweroff".to_string(), "systemctl poweroff".to_string()),
-            ("notify".to_string(), "notify-send %project".to_string()),
-        ];
-        assert_eq!(resolve_alias(&aliases, "poweroff"), "systemctl poweroff");
+        let state = state_with_aliases();
+        assert_eq!(resolve_alias(&state, "poweroff"), "systemctl poweroff");
         assert_eq!(
-            resolve_alias(&aliases, "notify  \"build done\" now "),
-            "notify-send %project \"build done\" now"
+            resolve_alias(&state, "notify  \"build done\" now "),
+            "echo project \"build done\" now "
         );
-        assert_eq!(resolve_alias(&aliases, "notifying x"), "notifying x");
-        assert_eq!(resolve_alias(&aliases, "git push"), "git push");
+        assert_eq!(resolve_alias(&state, "notifying x"), "notifying x");
+        assert_eq!(resolve_alias(&state, " git push "), " git push ");
+    }
+
+    #[test]
+    fn only_the_first_word_is_an_alias() {
+        let state = state_with_aliases();
+        assert_eq!(resolve_alias(&state, "ls && poweroff"), "ls && poweroff");
+    }
+
+    #[test]
+    fn alias_sets_replaces_and_removes_a_project_alias() {
+        let mut state = state_with_aliases();
+        set_alias(&mut state, "ci cargo test").unwrap();
+        assert_eq!(state.project_aliases[1], alias("ci", "cargo test"));
+        set_alias(&mut state, "ci cargo nextest run").unwrap();
+        assert_eq!(state.project_aliases.len(), 2);
+        assert_eq!(state.project_aliases[1].command, "cargo nextest run");
+        set_alias(&mut state, "ci").unwrap();
+        assert_eq!(state.project_aliases, [alias("notify", "echo project")]);
+        assert!(state.session_dirty_at.is_some());
+    }
+
+    #[test]
+    fn alias_removal_errors() {
+        let mut state = state_with_aliases();
+        assert_eq!(
+            set_alias(&mut state, "poweroff"),
+            Err("poweroff is defined in config.kdl".to_string())
+        );
+        assert_eq!(
+            set_alias(&mut state, "nope"),
+            Err("no alias nope".to_string())
+        );
+        assert_eq!(set_alias(&mut state, ""), Ok(()));
+        assert_eq!(state.project_aliases.len(), 1);
+    }
+
+    #[test]
+    fn hints_list_and_name_aliases() {
+        let state = state_with_aliases();
+        assert_eq!(
+            command_hint("!", &state).unwrap(),
+            " <shell command> · aliases: notify, poweroff"
+        );
+        assert_eq!(
+            command_hint("alias", &state).unwrap(),
+            " notify = echo project · poweroff = systemctl poweroff (config)"
+        );
+        assert_eq!(
+            command_hint("alias notify", &state).unwrap(),
+            " Enter removes notify (was: echo project)"
+        );
+        assert_eq!(command_hint("ls", &state), None);
     }
 
     #[test]

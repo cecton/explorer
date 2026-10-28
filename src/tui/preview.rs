@@ -271,7 +271,7 @@ impl FilePreviewComponent {
                 let snapshot = global_data.state.files.load();
                 snapshot[file_key.0].path.clone()
             };
-            match shell_signal(shell_cmd, Some(&file_path), &global_data.state.root) {
+            match shell_signal(shell_cmd, Some(&file_path), &global_data.state) {
                 Ok(signal) => {
                     send_signal!(
                         global_data.main_thread_channel_sender,

@@ -190,9 +190,10 @@ keybindings {
 
 after-agents {
     grace-seconds 5
-    alias poweroff "systemctl poweroff"
-    alias notify "notify-send %project"
 }
+
+alias poweroff "systemctl poweroff"
+alias notify "notify-send %project"
 
 agent {
     endpoint "claude" {
@@ -216,9 +217,12 @@ agent {
   `send-to-back`, …). The names are listed at the top of `src/keymap.rs`.
 - `after-agents`: `grace-seconds` is the time during which a key press, paste or mouse
   event cancels the command once the agents are done. The default is 5, and 0 runs it at once.
-  Each `alias <name> "<command>"` line names a command for `after-agents`: the text typed
-  after the name is appended unquoted, so `after-agents notify build done` runs
-  `notify-send 'repo' build done`. An alias shadows a program of the same name.
+- `alias`: each `alias <name> "<command>"` line names a command for the shell commands
+  (`!`, `:!` and `after-agents`): the text typed after the name is appended unquoted, so
+  `after-agents notify build done` runs `notify-send 'repo' build done`. An alias shadows a
+  program of the same name. `alias <name> <command>` on the command line sets an alias of
+  the repository, saved with its session, which wins over the config's; `alias <name>`
+  removes it.
 - `agent`: the endpoints, and the model that writes the titles and summaries of the
   tree. Without `summary-model` a node is titled by the first line of its prompt.
 

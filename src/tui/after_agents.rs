@@ -193,7 +193,7 @@ pub fn status_text(after: &AfterAgents, now: Instant) -> (String, bool) {
 }
 
 /// The command line's placeholder once `after-agents` is typed.
-pub fn hint(after: Option<&AfterAgents>, aliases: &[(String, String)]) -> String {
+pub fn hint(after: Option<&AfterAgents>) -> String {
     let first_line = |command: &str| {
         let line = command.lines().next().unwrap_or_default();
         let cut = crate::tui::text_layout::truncate(line, 60);
@@ -203,7 +203,7 @@ pub fn hint(after: Option<&AfterAgents>, aliases: &[(String, String)]) -> String
             cut
         }
     };
-    let mut hint = match after {
+    match after {
         None => "<shell command>".to_string(),
         Some(AfterAgents::Running { command, .. }) => {
             format!("running: {} · Enter kills", first_line(command))
@@ -212,12 +212,7 @@ pub fn hint(after: Option<&AfterAgents>, aliases: &[(String, String)]) -> String
             "<shell command: {}> · Enter clears",
             first_line(other.command())
         ),
-    };
-    if !aliases.is_empty() {
-        let names: Vec<&str> = aliases.iter().map(|(name, _)| name.as_str()).collect();
-        hint.push_str(&format!(" · aliases: {}", names.join(", ")));
     }
-    hint
 }
 
 #[cfg(test)]
@@ -377,16 +372,11 @@ mod tests {
 
     #[test]
     fn hint_names_the_command() {
-        assert_eq!(hint(None, &[]), "<shell command>");
+        assert_eq!(hint(None), "<shell command>");
         let pending = AfterAgents::Pending("git push\nmore".into());
         assert_eq!(
-            hint(Some(&pending), &[]),
+            hint(Some(&pending)),
             "<shell command: git push…> · Enter clears"
         );
-        let aliases = [
-            ("a".to_string(), "x".to_string()),
-            ("b".to_string(), "y".to_string()),
-        ];
-        assert_eq!(hint(None, &aliases), "<shell command> · aliases: a, b");
     }
 }

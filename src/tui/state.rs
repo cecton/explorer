@@ -2,6 +2,7 @@ use crate::agent::mcp::{McpHost, McpServerDecl};
 use crate::agent::turn::{TurnHandle, TurnOutcome};
 use crate::agent::usage::Usage;
 use crate::agent::{AgentConfig, Effort, ModelSpec};
+use crate::config::Alias;
 use crate::conversation::{ConversationTree, NodeId};
 use crate::git::{DiffLine, GitRef, LogHistory};
 use crate::keymap::Keymap;
@@ -597,7 +598,10 @@ pub struct AppState {
     /// The `after-agents` command, in memory only; replacing or clearing it kills a running one.
     pub after_agents: Option<AfterAgents>,
     pub after_agents_grace: Duration,
-    pub after_agents_aliases: Vec<(String, String)>,
+    /// Aliases from `config.kdl`.
+    pub config_aliases: Vec<Alias>,
+    /// Aliases of this repository, saved in its session; they win over the config's.
+    pub project_aliases: Vec<Alias>,
     pub next_after_agents_run: u64,
     pub mouse_drag_active: bool,
     /// Window whose input holds the mouse selection in progress.
@@ -776,7 +780,8 @@ impl AppState {
             running_turns: HashMap::new(),
             queued_turns: Vec::new(),
             after_agents: None,
-            after_agents_aliases: Vec::new(),
+            config_aliases: Vec::new(),
+            project_aliases: Vec::new(),
             after_agents_grace: Duration::from_secs(crate::config::DEFAULT_GRACE_SECONDS),
             next_after_agents_run: 0,
             mouse_drag_active: false,

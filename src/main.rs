@@ -53,14 +53,23 @@ async fn main() {
         }
     };
 
-    let (config_theme, keybindings, counters, agent_settings, after_agents) = match config {
-        Some(c) => (c.theme, c.keybindings, c.counters, c.agent, c.after_agents),
+    let (config_theme, keybindings, counters, agent_settings, after_agents, aliases) = match config
+    {
+        Some(c) => (
+            c.theme,
+            c.keybindings,
+            c.counters,
+            c.agent,
+            c.after_agents,
+            c.aliases,
+        ),
         None => (
             None,
             Vec::new(),
             config::CountersConfig::default(),
             config::AgentSettings::default(),
             config::AfterAgentsConfig::default(),
+            Vec::new(),
         ),
     };
 
@@ -89,7 +98,7 @@ async fn main() {
     initial_state.show_timers = counters.show;
     initial_state.count_render_as_active = counters.render_counts_as_active;
     initial_state.after_agents_grace = std::time::Duration::from_secs(after_agents.grace_seconds);
-    initial_state.after_agents_aliases = after_agents.aliases;
+    initial_state.config_aliases = aliases;
     initial_state.agent = Arc::new(config::resolve_agent(
         agent_settings,
         &config::load_auth(),

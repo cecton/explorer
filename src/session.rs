@@ -1,4 +1,5 @@
 use crate::agent::mcp::McpServerDecl;
+use crate::config::Alias;
 use crate::conversation::NodeId;
 use crate::loader::{LoadedFile, file_key_for_path, path_for_file_key};
 use crate::tui::AppState;
@@ -54,6 +55,9 @@ pub struct Session {
     /// MCP servers of this repository, started with Explorer.
     #[serde(default)]
     pub mcp_servers: Vec<McpServerDecl>,
+    /// Aliases of this repository.
+    #[serde(default)]
+    pub aliases: Vec<Alias>,
 }
 
 /// Persisted symbol-highlight identity. Byte-offset locations are never saved —
@@ -221,6 +225,7 @@ impl Session {
             conversation_query: state.tree_view.query.text().to_string(),
             discussion_highlights,
             mcp_servers: state.mcp_servers.clone(),
+            aliases: state.project_aliases.clone(),
         }
     }
 
@@ -424,6 +429,7 @@ impl Session {
             .map(|(node, highlights)| (NodeId::new(&node), highlights))
             .collect();
         state.mcp_servers = self.mcp_servers;
+        state.project_aliases = self.aliases;
 
         if !new_stack.is_empty() {
             state.pane_manager.window_stack = new_stack;
@@ -710,6 +716,7 @@ mod tests {
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
+            aliases: Vec::new(),
         };
 
         let value = serde_json::to_value(&session).unwrap();
@@ -831,6 +838,7 @@ mod tests {
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
+            aliases: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -894,6 +902,7 @@ mod tests {
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
+            aliases: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -943,6 +952,7 @@ mod tests {
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
+            aliases: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -978,6 +988,7 @@ mod tests {
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
+            aliases: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -1046,6 +1057,7 @@ mod tests {
             conversation_query: String::new(),
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
+            aliases: Vec::new(),
         };
 
         session.apply(&mut state);
@@ -1107,6 +1119,24 @@ mod tests {
         let mut fresh = empty_state(root);
         restored.apply(&mut fresh);
         assert_eq!(fresh.tree_view.query.text(), "queue esc");
+    }
+
+    #[test]
+    fn aliases_round_trip_through_session() {
+        let (_dir, root) = temp_root();
+        let mut state = empty_state(root.clone());
+        let alias = Alias {
+            name: "ci".to_string(),
+            command: "cargo test".to_string(),
+        };
+        state.project_aliases.push(alias.clone());
+
+        let json = serde_json::to_string(&Session::from_state(&state)).expect("serialize");
+        let restored: Session = serde_json::from_str(&json).expect("deserialize session");
+
+        let mut fresh = empty_state(root);
+        restored.apply(&mut fresh);
+        assert_eq!(fresh.project_aliases, [alias]);
     }
 
     #[test]

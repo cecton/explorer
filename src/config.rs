@@ -7,6 +7,13 @@ use crate::agent::{
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+/// A name standing for a shell command; what is typed after it is appended as is.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct Alias {
+    pub name: String,
+    pub command: String,
+}
+
 pub struct Config {
     /// Fallback theme used only when a project has no session (or no session-saved
     /// theme) yet. Theme selection normally lives in the session; this can only be
@@ -21,6 +28,8 @@ pub struct Config {
     pub agent: AgentSettings,
     /// The `after-agents { … }` block.
     pub after_agents: AfterAgentsConfig,
+    /// The `alias <name> "<command>"` lines.
+    pub aliases: Vec<Alias>,
 }
 
 /// Settings for the `after-agents` command line command.
@@ -28,8 +37,6 @@ pub struct Config {
 pub struct AfterAgentsConfig {
     /// Seconds any input can still cancel the command after the agents end; 0 runs it at once.
     pub grace_seconds: u64,
-    /// `(name, shell command)` pairs from the `alias` lines; the typed remainder is appended.
-    pub aliases: Vec<(String, String)>,
 }
 
 pub const DEFAULT_GRACE_SECONDS: u64 = 5;
@@ -38,7 +45,6 @@ impl Default for AfterAgentsConfig {
     fn default() -> Self {
         Self {
             grace_seconds: DEFAULT_GRACE_SECONDS,
-            aliases: Vec::new(),
         }
     }
 }
@@ -383,40 +389,37 @@ fn parse(content: &str) -> Result<Config, String> {
     let mut counters = CountersConfig::default();
     let mut agent = AgentSettings::default();
     let mut after_agents = AfterAgentsConfig::default();
+    let mut aliases: Vec<Alias> = Vec::new();
 
     for node in doc.nodes() {
         match node.name().value() {
+            "alias" => {
+                let mut arguments = node
+                    .entries()
+                    .iter()
+                    .filter(|e| e.name().is_none())
+                    .map(|e| e.value().as_string());
+                let (Some(Some(name)), Some(Some(command)), None) =
+                    (arguments.next(), arguments.next(), arguments.next())
+                else {
+                    return Err("alias must have a name and a command, both strings".to_string());
+                };
+                if name.is_empty() || name.contains(char::is_whitespace) {
+                    return Err(format!("alias name '{name}' must be one word"));
+                }
+                if aliases.iter().any(|known| known.name == name) {
+                    return Err(format!("alias '{name}' is defined twice"));
+                }
+                aliases.push(Alias {
+                    name: name.to_string(),
+                    command: command.to_string(),
+                });
+            }
             "after-agents" => {
                 let Some(children) = node.children() else {
                     continue;
                 };
                 for child in children.nodes() {
-                    if child.name().value() == "alias" {
-                        let mut arguments = child
-                            .entries()
-                            .iter()
-                            .filter(|e| e.name().is_none())
-                            .map(|e| e.value().as_string());
-                        let (Some(Some(name)), Some(Some(command)), None) =
-                            (arguments.next(), arguments.next(), arguments.next())
-                        else {
-                            return Err(
-                                "after-agents.alias must have a name and a command, both strings"
-                                    .to_string(),
-                            );
-                        };
-                        if name.is_empty() || name.contains(char::is_whitespace) {
-                            return Err(format!(
-                                "after-agents.alias name '{name}' must be one word"
-                            ));
-                        }
-                        if after_agents.aliases.iter().any(|(known, _)| known == name) {
-                            return Err(format!("after-agents.alias '{name}' is defined twice"));
-                        }
-                        after_agents
-                            .aliases
-                            .push((name.to_string(), command.to_string()));
-                    }
                     if child.name().value() == "grace-seconds" {
                         after_agents.grace_seconds = child
                             .entries()
@@ -488,6 +491,7 @@ fn parse(content: &str) -> Result<Config, String> {
         counters,
         agent,
         after_agents,
+        aliases,
     })
 }
 
@@ -819,28 +823,30 @@ mod config_tests {
     }
 
     #[test]
-    fn after_agents_aliases_are_read_in_order() {
-        let config = parse(
-            "after-agents {\n alias poweroff \"systemctl poweroff\"\n alias notify \"notify-send %project\"\n}",
-        )
-        .unwrap();
+    fn aliases_are_read_in_order() {
+        let config =
+            parse("alias poweroff \"systemctl poweroff\"\nalias notify \"notify-send %project\"\n")
+                .unwrap();
+        let alias = |name: &str, command: &str| Alias {
+            name: name.to_string(),
+            command: command.to_string(),
+        };
         assert_eq!(
-            config.after_agents.aliases,
+            config.aliases,
             vec![
-                ("poweroff".to_string(), "systemctl poweroff".to_string()),
-                ("notify".to_string(), "notify-send %project".to_string()),
+                alias("poweroff", "systemctl poweroff"),
+                alias("notify", "notify-send %project"),
             ]
         );
-        assert!(parse("").unwrap().after_agents.aliases.is_empty());
+        assert!(parse("").unwrap().aliases.is_empty());
     }
 
     #[test]
-    fn after_agents_aliases_reject_bad_declarations() {
-        let twice = "after-agents {\n alias a \"x\"\n alias a \"y\"\n}";
-        assert!(parse(twice).is_err());
-        assert!(parse("after-agents { alias \"\" \"x\" }").is_err());
-        assert!(parse("after-agents { alias \"a b\" \"x\" }").is_err());
-        assert!(parse("after-agents { alias a }").is_err());
-        assert!(parse("after-agents { alias a 3 }").is_err());
+    fn aliases_reject_bad_declarations() {
+        assert!(parse("alias a \"x\"\nalias a \"y\"").is_err());
+        assert!(parse("alias \"\" \"x\"").is_err());
+        assert!(parse("alias \"a b\" \"x\"").is_err());
+        assert!(parse("alias a").is_err());
+        assert!(parse("alias a 3").is_err());
     }
 }
