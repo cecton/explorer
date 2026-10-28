@@ -26,7 +26,7 @@ const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '�
 const TITLE_MAX_CHARS: usize = 100;
 const REPLY_MAX_CHARS: usize = 8000;
 const COMMITS_MAX: usize = 20;
-/// Times a commit turn is asked to commit what it left behind before Explorer stashes it.
+/// Times a commit turn is asked to commit what it left behind before Explorer discards it.
 const MAX_NUDGES: usize = 2;
 /// Opens the line of a tool call in the work log.
 pub const TOOL_LINE_PREFIX: &str = "- ";
@@ -112,9 +112,7 @@ pub struct TurnOutcome {
     pub cached_in: Option<u64>,
     /// Commits the turn produced, oldest first.
     pub commits: Vec<String>,
-    /// Stash holding what the turn left uncommitted.
-    pub stash: Option<String>,
-    /// True when a feedback turn's scratch work was hard-reset at its end.
+    /// True when the turn's uncommitted work was discarded at its end.
     pub reset: bool,
     /// Claude Code session of the turn; `None` for our own loop.
     pub session_id: Option<String>,
@@ -490,25 +488,26 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             .write()
             .cancel_running_agents(&request.node, now_secs());
         let head_after = request.repo.as_ref().and_then(crate::git::head_id);
-        let (commits, stash, reset) = match request.mode {
+        // Whatever a turn left uncommitted is discarded, however it ended.
+        let (commits, reset) = match request.mode {
             Mode::Feedback => {
                 let root = request.root.clone();
-                let reset = tokio::task::spawn_blocking(move || close_feedback_turn(&root))
+                let reset = tokio::task::spawn_blocking(move || discard_turn_work(&root))
                     .await
                     .unwrap_or(false);
-                (Vec::new(), None, reset)
+                (Vec::new(), reset)
             }
             Mode::Commit => {
                 let root = request.root.clone();
                 let node = request.node.clone();
                 let before = request.head.clone();
                 let after = head_after.clone();
-                let (commits, stash) = tokio::task::spawn_blocking(move || {
+                let (commits, reset) = tokio::task::spawn_blocking(move || {
                     close_commit_turn(&root, node.as_str(), before.as_deref(), after.as_deref())
                 })
                 .await
                 .unwrap_or_default();
-                (commits, stash, false)
+                (commits, reset)
             }
         };
         // A turn cut short before it said anything has nothing to show and nothing to
@@ -534,7 +533,6 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             tokens_in,
             cached_in,
             commits: commits.clone(),
-            stash,
             reset,
             session_id,
         };
@@ -846,14 +844,13 @@ async fn run_own_loop(
     Ok(())
 }
 
-/// What a commit turn leaves in git once it has ended, however it ended: the commits
-/// it made, and a stash of anything still uncommitted.
+/// The commits a commit turn made; what it left uncommitted is discarded.
 fn close_commit_turn(
     root: &Utf8Path,
     node: &str,
     head_before: Option<&str>,
     head_after: Option<&str>,
-) -> (Vec<String>, Option<String>) {
+) -> (Vec<String>, bool) {
     let commits = match head_after {
         Some(after) if head_before != Some(after) => {
             crate::git::commits_between(root, head_before, after).unwrap_or_else(|e| {
@@ -863,21 +860,11 @@ fn close_commit_turn(
         }
         _ => Vec::new(),
     };
-    let dirty = crate::git::status_short(root).is_ok_and(|status| !status.trim().is_empty());
-    let stash = dirty
-        .then(|| crate::git::stash_push(root, &format!("explorer: left uncommitted by {node}")))
-        .and_then(|stashed| {
-            stashed
-                .map_err(|e| tracing::warn!("cannot stash the leftovers of {node}: {e}"))
-                .ok()
-        });
-    (commits, stash)
+    (commits, discard_turn_work(root))
 }
 
-/// What a feedback turn leaves behind: whether its scratch work was discarded. The
-/// tree is guaranteed clean at the start (prompts are refused otherwise), so the
-/// reset can only remove the turn's own changes.
-fn close_feedback_turn(root: &Utf8Path) -> bool {
+/// Discards what the turn left uncommitted; the tree was clean when the turn started.
+fn discard_turn_work(root: &Utf8Path) -> bool {
     match crate::git::status_short(root) {
         Ok(status) if !status.trim().is_empty() => discard_worktree(root)
             .map_err(|e| tracing::warn!("cannot reset the tree after the turn: {e}"))
@@ -1201,18 +1188,18 @@ mod tests {
         let first = commit(&root, "a.txt", "2", "feat: one");
         let second = commit(&root, "b.txt", "x", "feat: two");
 
-        let (commits, stash) = close_commit_turn(&root, "node", Some(&before), Some(&second));
+        let (commits, reset) = close_commit_turn(&root, "node", Some(&before), Some(&second));
         assert_eq!(commits, [first, second]);
-        assert!(stash.is_none());
+        assert!(!reset);
     }
 
     #[test]
     fn closing_a_turn_that_changed_nothing_records_nothing() {
         let (_tmp, root) = temp_repo();
         let head = commit(&root, "a.txt", "1", "init");
-        let (commits, stash) = close_commit_turn(&root, "node", Some(&head), Some(&head));
+        let (commits, reset) = close_commit_turn(&root, "node", Some(&head), Some(&head));
         assert!(commits.is_empty());
-        assert!(stash.is_none());
+        assert!(!reset);
     }
 
     #[test]
@@ -1238,7 +1225,7 @@ mod tests {
         let (_tmp, root) = temp_repo();
         let head = commit(&root, "a.txt", "1", "init");
 
-        assert!(!close_feedback_turn(&root));
+        assert!(!discard_turn_work(&root));
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "1");
         assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
     }
@@ -1250,7 +1237,7 @@ mod tests {
         std::fs::write(root.join("a.txt"), "scratch").unwrap();
         std::fs::write(root.join("note.txt"), "untracked").unwrap();
 
-        assert!(close_feedback_turn(&root));
+        assert!(discard_turn_work(&root));
         assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "1");
         assert!(!root.join("note.txt").exists());
         assert_eq!(git(&root, &["rev-parse", "HEAD"]), head);
@@ -1258,18 +1245,39 @@ mod tests {
     }
 
     #[test]
-    fn closing_a_dirty_turn_stashes_tracked_and_untracked_leftovers() {
+    fn closing_a_dirty_turn_discards_tracked_and_untracked_leftovers() {
         let (_tmp, root) = temp_repo();
         let before = commit(&root, "a.txt", "1", "init");
         std::fs::write(root.join("a.txt"), "changed").unwrap();
         std::fs::write(root.join("new.txt"), "untracked").unwrap();
 
-        let (commits, stash) = close_commit_turn(&root, "node-7", Some(&before), Some(&before));
+        let (commits, reset) = close_commit_turn(&root, "node-7", Some(&before), Some(&before));
         assert!(commits.is_empty());
-        let stash = stash.expect("leftovers are stashed");
-        assert_eq!(stash, git(&root, &["rev-parse", "refs/stash"]));
+        assert!(reset);
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "1");
+        assert!(!root.join("new.txt").exists());
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), before);
         assert_eq!(crate::git::status_short(&root).unwrap(), "");
-        assert!(git(&root, &["stash", "list"]).contains("left uncommitted by node-7"));
+        assert!(git(&root, &["stash", "list"]).is_empty());
+    }
+
+    #[test]
+    fn closing_a_turn_that_committed_keeps_the_commit_and_discards_the_rest() {
+        let (_tmp, root) = temp_repo();
+        let before = commit(&root, "a.txt", "1", "init");
+        std::fs::write(root.join("a.txt"), "2").unwrap();
+        git(&root, &["commit", "-q", "-a", "-m", "feat: one"]);
+        let after = git(&root, &["rev-parse", "HEAD"]);
+        std::fs::write(root.join("a.txt"), "3").unwrap();
+        std::fs::write(root.join("new.txt"), "untracked").unwrap();
+
+        let (commits, reset) = close_commit_turn(&root, "node", Some(&before), Some(&after));
+        assert_eq!(commits, std::slice::from_ref(&after));
+        assert!(reset);
+        assert_eq!(std::fs::read_to_string(root.join("a.txt")).unwrap(), "2");
+        assert!(!root.join("new.txt").exists());
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]), after);
+        assert_eq!(crate::git::status_short(&root).unwrap(), "");
     }
 
     #[test]

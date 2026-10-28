@@ -89,7 +89,7 @@ reasons behind them.
 | Dirty tree | Every prompt, whatever its mode, is refused while the working tree has uncommitted changes. |
 | Feedback scratch work | A feedback turn may edit, build and test freely; Explorer hard-resets the working tree when the turn ends, and a commit it makes is not recorded to the conversation, so it must not commit. |
 | Forgotten commit | Explorer stays in the loop and sends a hidden nudge asking the agent to commit. |
-| Leftovers | Only when nudging is impossible or exhausted, Explorer stashes what is left and flags the node. |
+| Leftovers | Only when nudging is impossible or exhausted, Explorer discards what is left. Nothing of a turn survives outside the commits it made. |
 | Locking | One turn at a time per repository, whatever its mode. |
 | Reply and work log | The reply is the text of the answers that called no tools. The narration between tool calls and the tool calls themselves go to a display-only work log. |
 | Permissions | None in v1: every tool call is allowed, file tools are confined to the repository root. |
@@ -170,8 +170,7 @@ status: done                  running | done | failed | cancelled
 head-before: <full hash>
 head-after: <full hash>
 commits: <full hash> <full hash>     commit nodes only; oldest first
-stash: <full hash>            only when leftovers were stashed
-scratch-reset: true           only when a feedback turn's changes were discarded
+scratch-reset: true           only when a turn's uncommitted changes were discarded
 favorite: true                only when set
 command: review               only when a custom command was expanded
 system-prompt: off            only for a command sent without the mode prompt
@@ -526,9 +525,11 @@ When the model stops without asking for a tool, Explorer checks the working tree
   - On `claude-code`, the nudge is a second `claude -p --resume <this node's session>`
     call without `--fork-session`.
 - **Still dirty after two nudges, or the turn failed or was cancelled** — no model can
-  be asked. Explorer runs `git stash push --include-untracked` with a message naming the
-  node, stores the stash commit hash in `stash:`, and flags the node as uncommitted.
-  Stashing shells out to `git` (gix has no stash writer).
+  be asked. Explorer discards what the turn left uncommitted, like it does a feedback
+  turn's scratch work, and records `scratch-reset: true` on the node. The tree was
+  clean when the turn started, so the reset can only remove the turn's own changes. A
+  `/continue` on such a node says the work was discarded and asks the model to redo it
+  from the conversation it replays.
 
 Amended or rebased-away commits remain recorded in older nodes' metadata, but git may
 eventually garbage-collect the objects themselves.
@@ -633,7 +634,7 @@ the end of the text, is looked up among the commands:
     like any prompt. With `off`, the turn gets no mode prompt on either kind of endpoint
     (the rest of the system prompt stays) and no workspace note. Since nothing tells it
     that the tree is a lab, its work is kept: the turn runs and closes as a commit turn
-    (commits recorded, nudge, leftovers stashed) and its node has type `commit`. The
+    (commits recorded, nudge, leftovers discarded) and its node has type `commit`. The
     node records `system-prompt: off`, so a replay leaves the mode prompt out again.
   - `argument` and `description` are display only, see the hint below.
 
@@ -706,8 +707,8 @@ suggests `/compact` from the parent node.
   the new node. The expanded set is saved in the session.
 - Feedback and commit nodes have distinct colors. Other states get a color and a
   one-character marker in a fixed gutter column right after the date: running (a
-  braille spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), failed `✗`, cancelled `■`, uncommitted (stashed)
-  `±`, compact `≡`. All of them exist in the Terminus font. While a turn runs it asks
+  braille spinner, `⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏`), failed `✗`, cancelled `■`, compact `≡`. All of them
+  exist in the Terminus font. While a turn runs it asks
   for a redraw every 100 ms, one spinner frame; the frame is computed from the time
   the turn started. Favorites are highlighted across the whole row. Rails and arms are
   drawn in `ui.linenr`, never bold; on the selected row the date and rails, including
@@ -738,7 +739,7 @@ suggests `/compact` from the parent node.
   `m`, `e`, `c`, `f`, `Ctrl+D`, `Left` and `Right` do nothing on it, since a queued
   prompt has no node to act on.
 - **Deletion** removes the directories and closes Discussion windows showing deleted
-  nodes; their highlights go with them. Commits and stashes are not touched. A running node and its ancestors cannot be
+  nodes; their highlights go with them. Commits are not touched. A running node and its ancestors cannot be
   deleted.
 
 ### 11.2 Discussion window
@@ -768,7 +769,7 @@ window holds its node's prompt, reply and work log in memory only while it is op
   turn still shows what it did. A done node with a reply hides it; `Ctrl+O` shows or
   hides it either way, and the status line of a node that has one says so.
 - Status line: running (the same spinner as in the tree, current tool, elapsed time,
-  context size), done (type, short hashes, stash, context size, cache hits, elapsed
+  context size), done (type, short hashes, context size, cache hits, elapsed
   time), failed (error), cancelled, or the reason a send was refused. The context size is
   abbreviated (`96k`, `1.2M`); of the types only `compact` is named, since a commit node
   is recognizable by its hashes and every other node is feedback. Cache hits are the part
@@ -885,7 +886,7 @@ Hermetic unit tests:
 - context assembly: ancestor walk, compact cut-off, handover, repository-moved note,
   the repository-state note, injected messages preserved;
 - commit-turn closing on a temporary git repository: clean, nudge then clean, nudges
-  exhausted then stash, amended history;
+  exhausted then discard, amended history;
 - feedback-turn closing: scratch work discarded, ignored files kept, a clean tree and a
   repository without commits left alone;
 - recorder: the text of an answer that calls tools moves from the reply to the work
@@ -937,7 +938,7 @@ Defaults chosen without an explicit answer; change freely.
 
 1. `default` was added to the effort set (`low` / `medium` / `high` was the answer) so
    that models rejecting an effort parameter stay usable.
-2. Two nudges at most, then stash.
+2. Two nudges at most, then discard.
 3. The nudge and the repository-moved note are kept in `transcript.jsonl` although
    hidden from the user (the request was to save the nudge nowhere).
 4. `conversation` pages are generated on demand from memory rather than maintained as
@@ -957,8 +958,8 @@ Defaults chosen without an explicit answer; change freely.
     too: it is what makes the reset at the end of a feedback turn safe.
 14. `AGENTS.md` is injected into the system prompt of the own loop.
 15. `claude-code` runs with `--permission-mode bypassPermissions`.
-16. A turn found dirty after a commit turn is stashed with
-    `git stash push --include-untracked`.
+16. A turn found dirty after a commit turn is discarded, like a feedback turn's scratch
+    work.
 17. Key choices: `<leader>c`, `n`, `f`, `c`, `Ctrl+O`; in the Discussion window `Esc`
     cancels or takes back and `Ctrl+C` only clears the input. The favorite of the node
     in focus is on `<leader>f` rather than `Ctrl+F`, which stays the input's forward-char.

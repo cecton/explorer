@@ -184,20 +184,24 @@ pub fn compact_request(instructions: &str) -> String {
 }
 
 /// What a `/continue` turn asks the model: the state of the interrupted turn of the
-/// node it replays, then how to go on. `interrupted` is how the turn ended, `stash`
-/// the message of the stash holding what the turn left uncommitted.
-pub fn continue_request(interrupted: &str, stash: Option<&str>, instructions: &str) -> String {
+/// node it replays, then how to go on. `interrupted` is how the turn ended,
+/// `discarded` whether the uncommitted work of that turn was discarded when it ended.
+pub fn continue_request(interrupted: &str, discarded: bool, instructions: &str) -> String {
     let mut note = format!(
         "[Note from Explorer: your previous turn on this conversation was interrupted: \
          {interrupted}. Everything above is what you did and said before the \
          interruption. Continue where you left off; if the failure came from something \
          in your approach, adapt."
     );
-    if let Some(stash) = stash {
-        note.push_str(&format!(
-            " Your uncommitted changes were stashed as \"{stash}\"; restore them with \
-             git stash pop if you still need them."
-        ));
+    if discarded {
+        note.push_str(
+            " The changes that turn left uncommitted were discarded when it ended: the \
+             working tree holds nothing of that turn but the commits it made. Redo them \
+             from what you know of that turn: the conversation above holds every edit \
+             and command you made.",
+        );
+    } else {
+        note.push_str(" That turn left no uncommitted work behind, so nothing was lost.");
     }
     note.push(']');
     match instructions.trim() {
@@ -329,17 +333,20 @@ mod tests {
     }
 
     #[test]
-    fn continue_request_reports_the_interruption_and_the_stash() {
-        let bare = continue_request("rate limited", None, "  ");
+    fn continue_request_reports_the_interruption_and_the_discarded_work() {
+        let bare = continue_request("rate limited", true, "  ");
         assert!(bare.starts_with("[Note from Explorer:"));
         assert!(bare.contains("was interrupted: rate limited."));
-        assert!(bare.ends_with("adapt.]"));
-        assert!(!bare.contains("stashed"));
+        assert!(bare.contains("discarded"));
+        assert!(bare.contains("the conversation above holds every edit"));
+        assert!(!bare.contains("stash"));
+        assert!(bare.ends_with("made.]"));
 
-        let stashed = continue_request("boom", Some("explorer: left uncommitted by a2"), "");
-        assert!(stashed.contains("stashed as \"explorer: left uncommitted by a2\""));
+        let kept = continue_request("boom", false, "");
+        assert!(kept.contains("nothing was lost"));
+        assert!(!kept.contains("discarded"));
 
-        let extra = continue_request("boom", None, " skip the refactor");
+        let extra = continue_request("boom", true, " skip the refactor");
         assert!(extra.ends_with("Additional instructions from the user: skip the refactor"));
     }
 

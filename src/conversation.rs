@@ -118,7 +118,6 @@ pub struct Metadata {
     pub head_before: Option<String>,
     pub head_after: Option<String>,
     pub commits: Vec<String>,
-    pub stash: Option<String>,
     pub scratch_reset: bool,
     pub favorite: bool,
     pub command: Option<String>,
@@ -163,7 +162,6 @@ impl Metadata {
                 "commits" => {
                     meta.commits = value.split_whitespace().map(str::to_string).collect();
                 }
-                "stash" => meta.stash = Some(value.to_string()),
                 "scratch-reset" => meta.scratch_reset = value == "true",
                 "favorite" => meta.favorite = value == "true",
                 "command" => meta.command = Some(value.to_string()),
@@ -206,7 +204,6 @@ impl Metadata {
         push("head-before", self.head_before.as_deref());
         push("head-after", self.head_after.as_deref());
         push("commits", (!commits.is_empty()).then_some(commits.as_str()));
-        push("stash", self.stash.as_deref());
         push("scratch-reset", self.scratch_reset.then_some("true"));
         push("favorite", self.favorite.then_some("true"));
         push("command", self.command.as_deref());
@@ -990,7 +987,6 @@ mod tests {
             head_before: Some("aaaa".into()),
             head_after: Some("bbbb".into()),
             commits: vec!["bbbb".into(), "cccc".into()],
-            stash: Some("dddd".into()),
             scratch_reset: true,
             favorite: true,
             command: Some("review".into()),

@@ -444,12 +444,6 @@ fn lock_refusal(running: &[Mode]) -> Option<&'static str> {
     (!running.is_empty()).then_some("another turn is running; wait for it to finish")
 }
 
-/// What the stash of `node` holds, from its metadata. A failed commit turn's
-/// uncommitted work sits in one.
-fn stash_message(state: &AppState, node: &NodeId) -> Option<String> {
-    state.conversations.read().node(node)?.meta.stash.clone()
-}
-
 fn ordinal(rank: usize) -> String {
     let suffix = match (rank % 10, rank % 100) {
         (_, 11..=13) => "th",
@@ -528,7 +522,7 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
                     "/continue has nothing to resume in a new conversation".to_string(),
                 )));
             };
-            let (interrupted, mode) = {
+            let (interrupted, mode, discarded) = {
                 let tree = state.conversations.read();
                 let resumed = tree.node(node)?;
                 let meta = &resumed.meta;
@@ -540,14 +534,10 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
                     Some(NodeStatus::Cancelled) => crate::conversation::CANCELLED_ERROR.to_string(),
                     _ => "the turn stopped before an answer".to_string(),
                 };
-                (interrupted, node_mode(resumed))
+                (interrupted, node_mode(resumed), meta.scratch_reset)
             };
             (
-                context::continue_request(
-                    &interrupted,
-                    stash_message(state, node).as_deref(),
-                    &instructions,
-                ),
+                context::continue_request(&interrupted, discarded, &instructions),
                 Some(typed),
                 TurnKind::Continue(mode),
                 None,
@@ -1487,9 +1477,6 @@ fn status_text(meta: &Metadata) -> (String, bool) {
         .map(|hash| hash.chars().take(7).collect())
         .collect();
     push(&hashes.join(" "));
-    if meta.stash.is_some() {
-        push("uncommitted changes stashed");
-    }
     if let Some(model) = meta.model_label() {
         push(&model);
     }
@@ -2507,14 +2494,14 @@ mod tests {
     }
 
     #[test]
-    fn continue_note_carries_the_error_and_the_stash() {
+    fn continue_note_carries_the_error_and_says_the_work_was_discarded() {
         let (_tmp, mut state) = state_with_failed_child();
         state
             .conversations
             .write()
             .update_meta(&NodeId::new("a2"), |meta| {
                 meta.error = Some("rate limited".into());
-                meta.stash = Some("explorer: left uncommitted by a2".into());
+                meta.scratch_reset = true;
             })
             .unwrap();
         state
@@ -2525,16 +2512,27 @@ mod tests {
             .set_text("/continue finish it");
         let launch = compose_launch(&state, 1).unwrap().unwrap();
         assert!(launch.prompt.contains("was interrupted: rate limited"));
-        assert!(
-            launch
-                .prompt
-                .contains("stashed as \"explorer: left uncommitted by a2\"")
-        );
+        assert!(launch.prompt.contains("discarded"));
+        assert!(!launch.prompt.contains("stash"));
         assert!(
             launch
                 .prompt
                 .ends_with("Additional instructions from the user: finish it")
         );
+    }
+
+    #[test]
+    fn continue_note_does_not_claim_a_discard_when_the_turn_left_nothing() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("/continue");
+        let launch = compose_launch(&state, 1).unwrap().unwrap();
+        assert!(!launch.prompt.contains("discarded"));
+        assert!(launch.prompt.contains("nothing was lost"));
     }
 
     #[test]

@@ -1579,7 +1579,6 @@ impl App for AppMain {
                         meta.tokens_in = outcome.tokens_in;
                         meta.cached_in = outcome.cached_in;
                         meta.commits = outcome.commits.clone();
-                        meta.stash = outcome.stash.clone();
                         meta.scratch_reset = outcome.reset;
                         meta.session_id = outcome.session_id.clone();
                     });
@@ -1589,7 +1588,7 @@ impl App for AppMain {
                     if outcome.status == crate::conversation::NodeStatus::Failed {
                         DiscussionComponent::restore_prompt(state, node);
                     }
-                    // A turn may have moved HEAD or stashed: refresh what shows git state.
+                    // A turn may have moved HEAD or discarded its work: refresh what shows git state.
                     let main_tx = global_data.main_thread_channel_sender.clone();
                     // A cancel cuts its sub-agent short, without the signal of its end.
                     DiscussionComponent::reload_agent_windows(state, main_tx.clone(), node, None);

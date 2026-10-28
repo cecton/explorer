@@ -335,7 +335,6 @@ fn state_marker(meta: &Metadata, running_for: Option<Duration>) -> Option<char> 
     match (meta.status, meta.node_type) {
         (Some(NodeStatus::Running), _) => Some(spinner_frame(running_for.unwrap_or_default())),
         (Some(NodeStatus::Failed), _) => Some('✗'),
-        _ if meta.stash.is_some() => Some('±'),
         (_, Some(NodeType::Compact)) => Some('≡'),
         _ => None,
     }

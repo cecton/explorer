@@ -334,16 +334,6 @@ pub fn commits_between(
     Ok(listed.lines().map(str::to_string).collect())
 }
 
-/// Stashes every change, untracked files included, and returns the stash commit id.
-pub fn stash_push(root: &camino::Utf8Path, message: &str) -> Result<String, String> {
-    git_output(
-        root,
-        &["stash", "push", "--include-untracked", "--message", message],
-    )?;
-    let id = git_output(root, &["rev-parse", "refs/stash"])?;
-    Ok(id.trim().to_string())
-}
-
 /// Hard-resets tracked files and removes untracked ones. Ignored files are kept.
 /// Works on a repository without commits, where there is nothing to reset.
 pub fn discard_worktree(root: &camino::Utf8Path) -> Result<(), String> {
