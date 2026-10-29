@@ -563,6 +563,36 @@ error and its partial reply; sending from it creates a sibling.
 **Quit.** Quitting Explorer cancels running turns the same way. A running turn is not
 resumable and is not part of session restore.
 
+**Review rounds.** Every commit a commit turn makes is reviewed before the turn moves on,
+by a sub-agent that did not write it and sees none of the conversation. A round ends with
+the reviewer's fixes uncommitted in the working tree; the turn judges the round whole and
+folds it into the commit under review (amending it, or adding one `fix` commit when newer
+commits of the turn already sit on top of it), or rejects it with a hard reset and stops
+reviewing this commit. Only a kept round starts the next one. At most
+`agent { review-rounds <n> }` rounds per commit, 3 by default, at least 1.
+
+A round that changes nothing ends the review of a commit; the round limit and a rejected
+round end it too, but the size of a round's diff never does: not a round that changed one
+comment, one line of documentation or one test name. That is the point of the loop, and
+it is worth writing down why, since it looks wasteful from the outside. A reviewer is
+fresh: it has no idea what the work was driving at, so it spreads its attention over the
+whole commit and the code around it until something turns up. The agent that wrote the
+commit has had its attention narrowed by its own work: it has been inside one line of
+reasoning for minutes and looks where that line pointed. So a round that found something
+is evidence that a fresh reader still finds something in this commit, and the size of
+what it found says nothing about how much is left. Stopping on "only docs" or "a small
+fix" reads the size of a finding as if it were a measure of the commit's state.
+
+`prompts/commit.md` gets the rule and not this reasoning. The agent has to follow the
+rule and has nothing useful to do with the explanation, which also invites it to reason
+about its own attention instead of about the commit, and to argue that its case is the
+exception. The reason belongs here, and in the commit message that added the rule.
+
+The loop still ends, because the reviewer's own prompt makes finding nothing the normal
+outcome of a good commit and forbids changing code just to have something to show. Both
+halves are needed: the reviewer never invents a defect, and the turn never stops at the
+size of the defects it is given.
+
 **Title and summary.** Until a turn ends, a node has no title or summary files and the
 tree shows the first line of its prompt. When a turn ends `done`, one non-streaming
 call to `summary-model` without tools

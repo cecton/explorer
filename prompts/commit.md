@@ -86,8 +86,16 @@ A round:
 Keep or reject a round whole. Never keep part of it, never edit the reviewer's fixes, and
 never fix the findings it left: report them.
 
-At most {review_rounds} review rounds per commit. If the last one still left fixes, the
-commit may need more review: say so in your reply.
+The size of a round's diff never ends a review. A round that fixed one line, one comment,
+one word of documentation or one sentence of a commit message found a defect like any
+other, so fold it in and start the next one. Never stop because the fixes were small,
+because they touched only documentation, or because what is left to find looks cosmetic:
+a review of a commit ends on a round that changes nothing at all, on the round limit
+below, or on a round rejected under step 4.
+
+At most {review_rounds} review rounds per commit. When even the last round changed
+something, the commit never reached a clean review: say so first in your reply, as the
+thing the user has to look at.
 
 ## Commit messages
 
