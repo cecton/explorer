@@ -5,6 +5,7 @@ use super::tools::{self, ToolContext};
 use super::turn::Recorder;
 use std::future::Future;
 use std::pin::Pin;
+use std::time::{Duration, Instant};
 
 /// Threshold for detecting excessive Chinese characters (0.0 to 1.0).
 const CHINESE_DETECTION_THRESHOLD: f32 = 0.5;
@@ -30,6 +31,42 @@ fn has_excessive_chinese(text: &str) -> bool {
     (chinese_chars as f32 / total_chars as f32) > CHINESE_DETECTION_THRESHOLD
 }
 
+/// What the loop tells a run nearing its time budget.
+#[derive(Debug, PartialEq, Eq)]
+enum Nudge {
+    /// Sent once, as the budget nears its end.
+    Soft,
+    /// Sent every round past the budget.
+    Firm,
+}
+
+/// The wrap-up nudge of a run on a time budget: the soft one once at `budget - min(2
+/// minutes, half the budget)`, then the firm one every round past the budget.
+fn time_nudge(elapsed: Duration, budget: Duration, warned: bool) -> Option<Nudge> {
+    if elapsed >= budget {
+        return Some(Nudge::Firm);
+    }
+    let lead = Duration::from_secs(120).min(budget / 2);
+    (!warned && elapsed >= budget - lead).then_some(Nudge::Soft)
+}
+
+fn nudge_text(nudge: Nudge, elapsed: Duration, budget: Duration) -> String {
+    let (elapsed, budget) = (elapsed.as_secs() / 60, budget.as_secs() / 60);
+    match nudge {
+        Nudge::Soft => format!(
+            "[Note from Explorer: you have been running for {elapsed}m of the {budget}m \
+             you were given. Time is nearly up: finish the step you are on and write \
+             your final answer, saying plainly what you did and what remains undone.]"
+        ),
+        Nudge::Firm => format!(
+            "[Note from Explorer: you have been running for {elapsed}m of the {budget}m \
+             you were given. Do not start anything new. Write your final answer now, \
+             saying plainly what you did and what remains undone. An unfinished task \
+             reported clearly is worth more than a finished one reported late.]"
+        ),
+    }
+}
+
 /// Repairs a transcript that ends inside a round: an assistant message asking for
 /// tool calls whose results never arrived, because the turn died mid-stream or
 /// mid-tool. The calls are answered with a note, so replaying the transcript is a
@@ -52,7 +89,9 @@ pub fn repair_tail(messages: &mut Vec<Message>) {
 }
 
 /// Our own agent loop: ask the model, run the tools it asks for, feed the results
-/// back, and stop when an answer asks for none. Boxed: a sub-agent call runs it in turn.
+/// back, and stop when an answer asks for none. Boxed: a sub-agent call runs it in
+/// turn. A `budget` of start and duration nudges the model to wrap up as the run's
+/// time runs out; a turn has none.
 pub fn run<'a>(
     context: &'a ToolContext,
     target: &'a LlmTarget,
@@ -60,9 +99,10 @@ pub fn run<'a>(
     system: &'a str,
     messages: &'a mut Vec<Message>,
     recorder: &'a mut Recorder,
+    budget: Option<(Instant, Duration)>,
 ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
     Box::pin(run_loop(
-        context, target, session, system, messages, recorder,
+        context, target, session, system, messages, recorder, budget,
     ))
 }
 
@@ -73,9 +113,23 @@ async fn run_loop(
     system: &str,
     messages: &mut Vec<Message>,
     recorder: &mut Recorder,
+    budget: Option<(Instant, Duration)>,
 ) -> Result<(), String> {
     let tool_specs = tools::specs(context);
+    let mut warned = false;
     loop {
+        if let Some((started, limit)) = budget {
+            let elapsed = started.elapsed();
+            if let Some(nudge) = time_nudge(elapsed, limit, warned) {
+                warned |= nudge == Nudge::Soft;
+                let wrap_up = Message::User {
+                    content: nudge_text(nudge, elapsed, limit),
+                    injected: true,
+                };
+                recorder.message(&wrap_up);
+                messages.push(wrap_up);
+            }
+        }
         recorder.begin_answer();
         let response = match llm::stream_chat(
             target,
@@ -153,8 +207,47 @@ async fn run_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{super::ToolCall, repair_tail};
+    use super::{super::ToolCall, Nudge, nudge_text, repair_tail, time_nudge};
     use crate::agent::Message;
+    use std::time::Duration;
+
+    #[test]
+    fn a_budget_warns_once_then_nags_every_round_past_it() {
+        let budget = Duration::from_secs(900);
+        assert_eq!(time_nudge(Duration::from_secs(779), budget, false), None);
+        assert_eq!(
+            time_nudge(Duration::from_secs(780), budget, false),
+            Some(Nudge::Soft)
+        );
+        assert_eq!(time_nudge(Duration::from_secs(781), budget, true), None);
+        assert_eq!(
+            time_nudge(Duration::from_secs(900), budget, true),
+            Some(Nudge::Firm)
+        );
+        assert_eq!(
+            time_nudge(Duration::from_secs(1200), budget, false),
+            Some(Nudge::Firm)
+        );
+
+        // A budget under four minutes warns halfway instead.
+        let small = Duration::from_secs(60);
+        assert_eq!(time_nudge(Duration::from_secs(29), small, false), None);
+        assert_eq!(
+            time_nudge(Duration::from_secs(30), small, false),
+            Some(Nudge::Soft)
+        );
+    }
+
+    #[test]
+    fn a_nudge_says_how_long_the_run_has_been_going_and_how_much_it_got() {
+        let budget = Duration::from_secs(900);
+        let soft = nudge_text(Nudge::Soft, Duration::from_secs(780), budget);
+        assert!(soft.contains("13m of the 15m"));
+        assert!(soft.contains("what remains undone"));
+        let firm = nudge_text(Nudge::Firm, Duration::from_secs(960), budget);
+        assert!(firm.contains("16m of the 15m"));
+        assert!(firm.contains("Do not start anything new"));
+    }
 
     #[test]
     fn a_tail_left_inside_a_round_gets_synthetic_tool_results() {

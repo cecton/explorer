@@ -1,5 +1,6 @@
 use super::{Message, Mode};
 use camino::Utf8Path;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const FEEDBACK_PROMPT: &str = include_str!("../../prompts/feedback.md");
 const COMMIT_PROMPT: &str = include_str!("../../prompts/commit.md");
@@ -72,6 +73,34 @@ pub fn environment_note(root: &Utf8Path, head: Option<&str>, date: &str) -> Stri
         "[Note from Explorer: the state of the repository when this message was sent.]\n\n\
          - Repository root: {root}\n- Date: {date}\n- HEAD: {head}"
     )
+}
+
+/// The time budget of a run, closing its system prompt: the budget, when the run
+/// started and when the budget expires. A run that gets no warnings from the agent
+/// loop checks the time against it with `date`.
+pub fn budget_note(budget: Duration) -> String {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    budget_note_at(budget, now, crate::conversation::local_offset_secs(now))
+}
+
+fn budget_note_at(budget: Duration, now: i64, offset: i32) -> String {
+    let minutes = budget.as_secs() / 60;
+    format!(
+        "[Note from Explorer: this run has a time budget of {minutes} minutes. It is \
+         now about {}; the budget expires at about {}. The agent loop warns you as \
+         the end nears; when you are warned or the time is past, finish what you are \
+         doing and write your final answer. A run that gets no such warning checks \
+         the time with `date` itself.]",
+        hhmm(now, offset),
+        hhmm(now + budget.as_secs() as i64, offset),
+    )
+}
+
+fn hhmm(secs: i64, offset: i32) -> String {
+    let minutes = (secs + i64::from(offset)).rem_euclid(86_400) / 60;
+    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 /// The messages `transcript.jsonl` of a node holds, or `None` without a usable one.
@@ -456,5 +485,21 @@ mod tests {
         assert!(preamble.contains(body), "{preamble}");
         assert!(preamble.starts_with("[Note from Explorer:"));
         assert!(handover_preamble(&[empty]).is_none());
+    }
+
+    #[test]
+    fn the_budget_note_names_the_budget_and_both_times() {
+        let text = budget_note_at(Duration::from_secs(900), 14 * 3600 + 32 * 60, 0);
+        assert!(text.contains("15 minutes"));
+        assert!(text.contains("14:32"));
+        assert!(text.contains("14:47"));
+        assert!(text.contains("`date`"));
+    }
+
+    #[test]
+    fn hhmm_is_local_24h_rolling_over_midnight() {
+        assert_eq!(hhmm(14 * 3600 + 32 * 60, 0), "14:32");
+        assert_eq!(hhmm(86_400 - 60, 0), "23:59");
+        assert_eq!(hhmm(86_400 + 60, 0), "00:01");
     }
 }

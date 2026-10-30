@@ -824,6 +824,7 @@ async fn run_own_loop(
         &system,
         &mut messages,
         recorder,
+        None,
     )
     .await?;
     if request.mode == Mode::Feedback {
@@ -845,6 +846,7 @@ async fn run_own_loop(
             &system,
             &mut messages,
             recorder,
+            None,
         )
         .await?;
     }

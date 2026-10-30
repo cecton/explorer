@@ -63,7 +63,8 @@ A round:
    where it is `HEAD` —, then start a fresh sub-agent. Every round gets the same prompt:
    what the commit is meant to do and why, the decisions from this conversation it must
    respect (it sees none of the conversation), and that it reviews that commit, leaves
-   its fixes uncommitted in the working tree, and never commits.
+   its fixes uncommitted in the working tree, never commits, and ends by stating what
+   it did not get to examine.
 2. When it is done, run `git add -A` and read `git diff --cached` with its report. When
    nothing changed, the review of this commit is over. Otherwise judge the round as a
    whole and run the project's checks.
@@ -92,6 +93,14 @@ other, so fold it in and start the next one. Never stop because the fixes were s
 because they touched only documentation, or because what is left to find looks cosmetic:
 a review of a commit ends on a round that changes nothing at all, on the round limit
 below, or on a round rejected under step 4.
+
+A sub-agent result can note that the run hit its time budget and its answer may be
+partial. Take such a review report by what it found. With findings in hand, the
+wrap-up is its report: go on with the round as usual. Finding nothing and leaving its
+analysis unfinished, continue the same run once (pass its `agent_id`) to finish
+exactly the analysis it had left: no new areas, and tell it it has at most about half
+the original budget before it must stop. Never continue it twice. Finding nothing
+with its analysis complete, it is the clean round like any other.
 
 At most {review_rounds} review rounds per commit. When even the last round changed
 something, the commit never reached a clean review: say so first in your reply, as the

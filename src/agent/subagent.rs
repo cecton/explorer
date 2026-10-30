@@ -14,7 +14,7 @@ use camino::{Utf8Path, Utf8PathBuf};
 use parking_lot::RwLock;
 use serde_json::{Value, json};
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Name of the tool that calls a sub-agent.
 pub const TOOL: &str = "agent";
@@ -40,13 +40,16 @@ pub struct Role {
     pub description: String,
     /// Model the role runs on, ahead of the `subagent-model` setting.
     pub model: Option<ModelSpec>,
+    /// Wall-clock budget of one run, from the role's `budget-minutes`.
+    pub budget: Option<Duration>,
     /// The role's system prompt.
     pub prompt: String,
 }
 
 impl Role {
     /// Reads a role file: a metadata block of `key: value` lines between two `---`
-    /// lines, with a `description` and an optional `model`, then the system prompt.
+    /// lines, with a `description`, an optional `model` and `budget-minutes`, then the
+    /// system prompt.
     pub fn parse(name: &str, text: &str) -> Result<Self, String> {
         let (metadata, prompt) = split_metadata(text);
         let prompt = prompt.trim();
@@ -55,6 +58,7 @@ impl Role {
         }
         let mut description = None;
         let mut model = None;
+        let mut budget = None;
         for line in metadata.lines() {
             let Some((key, value)) = line.split_once(':') else {
                 continue;
@@ -70,6 +74,17 @@ impl Role {
                         format!("model '{value}' is not of the form endpoint/model/effort")
                     })?);
                 }
+                "budget-minutes" => {
+                    let secs = value
+                        .parse::<u64>()
+                        .ok()
+                        .filter(|minutes| *minutes >= 1)
+                        .and_then(|minutes| minutes.checked_mul(60))
+                        .ok_or_else(|| {
+                            format!("budget-minutes '{value}' is not a positive whole number")
+                        })?;
+                    budget = Some(Duration::from_secs(secs));
+                }
                 _ => {}
             }
         }
@@ -77,6 +92,7 @@ impl Role {
             name: name.to_string(),
             description: description.ok_or("it has no description")?,
             model,
+            budget,
             prompt: prompt.to_string(),
         })
     }
@@ -154,6 +170,8 @@ struct Launch {
     role: Option<String>,
     /// The role's prompt, or the default one.
     system: String,
+    /// The role's time budget, when it sets one.
+    budget: Option<Duration>,
     /// The task as typed, for the retry's `prompt.md`.
     prompt: String,
     description: String,
@@ -312,6 +330,7 @@ fn prepare(
         system: role
             .map_or(context::SUBAGENT_PROMPT, |role| &role.prompt)
             .to_string(),
+        budget: role.and_then(|role| role.budget),
         prompt: prompt.to_string(),
         description: description.to_string(),
         message,
@@ -341,9 +360,23 @@ async fn execute(
         started,
         live: Arc::clone(&child.live),
     });
+    // Composed here, not in `prepare`, so every run — a fallback rerun included —
+    // names its own start and deadline in the budget note.
+    let system = match launch.budget {
+        Some(budget) => format!(
+            "{}\n\n{}",
+            launch.system.trim_end(),
+            context::budget_note(budget)
+        ),
+        None => launch.system.clone(),
+    };
     let result = match backend {
-        Backend::OpenAi(target) => run_own_loop(context, launch, target, &mut child).await,
-        Backend::ClaudeCode(target) => run_claude_code(context, launch, target, &mut child).await,
+        Backend::OpenAi(target) => {
+            run_own_loop(context, launch, target, &system, started, &mut child).await
+        }
+        Backend::ClaudeCode(target) => {
+            run_claude_code(context, launch, target, &system, &mut child).await
+        }
     };
     child.flush_reply();
     recorder.live.lock().subagent = None;
@@ -451,6 +484,7 @@ async fn prepare_retry(
         spec: spec.clone(),
         role: launch.role.clone(),
         system,
+        budget: launch.budget,
         prompt: launch.prompt.clone(),
         description: launch.description.clone(),
         message,
@@ -535,8 +569,18 @@ pub async fn run(
     );
 
     let id = conversation::agent_id(&context.node, outcome.index);
+    let over_budget = match launch.budget {
+        Some(budget) if outcome.secs >= budget.as_secs() => format!(
+            "[Note from Explorer: the sub-agent hit its {}m time budget; its answer \
+             may be partial.]\n\n",
+            budget.as_secs() / 60
+        ),
+        _ => String::new(),
+    };
     match &outcome.result {
-        Err(error) => format!("agent_id: {id}\n\nerror: the sub-agent failed: {error}"),
+        Err(error) => {
+            format!("agent_id: {id}\n\n{over_budget}error: the sub-agent failed: {error}")
+        }
         Ok(()) => {
             let note = first_error
                 .as_deref()
@@ -547,7 +591,7 @@ pub async fn run(
             } else {
                 outcome.reply.as_str()
             };
-            format!("agent_id: {id}\n\n{note}{answer}")
+            format!("agent_id: {id}\n\n{over_budget}{note}{answer}")
         }
     }
 }
@@ -603,10 +647,12 @@ async fn run_own_loop(
     context: &ToolContext,
     launch: &Launch,
     target: &LlmTarget,
+    system: &str,
+    started: Instant,
     recorder: &mut Recorder,
 ) -> Result<(), String> {
     let (system, mut messages) = {
-        let role = launch.system.clone();
+        let lead = system.to_string();
         let root = context.root.clone();
         let chain = launch.chain.clone();
         tokio::task::spawn_blocking(move || {
@@ -614,7 +660,7 @@ async fn run_own_loop(
                 .iter()
                 .flat_map(|dir| context::ancestor_messages(dir))
                 .collect();
-            (context::subagent_system_prompt(&role, &root), messages)
+            (context::subagent_system_prompt(&lead, &root), messages)
         })
         .await
         .map_err(|e| e.to_string())?
@@ -640,6 +686,7 @@ async fn run_own_loop(
         &system,
         &mut messages,
         recorder,
+        launch.budget.map(|budget| (started, budget)),
     )
     .await
 }
@@ -648,12 +695,13 @@ async fn run_claude_code(
     context: &ToolContext,
     launch: &Launch,
     target: &ClaudeTarget,
+    system: &str,
     recorder: &mut Recorder,
 ) -> Result<(), String> {
     let invocation = |prompt, resume| Invocation {
         target,
         root: &context.root,
-        system: &launch.system,
+        system,
         prompt,
         resume,
         mcp: &context.mcp,
@@ -708,6 +756,24 @@ mod tests {
         assert!(Role::parse("x", "You review.\n").is_err());
         assert!(Role::parse("x", "---\ndescription: d\n---\n").is_err());
         assert!(Role::parse("x", "---\ndescription: d\nmodel: opus\n---\nP\n").is_err());
+    }
+
+    #[test]
+    fn a_role_can_set_a_time_budget() {
+        let role = Role::parse("r", "---\ndescription: d\nbudget-minutes: 15\n---\nP\n").unwrap();
+        assert_eq!(role.budget, Some(Duration::from_secs(900)));
+
+        let none = Role::parse("r", "---\ndescription: d\n---\nP\n").unwrap();
+        assert_eq!(none.budget, None);
+        assert!(Role::parse("r", "---\ndescription: d\nbudget-minutes: 0\n---\nP\n").is_err());
+        assert!(Role::parse("r", "---\ndescription: d\nbudget-minutes: x\n---\nP\n").is_err());
+        assert!(
+            Role::parse(
+                "r",
+                "---\ndescription: d\nbudget-minutes: 9999999999999999999\n---\nP\n"
+            )
+            .is_err()
+        );
     }
 
     #[test]
