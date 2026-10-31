@@ -8,7 +8,7 @@ use super::{
     AgentConfig, Backend, Endpoint, EndpointKind, Message, Mode, ModelSpec, ToolCall, agent_loop,
     context,
 };
-use crate::conversation::{self, ConversationTree, Metadata, NodeId, NodeStatus};
+use crate::conversation::{self, ConversationTree, Metadata, NodeId, NodeStatus, NodeType};
 use crate::tui::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
 use parking_lot::RwLock;
@@ -181,8 +181,12 @@ struct Launch {
     chain: Vec<Utf8PathBuf>,
     /// Session of OpenAI-compatible requests: the id of the first run of the chain.
     session: String,
-    /// Claude Code session of the run this one continues.
+    /// Claude Code session of the run this one continues, unless a commit caller resumes
+    /// a run made under a feedback node.
     claude_session: Option<String>,
+    /// Mode of the calling turn: a commit caller replays its chain without the feedback
+    /// note.
+    mode: Mode,
     /// Model to rerun on when this one fails: the caller's, for a fresh run on an
     /// OpenAI-compatible endpoint. `claude` has no such failures to recover from, and
     /// a continued run keeps its own model.
@@ -207,6 +211,17 @@ fn find_role<'a>(config: &'a AgentConfig, name: &str) -> Result<&'a Role, String
         .iter()
         .find(|role| role.name == name)
         .ok_or_else(|| format!("unknown role: {name}"))
+}
+
+/// Whether a resumed run may fork the Claude Code session of `chain`. A fork replays the
+/// chain's messages, and a run under a feedback node opened with the feedback note: a
+/// commit caller only forks a chain run under commit nodes.
+fn forkable(tree: &ConversationTree, mode: Mode, chain: &[(NodeId, u32)]) -> bool {
+    mode == Mode::Feedback
+        || chain.iter().all(|(node, _)| {
+            tree.node(node)
+                .is_some_and(|node| node.meta.node_type == Some(NodeType::Commit))
+        })
 }
 
 /// Resolves a call into a run: its role, model and message. The run is recorded under
@@ -319,6 +334,7 @@ fn prepare(
     };
     let claude_session = resumed
         .as_ref()
+        .filter(|_| forkable(&tree, subagents.mode, &chain))
         .and_then(|(source, index)| tree.agent(source, *index)?.meta.session_id.clone());
     Ok(Launch {
         index,
@@ -340,6 +356,7 @@ fn prepare(
             .collect(),
         session,
         claude_session,
+        mode: subagents.mode,
         fallback,
     })
 }
@@ -491,6 +508,7 @@ async fn prepare_retry(
         chain: Vec::new(),
         session: conversation::agent_id(&context.node, index),
         claude_session: None,
+        mode: launch.mode,
         fallback: None,
     })
 }
@@ -655,11 +673,15 @@ async fn run_own_loop(
         let lead = system.to_string();
         let root = context.root.clone();
         let chain = launch.chain.clone();
+        let mode = launch.mode;
         tokio::task::spawn_blocking(move || {
-            let messages: Vec<Message> = chain
+            let mut messages: Vec<Message> = chain
                 .iter()
                 .flat_map(|dir| context::ancestor_messages(dir))
                 .collect();
+            if mode == Mode::Commit {
+                context::strip_workspace_note(&mut messages);
+            }
             (context::subagent_system_prompt(&lead, &root), messages)
         })
         .await
@@ -796,5 +818,30 @@ mod tests {
         let call = json!({"role": "reviewer", "description": "Review it\nsecond line"});
         assert_eq!(describe(&call), "agent reviewer: Review it");
         assert_eq!(describe(&json!({"description": "Fix"})), "agent: Fix");
+    }
+
+    #[test]
+    fn a_commit_caller_forks_only_a_chain_under_commit_nodes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let mut tree = ConversationTree::load(&root);
+        let mut node = |parent: Option<&NodeId>, secs, node_type| {
+            let meta = Metadata {
+                node_type: Some(node_type),
+                ..Default::default()
+            };
+            tree.create_node(parent, secs, meta, "x", None).unwrap()
+        };
+        let feedback = node(None, 1, NodeType::Feedback);
+        let commit = node(Some(&feedback), 2, NodeType::Commit);
+        let later = node(Some(&commit), 3, NodeType::Commit);
+
+        let under_commits = [(commit.clone(), 1), (later.clone(), 1)];
+        assert!(forkable(&tree, Mode::Commit, &under_commits));
+        assert!(forkable(&tree, Mode::Feedback, &under_commits));
+
+        let through_feedback = [(feedback, 1), (later, 1)];
+        assert!(!forkable(&tree, Mode::Commit, &through_feedback));
+        assert!(forkable(&tree, Mode::Feedback, &through_feedback));
     }
 }

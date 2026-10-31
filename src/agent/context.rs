@@ -172,6 +172,19 @@ the request reads. What a feedback turn changes does not stay: the tree is hard-
 when it ends, and a commit made here is not recorded to this conversation. You cannot \
 keep a change in the git history — you can only present a change to the user.]";
 
+/// Removes the feedback note from replayed user messages, so a commit turn never reads
+/// the feedback turns before it as instructions to itself.
+pub fn strip_workspace_note(messages: &mut [Message]) {
+    let note = format!("{WORKSPACE_NOTE}\n\n");
+    for message in messages {
+        if let Message::User { content, .. } = message
+            && content.contains(WORKSPACE_NOTE)
+        {
+            *content = content.replace(&note, "").replace(WORKSPACE_NOTE, "");
+        }
+    }
+}
+
 /// Note telling the agent which commits happened since the node it continues from.
 /// `commits` are `<short hash> <title>` lines, newest first, possibly one more than
 /// [`NOTE_MAX_COMMITS`] to signal that older ones exist.
@@ -435,6 +448,33 @@ mod tests {
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
 
         assert_eq!(claude_system_prompt(None, 3), "");
+    }
+
+    #[test]
+    fn strip_workspace_note_leaves_the_other_notes_and_the_prompt() {
+        let environment = Some("[Note from Explorer: env]".to_string());
+        let workspace = Some(WORKSPACE_NOTE.to_string());
+        let mut messages = vec![
+            Message::User {
+                content: with_notes(&[environment.clone(), workspace], "Fix it"),
+                injected: false,
+            },
+            Message::Assistant {
+                content: WORKSPACE_NOTE.to_string(),
+                tool_calls: Vec::new(),
+            },
+        ];
+        strip_workspace_note(&mut messages);
+        assert_eq!(
+            messages[0],
+            Message::User {
+                content: with_notes(&[environment], "Fix it"),
+                injected: false,
+            }
+        );
+        assert!(
+            matches!(&messages[1], Message::Assistant { content, .. } if content == WORKSPACE_NOTE)
+        );
     }
 
     #[test]

@@ -148,7 +148,8 @@ pub struct TurnRequest {
     /// Id of the conversation's root node, sent to OpenAI-compatible servers as the
     /// session of every request.
     pub session: String,
-    /// Claude Code session of the parent node, to fork when the backend is the CLI.
+    /// Claude Code session of the parent node, to fork when the backend is the CLI and the
+    /// turn is a feedback turn.
     pub parent_session: Option<String>,
     /// Claude Code session of the node itself, for a continue turn on it: the session
     /// holds everything its interrupted turn did.
@@ -592,6 +593,12 @@ async fn uncommitted(request: &TurnRequest) -> Result<Option<String>, String> {
     Ok((!status.trim().is_empty()).then_some(status))
 }
 
+/// The parent session a turn forks. Only feedback turns fork: a fork replays the parent's
+/// earlier user messages, which carry the feedback-turn workspace note.
+fn fork_source(mode: Mode, parent_session: Option<&str>) -> Option<&str> {
+    parent_session.filter(|_| mode == Mode::Feedback)
+}
+
 async fn run_claude_code(
     request: &TurnRequest,
     mcp: &McpTools,
@@ -644,9 +651,10 @@ async fn run_claude_code(
             Err(RunError::Failed(error)) => return Err(error),
         }
     } else {
-        // Fork the parent's session when there is one; otherwise, or when it is gone, start
-        // a fresh session that opens with the ancestors as plain text.
-        let forked = match request.parent_session.as_deref() {
+        // Feedback turns fork the parent's session when there is one; commit turns start
+        // fresh so they never see the replayed feedback history. A fork that is gone, or
+        // no parent, starts a fresh session that opens with the ancestors as plain text.
+        let forked = match fork_source(request.mode, request.parent_session.as_deref()) {
             Some(session) => {
                 match claude_code::run(
                     &invocation(
@@ -756,6 +764,9 @@ async fn run_own_loop(
                 .iter()
                 .flat_map(|dir| context::ancestor_messages(dir))
                 .collect();
+            if request.mode == Mode::Commit {
+                context::strip_workspace_note(&mut messages);
+            }
             messages.push(Message::User {
                 content: message_to_send(&request),
                 injected: false,
@@ -1071,6 +1082,14 @@ mod tests {
         git(root, &["add", "-A"]);
         git(root, &["commit", "-q", "-m", message]);
         git(root, &["rev-parse", "HEAD"])
+    }
+
+    #[test]
+    fn only_feedback_turns_fork_the_parent_session() {
+        assert_eq!(fork_source(Mode::Feedback, Some("abc")), Some("abc"));
+        assert_eq!(fork_source(Mode::Commit, Some("abc")), None);
+        assert_eq!(fork_source(Mode::Feedback, None), None);
+        assert_eq!(fork_source(Mode::Commit, None), None);
     }
 
     #[test]
