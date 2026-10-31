@@ -1305,6 +1305,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
 
             let window = Window::ConversationTree;
             let state = &mut global_data.state;
+            let was_at_scroll_max = state.pane_manager.window_at_scroll_max(&window);
             state.pane_manager.set_window_page_size(&window, total_rows);
 
             let tree_handle = state.conversations.clone();
@@ -1483,6 +1484,9 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 }
                 state.pane_manager.set_window_scroll(&window, scroll);
                 self.shown_selection = selected_target.clone();
+            } else if was_at_scroll_max && total_rows > 0 {
+                scroll = lines.len().saturating_sub(total_rows);
+                state.pane_manager.set_window_scroll(&window, scroll);
             }
 
             for row_offset in 0..total_rows {

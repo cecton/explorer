@@ -473,6 +473,13 @@ impl PaneManager {
             state.scroll = 0;
         }
     }
+
+    /// Whether `window`'s scroll offset sits where `clamp_scroll` settles it.
+    pub fn window_at_scroll_max(&self, window: &Window) -> bool {
+        self.window_states
+            .get(window)
+            .is_some_and(|s| s.scroll >= s.scroll_max.saturating_sub(s.page_size))
+    }
 }
 
 #[cfg(test)]
