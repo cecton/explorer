@@ -1176,14 +1176,8 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     state.tree_view.notice = Some(format!("favorite not saved: {e}"));
                 }
             }
-            InputEvent::Keyboard(KeyPress::WithModifiers {
+            InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('d'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
             }) => {
                 let Some(row) = rows.get(index) else {
                     return Ok(EventPropagation::ConsumedRender);

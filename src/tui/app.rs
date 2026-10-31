@@ -2111,7 +2111,7 @@ fn render_status_bar(
                     "Bksp:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll".to_string()
                 }
                 Some(Window::ConversationTree) => {
-                    "Bksp:Send to back  /:Search  ::Command  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  Ctrl+D:Delete  Esc:Clear search"
+                    "Bksp:Send to back  /:Search  ::Command  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  dd:Delete  Esc:Clear search"
                         .to_string()
                 }
                 Some(Window::Discussion(_)) => {
@@ -2339,7 +2339,7 @@ fn conversation_tree_alert(state: &AppState) -> Option<String> {
     let id = state.tree_view.armed_delete.as_ref()?;
     let count = state.conversations.read().subtree_len(id);
     Some(format!(
-        "Ctrl+D again: delete {count} node(s)  any other key: Cancel"
+        "d again: delete {count} node(s)  any other key: Cancel"
     ))
 }
 

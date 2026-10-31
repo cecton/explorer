@@ -290,7 +290,7 @@ pub struct TreeViewState {
     /// Nodes whose sub-agent runs are listed under them. Never saved: they are hidden
     /// at startup.
     pub shown_agents: HashSet<NodeId>,
-    /// Node a first `Ctrl+D` marked for deletion; a second one on it deletes.
+    /// Node a first `d` marked for deletion; a second one on it deletes.
     pub armed_delete: Option<NodeId>,
     /// False until the startup load of the tree has finished.
     pub loaded: bool,

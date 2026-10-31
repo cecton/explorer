@@ -758,15 +758,15 @@ suggests `/compact` from the parent node.
   - `n` — new root: opens a Discussion window with no node, only the input.
   - `f` — toggle favorite. `<leader>f` (`toggle-favorite`) does the same.
   - `c` — open Commit Diff windows for the node's commits (existing `Window::CommitDiff`).
-  - `Ctrl+D` — first press arms deletion of the node and its descendants and the status
-    bar shows the count; a second `Ctrl+D` on the same node deletes. Any other key or a
+  - `d` — first press arms deletion of the node and its descendants and the status
+    bar shows the count; a second `d` on the same node deletes. Any other key or a
     selection change disarms.
 - **A queued prompt is a row too** (section 6): dimmed, holding the first line of its
   prompt as it stands, with its place in the queue where a node's state marker goes. It
   follows the row of the node it will follow, and is left out when that node is folded
   away, or when the window it belongs to shows no node yet. It is selectable like any
   other row; `Enter` focuses the window that holds it and `Esc` takes it back, while
-  `m`, `e`, `c`, `f`, `Ctrl+D`, `Left` and `Right` do nothing on it, since a queued
+  `m`, `e`, `c`, `f`, `d`, `Left` and `Right` do nothing on it, since a queued
   prompt has no node to act on.
 - **Deletion** removes the directories and closes Discussion windows showing deleted
   nodes; their highlights go with them. Commits are not touched. A running node and its ancestors cannot be
