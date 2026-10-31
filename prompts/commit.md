@@ -60,11 +60,14 @@ when it is not, so never get ahead of an unfinished review.
 A round:
 
 1. Note the hash of the commit under review — `git rev-parse HEAD` in the usual case,
-   where it is `HEAD` —, then start a fresh sub-agent. Every round gets the same prompt:
-   what the commit is meant to do and why, the decisions from this conversation it must
-   respect (it sees none of the conversation), and that it reviews that commit, leaves
-   its fixes uncommitted in the working tree, never commits, and ends by stating what
-   it did not get to examine.
+   where it is `HEAD` —, then start a fresh sub-agent. Every round gets the same prompt
+   — what the commit is meant to do and why, the decisions from this conversation it
+   must respect (it sees none of the conversation), and that it reviews that commit,
+   leaves its fixes uncommitted in the working tree and never commits. Ask every round
+   to close its answer with three things: what it examined and ruled out, one line each,
+   naming the lead, where it points and the evidence that settled it; what it did not
+   get to examine; and how many tool calls the round took. The first is what the next
+   round is spared, below. The last is how the review reports its own cost.
 2. When it is done, run `git add -A` and read `git diff --cached` with its report. When
    nothing changed, the review of this commit is over. Otherwise judge the round as a
    whole and run the project's checks.
@@ -100,11 +103,46 @@ wrap-up is its report: go on with the round as usual. Finding nothing and leavin
 analysis unfinished, continue the same run once (pass its `agent_id`) to finish
 exactly the analysis it had left: no new areas, and tell it it has at most about half
 the original budget before it must stop. Never continue it twice. Finding nothing
-with its analysis complete, it is the clean round like any other.
+with its analysis complete, it is the clean round like any other. A run cut short still
+settles leads on its way, and those belong on the list like any other: the continuation
+replays the run's own transcript and keeps them, while the rounds after it have only the
+list.
 
 At most {review_rounds} review rounds per commit. When even the last round changed
 something, the commit never reached a clean review: say so first in your reply, as the
 thing the user has to look at.
+
+## Leads already ruled out
+
+A round re-chases the suspicions the round before it chased, because the commit carries
+no trace of them. Fixed defects need no record — they are in the diff, and every round
+reads it. Leads that die without a fix leave nothing behind at all: the diff is the same
+whether the question was asked or not. Keep them, in a list given to every round after
+the first, in that round's prompt.
+
+Record only what a round answered "no" to: a call traced to see whether a failure was
+handled, an invariant checked against the code that maintains it, a path followed to see
+whether it could leave the tree dirty. Findings a round reported but fixed nothing for
+are not leads; they go in your reply to the user.
+
+Each entry is one line: the lead, where it points, and the evidence that settled it. The
+next round has to be able to go there and check the evidence itself, so a lead you cannot
+write that way is dropped rather than inherited as an opinion.
+
+The list covers questions, never files: no hunk is excused, and every round still reads
+the diff whole and the code around it. What a round skips is opening a doubt already
+answered, and what it keeps is the right to reopen one — a fix it made nearby, a
+different path through the same function. Say so plainly to the round: a lead listed here
+is closed only until something reopens it, and coming back to one with a doubt of its own
+is the round doing its job, not contradicting you.
+
+It is not a coverage chart to complete. A short list is normal, and padding it with areas
+nobody actually doubted makes the next round read noise instead of leads.
+
+The list follows the review, not the hash. When step 3 commits the fixes on top because
+`HEAD` moved, it carries over with the leads those fixes touch reopened, since that
+ground changed. A round rejected under step 4 ends the review of its commit, and a review
+that ends on a clean round has nothing left to carry.
 
 ## Commit messages
 
