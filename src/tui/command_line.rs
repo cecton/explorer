@@ -1,8 +1,10 @@
+use crate::agent::mcp::McpServerDecl;
 use crate::config::Alias;
 use crate::tui::after_agents::{self, AfterAgents};
 use crate::tui::text_layout::truncate;
 use crate::tui::*;
 use camino::{Utf8Path, Utf8PathBuf};
+use tokio::sync::mpsc;
 
 const PROMPT: &str = ":";
 const PLACEHOLDER: &str = "<shell command>";
@@ -27,12 +29,14 @@ struct CommandRun<'a> {
     argument: &'a str,
     /// The file in focus, for the `%` placeholders.
     file: Option<&'a Utf8Path>,
+    /// The main thread's channel, which an MCP server reports its status through.
+    main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
     /// The terminal a command asks for, applied once the line has closed.
     signal: Option<AppSignal>,
 }
 
 /// Every command the line runs, in the order the palette lists it.
-const COMMANDS: [Command; 5] = [
+const COMMANDS: [Command; 6] = [
     Command {
         name: after_agents::NAME,
         argument: "[shell command]",
@@ -44,6 +48,12 @@ const COMMANDS: [Command; 5] = [
         argument: "[name] [shell command]",
         description: "set, replace or remove a project alias",
         run: run_alias,
+    },
+    Command {
+        name: "mcp",
+        argument: "[add <name> <program> | remove <name>]",
+        description: "MCP servers of this repository",
+        run: run_mcp,
     },
     Command {
         name: "scan",
@@ -242,6 +252,7 @@ impl CommandLine {
 
 /// Runs the typed command: the command line closes, or stays open with the error.
 pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
+    let main_tx = global_data.main_thread_channel_sender.clone();
     let state = &mut global_data.state;
     let Some(command_line) = state.command_line.as_ref() else {
         return;
@@ -267,6 +278,7 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
         state,
         argument,
         file: file.as_deref(),
+        main_tx,
         signal: None,
     };
     let outcome = match COMMANDS.iter().find(|command| command.name == word) {
@@ -319,6 +331,63 @@ fn run_after_agents(run: &mut CommandRun<'_>) -> Result<(), String> {
 
 fn run_alias(run: &mut CommandRun<'_>) -> Result<(), String> {
     set_alias(run.state, run.argument)
+}
+
+/// Failures are the line's error; a started server is reported in the tree's notice.
+fn run_mcp(run: &mut CommandRun<'_>) -> Result<(), String> {
+    let words: Vec<&str> = run.argument.split_whitespace().collect();
+    match words.as_slice() {
+        ["add", name, program] => {
+            check_server_name(name, &run.state.mcp_servers)?;
+            let decl = McpServerDecl {
+                name: name.to_string(),
+                program: program.to_string(),
+            };
+            let notify = crate::tui::app::mcp_notify(run.main_tx.clone());
+            run.state.mcp.start(&decl, notify);
+            run.state.mcp_servers.push(decl);
+            run.state
+                .tree_view
+                .announced_starts
+                .insert(name.to_string());
+            run.state.tree_view.notice = Some(format!("{name}: starting"));
+            run.state.mark_session_dirty();
+            Ok(())
+        }
+        ["add", ..] => Err("usage: mcp add <name> <program>".to_string()),
+        ["remove", name] => {
+            if !run
+                .state
+                .mcp_servers
+                .iter()
+                .any(|server| server.name == *name)
+            {
+                return Err(format!("{name}: no such server"));
+            }
+            run.state.mcp_servers.retain(|server| server.name != *name);
+            run.state.mcp.remove(name);
+            run.state.tree_view.announced_starts.remove(*name);
+            run.state.tree_view.notice = Some(format!("{name}: removed"));
+            run.state.mark_session_dirty();
+            Ok(())
+        }
+        ["remove", ..] => Err("usage: mcp remove <name>".to_string()),
+        _ => Err("usage: mcp add <name> <program> | mcp remove <name>".to_string()),
+    }
+}
+
+/// Why `name` cannot name a new MCP server: its tools are `mcp__<name>__<tool>`.
+fn check_server_name(name: &str, servers: &[McpServerDecl]) -> Result<(), String> {
+    let allowed = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
+    if !name.chars().all(allowed) || name.contains("__") {
+        return Err(format!(
+            "{name}: a server name holds only letters, digits, `_` and `-`, and no `__`"
+        ));
+    }
+    if servers.iter().any(|server| server.name == name) {
+        return Err(format!("{name}: a server has this name already"));
+    }
+    Ok(())
 }
 
 fn run_scan(run: &mut CommandRun<'_>) -> Result<(), String> {
@@ -463,6 +532,29 @@ fn command_hint(typed: &str, state: &AppState) -> Option<String> {
             {
                 Some(alias) => format!("Enter removes {name} (was: {})", alias.command),
                 None => PLACEHOLDER.to_string(),
+            }
+        }
+        ("mcp", None, _) => {
+            let installed: Vec<String> = state
+                .mcp
+                .statuses()
+                .iter()
+                .map(|(name, status)| format!("{name} ({})", status.label()))
+                .collect();
+            if installed.is_empty() {
+                "Installed: none".to_string()
+            } else {
+                format!("Installed: {}", installed.join(", "))
+            }
+        }
+        ("mcp", Some("add"), None) => "[name] [program]".to_string(),
+        ("mcp", Some("remove"), None) => {
+            let statuses = state.mcp.statuses();
+            if statuses.is_empty() {
+                "(no server installed)".to_string()
+            } else {
+                let names: Vec<String> = statuses.into_iter().map(|(name, _)| name).collect();
+                format!("[{}]", names.join("|"))
             }
         }
         (name, None, _) => match COMMANDS.iter().find(|command| command.name == name) {
@@ -860,6 +952,19 @@ mod tests {
             command_hint("trust", &state).as_deref(),
             Some(" allow agent turns in this repository")
         );
+        assert_eq!(
+            command_hint("mcp", &state).as_deref(),
+            Some(" Installed: none")
+        );
+        assert_eq!(
+            command_hint("mcp add", &state).as_deref(),
+            Some(" [name] [program]")
+        );
+        assert_eq!(
+            command_hint("mcp remove", &state).as_deref(),
+            Some(" (no server installed)")
+        );
+        assert_eq!(command_hint("mcp add egui", &state), None);
         assert_eq!(command_hint("ci", &state).as_deref(), Some(" = cargo test"));
         assert_eq!(
             command_hint("poweroff", &state).as_deref(),
@@ -919,6 +1024,7 @@ mod tests {
             [
                 "after-agents",
                 "alias",
+                "mcp",
                 "scan",
                 "trust",
                 "untrust",
@@ -928,6 +1034,7 @@ mod tests {
             ]
         );
         assert_eq!(names("a"), ["after-agents", "alias"]);
+        assert_eq!(names("m"), ["mcp"]);
         assert_eq!(names("t"), ["trust"]);
         assert_eq!(names("c"), ["ci"]);
         assert_eq!(names("n"), ["notify"]);
@@ -968,7 +1075,8 @@ mod tests {
         };
         assert_eq!(completed("", 0), "after-agents ");
         assert_eq!(completed("", 1), "alias ");
-        assert_eq!(completed("", 5), "notify ");
+        assert_eq!(completed("", 2), "mcp ");
+        assert_eq!(completed("", 6), "notify ");
         assert_eq!(completed("al", 0), "alias ");
         assert_eq!(completed("sc", 0), "scan");
         assert_eq!(completed("un", 0), "untrust");
@@ -979,16 +1087,30 @@ mod tests {
     fn moving_the_highlight_wraps_over_commands_and_aliases() {
         let state = state_with_aliases();
         let entries = palette_entries("", &state).len();
-        assert_eq!(entries, 8);
+        assert_eq!(entries, 9);
         let mut line = CommandLine::new(None);
         assert!(line.move_selection(true, entries));
         assert_eq!(line.selected, 1);
-        line.selected = 7;
+        line.selected = 8;
         assert!(line.move_selection(true, entries));
         assert_eq!(line.selected, 0);
         assert!(line.move_selection(false, entries));
-        assert_eq!(line.selected, 7);
+        assert_eq!(line.selected, 8);
         assert!(!line.move_selection(true, palette_entries("nothing", &state).len()));
+    }
+
+    #[test]
+    fn server_names_are_unique_and_fit_tool_names() {
+        let servers = vec![McpServerDecl {
+            name: "egui".to_string(),
+            program: "egui-mcp".to_string(),
+        }];
+        assert!(check_server_name("doneward", &servers).is_ok());
+        assert!(check_server_name("egui", &servers).is_err());
+        assert!(check_server_name("a__b", &servers).is_err());
+        assert!(check_server_name("a/b", &servers).is_err());
+        assert!(check_server_name("egui.v2", &servers).is_err());
+        assert!(check_server_name("egui-v2_", &servers).is_ok());
     }
 
     #[test]

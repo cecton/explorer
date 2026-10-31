@@ -2026,13 +2026,13 @@ pub(super) fn close_window(state: &mut AppState, window: Window) {
         Window::FilePreview(key) => {
             state.preview_inputs.remove(&key);
         }
-        Window::ConversationTree => {
-            state.tree_view.command = None;
-        }
         Window::Report(id) => {
             state.reports.remove(&id);
         }
-        Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => {}
+        Window::ConversationTree
+        | Window::WindowPicker
+        | Window::ThemePicker
+        | Window::ModelPicker => {}
     }
     state.pane_manager.remove_window(&window);
     notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
@@ -2172,7 +2172,7 @@ fn render_status_bar(
                     "Bksp:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll".to_string()
                 }
                 Some(Window::ConversationTree) => {
-                    "Bksp:Send to back  /:Search  ::Command  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  dd:Delete  Esc:Clear search"
+                    "Bksp:Send to back  /:Search  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  dd:Delete  Esc:Clear search"
                         .to_string()
                 }
                 Some(Window::Discussion(_)) => {

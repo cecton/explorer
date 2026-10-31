@@ -169,8 +169,8 @@ impl Refusal {
                 "the working tree has uncommitted changes; commit or stash them first".to_string()
             }
             Self::Untrusted => {
-                "this repository is not trusted yet: run :scan, read its report, then \
-                 :trust to allow agents here"
+                "this repository is not trusted yet: run scan, read its report, then \
+                 trust on the command line to allow agents here"
                     .to_string()
             }
             Self::Rejected(reason) => reason,
@@ -2354,7 +2354,11 @@ mod tests {
         let (main_tx, _rx) = mpsc::channel(1);
         let refused = start_turn(&mut state, main_tx.clone(), feedback_launch());
         assert_eq!(refused, Err(Refusal::Untrusted));
-        assert!(Refusal::Untrusted.into_reason().contains(":trust"));
+        assert!(
+            Refusal::Untrusted
+                .into_reason()
+                .contains("trust on the command line")
+        );
 
         state.trusted = true;
         let started = start_turn(&mut state, main_tx, feedback_launch());

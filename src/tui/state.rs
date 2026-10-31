@@ -302,8 +302,6 @@ pub struct TreeViewState {
     pub search_active: bool,
     /// Row selected when `/` was opened, given back when the filter matches nothing.
     pub before_search: Option<RowTarget>,
-    /// The `:` command line, while it is open.
-    pub command: Option<InputLine>,
     /// MCP servers added from the command line whose start is still to be reported.
     pub announced_starts: HashSet<String>,
 }
@@ -680,9 +678,6 @@ impl AppState {
             }
             Window::ConversationTree if self.tree_view.search_active => {
                 Some(&mut self.tree_view.query)
-            }
-            Window::ConversationTree if self.tree_view.command.is_some() => {
-                self.tree_view.command.as_mut()
             }
             Window::FilePreview(key) => {
                 self.preview_inputs.get_mut(key).map(PreviewInput::line_mut)
