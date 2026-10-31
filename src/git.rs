@@ -334,6 +334,93 @@ pub fn commits_between(
     Ok(listed.lines().map(str::to_string).collect())
 }
 
+/// Repository-relative paths added, copied, modified or renamed from `before` to `after`.
+pub fn files_changed_between(
+    root: &camino::Utf8Path,
+    before: &str,
+    after: &str,
+) -> Result<Vec<camino::Utf8PathBuf>, String> {
+    let listed = git_output(
+        root,
+        &[
+            "diff",
+            "-z",
+            "--name-only",
+            "--diff-filter=ACMR",
+            before,
+            after,
+        ],
+    )?;
+    Ok(nul_separated(&listed))
+}
+
+/// Paths changed since HEAD, untracked included; without a commit, the staged ones.
+pub fn working_tree_changes(root: &camino::Utf8Path) -> Result<Vec<camino::Utf8PathBuf>, String> {
+    let mut paths: Vec<camino::Utf8PathBuf> = Vec::new();
+    if git_output(root, &["rev-parse", "--verify", "HEAD"]).is_ok() {
+        let tracked = git_output(
+            root,
+            &["diff", "-z", "--name-only", "--diff-filter=d", "HEAD"],
+        )?;
+        paths.extend(nul_separated(&tracked));
+    } else {
+        let staged = git_output(root, &["ls-files", "-z", "--cached"])?;
+        paths.extend(
+            nul_separated(&staged)
+                .into_iter()
+                .filter(|path| root.join(path).is_file()),
+        );
+    }
+    let untracked = git_output(root, &["ls-files", "-z", "--others", "--exclude-standard"])?;
+    paths.extend(nul_separated(&untracked));
+    Ok(paths)
+}
+
+/// Files under a repository-relative directory (the root when empty), tracked or untracked,
+/// ignored ones left out.
+pub fn files_under(
+    root: &camino::Utf8Path,
+    directory: &camino::Utf8Path,
+) -> Result<Vec<camino::Utf8PathBuf>, String> {
+    // Literal, so that a directory whose name holds glob characters is not read as a pattern.
+    let pathspec = if directory.as_str().is_empty() {
+        ".".to_string()
+    } else {
+        format!(":(literal){directory}")
+    };
+    let listed = git_output(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+            "--",
+            pathspec.as_str(),
+        ],
+    )?;
+    Ok(nul_separated(&listed)
+        .into_iter()
+        .filter(|path| root.join(path).is_file())
+        .collect())
+}
+
+/// The paths of a `-z` listing: git leaves them unquoted there, whatever their bytes.
+fn nul_separated(listed: &str) -> Vec<camino::Utf8PathBuf> {
+    listed
+        .split('\0')
+        .filter(|path| !path.is_empty())
+        .map(camino::Utf8PathBuf::from)
+        .collect()
+}
+
+/// Stages every change and folds it into HEAD, keeping its message.
+pub fn amend_all(root: &camino::Utf8Path) -> Result<(), String> {
+    git_output(root, &["add", "-A"])?;
+    git_output(root, &["commit", "--amend", "--no-edit", "--allow-empty"]).map(|_| ())
+}
+
 /// Hard-resets tracked files and removes untracked ones. Ignored files are kept.
 /// Works on a repository without commits, where there is nothing to reset.
 pub fn discard_worktree(root: &camino::Utf8Path) -> Result<(), String> {
@@ -576,6 +663,23 @@ mod tests {
             .unwrap()
             .trim()
             .to_string()
+    }
+
+    #[test]
+    fn working_tree_changes_lists_staged_files_of_a_repository_without_commits() {
+        let (_tmp, root) = temp_repo();
+        std::fs::write(root.join("staged.md"), "a").unwrap();
+        std::fs::write(root.join("gone.md"), "b").unwrap();
+        std::fs::write(root.join("loose.md"), "c").unwrap();
+        git_output(&root, &["add", "staged.md", "gone.md"]).unwrap();
+        std::fs::remove_file(root.join("gone.md")).unwrap();
+        assert_eq!(
+            working_tree_changes(&root).unwrap(),
+            [
+                camino::Utf8PathBuf::from("staged.md"),
+                camino::Utf8PathBuf::from("loose.md")
+            ]
+        );
     }
 
     #[test]

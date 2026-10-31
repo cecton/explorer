@@ -108,6 +108,26 @@ fn base_specs() -> Vec<ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "format_markdown".into(),
+            description: "Format markdown files in place with Explorer's formatter: \
+                          tables aligned, lists and fences normalized, the line breaks \
+                          of prose kept. Never format markdown by hand. Without `paths`, \
+                          formats the markdown files changed in the working tree; a directory is \
+                          formatted recursively. \
+                          Returns the files it rewrote."
+                .into(),
+            schema: json!({
+                "type": "object",
+                "properties": {
+                    "paths": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Markdown files or directories (formatted recursively), relative to the repository root"
+                    }
+                }
+            }),
+        },
+        ToolSpec {
             name: "glob".into(),
             description: "List the files of the repository whose path matches a glob \
                           pattern such as `src/**/*.rs`."
@@ -228,6 +248,10 @@ pub async fn run(context: &ToolContext, call: &ToolCall) -> String {
         "read" => read(root, &args),
         "write" => write(root, &args),
         "edit" => edit(root, &args),
+        "format_markdown" => {
+            let root = root.to_owned();
+            blocking(move || format_markdown(&root, &args)).await
+        }
         "glob" => {
             let root = root.to_owned();
             blocking(move || glob(&root, &args)).await
@@ -271,7 +295,7 @@ fn usize_arg(args: &Value, key: &str) -> Option<usize> {
 }
 
 /// Resolves `path` against the repository root and refuses anything outside it.
-fn resolve(root: &Utf8Path, path: &str) -> Result<Utf8PathBuf, String> {
+pub fn resolve(root: &Utf8Path, path: &str) -> Result<Utf8PathBuf, String> {
     let joined = if Utf8Path::new(path).is_absolute() {
         Utf8PathBuf::from(path)
     } else {
@@ -291,6 +315,31 @@ fn resolve(root: &Utf8Path, path: &str) -> Result<Utf8PathBuf, String> {
         Ok(resolved)
     } else {
         Err(format!("{path} is outside the repository"))
+    }
+}
+
+fn format_markdown(root: &Utf8Path, args: &Value) -> Result<String, String> {
+    let relatives = match args.get("paths").and_then(Value::as_array) {
+        Some(paths) if !paths.is_empty() => paths
+            .iter()
+            .map(|path| {
+                let path = path.as_str().ok_or("`paths` holds a non-string")?;
+                let resolved = resolve(root, path)?;
+                resolved
+                    .strip_prefix(root)
+                    .map(Utf8Path::to_path_buf)
+                    .map_err(|_| format!("{path} is outside the repository"))
+            })
+            .collect::<Result<Vec<Utf8PathBuf>, String>>()?,
+        _ => crate::git::working_tree_changes(root)?,
+    };
+    let relatives = crate::markdown_format::expand_directories(root, relatives)?;
+    let changed = crate::markdown_format::format_files(root, &relatives)?;
+    if changed.is_empty() {
+        Ok("nothing to format".to_string())
+    } else {
+        let names: Vec<&str> = changed.iter().map(|path| path.as_str()).collect();
+        Ok(format!("formatted:\n{}", names.join("\n")))
     }
 }
 
@@ -957,6 +1006,7 @@ mod tests {
             [
                 "conversation",
                 "read",
+                "format_markdown",
                 "glob",
                 "grep",
                 "shell",
@@ -975,6 +1025,24 @@ mod tests {
             "one\ntwo\n"
         );
         let outside = call("write", json!({"path": "../evil", "content": "x"}));
+        assert!(run(&context(&root), &outside).await.starts_with("error: "));
+    }
+
+    #[tokio::test]
+    async fn format_markdown_formats_the_given_files_and_refuses_outside_paths() {
+        let (_tmp, root) = repo();
+        std::fs::write(root.join("t.md"), "|a|b|\n|-|-|\n|1|2|\n").unwrap();
+        let format_call = call("format_markdown", json!({"paths": ["t.md", "src/main.rs"]}));
+        assert_eq!(run(&context(&root), &format_call).await, "formatted:\nt.md");
+        assert_eq!(
+            std::fs::read_to_string(root.join("t.md")).unwrap(),
+            "| a | b |\n| - | - |\n| 1 | 2 |\n"
+        );
+        assert_eq!(
+            run(&context(&root), &format_call).await,
+            "nothing to format"
+        );
+        let outside = call("format_markdown", json!({"paths": ["../x.md"]}));
         assert!(run(&context(&root), &outside).await.starts_with("error: "));
     }
 

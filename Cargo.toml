@@ -41,6 +41,8 @@ url = "2"
 genai = "0.6"
 futures-util = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+dprint-plugin-markdown = "0.28.2"
+dprint-core = "0.71"
 
 [dev-dependencies]
 tempfile = "3"

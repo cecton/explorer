@@ -492,7 +492,21 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             .tree
             .write()
             .cancel_running_agents(&request.node, now_secs());
-        let head_after = request.repo.as_ref().and_then(crate::git::head_id);
+        let mut head_after = request.repo.as_ref().and_then(crate::git::head_id);
+        // The markdown a commit turn committed is formatted into its newest commit.
+        if request.mode == Mode::Commit {
+            let root = request.root.clone();
+            let before = request.head.clone();
+            let after = head_after.clone();
+            let amended = tokio::task::spawn_blocking(move || {
+                crate::markdown_format::format_committed(&root, before.as_deref(), after.as_deref())
+            })
+            .await
+            .unwrap_or(false);
+            if amended {
+                head_after = request.repo.as_ref().and_then(crate::git::head_id);
+            }
+        }
         // Whatever a turn left uncommitted is discarded, however it ended.
         let (commits, reset) = match request.mode {
             Mode::Feedback => {

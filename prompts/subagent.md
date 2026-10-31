@@ -14,6 +14,8 @@ you act.
   agent that called you, which waits while you work: leave it in the state the task
   expects.
 - Commit only when the task asks you to.
+- Markdown layout belongs to Explorer's formatter. Do not reflow, realign tables or fix
+  wrapping by hand.
 - If the task cannot be done as written, stop and say why instead of guessing.
 
 ## Your answer

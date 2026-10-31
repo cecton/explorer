@@ -10,12 +10,61 @@ mod git;
 mod keymap;
 mod loader;
 mod lsp;
+mod markdown_format;
 mod scan;
 mod session;
 mod tui;
 mod watcher;
 
 use loader::{LoadedFile, find_git_root, walk_repo_files};
+
+/// The `fmt-md` subcommand: prints the paths it rewrote and returns the exit code.
+fn fmt_md(root: &camino::Utf8Path, paths: &[Utf8PathBuf]) -> i32 {
+    let relatives = if paths.is_empty() {
+        git::working_tree_changes(root)
+    } else {
+        paths
+            .iter()
+            .map(|path| {
+                let absolute = std::env::current_dir()
+                    .map_err(|e| e.to_string())
+                    .map(|cwd| cwd.join(path))?;
+                let absolute = Utf8PathBuf::from_path_buf(absolute)
+                    .map_err(|p| format!("{} is not valid UTF-8", p.display()))?;
+                // Lexically resolves `..`, so a path leaving the repository is refused.
+                let resolved = agent::tools::resolve(root, absolute.as_str())
+                    .map_err(|_| format!("{path} is outside the repository"))?;
+                resolved
+                    .strip_prefix(root)
+                    .map(|relative| relative.to_path_buf())
+                    .map_err(|_| format!("{path} is outside the repository"))
+            })
+            .collect()
+    };
+    let result = relatives
+        .and_then(|relatives| markdown_format::expand_directories(root, relatives))
+        .and_then(|relatives| markdown_format::format_files(root, &relatives));
+    match result {
+        Ok(changed) => {
+            use std::io::Write;
+            let mut stdout = std::io::stdout().lock();
+            for path in changed {
+                // A reader that closes the pipe early (a `| head`) got what it asked for.
+                if let Err(error) = writeln!(stdout, "{path}")
+                    && error.kind() != std::io::ErrorKind::BrokenPipe
+                {
+                    eprintln!("failed to print the changed paths: {error}");
+                    return 1;
+                }
+            }
+            0
+        }
+        Err(error) => {
+            eprintln!("{error}");
+            1
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() {
@@ -51,6 +100,10 @@ async fn main() {
             std::process::exit(1);
         }
         return;
+    }
+
+    if let Some(paths) = &args.fmt_md {
+        std::process::exit(fmt_md(&root, paths));
     }
 
     let files: Vec<Arc<LoadedFile>> = walk_repo_files(&root)
