@@ -12,6 +12,7 @@ use std::time::Duration;
 
 const READ_DEFAULT_LINES: usize = 2000;
 const READ_MAX_BYTES: usize = 30_000;
+const READ_MAX_LINE_CHARS: usize = 2000;
 const GLOB_MAX_PATHS: usize = 500;
 const GREP_MAX_MATCHES: usize = 200;
 const GREP_MAX_LINE_CHARS: usize = 300;
@@ -91,14 +92,17 @@ fn base_specs() -> Vec<ToolSpec> {
         ToolSpec {
             name: "read".into(),
             description: "Read a text file of the repository. Lines are returned prefixed \
-                          with their number."
+                          with their number. A file too long to fit is cut at a line \
+                          boundary, and the last line says where to resume. A line longer \
+                          than 2000 characters is truncated; use grep to find content \
+                          inside such a line."
                 .into(),
             schema: json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path relative to the repository root"},
                     "offset": {"type": "integer", "description": "First line to return, starting at 1"},
-                    "limit": {"type": "integer", "description": "Maximum number of lines (default 2000)"}
+                    "limit": {"type": "integer", "description": "Maximum number of lines (default and maximum 2000)"}
                 },
                 "required": ["path"]
             }),
@@ -294,24 +298,46 @@ fn read(root: &Utf8Path, args: &Value) -> Result<String, String> {
     let path = resolve(root, str_arg(args, "path")?)?;
     let content = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
     let offset = usize_arg(args, "offset").unwrap_or(1).max(1);
-    let limit = usize_arg(args, "limit").unwrap_or(READ_DEFAULT_LINES);
+    let limit = usize_arg(args, "limit")
+        .unwrap_or(READ_DEFAULT_LINES)
+        .clamp(1, READ_DEFAULT_LINES);
     let total = content.lines().count();
-    let mut out = String::new();
-    for (number, line) in content.lines().enumerate().skip(offset - 1).take(limit) {
-        out.push_str(&format!("{}\t{line}\n", number + 1));
-    }
-    let shown_until = (offset - 1 + limit).min(total);
-    if shown_until < total {
-        out.push_str(&format!(
-            "[lines {offset}-{shown_until} of {total}; use offset to read more]\n"
+    if offset > total.max(1) {
+        return Ok(format!(
+            "[{total} lines; offset {offset} is past the end]\n"
         ));
     }
-    let truncated = out.len() > READ_MAX_BYTES;
-    let mut out = truncate_middle(&out, READ_MAX_BYTES);
-    if truncated {
-        out.push_str("[output truncated to fit; use offset and limit to read the omitted part]\n");
+    let mut out = String::new();
+    let mut shown_until = offset - 1;
+    for (number, line) in content.lines().enumerate().skip(offset - 1).take(limit) {
+        let rendered = render_line(number + 1, line);
+        if !out.is_empty() && out.len() + rendered.len() > READ_MAX_BYTES {
+            break;
+        }
+        out.push_str(&rendered);
+        shown_until = number + 1;
+    }
+    if shown_until < total {
+        out.push_str(&format!(
+            "[lines {offset}-{shown_until} of {total}; use offset {} to read more]\n",
+            shown_until + 1
+        ));
     }
     Ok(out)
+}
+
+fn render_line(number: usize, line: &str) -> String {
+    match line
+        .char_indices()
+        .nth(READ_MAX_LINE_CHARS)
+        .map(|(cut, _)| cut)
+    {
+        Some(cut) => format!(
+            "{number}\t{}... (line truncated to {READ_MAX_LINE_CHARS} chars)\n",
+            &line[..cut]
+        ),
+        None => format!("{number}\t{line}\n"),
+    }
 }
 
 fn conversation(
@@ -678,14 +704,66 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_caps_output_bytes_and_says_so() {
+    async fn read_caps_output_bytes_at_a_line_boundary() {
+        let (_tmp, root) = repo();
+        let mut many = String::new();
+        for number in 1..=200 {
+            many.push_str(&format!("{number}\t{}\n", "y".repeat(1000)));
+        }
+        std::fs::write(root.join("many.txt"), many).unwrap();
+        let out = run(&context(&root), &call("read", json!({"path": "many.txt"}))).await;
+        assert!(out.len() <= READ_MAX_BYTES + 100, "{}", out.len());
+        let footer = out.lines().last().unwrap();
+        assert!(footer.starts_with("[lines 1-"), "{footer}");
+        assert!(
+            footer.ends_with("of 200; use offset 30 to read more]"),
+            "{footer}"
+        );
+        assert!(
+            !out.contains("bytes omitted"),
+            "the middle is never spliced out"
+        );
+    }
+
+    #[tokio::test]
+    async fn read_cuts_a_long_line_and_says_so() {
         let (_tmp, root) = repo();
         let payload = "x".repeat(100_000);
         std::fs::write(root.join("min.json"), format!("{{\"k\":\"{payload}\"}}")).unwrap();
         let out = run(&context(&root), &call("read", json!({"path": "min.json"}))).await;
-        assert!(out.len() < READ_MAX_BYTES + 300);
-        assert!(out.contains("bytes omitted"));
-        assert!(out.contains("output truncated to fit"));
+        assert!(out.len() < 3000, "{}", out.len());
+        assert!(out.starts_with("1\t{\"k\":\"xxx"), "{out}");
+        assert!(
+            out.ends_with("... (line truncated to 2000 chars)\n"),
+            "{out}"
+        );
+        assert!(!out.contains("bytes omitted"));
+        assert!(!out.contains("use offset"));
+    }
+
+    #[tokio::test]
+    async fn read_says_when_the_offset_is_past_the_end() {
+        let (_tmp, root) = repo();
+        let out = run(
+            &context(&root),
+            &call("read", json!({"path": "src/main.rs", "offset": 500})),
+        )
+        .await;
+        assert_eq!(out, "[3 lines; offset 500 is past the end]\n");
+    }
+
+    #[tokio::test]
+    async fn read_treats_a_zero_limit_as_one_line() {
+        let (_tmp, root) = repo();
+        let out = run(
+            &context(&root),
+            &call("read", json!({"path": "src/main.rs", "limit": 0})),
+        )
+        .await;
+        assert_eq!(
+            out,
+            "1\tfn main() {\n[lines 1-1 of 3; use offset 2 to read more]\n"
+        );
     }
 
     #[tokio::test]
@@ -718,7 +796,7 @@ mod tests {
         .await;
         assert_eq!(
             part,
-            "2\t    run();\n[lines 2-2 of 3; use offset to read more]\n"
+            "2\t    run();\n[lines 2-2 of 3; use offset 3 to read more]\n"
         );
         let outside = run(&context(&root), &call("read", json!({"path": "../x"}))).await;
         assert!(outside.starts_with("error: "), "{outside}");
