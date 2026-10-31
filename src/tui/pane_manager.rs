@@ -32,6 +32,8 @@ pub enum Window {
     Discussion(usize),
     /// Fuzzy picker of `endpoint/model/effort` entries.
     ModelPicker,
+    /// Markdown to read and nothing else: not part of the conversation, never saved.
+    Report(usize),
 }
 
 /// One of the texts a Discussion window shows, in the order it shows them.

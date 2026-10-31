@@ -8,8 +8,9 @@ use serde_json::Value;
 use std::process::Stdio;
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
-/// Removes Claude Code's own trailer from the commits it makes.
-const NO_ATTRIBUTION: &str = r#"{"attribution":{"commit":"","pr":""}}"#;
+/// Settings every run gets: no trailer on the commits it makes, and no hooks, which are
+/// code a repository supplies and which Claude Code runs before the model is called.
+const SETTINGS: &str = r#"{"attribution":{"commit":"","pr":""},"disableAllHooks":true}"#;
 
 /// A model of the local `claude` CLI and the effort to run it with.
 #[derive(Clone, Debug)]
@@ -211,7 +212,11 @@ fn arguments(invocation: &Invocation<'_>) -> Vec<String> {
         "--permission-mode",
         "bypassPermissions",
         "--settings",
-        NO_ATTRIBUTION,
+        SETTINGS,
+        // The repository's own settings file, and the hooks it declares, are code it
+        // supplies: read the user's, never the project's.
+        "--setting-sources",
+        "user",
         // A resumed session otherwise keeps the prompt of its first request, and with
         // it the mode of the node it was forked from.
         "--system-prompt-snapshot",
@@ -346,6 +351,10 @@ pub async fn complete(target: &ClaudeTarget, system: &str, user: &str) -> Result
             "--tools",
             "",
             "--strict-mcp-config",
+            "--setting-sources",
+            "user",
+            "--settings",
+            SETTINGS,
             "--system-prompt",
             system,
         ])
@@ -512,6 +521,9 @@ mod tests {
         assert!(forked.contains("--append-system-prompt SYSTEM"));
         assert!(forked.contains("--system-prompt-snapshot off"));
         assert!(!forked.contains("--bare"));
+        // A repository's settings file and its hooks are code it supplies.
+        assert!(forked.contains("--setting-sources user"));
+        assert!(forked.contains(r#"{"attribution":{"commit":"","pr":""},"disableAllHooks":true}"#));
 
         let continued = joined(&invocation(Resume::Continue("abc")));
         assert!(continued.ends_with("--resume abc --strict-mcp-config"));
@@ -527,5 +539,6 @@ mod tests {
         let fresh = joined(&fresh);
         assert!(!fresh.contains("--effort"));
         assert!(!fresh.contains("--resume"));
+        assert!(fresh.contains("--setting-sources user"));
     }
 }

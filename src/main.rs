@@ -10,6 +10,7 @@ mod git;
 mod keymap;
 mod loader;
 mod lsp;
+mod scan;
 mod session;
 mod tui;
 mod watcher;
@@ -37,6 +38,20 @@ async fn main() {
 
     let root = Utf8PathBuf::from_path_buf(find_git_root())
         .expect("repository root path is not valid UTF-8");
+
+    if args.scan {
+        use std::io::Write;
+        let report = scan::scan(&root).to_markdown();
+        let mut stdout = std::io::stdout().lock();
+        // A reader that closes the pipe early (a `| head`) got what it asked for.
+        if let Err(error) = write!(stdout, "{report}")
+            && error.kind() != std::io::ErrorKind::BrokenPipe
+        {
+            eprintln!("failed to print the scan report: {error}");
+            std::process::exit(1);
+        }
+        return;
+    }
 
     let files: Vec<Arc<LoadedFile>> = walk_repo_files(&root)
         .into_iter()

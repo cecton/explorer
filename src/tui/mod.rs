@@ -13,6 +13,7 @@ mod pane_component;
 pub(crate) mod pane_manager;
 mod panes_renderer;
 mod preview;
+pub(crate) mod report_pane;
 mod state;
 mod terminal_pane;
 mod text_layout;

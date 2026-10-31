@@ -81,6 +81,7 @@ impl WindowPickerComponent {
                 Window::Terminal(_)
                 | Window::GitLog(_)
                 | Window::CommitDiff(_)
+                | Window::Report(_)
                 | Window::ConversationTree
                 | Window::Discussion(_) => true,
                 Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => false,
@@ -334,6 +335,7 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
                         }
                         Window::GitLog(_)
                         | Window::CommitDiff(_)
+                        | Window::Report(_)
                         | Window::ConversationTree
                         | Window::Discussion(_) => {
                             state.pane_manager.push_window(window);
@@ -470,6 +472,10 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
                     Window::Discussion(id) => {
                         (DiscussionComponent::title(state, *id), Some(accents.agent))
                     }
+                    Window::Report(id) => (
+                        crate::tui::report_pane::ReportComponent::title(state, *id),
+                        None,
+                    ),
                     Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => {
                         (String::new(), None)
                     }

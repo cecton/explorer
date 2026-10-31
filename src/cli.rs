@@ -4,6 +4,8 @@ pub struct Args {
     pub log_file: Option<String>,
     pub log_level: LevelFilter,
     pub theme: Option<String>,
+    /// Scan the repository, print the report and exit, without starting the UI.
+    pub scan: bool,
 }
 
 pub fn parse_args() -> Args {
@@ -26,9 +28,11 @@ pub fn parse_args() -> Args {
         }
     };
     let theme: Option<String> = args.opt_value_from_str("--theme").expect("invalid --theme");
+    let scan = args.contains("--scan");
     Args {
         log_file,
         log_level,
         theme,
+        scan,
     }
 }

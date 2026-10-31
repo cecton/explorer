@@ -596,10 +596,17 @@ impl ConversationTreeComponent {
     }
 
     pub(crate) fn title(state: &AppState) -> String {
-        if state.tree_view.filtering() {
-            format!("{} — {}", Self::TITLE, state.tree_view.query.text().trim())
-        } else {
+        // The tree is where a conversation starts, so it is where the repository says
+        // whether one can: its title carries that instead of a status-bar segment.
+        let name = if state.trusted {
             Self::TITLE.to_string()
+        } else {
+            format!("{} (untrusted)", Self::TITLE)
+        };
+        if state.tree_view.filtering() {
+            format!("{name} — {}", state.tree_view.query.text().trim())
+        } else {
+            name
         }
     }
 
@@ -825,6 +832,20 @@ fn run_command(
         }
         ["mcp", "remove", ..] => Some("usage: mcp remove <name>".to_string()),
         ["mcp", ..] => Some("usage: mcp add <name> <program> | mcp remove <name>".to_string()),
+        ["scan"] => {
+            crate::tui::command_line::scan_into_report(state);
+            None
+        }
+        ["trust"] => {
+            state.trusted = true;
+            state.mark_session_dirty();
+            Some("trusted: agents may run in this repository".to_string())
+        }
+        ["untrust"] => {
+            state.trusted = false;
+            state.mark_session_dirty();
+            Some("untrusted: agents no longer run in this repository".to_string())
+        }
         [command, ..] => Some(format!("unknown command: {command}")),
     };
 }
@@ -1650,6 +1671,28 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
 mod tests {
     use super::*;
     use camino::Utf8PathBuf;
+
+    #[test]
+    fn the_title_says_the_repository_is_untrusted() {
+        let mut state = AppState::new(
+            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+            camino::Utf8PathBuf::from("/tmp"),
+            HelixTheme::default(),
+            crate::keymap::Keymap::default(),
+        );
+        assert_eq!(
+            ConversationTreeComponent::title(&state),
+            "Conversations (untrusted)"
+        );
+        state.trusted = true;
+        assert_eq!(ConversationTreeComponent::title(&state), "Conversations");
+        state.tree_view.query.set_text("queue");
+        state.tree_view.search_active = true;
+        assert_eq!(
+            ConversationTreeComponent::title(&state),
+            "Conversations — queue"
+        );
+    }
 
     #[test]
     fn mcp_hint_follows_the_command_typed() {

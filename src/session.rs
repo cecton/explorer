@@ -58,6 +58,9 @@ pub struct Session {
     /// Aliases of this repository.
     #[serde(default)]
     pub aliases: Vec<Alias>,
+    /// The user allowed agent turns in this repository. No turn runs without it.
+    #[serde(default)]
+    pub trusted: bool,
 }
 
 /// Persisted symbol-highlight identity. Byte-offset locations are never saved —
@@ -226,6 +229,7 @@ impl Session {
             discussion_highlights,
             mcp_servers: state.mcp_servers.clone(),
             aliases: state.project_aliases.clone(),
+            trusted: state.trusted,
         }
     }
 
@@ -430,6 +434,7 @@ impl Session {
             .collect();
         state.mcp_servers = self.mcp_servers;
         state.project_aliases = self.aliases;
+        state.trusted = self.trusted;
 
         if !new_stack.is_empty() {
             state.pane_manager.window_stack = new_stack;
@@ -493,7 +498,10 @@ fn pane_entry_from_window(
                 pane_size: window_state.pane_size.into(),
             })
         }
-        Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => None,
+        // A report is read and gone: it is never part of the session.
+        Window::WindowPicker | Window::ThemePicker | Window::ModelPicker | Window::Report(_) => {
+            None
+        }
         Window::GitLog(id) => {
             let win = state.git_logs.get(id)?;
             Some(PaneEntry::GitLog {
@@ -717,6 +725,7 @@ mod tests {
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
             aliases: Vec::new(),
+            trusted: false,
         };
 
         let value = serde_json::to_value(&session).unwrap();
@@ -839,6 +848,7 @@ mod tests {
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
             aliases: Vec::new(),
+            trusted: false,
         };
 
         session.apply(&mut state);
@@ -903,6 +913,7 @@ mod tests {
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
             aliases: Vec::new(),
+            trusted: false,
         };
 
         session.apply(&mut state);
@@ -953,6 +964,7 @@ mod tests {
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
             aliases: Vec::new(),
+            trusted: false,
         };
 
         session.apply(&mut state);
@@ -989,6 +1001,7 @@ mod tests {
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
             aliases: Vec::new(),
+            trusted: false,
         };
 
         session.apply(&mut state);
@@ -1058,6 +1071,7 @@ mod tests {
             discussion_highlights: HashMap::new(),
             mcp_servers: Vec::new(),
             aliases: Vec::new(),
+            trusted: false,
         };
 
         session.apply(&mut state);
@@ -1137,6 +1151,35 @@ mod tests {
         let mut fresh = empty_state(root);
         restored.apply(&mut fresh);
         assert_eq!(fresh.project_aliases, [alias]);
+    }
+
+    #[test]
+    fn trust_round_trips_through_session() {
+        let (_dir, root) = temp_root();
+        let mut state = empty_state(root.clone());
+        assert!(
+            !state.trusted,
+            "a repository is untrusted until the user says so"
+        );
+        state.trusted = true;
+
+        let json = serde_json::to_string(&Session::from_state(&state)).expect("serialize");
+        let restored: Session = serde_json::from_str(&json).expect("deserialize session");
+
+        let mut fresh = empty_state(root.clone());
+        restored.apply(&mut fresh);
+        assert!(fresh.trusted);
+
+        // An older session file that predates the flag loads as untrusted.
+        let path = session_file_path(&root).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, format!("{{\"version\": {}}}", SESSION_VERSION - 1)).unwrap();
+        let mut old = empty_state(root);
+        load_session(&old.root)
+            .expect("older version must load")
+            .apply(&mut old);
+        assert!(!old.trusted);
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]

@@ -14,6 +14,7 @@ pub struct PaneComponent {
     theme_picker: ThemePickerComponent,
     git_log: GitLogPaneComponent,
     commit_diff: CommitDiffPaneComponent,
+    report: crate::tui::report_pane::ReportComponent,
     conversation_tree: ConversationTreeComponent,
     discussion: DiscussionComponent,
     model_picker: ModelPickerComponent,
@@ -53,6 +54,7 @@ impl PaneComponent {
             theme_picker: ThemePickerComponent::new(id),
             git_log: GitLogPaneComponent::new(id),
             commit_diff: CommitDiffPaneComponent::new(id),
+            report: crate::tui::report_pane::ReportComponent::new(id),
             conversation_tree: ConversationTreeComponent::new(id),
             discussion: DiscussionComponent::new(id),
             model_picker: ModelPickerComponent::new(id),
@@ -193,6 +195,7 @@ impl PaneComponent {
             }
             Window::GitLog(_)
             | Window::CommitDiff(_)
+            | Window::Report(_)
             | Window::ConversationTree
             | Window::Discussion(_) => {
                 state.pane_manager.set_window_scroll(window, target);
@@ -282,6 +285,7 @@ impl TitleRow for PaneComponent {
             Window::Discussion(id) => self
                 .discussion
                 .render_title_row(ops, pane_box, focused, state, id),
+            Window::Report(_) => self.report.render_title_row(ops, pane_box, focused, state),
             Window::ModelPicker => self
                 .model_picker
                 .render_title_row(ops, pane_box, focused, state),
@@ -989,6 +993,10 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 self.discussion
                     .handle_event(global_data, input_event, has_focus)
             }
+            Some(Window::Report(_)) => {
+                self.report
+                    .handle_event(global_data, input_event, has_focus)
+            }
             Some(Window::ModelPicker) => {
                 self.model_picker
                     .handle_event(global_data, input_event, has_focus)
@@ -1084,6 +1092,10 @@ impl Component<AppState, AppSignal> for PaneComponent {
 
             // Render active child component (pushes into global_data.pipeline).
             match active_window {
+                Some(Window::Report(_)) => {
+                    self.report
+                        .render(global_data, inner_bounds, surface_bounds, has_focus)?
+                }
                 Some(Window::WindowPicker) => {
                     self.picker
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?

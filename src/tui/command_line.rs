@@ -6,6 +6,9 @@ use camino::{Utf8Path, Utf8PathBuf};
 const PROMPT: &str = ":";
 const PLACEHOLDER: &str = "<shell command>";
 const ALIAS: &str = "alias";
+const TRUST: &str = "trust";
+const UNTRUST: &str = "untrust";
+const SCAN: &str = "scan";
 const MAX_ROWS: usize = 10;
 
 /// The global command line opened with `<leader>:`, painted over the status bar.
@@ -51,6 +54,12 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
             set_after_agents(state, argument.trim(), file.as_deref()).map(|()| None)
         }
         ALIAS => set_alias(state, argument.trim()).map(|()| None),
+        SCAN => {
+            scan_into_report(state);
+            Ok(None)
+        }
+        TRUST => set_trust(state, true).map(|()| None),
+        UNTRUST => set_trust(state, false).map(|()| None),
         _ => match text.strip_prefix('!') {
             Some(shell_cmd) => shell_signal(shell_cmd, file.as_deref(), state).map(Some),
             None => Err(format!(
@@ -75,6 +84,33 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
             }
         }
     }
+}
+
+/// Scans the repository and shows what it found in a report window. Runs in place: a scan
+/// of a large repository takes a fraction of a second, and nothing is written anywhere.
+pub(crate) fn scan_into_report(state: &mut AppState) {
+    let report = crate::scan::scan(&state.root);
+    let danger = report.count(crate::scan::Severity::Danger);
+    let title = match danger {
+        0 => "Repository scan: nothing hidden found".to_string(),
+        1 => "Repository scan: 1 danger finding".to_string(),
+        count => format!("Repository scan: {count} danger findings"),
+    };
+    crate::tui::report_pane::ReportComponent::show(state, title, report.to_markdown());
+}
+
+/// Allows or forbids agent turns in this repository, for the session this writes.
+fn set_trust(state: &mut AppState, trusted: bool) -> Result<(), String> {
+    if state.trusted == trusted {
+        return Err(if trusted {
+            "this repository is already trusted".to_string()
+        } else {
+            "this repository is not trusted".to_string()
+        });
+    }
+    state.trusted = trusted;
+    state.mark_session_dirty();
+    Ok(())
 }
 
 fn set_after_agents(
@@ -167,6 +203,9 @@ fn command_hint(typed: &str, state: &AppState) -> Option<String> {
         ("!", None, _) if typed == "!" => {
             format!("{PLACEHOLDER}{}", aliases_suffix(state))
         }
+        (SCAN, None, _) => "read the repository for instructions aimed at an agent".to_string(),
+        (TRUST, None, _) => "allow agent turns in this repository".to_string(),
+        (UNTRUST, None, _) => "forbid agent turns in this repository".to_string(),
         (after_agents::NAME, None, _) => format!(
             "{}{}",
             after_agents::hint(state.after_agents.as_ref()),

@@ -576,7 +576,9 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
 async fn run(request: &TurnRequest, recorder: &mut Recorder) -> Result<(), String> {
     let mcp = request.mcp.snapshot().await;
     match &request.backend {
-        Backend::OpenAi(target) => run_own_loop(request, &mcp, target, recorder).await,
+        Backend::OpenAi(target) => {
+            run_own_loop(request, &mcp, target, &request.spec, recorder).await
+        }
         Backend::ClaudeCode(target) => run_claude_code(request, &mcp, target, recorder).await,
     }
 }
@@ -738,6 +740,7 @@ async fn run_own_loop(
     request: &TurnRequest,
     mcp: &McpTools,
     target: &LlmTarget,
+    spec: &ModelSpec,
     recorder: &mut Recorder,
 ) -> Result<(), String> {
     let (system, mut messages) = {
@@ -809,7 +812,7 @@ async fn run_own_loop(
             mode: request.mode,
             date: request.date.clone(),
             repo: request.repo.clone(),
-            spec: request.spec.clone(),
+            spec: spec.clone(),
         }),
         background: Arc::default(),
         mcp: mcp.clone(),

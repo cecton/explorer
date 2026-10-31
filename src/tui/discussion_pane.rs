@@ -156,6 +156,8 @@ pub(crate) enum Refusal {
     Busy(&'static str),
     /// The working tree has uncommitted changes.
     DirtyTree,
+    /// The repository is not trusted yet: no agent runs in it before the user says so.
+    Untrusted,
     Rejected(String),
 }
 
@@ -165,6 +167,11 @@ impl Refusal {
             Self::Busy(reason) => reason.to_string(),
             Self::DirtyTree => {
                 "the working tree has uncommitted changes; commit or stash them first".to_string()
+            }
+            Self::Untrusted => {
+                "this repository is not trusted yet: run :scan, read its report, then \
+                 :trust to allow agents here"
+                    .to_string()
             }
             Self::Rejected(reason) => reason,
         }
@@ -221,6 +228,11 @@ pub(crate) fn start_turn(
         TurnKind::NoSystemPrompt | TurnKind::Continue(Mode::Commit)
     );
     let continuing = matches!(kind, TurnKind::Continue(_));
+    // Nothing an agent says or does runs in a repository the user has not allowed it in,
+    // and the scan is how they come to know whether they should.
+    if !state.trusted {
+        return Err(Refusal::Untrusted);
+    }
     // A compact turn changes nothing, so it runs under the shared lock like feedback.
     let (mode, node_type, compact) = match kind {
         TurnKind::Prompt(Mode::Feedback) | TurnKind::Continue(Mode::Feedback) => {
@@ -417,7 +429,7 @@ fn marker_bg(theme: &HelixTheme, pane_bg: RgbValue) -> RgbValue {
 }
 
 /// Paint style for one markdown span: its fg over `bg`, with the span's attributes.
-fn span_style(span: &markdown::Span, bg: RgbValue) -> TuiStyle {
+pub(crate) fn span_style(span: &markdown::Span, bg: RgbValue) -> TuiStyle {
     let mut style = new_style!(
         color_fg: {TuiColor::from(span.fg)} color_bg: {TuiColor::from(bg)}
     );
@@ -494,8 +506,8 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
     if typed.is_empty() {
         return None;
     }
-    let spec = discussion.model.clone()?;
     let expansion = commands::expand(&typed, &state.agent.commands);
+    let spec = discussion.model.clone()?;
     let continue_on_node = expansion.matches_command(commands::CONTINUE);
     let parent = {
         let tree = state.conversations.read();
@@ -1136,19 +1148,22 @@ impl DiscussionComponent {
     /// then stays in the input until its turn starts. A refused send keeps the draft and
     /// explains itself in the window's notice.
     fn send(state: &mut AppState, main_tx: MainTx, id: usize) {
-        let Some(discussion) = state.discussions.get(&id) else {
-            return;
+        let has_model = {
+            let Some(discussion) = state.discussions.get(&id) else {
+                return;
+            };
+            if discussion.draft.text().trim().is_empty() {
+                return;
+            }
+            discussion.model.is_some()
         };
-        if discussion.draft.text().trim().is_empty() {
-            return;
-        }
-        if discussion.model.is_none() {
-            ModelPickerComponent::open(state, main_tx, ModelPickerPurpose::Window(id));
-            return;
-        }
         // A queue held back goes first, so that this prompt cannot overtake it.
         Self::release_queue(state, main_tx.clone());
         if state.queued_turns.iter().any(|entry| entry.window == id) {
+            return;
+        }
+        if !has_model {
+            ModelPickerComponent::open(state, main_tx, ModelPickerPurpose::Window(id));
             return;
         }
         let Some(composed) = compose_launch(state, id) else {
@@ -2304,6 +2319,46 @@ mod tests {
             );
         }
         (tmp, state)
+    }
+
+    fn feedback_launch() -> Launch {
+        Launch {
+            parent: None,
+            prompt: "hello".to_string(),
+            input: None,
+            kind: TurnKind::Prompt(Mode::Feedback),
+            command: None,
+            spec: ModelSpec::parse("mock/m/low").unwrap(),
+        }
+    }
+
+    /// A configured endpoint, so that a refusal is the trust gate and not a missing token.
+    fn agent_with_endpoint() -> Arc<crate::agent::AgentConfig> {
+        Arc::new(crate::agent::AgentConfig {
+            endpoints: vec![crate::agent::Endpoint {
+                name: "mock".to_string(),
+                kind: crate::agent::EndpointKind::OpenAi {
+                    url: "http://localhost:1".to_string(),
+                    token: "t".to_string(),
+                },
+            }],
+            ..Default::default()
+        })
+    }
+
+    #[tokio::test]
+    async fn no_turn_runs_in_a_repository_the_user_has_not_trusted() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state.agent = agent_with_endpoint();
+        state.trusted = false;
+        let (main_tx, _rx) = mpsc::channel(1);
+        let refused = start_turn(&mut state, main_tx.clone(), feedback_launch());
+        assert_eq!(refused, Err(Refusal::Untrusted));
+        assert!(Refusal::Untrusted.into_reason().contains(":trust"));
+
+        state.trusted = true;
+        let started = start_turn(&mut state, main_tx, feedback_launch());
+        assert!(started.is_ok(), "{started:?}");
     }
 
     fn queue(state: &mut AppState, windows: &[usize]) {

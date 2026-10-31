@@ -1226,6 +1226,7 @@ dependencies = [
  "tracing",
  "tracing-core",
  "tracing-subscriber",
+ "unicode-general-category",
  "unicode-segmentation",
  "url",
 ]
@@ -5731,6 +5732,12 @@ name = "unicode-bom"
 version = "2.0.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "7eec5d1121208364f6793f7d2e222bf75a915c19557537745b195b253dd64217"
+
+[[package]]
+name = "unicode-general-category"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0b993bddc193ae5bd0d623b49ec06ac3e9312875fdae725a975c51db1cc1677f"
 
 [[package]]
 name = "unicode-ident"

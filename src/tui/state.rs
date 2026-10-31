@@ -342,6 +342,13 @@ pub struct DiscussionState {
     pub notice: Option<String>,
 }
 
+/// What a report window shows: a title and the markdown under it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReportState {
+    pub title: String,
+    pub markdown: String,
+}
+
 /// A prompt waiting for the running turn to end. Its text is not copied: it stays the
 /// draft of `window`, editable until the turn starts.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -585,6 +592,11 @@ pub struct AppState {
     pub mcp_servers: Vec<McpServerDecl>,
     /// The running MCP servers, shared with the turns.
     pub mcp: Arc<McpHost>,
+    /// Markdown shown in the report windows, by window id. In memory only: a report is not
+    /// saved, and leaves nothing behind when its window closes.
+    pub reports: HashMap<usize, ReportState>,
+    /// Next available report window ID.
+    pub next_report_id: usize,
     /// Model last picked during this run, offered to new conversations.
     pub last_picked_model: Option<ModelSpec>,
     /// Model Picker entries are indexes into `models.specs`.
@@ -602,6 +614,9 @@ pub struct AppState {
     pub config_aliases: Vec<Alias>,
     /// Aliases of this repository, saved in its session; they win over the config's.
     pub project_aliases: Vec<Alias>,
+    /// The user allowed agent turns in this repository, saved in its session. Until it is
+    /// set, every turn is refused.
+    pub trusted: bool,
     pub next_after_agents_run: u64,
     pub mouse_drag_active: bool,
     /// Window whose input holds the mouse selection in progress.
@@ -675,7 +690,10 @@ impl AppState {
             Window::WindowPicker => Some(&mut self.window_picker.query),
             Window::ThemePicker => Some(&mut self.theme_picker.query),
             Window::ModelPicker => Some(&mut self.model_picker.query),
-            Window::ConversationTree | Window::Terminal(_) | Window::CommitDiff(_) => None,
+            Window::ConversationTree
+            | Window::Terminal(_)
+            | Window::CommitDiff(_)
+            | Window::Report(_) => None,
         }
     }
 
@@ -773,6 +791,8 @@ impl AppState {
             models: ModelCatalog::default(),
             usage: HashMap::new(),
             mcp_servers: Vec::new(),
+            reports: HashMap::new(),
+            next_report_id: 0,
             mcp,
             last_picked_model: None,
             model_picker: FuzzyPickerState::default(),
@@ -782,6 +802,7 @@ impl AppState {
             after_agents: None,
             config_aliases: Vec::new(),
             project_aliases: Vec::new(),
+            trusted: false,
             after_agents_grace: Duration::from_secs(crate::config::DEFAULT_GRACE_SECONDS),
             next_after_agents_run: 0,
             mouse_drag_active: false,

@@ -1968,6 +1968,9 @@ pub(super) fn close_window(state: &mut AppState, window: Window) {
         Window::ConversationTree => {
             state.tree_view.command = None;
         }
+        Window::Report(id) => {
+            state.reports.remove(&id);
+        }
         Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => {}
     }
     state.pane_manager.remove_window(&window);
@@ -2114,6 +2117,9 @@ fn render_status_bar(
                 Some(Window::Discussion(_)) => {
                     "Enter:Send  Shift+Enter:New line  PgUp/PgDn:scroll"
                         .to_string()
+                }
+                Some(Window::Report(_)) => {
+                    "Bksp:Send to back  Esc:Close  PgUp/PgDn:scroll".to_string()
                 }
                 Some(Window::ModelPicker) => model_picker_hint(state),
                 Some(Window::Terminal(_)) if !state.terminal_grabbed => {
