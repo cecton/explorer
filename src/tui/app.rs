@@ -708,12 +708,54 @@ impl App for AppMain {
         }
 
         // The command line takes every key while it is open, ahead of the leader key.
-        if let Some(command_line) = global_data.state.command_line.as_mut() {
-            if !matches!(input_event, InputEvent::Mouse(_)) && command_line.input.selecting() {
-                command_line.input.cancel_select();
+        // `Tab`/`Shift+Tab` walk the palette and `Enter` takes what it highlights; a second
+        // `Enter` runs the completed line. The arrows stay with the input, as everywhere.
+        if global_data.state.command_line.is_some() {
+            if !matches!(input_event, InputEvent::Mouse(_))
+                && global_data
+                    .state
+                    .command_line
+                    .as_ref()
+                    .is_some_and(|command_line| command_line.input.selecting())
+            {
+                if let Some(command_line) = global_data.state.command_line.as_mut() {
+                    command_line.input.cancel_select();
+                }
                 global_data.state.mouse_drag_active = false;
             }
+            let entries = global_data
+                .state
+                .command_line
+                .as_ref()
+                .map(|command_line| palette_entries(command_line.input.text(), &global_data.state))
+                .unwrap_or_default();
             match &input_event {
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Tab),
+                }) if !entries.is_empty() => {
+                    if let Some(command_line) = global_data.state.command_line.as_mut() {
+                        command_line.move_selection(true, entries.len());
+                        command_line.error = None;
+                    }
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::BackTab),
+                }) if !entries.is_empty() => {
+                    if let Some(command_line) = global_data.state.command_line.as_mut() {
+                        command_line.move_selection(false, entries.len());
+                        command_line.error = None;
+                    }
+                    return Ok(EventPropagation::ConsumedRender);
+                }
+                InputEvent::Keyboard(KeyPress::Plain {
+                    key: Key::SpecialKey(SpecialKey::Enter),
+                }) if !entries.is_empty() => {
+                    if let Some(command_line) = global_data.state.command_line.as_mut() {
+                        command_line.accept(&entries);
+                    }
+                    return Ok(EventPropagation::ConsumedRender);
+                }
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Enter),
                 }) => {
@@ -735,8 +777,11 @@ impl App for AppMain {
                             alt_key_state: KeyState::NotPressed,
                         },
                 }) => {
-                    command_line.input.clear();
-                    command_line.error = None;
+                    if let Some(command_line) = global_data.state.command_line.as_mut() {
+                        command_line.input.clear();
+                        command_line.error = None;
+                        command_line.selected = 0;
+                    }
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -747,23 +792,39 @@ impl App for AppMain {
                             shift_key_state: KeyState::NotPressed,
                             alt_key_state: KeyState::NotPressed,
                         },
-                }) if command_line.input.text().is_empty() => {
+                }) if global_data
+                    .state
+                    .command_line
+                    .as_ref()
+                    .is_some_and(|command_line| command_line.input.text().is_empty()) =>
+                {
                     global_data.state.command_line = None;
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(_) | InputEvent::BracketedPaste(_) => {
-                    command_line.input.handle_key(&input_event);
-                    command_line.error = None;
+                    if let Some(command_line) = global_data.state.command_line.as_mut() {
+                        let before = command_line.input.text().to_string();
+                        command_line.input.handle_key(&input_event);
+                        command_line.error = None;
+                        if command_line.input.text() != before {
+                            command_line.selected = 0;
+                        }
+                    }
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Mouse(mouse) if command_line.input.handle_mouse(mouse) => {
-                    global_data.state.mouse_drag_active = command_line.input.selecting();
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                // A mouse event the input does not take means its release was lost.
-                InputEvent::Mouse(_) if command_line.input.selecting() => {
-                    command_line.input.cancel_select();
-                    global_data.state.mouse_drag_active = false;
+                InputEvent::Mouse(mouse) => {
+                    let Some(command_line) = global_data.state.command_line.as_mut() else {
+                        return Ok(EventPropagation::ConsumedRender);
+                    };
+                    if command_line.input.handle_mouse(mouse) {
+                        global_data.state.mouse_drag_active = command_line.input.selecting();
+                        return Ok(EventPropagation::ConsumedRender);
+                    }
+                    // A mouse event the input does not take means its release was lost.
+                    if command_line.input.selecting() {
+                        command_line.input.cancel_select();
+                        global_data.state.mouse_drag_active = false;
+                    }
                 }
                 _ => {}
             }

@@ -1,15 +1,115 @@
 use crate::config::Alias;
 use crate::tui::after_agents::{self, AfterAgents};
+use crate::tui::text_layout::truncate;
 use crate::tui::*;
 use camino::{Utf8Path, Utf8PathBuf};
 
 const PROMPT: &str = ":";
 const PLACEHOLDER: &str = "<shell command>";
-const ALIAS: &str = "alias";
-const TRUST: &str = "trust";
-const UNTRUST: &str = "untrust";
-const SCAN: &str = "scan";
 const MAX_ROWS: usize = 10;
+const MAX_LIST_ROWS: usize = 5;
+
+/// A command of the line. Everything the line knows about it lives here: the palette lists
+/// it and `run` is what the line does with what follows its name.
+pub(crate) struct Command {
+    pub(crate) name: &'static str,
+    /// What the command expects after its name, as the palette spells it out.
+    argument: &'static str,
+    /// One line, used by the palette and by the placeholder of the command typed alone.
+    description: &'static str,
+    run: fn(&mut CommandRun<'_>) -> Result<(), String>,
+}
+
+/// What a command is handed: the state it acts on, its argument, and the ways out.
+struct CommandRun<'a> {
+    state: &'a mut AppState,
+    /// The text after the command's name, trimmed.
+    argument: &'a str,
+    /// The file in focus, for the `%` placeholders.
+    file: Option<&'a Utf8Path>,
+    /// The terminal a command asks for, applied once the line has closed.
+    signal: Option<AppSignal>,
+}
+
+/// Every command the line runs, in the order the palette lists it.
+const COMMANDS: [Command; 5] = [
+    Command {
+        name: after_agents::NAME,
+        argument: "[shell command]",
+        description: "run a shell command once the agents are done",
+        run: run_after_agents,
+    },
+    Command {
+        name: "alias",
+        argument: "[name] [shell command]",
+        description: "set, replace or remove a project alias",
+        run: run_alias,
+    },
+    Command {
+        name: "scan",
+        argument: "",
+        description: "read the repository for instructions aimed at an agent",
+        run: run_scan,
+    },
+    Command {
+        name: "trust",
+        argument: "",
+        description: "allow agent turns in this repository",
+        run: run_trust,
+    },
+    Command {
+        name: "untrust",
+        argument: "",
+        description: "forbid agent turns in this repository",
+        run: run_untrust,
+    },
+];
+
+/// An alias the palette offers: a name typed on the line, which opens its command in a
+/// terminal. Aliases belong to the session, so they are only ever what the palette lists.
+pub(crate) struct AliasRow {
+    name: String,
+    command: String,
+    from_config: bool,
+}
+
+/// One row of the palette, whatever it came from.
+pub(crate) enum Entry {
+    Command(&'static Command),
+    Alias(AliasRow),
+}
+
+impl Entry {
+    fn name(&self) -> &str {
+        match self {
+            Self::Command(command) => command.name,
+            Self::Alias(alias) => &alias.name,
+        }
+    }
+
+    /// What the row says after the name.
+    fn detail(&self) -> String {
+        match self {
+            Self::Command(command) if command.argument.is_empty() => {
+                command.description.to_string()
+            }
+            Self::Command(command) => format!("{}   {}", command.argument, command.description),
+            Self::Alias(alias) => {
+                let origin = if alias.from_config { " (config)" } else { "" };
+                format!("= {}{origin}", alias.command)
+            }
+        }
+    }
+
+    /// What goes into the input: the name, then a space for what takes an argument.
+    fn completion(&self) -> String {
+        match self {
+            Self::Command(command) if command.argument.is_empty() => command.name.to_string(),
+            Self::Command(command) => format!("{} ", command.name),
+            Self::Alias(alias) => format!("{} ", alias.name),
+        }
+    }
+}
 
 /// The global command line opened with `<leader>:`, painted over the status bar.
 #[derive(Clone)]
@@ -18,6 +118,8 @@ pub struct CommandLine {
     /// The window focused when the command line opened: focus follows the mouse meanwhile.
     pub origin: Option<Window>,
     pub error: Option<String>,
+    /// The palette's highlight, an index into its entries. Reset whenever the text changes.
+    pub selected: usize,
 }
 
 impl CommandLine {
@@ -26,7 +128,115 @@ impl CommandLine {
             input: InputLine::new(),
             origin,
             error: None,
+            selected: 0,
         }
+    }
+}
+
+/// The aliases of the repository, project ones first, the config's shadowed by them.
+fn alias_rows(state: &AppState) -> Vec<AliasRow> {
+    state
+        .project_aliases
+        .iter()
+        .map(|alias| AliasRow {
+            name: alias.name.clone(),
+            command: alias.command.clone(),
+            from_config: false,
+        })
+        .chain(
+            state
+                .config_aliases
+                .iter()
+                .filter(|alias| {
+                    !state
+                        .project_aliases
+                        .iter()
+                        .any(|own| own.name == alias.name)
+                })
+                .map(|alias| AliasRow {
+                    name: alias.name.clone(),
+                    command: alias.command.clone(),
+                    from_config: true,
+                }),
+        )
+        .collect()
+}
+
+/// Whether `word` names a project or config alias.
+fn is_alias(state: &AppState, word: &str) -> bool {
+    state
+        .project_aliases
+        .iter()
+        .chain(&state.config_aliases)
+        .any(|alias| alias.name == word)
+}
+
+/// The palette's entries for the first word `typed`: the commands, then the aliases, whose
+/// names are prefix-matched too since typing one is how it runs. Only while that word is
+/// being typed — once it is followed by a space the line takes an argument, and once it
+/// names something exactly the line's own hint says more than a one-line description.
+pub(crate) fn palette_entries(typed: &str, state: &AppState) -> Vec<Entry> {
+    if typed.contains(char::is_whitespace) || typed.starts_with('!') {
+        return Vec::new();
+    }
+    if COMMANDS.iter().any(|command| command.name == typed) || is_alias(state, typed) {
+        return Vec::new();
+    }
+    let mut entries: Vec<Entry> = COMMANDS
+        .iter()
+        .filter(|command| command.name.starts_with(typed))
+        .map(Entry::Command)
+        .collect();
+    entries.extend(
+        alias_rows(state)
+            .into_iter()
+            .filter(|alias| alias.name.starts_with(typed))
+            .map(Entry::Alias),
+    );
+    entries
+}
+
+/// The palette as it stands: its entries, and which of them is highlighted.
+struct Palette {
+    entries: Vec<Entry>,
+    selected: usize,
+}
+
+impl Palette {
+    /// `None` when nothing matches, so the palette has nothing to show.
+    fn new(typed: &str, selected: usize, state: &AppState) -> Option<Self> {
+        let entries = palette_entries(typed, state);
+        let last = entries.len().checked_sub(1)?;
+        Some(Self {
+            entries,
+            selected: selected.min(last),
+        })
+    }
+}
+
+impl CommandLine {
+    /// Take the entry at `selected` as the typed text, so a second Enter runs it. A name
+    /// that takes an argument is only written out, with a space after it: the input never
+    /// holds a command the user has not seen.
+    pub fn accept(&mut self, entries: &[Entry]) {
+        let Some(entry) = entries.get(self.selected) else {
+            return;
+        };
+        self.input.set_text(entry.completion());
+        self.selected = 0;
+    }
+
+    /// Moves the palette's highlight, wrapping, and returns whether it moved.
+    pub fn move_selection(&mut self, down: bool, entries: usize) -> bool {
+        if entries == 0 {
+            return false;
+        }
+        self.selected = if down {
+            (self.selected + 1) % entries
+        } else {
+            (self.selected + entries - 1) % entries
+        };
+        true
     }
 }
 
@@ -48,28 +258,38 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
         _ => None,
     };
     let word = text.split_whitespace().next().unwrap_or_default();
-    let argument = text.trim_start().strip_prefix(word).unwrap_or_default();
-    let outcome = match word {
-        after_agents::NAME => {
-            set_after_agents(state, argument.trim(), file.as_deref()).map(|()| None)
+    let argument = text
+        .trim_start()
+        .strip_prefix(word)
+        .unwrap_or_default()
+        .trim();
+    let mut run = CommandRun {
+        state,
+        argument,
+        file: file.as_deref(),
+        signal: None,
+    };
+    let outcome = match COMMANDS.iter().find(|command| command.name == word) {
+        Some(command) => (command.run)(&mut run),
+        None if word.starts_with('!') => shell_signal(
+            text.trim().trim_start_matches('!'),
+            file.as_deref(),
+            run.state,
+        )
+        .map(|signal| run.signal = Some(signal)),
+        // A name the palette lists as an alias opens its command in a terminal: typing the
+        // name is how it runs, so the palette must not offer what the line would refuse.
+        None if is_alias(run.state, word) => {
+            shell_signal(&text, file.as_deref(), run.state).map(|signal| run.signal = Some(signal))
         }
-        ALIAS => set_alias(state, argument.trim()).map(|()| None),
-        SCAN => {
-            scan_into_report(state);
-            Ok(None)
-        }
-        TRUST => set_trust(state, true).map(|()| None),
-        UNTRUST => set_trust(state, false).map(|()| None),
-        _ => match text.strip_prefix('!') {
-            Some(shell_cmd) => shell_signal(shell_cmd, file.as_deref(), state).map(Some),
-            None => Err(format!(
-                "unknown command: {}",
-                text.trim().lines().next().unwrap_or_default()
-            )),
-        },
+        None => Err(format!(
+            "unknown command: {}",
+            text.trim().lines().next().unwrap_or_default()
+        )),
     };
     match outcome {
-        Ok(signal) => {
+        Ok(()) => {
+            let signal = run.signal.take();
             state.command_line = None;
             if let Some(signal) = signal {
                 send_signal!(
@@ -84,6 +304,34 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
             }
         }
     }
+}
+
+fn run_after_agents(run: &mut CommandRun<'_>) -> Result<(), String> {
+    if run.argument.is_empty() {
+        run.state.after_agents = None;
+        return Ok(());
+    }
+    let command = resolve_alias(run.state, run.argument);
+    let expanded = expand_placeholders(&command, run.file, &run.state.root)?;
+    run.state.after_agents = Some(AfterAgents::Pending(expanded));
+    Ok(())
+}
+
+fn run_alias(run: &mut CommandRun<'_>) -> Result<(), String> {
+    set_alias(run.state, run.argument)
+}
+
+fn run_scan(run: &mut CommandRun<'_>) -> Result<(), String> {
+    scan_into_report(run.state);
+    Ok(())
+}
+
+fn run_trust(run: &mut CommandRun<'_>) -> Result<(), String> {
+    set_trust(run.state, true)
+}
+
+fn run_untrust(run: &mut CommandRun<'_>) -> Result<(), String> {
+    set_trust(run.state, false)
 }
 
 /// Scans the repository and shows what it found in a report window. Runs in place: a scan
@@ -110,21 +358,6 @@ fn set_trust(state: &mut AppState, trusted: bool) -> Result<(), String> {
     }
     state.trusted = trusted;
     state.mark_session_dirty();
-    Ok(())
-}
-
-fn set_after_agents(
-    state: &mut AppState,
-    command: &str,
-    file: Option<&Utf8Path>,
-) -> Result<(), String> {
-    if command.is_empty() {
-        state.after_agents = None;
-        return Ok(());
-    }
-    let command = resolve_alias(state, command);
-    let expanded = expand_placeholders(&command, file, &state.root)?;
-    state.after_agents = Some(AfterAgents::Pending(expanded));
     Ok(())
 }
 
@@ -196,38 +429,25 @@ fn aliases_suffix(state: &AppState) -> String {
     }
 }
 
-/// The placeholder for a command typed alone (`!`, `after-agents`, `alias [name]`).
+/// The placeholder for what is typed: what a command expects, and the aliases in force.
 fn command_hint(typed: &str, state: &AppState) -> Option<String> {
     let mut words = typed.split_whitespace();
     let hint = match (words.next()?, words.next(), words.next()) {
         ("!", None, _) if typed == "!" => {
             format!("{PLACEHOLDER}{}", aliases_suffix(state))
         }
-        (SCAN, None, _) => "read the repository for instructions aimed at an agent".to_string(),
-        (TRUST, None, _) => "allow agent turns in this repository".to_string(),
-        (UNTRUST, None, _) => "forbid agent turns in this repository".to_string(),
         (after_agents::NAME, None, _) => format!(
             "{}{}",
             after_agents::hint(state.after_agents.as_ref()),
             aliases_suffix(state)
         ),
-        (ALIAS, None, _) => {
-            let entries: Vec<String> = state
-                .project_aliases
+        ("alias", None, _) => {
+            let entries: Vec<String> = alias_rows(state)
                 .iter()
-                .map(|alias| format!("{} = {}", alias.name, alias.command))
-                .chain(
-                    state
-                        .config_aliases
-                        .iter()
-                        .filter(|alias| {
-                            !state
-                                .project_aliases
-                                .iter()
-                                .any(|own| own.name == alias.name)
-                        })
-                        .map(|alias| format!("{} = {} (config)", alias.name, alias.command)),
-                )
+                .map(|alias| {
+                    let origin = if alias.from_config { " (config)" } else { "" };
+                    format!("{} = {}{origin}", alias.name, alias.command)
+                })
                 .collect();
             if entries.is_empty() {
                 "no aliases · alias <name> <shell command>".to_string()
@@ -235,7 +455,7 @@ fn command_hint(typed: &str, state: &AppState) -> Option<String> {
                 entries.join(" · ")
             }
         }
-        (ALIAS, Some(name), None) => {
+        ("alias", Some(name), None) => {
             match state
                 .project_aliases
                 .iter()
@@ -245,6 +465,16 @@ fn command_hint(typed: &str, state: &AppState) -> Option<String> {
                 None => PLACEHOLDER.to_string(),
             }
         }
+        (name, None, _) => match COMMANDS.iter().find(|command| command.name == name) {
+            Some(command) => command.description.to_string(),
+            None => alias_rows(state)
+                .into_iter()
+                .find(|alias| alias.name == name)
+                .map(|alias| {
+                    let origin = if alias.from_config { " (config)" } else { "" };
+                    format!("= {}{origin}", alias.command)
+                })?,
+        },
         _ => return None,
     };
     let gap = if typed.ends_with(char::is_whitespace) {
@@ -257,6 +487,9 @@ fn command_hint(typed: &str, state: &AppState) -> Option<String> {
 
 /// Paints over the bottom rows, growing upward: the panes are not resized while typing.
 pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mut AppState) {
+    let palette = state.command_line.as_ref().and_then(|command_line| {
+        Palette::new(command_line.input.text(), command_line.selected, state)
+    });
     let hint = state
         .command_line
         .as_ref()
@@ -278,10 +511,23 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mu
             let error_fg = TuiColor::from(theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG));
             Some((format!("  {error}"), error_fg))
         }
-        None => hint.map(|hint| {
-            let weak = theme.color_for_scope("comment").unwrap_or(fg_rgb);
-            (hint, TuiColor::from(weak))
-        }),
+        // With the palette up, the keys that walk it are worth naming once, after whatever
+        // the line itself has to say.
+        None => {
+            let keys = palette
+                .is_some()
+                .then_some("Tab/Shift+Tab:Choose  Enter:Complete  Esc:Close");
+            let hint = match (hint, keys) {
+                (Some(hint), Some(keys)) => Some(format!("{hint} · {keys}")),
+                (Some(hint), None) => Some(hint),
+                (None, Some(keys)) => Some(format!("  {keys}")),
+                (None, None) => None,
+            };
+            hint.map(|hint| {
+                let weak = theme.color_for_scope("comment").unwrap_or(fg_rgb);
+                (hint, TuiColor::from(weak))
+            })
+        }
     };
 
     let width = size.col_width.as_u16();
@@ -293,11 +539,20 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mu
         width,
         max_rows,
     );
-    let top = screen_rows.saturating_sub(rows);
+
+    // The palette shares the bottom of the screen with the line, so it stays a glance: it
+    // gives way before the input does, and never takes more than a third of the screen.
+    let room = screen_rows
+        .saturating_sub(rows)
+        .min((screen_rows / 3).max(1));
+    let list_rows = palette.as_ref().map_or(0, |palette| {
+        palette.entries.len().min(MAX_LIST_ROWS).min(room)
+    });
+    let top = screen_rows.saturating_sub(rows + list_rows);
 
     let fill_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
     let mut ops = RenderOpIRVec::new();
-    for row_idx in top..screen_rows {
+    for row_idx in top..(top + rows + list_rows).min(screen_rows) {
         ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row(row_idx as u16));
         ops += RenderOpCommon::ApplyColors(Some(fill_style));
         ops += RenderOpIR::PaintTextWithAttributes(
@@ -317,6 +572,36 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mu
         true,
         (color_bg, color_fg, color_selection),
     );
+    let Some(palette) = palette else {
+        pipeline.push(ZOrder::Normal, ops);
+        return;
+    };
+    let picked_bg = TuiColor::from(title_selection_bg(false, theme));
+    // Keep the highlighted row in view when the list has to be cut short.
+    let first = (palette.selected + 1).saturating_sub(list_rows);
+    let lines: Vec<(bool, String)> = palette
+        .entries
+        .iter()
+        .enumerate()
+        .skip(first)
+        .take(list_rows)
+        .map(|(index, entry)| {
+            let picked = index == palette.selected;
+            let marker = if picked { " > " } else { "   " };
+            (
+                picked,
+                format!("{marker}{}   {}", entry.name(), entry.detail()),
+            )
+        })
+        .collect();
+    for (offset, (picked, line)) in lines.iter().enumerate() {
+        let bg = if *picked { picked_bg } else { color_bg };
+        let style = new_style!(color_fg: {color_fg} color_bg: {bg});
+        let line = truncate(line, width as usize);
+        ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row((top + rows + offset) as u16));
+        ops += RenderOpCommon::ApplyColors(Some(style));
+        ops += RenderOpIR::PaintTextWithAttributes(line.into(), Some(style));
+    }
     pipeline.push(ZOrder::Normal, ops);
 }
 
@@ -494,7 +779,7 @@ mod tests {
                 alias("poweroff", "systemctl poweroff"),
                 alias("notify", "notify-send %project"),
             ],
-            project_aliases: vec![alias("notify", "echo project")],
+            project_aliases: vec![alias("notify", "echo project"), alias("ci", "cargo test")],
             ..AppState::default()
         }
     }
@@ -520,13 +805,14 @@ mod tests {
     #[test]
     fn alias_sets_replaces_and_removes_a_project_alias() {
         let mut state = state_with_aliases();
-        set_alias(&mut state, "ci cargo test").unwrap();
-        assert_eq!(state.project_aliases[1], alias("ci", "cargo test"));
-        set_alias(&mut state, "ci cargo nextest run").unwrap();
+        set_alias(&mut state, "triple cargo nextest run").unwrap();
+        assert_eq!(state.project_aliases.len(), 3);
+        assert_eq!(state.project_aliases[2].command, "cargo nextest run");
+        set_alias(&mut state, "triple cargo test").unwrap();
+        assert_eq!(state.project_aliases.len(), 3);
+        assert_eq!(state.project_aliases[2].command, "cargo test");
+        set_alias(&mut state, "triple").unwrap();
         assert_eq!(state.project_aliases.len(), 2);
-        assert_eq!(state.project_aliases[1].command, "cargo nextest run");
-        set_alias(&mut state, "ci").unwrap();
-        assert_eq!(state.project_aliases, [alias("notify", "echo project")]);
         assert!(state.session_dirty_at.is_some());
     }
 
@@ -542,7 +828,7 @@ mod tests {
             Err("no alias nope".to_string())
         );
         assert_eq!(set_alias(&mut state, ""), Ok(()));
-        assert_eq!(state.project_aliases.len(), 1);
+        assert_eq!(state.project_aliases.len(), 2);
     }
 
     #[test]
@@ -550,17 +836,159 @@ mod tests {
         let state = state_with_aliases();
         assert_eq!(
             command_hint("!", &state).unwrap(),
-            " <shell command> · aliases: notify, poweroff"
+            " <shell command> · aliases: notify, ci, poweroff"
         );
         assert_eq!(
             command_hint("alias", &state).unwrap(),
-            " notify = echo project · poweroff = systemctl poweroff (config)"
+            " notify = echo project · ci = cargo test · poweroff = systemctl poweroff (config)"
         );
         assert_eq!(
             command_hint("alias notify", &state).unwrap(),
             " Enter removes notify (was: echo project)"
         );
         assert_eq!(command_hint("ls", &state), None);
+    }
+
+    #[test]
+    fn a_command_or_alias_typed_alone_says_what_it_does() {
+        let state = state_with_aliases();
+        assert_eq!(
+            command_hint("scan", &state).as_deref(),
+            Some(" read the repository for instructions aimed at an agent")
+        );
+        assert_eq!(
+            command_hint("trust", &state).as_deref(),
+            Some(" allow agent turns in this repository")
+        );
+        assert_eq!(command_hint("ci", &state).as_deref(), Some(" = cargo test"));
+        assert_eq!(
+            command_hint("poweroff", &state).as_deref(),
+            Some(" = systemctl poweroff (config)")
+        );
+        assert_eq!(
+            command_hint("alias foo", &state).as_deref(),
+            Some(" <shell command>")
+        );
+    }
+
+    #[test]
+    fn the_table_is_what_the_line_runs_and_the_palette_lists() {
+        // One table, so a command cannot be listed without being runnable, nor runnable
+        // without being listed and described.
+        let state = AppState::default();
+        let listed: Vec<String> = palette_entries("", &state)
+            .iter()
+            .map(|entry| entry.name().to_string())
+            .collect();
+        for command in &COMMANDS {
+            assert!(
+                listed.iter().any(|name| name == command.name),
+                "{} is not listed",
+                command.name
+            );
+            assert!(
+                !command.description.is_empty(),
+                "{} has no description",
+                command.name
+            );
+            assert!(
+                command.argument.is_empty() || command.argument.starts_with('['),
+                "{} spells its argument oddly: {}",
+                command.name,
+                command.argument
+            );
+        }
+        let mut names: Vec<&str> = COMMANDS.iter().map(|command| command.name).collect();
+        let total = names.len();
+        names.sort_unstable();
+        names.dedup();
+        assert_eq!(names.len(), total, "two commands share a name");
+    }
+
+    #[test]
+    fn palette_lists_commands_then_aliases_by_prefix() {
+        let state = state_with_aliases();
+        let names = |typed: &str| {
+            palette_entries(typed, &state)
+                .iter()
+                .map(|entry| entry.name().to_string())
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            names(""),
+            [
+                "after-agents",
+                "alias",
+                "scan",
+                "trust",
+                "untrust",
+                "notify",
+                "ci",
+                "poweroff"
+            ]
+        );
+        assert_eq!(names("a"), ["after-agents", "alias"]);
+        assert_eq!(names("t"), ["trust"]);
+        assert_eq!(names("c"), ["ci"]);
+        assert_eq!(names("n"), ["notify"]);
+        assert_eq!(names("p"), ["poweroff"]);
+        assert!(names("alias ").is_empty());
+        assert!(names("!").is_empty());
+        assert!(names("nothing").is_empty());
+    }
+
+    #[test]
+    fn a_word_naming_an_entry_exactly_hides_the_palette() {
+        let state = state_with_aliases();
+        for typed in [
+            "alias",
+            "scan",
+            "trust",
+            "untrust",
+            "after-agents",
+            "notify",
+            "ci",
+        ] {
+            assert!(palette_entries(typed, &state).is_empty(), "{typed}");
+        }
+    }
+
+    #[test]
+    fn tab_and_enter_complete_to_the_highlighted_entry() {
+        let state = state_with_aliases();
+        let completed = |text: &str, selected: usize| {
+            let mut line = CommandLine {
+                input: InputLine::with_text(text),
+                origin: None,
+                error: None,
+                selected,
+            };
+            line.accept(&palette_entries(text, &state));
+            line.input.text().to_string()
+        };
+        assert_eq!(completed("", 0), "after-agents ");
+        assert_eq!(completed("", 1), "alias ");
+        assert_eq!(completed("", 5), "notify ");
+        assert_eq!(completed("al", 0), "alias ");
+        assert_eq!(completed("sc", 0), "scan");
+        assert_eq!(completed("un", 0), "untrust");
+        assert_eq!(completed("alias", 0), "alias");
+    }
+
+    #[test]
+    fn moving_the_highlight_wraps_over_commands_and_aliases() {
+        let state = state_with_aliases();
+        let entries = palette_entries("", &state).len();
+        assert_eq!(entries, 8);
+        let mut line = CommandLine::new(None);
+        assert!(line.move_selection(true, entries));
+        assert_eq!(line.selected, 1);
+        line.selected = 7;
+        assert!(line.move_selection(true, entries));
+        assert_eq!(line.selected, 0);
+        assert!(line.move_selection(false, entries));
+        assert_eq!(line.selected, 7);
+        assert!(!line.move_selection(true, palette_entries("nothing", &state).len()));
     }
 
     #[test]
