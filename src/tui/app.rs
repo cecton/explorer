@@ -90,7 +90,7 @@ pub struct AppMain {
     lsp_guard: Option<SubscriberGuard<crate::lsp::LspWorker>>,
     lsp_last_gen: u8,
     lsp_health_skip: u32,
-    /// Set when a `:features`/`:all-features`/`:default-features` command dropped
+    /// Set when a `features`/`all-features`/`default-features` command dropped
     /// `lsp_guard` to kill the old rust-analyzer; the fresh one is only spawned once
     /// `health_check()` confirms the old worker thread has actually exited (see the
     /// `AppSignal::Noop` tick handler) since resubscribing too early would silently
@@ -1831,7 +1831,7 @@ impl App for AppMain {
                         _ => {}
                     }
 
-                    // A `:features`/`:all-features`/`:default-features` command dropped
+                    // A `features`/`all-features`/`default-features` command dropped
                     // `lsp_guard` to kill the old rust-analyzer; only resubscribe once the
                     // old worker thread has actually exited (`NotRunning`). Resubscribing
                     // while it's merely `Running` with 0 receivers would take the RRT

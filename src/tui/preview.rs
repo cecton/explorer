@@ -252,171 +252,6 @@ impl FilePreviewComponent {
         );
     }
 
-    fn execute_command(
-        &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
-        window: &Window,
-    ) {
-        let Window::FilePreview(file_key) = window else {
-            return;
-        };
-        let Some(PreviewInput::Command(input)) = global_data.state.preview_inputs.get(file_key)
-        else {
-            return;
-        };
-        let cmd = input.text().to_string();
-
-        if let Some(shell_cmd) = cmd.strip_prefix('!') {
-            let file_path = {
-                let snapshot = global_data.state.files.load();
-                snapshot[file_key.0].path.clone()
-            };
-            match shell_signal(shell_cmd, Some(&file_path), &global_data.state) {
-                Ok(signal) => {
-                    send_signal!(
-                        global_data.main_thread_channel_sender,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(signal)
-                    );
-                }
-                Err(msg) => {
-                    self.error = Some((msg, Instant::now()));
-                }
-            }
-            return;
-        }
-
-        let trimmed = cmd.trim();
-        if crate::lsp::disabled()
-            && (trimmed == "all-features"
-                || trimmed == "default-features"
-                || trimmed == "features"
-                || trimmed.starts_with("features "))
-        {
-            self.error = Some((
-                "rust-analyzer is disabled (EXPLORER_NO_LSP)".to_string(),
-                Instant::now(),
-            ));
-            return;
-        }
-        if trimmed == "all-features" {
-            self.error = Some((
-                "cargo features: all (restarting rust-analyzer...)".to_string(),
-                Instant::now(),
-            ));
-            send_signal!(
-                global_data.main_thread_channel_sender,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::SetCargoFeatures(
-                    crate::lsp::CargoFeatureSelection::All
-                ))
-            );
-            return;
-        }
-        if trimmed == "default-features" {
-            self.error = Some((
-                "cargo features: default (restarting rust-analyzer...)".to_string(),
-                Instant::now(),
-            ));
-            send_signal!(
-                global_data.main_thread_channel_sender,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::SetCargoFeatures(
-                    crate::lsp::CargoFeatureSelection::Default
-                ))
-            );
-            return;
-        }
-        if trimmed == "features" || trimmed.starts_with("features ") {
-            let rest = trimmed["features".len()..].trim();
-            let mut tokens = rest.split_whitespace().peekable();
-            let no_default_features = tokens.peek() == Some(&"no-default");
-            if no_default_features {
-                tokens.next();
-            }
-            let features: Vec<String> = tokens.map(str::to_string).collect();
-            if features.is_empty() && !no_default_features {
-                self.error = Some((
-                    "features: expected at least one feature (or `no-default`)".to_string(),
-                    Instant::now(),
-                ));
-                return;
-            }
-            self.error = Some((
-                format!(
-                    "cargo features: {}{:?} (restarting rust-analyzer...)",
-                    if no_default_features {
-                        "no-default "
-                    } else {
-                        ""
-                    },
-                    features
-                ),
-                Instant::now(),
-            ));
-            send_signal!(
-                global_data.main_thread_channel_sender,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::SetCargoFeatures(
-                    crate::lsp::CargoFeatureSelection::Explicit {
-                        no_default_features,
-                        features,
-                    }
-                ))
-            );
-            return;
-        }
-
-        let state = &mut global_data.state;
-        // An empty command clears the current highlights (mirrors committing an empty
-        // search pattern, which removes the active search).
-        if cmd.trim().is_empty() {
-            if state.highlight_ranges.remove(file_key).is_some() {
-                state.mark_session_dirty();
-            }
-            return;
-        }
-        let max = state.pane_manager.window_scroll_max(window);
-        if max == 0 {
-            return;
-        }
-        let mut ranges = Vec::new();
-        for spec in cmd.split(',') {
-            let spec = spec.trim();
-            if spec.is_empty() {
-                continue;
-            }
-            if let Some((start_str, end_str)) = spec.split_once('-') {
-                let Ok(start) = start_str.trim().parse::<usize>() else {
-                    continue;
-                };
-                let Ok(end) = end_str.trim().parse::<usize>() else {
-                    continue;
-                };
-                if start > 0 && end > 0 {
-                    let lo = start.min(end).min(max);
-                    let hi = start.max(end).min(max);
-                    ranges.push((lo, hi));
-                }
-            } else if let Ok(n) = spec.trim().parse::<usize>()
-                && n > 0
-                && n <= max
-            {
-                ranges.push((n, n));
-            }
-        }
-
-        if ranges.is_empty() {
-            return;
-        }
-
-        state.highlight_ranges.insert(*file_key, ranges);
-
-        let page_size = state.pane_manager.window_page_size(window);
-        if let Some(ranges) = state.highlight_ranges.get(file_key) {
-            let target = compute_scroll_target(ranges, page_size, max);
-            state.pane_manager.set_window_scroll(window, target);
-            state.pane_manager.clamp_scroll(window);
-        }
-        state.mark_session_dirty();
-    }
-
     fn is_line_highlighted(state: &AppState, file_key: FileKey, line_1_indexed: usize) -> bool {
         state
             .highlight_ranges
@@ -555,54 +390,6 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
             };
             let window = Window::FilePreview(key);
 
-            if let Some(PreviewInput::Command(_)) = global_data.state.preview_inputs.get(&key) {
-                match input_event {
-                    InputEvent::Keyboard(KeyPress::Plain {
-                        key: Key::SpecialKey(SpecialKey::Enter),
-                    }) => {
-                        self.execute_command(global_data, &window);
-                        global_data.state.preview_inputs.remove(&key);
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                    InputEvent::Keyboard(KeyPress::Plain {
-                        key: Key::SpecialKey(SpecialKey::Esc),
-                    }) => {
-                        global_data.state.highlight_ranges.remove(&key);
-                        global_data.state.preview_inputs.remove(&key);
-                        global_data.state.mark_session_dirty();
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                    InputEvent::Keyboard(KeyPress::WithModifiers {
-                        key: Key::Character('c'),
-                        mask,
-                    }) if mask == ModifierKeysMask::new().with_ctrl() => {
-                        if let Some(input) = global_data.state.preview_inputs.get_mut(&key) {
-                            input.line_mut().clear();
-                        }
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                    InputEvent::Keyboard(KeyPress::WithModifiers {
-                        key: Key::Character('d'),
-                        mask,
-                    }) if mask == ModifierKeysMask::new().with_ctrl()
-                        && global_data
-                            .state
-                            .preview_inputs
-                            .get(&key)
-                            .is_some_and(|input| input.line().text().is_empty()) =>
-                    {
-                        global_data.state.preview_inputs.remove(&key);
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                    _ => {
-                        if let Some(input) = global_data.state.preview_inputs.get_mut(&key) {
-                            input.line_mut().handle_key(&input_event);
-                        }
-                        return Ok(EventPropagation::ConsumedRender);
-                    }
-                }
-            }
-
             if let Some(PreviewInput::Search(..)) = global_data.state.preview_inputs.get(&key) {
                 match input_event {
                     InputEvent::Keyboard(KeyPress::Plain {
@@ -654,16 +441,11 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 key: Key::Character(':'),
             }) = input_event
             {
-                let prefill = global_data
-                    .state
-                    .highlight_ranges
-                    .get(&key)
-                    .map(|ranges| format_highlight_ranges(ranges))
-                    .unwrap_or_default();
-                global_data
-                    .state
-                    .preview_inputs
-                    .insert(key, PreviewInput::Command(InputLine::with_text(prefill)));
+                // The highlights are typed on the global command line, which knows this file.
+                global_data.state.command_line = Some(CommandLine::prefilled(
+                    Some(window),
+                    format!("{} ", command_line::HIGHLIGHT),
+                ));
                 return Ok(EventPropagation::ConsumedRender);
             }
 
@@ -1210,7 +992,6 @@ impl TitleRow for FilePreviewComponent {
             .and_then(|key| state.preview_inputs.get_mut(&key));
         if let Some(input) = input {
             let prompt = match input {
-                PreviewInput::Command(_) => ":",
                 PreviewInput::Search(_, SearchDirection::Forward) => "/",
                 PreviewInput::Search(_, SearchDirection::Backward) => "?",
             };
@@ -1366,8 +1147,8 @@ fn overlay_interval(
 
 /// Formats highlight ranges as the canonical comma-separated string (single line `N`,
 /// range `lo-hi`, joined with `, `). Used for the pane title, title-bar hit testing, and
-/// prefilling the `:` command input so the current value can be edited.
-fn format_highlight_ranges(ranges: &[(usize, usize)]) -> String {
+/// the `highlight` command's hint.
+pub(super) fn format_highlight_ranges(ranges: &[(usize, usize)]) -> String {
     ranges
         .iter()
         .map(|&(lo, hi)| {
@@ -1381,7 +1162,11 @@ fn format_highlight_ranges(ranges: &[(usize, usize)]) -> String {
         .join(", ")
 }
 
-fn compute_scroll_target(ranges: &[(usize, usize)], page_size: usize, _max: usize) -> usize {
+pub(super) fn compute_scroll_target(
+    ranges: &[(usize, usize)],
+    page_size: usize,
+    _max: usize,
+) -> usize {
     if ranges.is_empty() || page_size == 0 {
         return 0;
     }

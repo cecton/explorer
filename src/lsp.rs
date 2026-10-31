@@ -99,8 +99,8 @@ pub static LSP_RRT: RRT<LspWorker> = RRT::new();
 
 // ── Shared config set before first subscribe ──────────────────────────────────
 
-/// Which Cargo features rust-analyzer should analyze. Set via the `:features` /
-/// `:all-features` / `:default-features` preview commands; changing it requires
+/// Which Cargo features rust-analyzer should analyze. Set via the `features` /
+/// `all-features` / `default-features` command line commands; changing it requires
 /// restarting the rust-analyzer process since these are initialization-time-only
 /// settings (rust-analyzer doesn't hot-reload `cargo.*` via `didChangeConfiguration`).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]

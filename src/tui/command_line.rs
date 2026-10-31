@@ -8,6 +8,9 @@ use tokio::sync::mpsc;
 
 const PROMPT: &str = ":";
 const PLACEHOLDER: &str = "<shell command>";
+/// The name of the command that marks lines of the file in focus: the file preview's `:` opens
+/// the line with it typed.
+pub(crate) const HIGHLIGHT: &str = "highlight";
 const MAX_ROWS: usize = 10;
 const MAX_LIST_ROWS: usize = 5;
 
@@ -29,6 +32,8 @@ struct CommandRun<'a> {
     argument: &'a str,
     /// The file in focus, for the `%` placeholders.
     file: Option<&'a Utf8Path>,
+    /// The window focused when the line opened.
+    origin: Option<Window>,
     /// The main thread's channel, which an MCP server reports its status through.
     main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
     /// The terminal a command asks for, applied once the line has closed.
@@ -36,7 +41,7 @@ struct CommandRun<'a> {
 }
 
 /// Every command the line runs, in the order the palette lists it.
-const COMMANDS: [Command; 6] = [
+const COMMANDS: [Command; 10] = [
     Command {
         name: after_agents::NAME,
         argument: "[shell command]",
@@ -48,6 +53,30 @@ const COMMANDS: [Command; 6] = [
         argument: "[name] [shell command]",
         description: "set, replace or remove a project alias",
         run: run_alias,
+    },
+    Command {
+        name: "all-features",
+        argument: "",
+        description: "analyze every Cargo feature with rust-analyzer",
+        run: run_all_features,
+    },
+    Command {
+        name: "default-features",
+        argument: "",
+        description: "analyze the default Cargo features with rust-analyzer",
+        run: run_default_features,
+    },
+    Command {
+        name: "features",
+        argument: "[no-default] [feature...]",
+        description: "choose the Cargo features rust-analyzer analyzes",
+        run: run_features,
+    },
+    Command {
+        name: HIGHLIGHT,
+        argument: "[lines]",
+        description: "mark lines of the file in focus: 12, 3-7, 1-3,8; bare clears",
+        run: run_highlight,
     },
     Command {
         name: "mcp",
@@ -134,8 +163,13 @@ pub struct CommandLine {
 
 impl CommandLine {
     pub fn new(origin: Option<Window>) -> Self {
+        Self::prefilled(origin, "")
+    }
+
+    /// A line that opens with `text` already typed.
+    pub fn prefilled(origin: Option<Window>, text: impl Into<String>) -> Self {
         Self {
-            input: InputLine::new(),
+            input: InputLine::with_text(text),
             origin,
             error: None,
             selected: 0,
@@ -262,7 +296,8 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
         state.command_line = None;
         return;
     }
-    let file = match command_line.origin {
+    let origin = command_line.origin;
+    let file = match origin {
         Some(Window::FilePreview(key)) => {
             state.files.load().get(key.0).map(|file| file.path.clone())
         }
@@ -278,6 +313,7 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
         state,
         argument,
         file: file.as_deref(),
+        origin,
         main_tx,
         signal: None,
     };
@@ -331,6 +367,92 @@ fn run_after_agents(run: &mut CommandRun<'_>) -> Result<(), String> {
 
 fn run_alias(run: &mut CommandRun<'_>) -> Result<(), String> {
     set_alias(run.state, run.argument)
+}
+
+/// Marks lines of the file preview the line opened from, and scrolls to them.
+fn run_highlight(run: &mut CommandRun<'_>) -> Result<(), String> {
+    let Some(window @ Window::FilePreview(key)) = run.origin else {
+        return Err("highlight needs a file preview in focus".to_string());
+    };
+    if run.argument.is_empty() {
+        if run.state.highlight_ranges.remove(&key).is_some() {
+            run.state.mark_session_dirty();
+        }
+        return Ok(());
+    }
+    let max = run.state.pane_manager.window_scroll_max(&window);
+    let ranges = parse_line_ranges(run.argument, max)
+        .ok_or_else(|| "highlight: expected lines like 12, 3-7 or 1-3,8".to_string())?;
+    let page_size = run.state.pane_manager.window_page_size(&window);
+    let target = compute_scroll_target(&ranges, page_size, max);
+    run.state.highlight_ranges.insert(key, ranges);
+    run.state.pane_manager.set_window_scroll(&window, target);
+    run.state.pane_manager.clamp_scroll(&window);
+    run.state.mark_session_dirty();
+    Ok(())
+}
+
+/// The ranges `text` names, comma-separated lines (`12`) or ranges (`3-7`) of a file of
+/// `max` lines, clamped to it; what is not a line number is skipped. `None` when nothing
+/// is left.
+fn parse_line_ranges(text: &str, max: usize) -> Option<Vec<(usize, usize)>> {
+    if max == 0 {
+        return None;
+    }
+    let mut ranges = Vec::new();
+    for spec in text.split(',').map(str::trim) {
+        if let Some((start, end)) = spec.split_once('-') {
+            let (Ok(start), Ok(end)) = (start.trim().parse::<usize>(), end.trim().parse::<usize>())
+            else {
+                continue;
+            };
+            if start > 0 && end > 0 {
+                ranges.push((start.min(end).min(max), start.max(end).min(max)));
+            }
+        } else if let Ok(line) = spec.parse::<usize>()
+            && line > 0
+            && line <= max
+        {
+            ranges.push((line, line));
+        }
+    }
+    (!ranges.is_empty()).then_some(ranges)
+}
+
+fn run_all_features(run: &mut CommandRun<'_>) -> Result<(), String> {
+    select_features(run, crate::lsp::CargoFeatureSelection::All)
+}
+
+fn run_default_features(run: &mut CommandRun<'_>) -> Result<(), String> {
+    select_features(run, crate::lsp::CargoFeatureSelection::Default)
+}
+
+fn run_features(run: &mut CommandRun<'_>) -> Result<(), String> {
+    let mut tokens = run.argument.split_whitespace().peekable();
+    let no_default_features = tokens.next_if_eq(&"no-default").is_some();
+    let features: Vec<String> = tokens.map(str::to_string).collect();
+    if features.is_empty() && !no_default_features {
+        return Err("features: expected at least one feature (or `no-default`)".to_string());
+    }
+    select_features(
+        run,
+        crate::lsp::CargoFeatureSelection::Explicit {
+            no_default_features,
+            features,
+        },
+    )
+}
+
+/// Asks for rust-analyzer to restart with `selection`, once the line has closed.
+fn select_features(
+    run: &mut CommandRun<'_>,
+    selection: crate::lsp::CargoFeatureSelection,
+) -> Result<(), String> {
+    if crate::lsp::disabled() {
+        return Err("rust-analyzer is disabled (EXPLORER_NO_LSP)".to_string());
+    }
+    run.signal = Some(AppSignal::SetCargoFeatures(selection));
+    Ok(())
 }
 
 /// Failures are the line's error; a started server is reported in the tree's notice.
@@ -532,6 +654,16 @@ fn command_hint(typed: &str, state: &AppState) -> Option<String> {
             {
                 Some(alias) => format!("Enter removes {name} (was: {})", alias.command),
                 None => PLACEHOLDER.to_string(),
+            }
+        }
+        (HIGHLIGHT, None, _) => {
+            let current = match state.command_line.as_ref().and_then(|line| line.origin) {
+                Some(Window::FilePreview(key)) => state.highlight_ranges.get(&key),
+                _ => None,
+            };
+            match current {
+                Some(ranges) => format!("current: {}", format_highlight_ranges(ranges)),
+                None => "[lines] 12, 3-7, 1-3,8".to_string(),
             }
         }
         ("mcp", None, _) => {
@@ -1024,6 +1156,10 @@ mod tests {
             [
                 "after-agents",
                 "alias",
+                "all-features",
+                "default-features",
+                "features",
+                "highlight",
                 "mcp",
                 "scan",
                 "trust",
@@ -1033,7 +1169,7 @@ mod tests {
                 "poweroff"
             ]
         );
-        assert_eq!(names("a"), ["after-agents", "alias"]);
+        assert_eq!(names("a"), ["after-agents", "alias", "all-features"]);
         assert_eq!(names("m"), ["mcp"]);
         assert_eq!(names("t"), ["trust"]);
         assert_eq!(names("c"), ["ci"]);
@@ -1075,8 +1211,9 @@ mod tests {
         };
         assert_eq!(completed("", 0), "after-agents ");
         assert_eq!(completed("", 1), "alias ");
-        assert_eq!(completed("", 2), "mcp ");
-        assert_eq!(completed("", 6), "notify ");
+        assert_eq!(completed("", 5), "highlight ");
+        assert_eq!(completed("", 6), "mcp ");
+        assert_eq!(completed("", 10), "notify ");
         assert_eq!(completed("al", 0), "alias ");
         assert_eq!(completed("sc", 0), "scan");
         assert_eq!(completed("un", 0), "untrust");
@@ -1087,15 +1224,15 @@ mod tests {
     fn moving_the_highlight_wraps_over_commands_and_aliases() {
         let state = state_with_aliases();
         let entries = palette_entries("", &state).len();
-        assert_eq!(entries, 9);
+        assert_eq!(entries, 13);
         let mut line = CommandLine::new(None);
         assert!(line.move_selection(true, entries));
         assert_eq!(line.selected, 1);
-        line.selected = 8;
+        line.selected = 12;
         assert!(line.move_selection(true, entries));
         assert_eq!(line.selected, 0);
         assert!(line.move_selection(false, entries));
-        assert_eq!(line.selected, 8);
+        assert_eq!(line.selected, 12);
         assert!(!line.move_selection(true, palette_entries("nothing", &state).len()));
     }
 
@@ -1111,6 +1248,22 @@ mod tests {
         assert!(check_server_name("a/b", &servers).is_err());
         assert!(check_server_name("egui.v2", &servers).is_err());
         assert!(check_server_name("egui-v2_", &servers).is_ok());
+    }
+
+    #[test]
+    fn line_ranges_are_clamped_and_junk_is_skipped() {
+        assert_eq!(parse_line_ranges("12", 100), Some(vec![(12, 12)]));
+        assert_eq!(
+            parse_line_ranges("1-3, 8 ,20-25", 100),
+            Some(vec![(1, 3), (8, 8), (20, 25)])
+        );
+        assert_eq!(
+            parse_line_ranges("9-4, 50-200", 60),
+            Some(vec![(4, 9), (50, 60)])
+        );
+        assert_eq!(parse_line_ranges("0, 70, x, 3-", 60), None);
+        assert_eq!(parse_line_ranges("x, 5", 60), Some(vec![(5, 5)]));
+        assert_eq!(parse_line_ranges("3-7, 1", 0), None);
     }
 
     #[test]

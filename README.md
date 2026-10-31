@@ -61,14 +61,14 @@ A file opens as a read-only view with line numbers.
 - **Search**: `/` and `?` search by regular expression, `n` and `N` move between
   matches.
 - **Line highlights**: `Shift`+drag marks lines, `Ctrl`+drag unmarks them, and `:`
-  edits the marked ranges as text (`12-40, 87`). The marks are saved with the session:
+  opens the command line to type the ranges (`highlight 12-40, 87`). The marks are saved with the session:
   they are the notes you leave while reading.
 - **Symbol highlights**: double-click a symbol and every reference to it across the
   repository takes the same color, one color per symbol, also saved. Double-click it
   again to remove it. This is how a value or a type is followed through the code.
 - **Selection**: drag to select and copy, by word; triple-click takes the line.
 - **Editing**: `e` opens the file in `$VISUAL` or `$EDITOR` in a terminal window.
-  `:!cmd` runs a command in a new terminal, with `%` standing for the file, `%dir` for
+  `<leader>:` then `!cmd` runs a command in a new terminal, with `%` standing for the file, `%dir` for
   its directory, `%crate` and `%repo` for the nearest `Cargo.toml` and `.git`, and
   `%project` for the name of the repository directory; `%%` is a literal `%`.
 
@@ -78,7 +78,7 @@ it serves reading only: Explorer asks for semantic tokens for coloring, hover to
 the symbol under the cursor, and references to find every use of it in the repository.
 It asks for nothing else — no diagnostics, no completion, no rename — and only
 rust-analyzer is wired in, so only Rust files get colors and references. Other files are
-plain text. In a file window, `:all-features` and `:features ...` tell rust-analyzer
+plain text. The command line's `all-features` and `features ...` tell rust-analyzer
 which cargo features to analyze.
 
 ### Terminals
@@ -133,7 +133,7 @@ and any key press, paste or mouse event cancels it. `after-agents notify-send "a
 done"` is the typical use. The command is one-shot and kept in memory only: a new
 `after-agents` replaces the pending one, a bare `after-agents` clears it, and a command
 already running is killed when it is replaced or cleared, or when Explorer exits. `%`
-placeholders work as in `:!` (plus `%project`, the name of the repository directory, which
+placeholders work as in `!` (plus `%project`, the name of the repository directory, which
 needs no file) and are filled in when you press Enter. Aliases from the config
 (`alias poweroff "systemctl poweroff"`) stand for a command: what you type after the
 alias is appended to it as is.
@@ -218,7 +218,7 @@ agent {
 - `after-agents`: `grace-seconds` is the time during which a key press, paste or mouse
   event cancels the command once the agents are done. The default is 5, and 0 runs it at once.
 - `alias`: each `alias <name> "<command>"` line names a command for the shell commands
-  (`!`, `:!` and `after-agents`): the text typed after the name is appended unquoted, so
+  (`!` and `after-agents`): the text typed after the name is appended unquoted, so
   `after-agents notify build done` runs `notify-send 'repo' build done`. An alias shadows a
   program of the same name. `alias <name> <command>` on the command line sets an alias of
   the repository, saved with its session, which wins over the config's; `alias <name>`

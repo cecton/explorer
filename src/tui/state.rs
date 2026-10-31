@@ -486,7 +486,7 @@ pub struct TerminalPane {
     pub pty_input_tx: Arc<mpsc::Sender<PtyInputEvent>>,
     pub child_killer: Option<ControlledChildTerminationHandle>,
     pub last_size: Size,
-    /// True when this pane was opened via `:!<cmd>` rather than as an interactive shell.
+    /// True when this pane was opened via `!<cmd>` rather than as an interactive shell.
     /// Command panes are dismissed by Esc or Enter instead of being auto-closed on PTY exit.
     pub is_command_pane: bool,
     /// Set to true when the PTY process has exited; pane stays visible until dismissed.
@@ -645,8 +645,8 @@ pub struct AppState {
     pub command_line: Option<CommandLine>,
     /// Configurable top-level (leader + global) key bindings.
     pub keymap: Keymap,
-    /// Which Cargo features rust-analyzer analyzes; set via `:features`/`:all-features`/
-    /// `:default-features` in the preview command line, persisted per-project in the
+    /// Which Cargo features rust-analyzer analyzes; set via `features`/`all-features`/
+    /// `default-features` on the global command line, persisted per-project in the
     /// session file.
     pub cargo_features: crate::lsp::CargoFeatureSelection,
 }
@@ -998,11 +998,9 @@ pub enum SearchDirection {
     Backward,
 }
 
-/// The input open in a file preview's title bar: the `:` command line or the `/` `?`
-/// search, never both.
+/// The input open in a file preview's title bar: the `/` `?` search.
 #[derive(Clone)]
 pub enum PreviewInput {
-    Command(InputLine),
     /// Prefilled with the file's active pattern; the direction is the key that opened it.
     Search(InputLine, SearchDirection),
 }
@@ -1010,13 +1008,13 @@ pub enum PreviewInput {
 impl PreviewInput {
     pub fn line(&self) -> &InputLine {
         match self {
-            Self::Command(line) | Self::Search(line, _) => line,
+            Self::Search(line, _) => line,
         }
     }
 
     pub fn line_mut(&mut self) -> &mut InputLine {
         match self {
-            Self::Command(line) | Self::Search(line, _) => line,
+            Self::Search(line, _) => line,
         }
     }
 }
