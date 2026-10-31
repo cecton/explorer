@@ -11,6 +11,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 const READ_DEFAULT_LINES: usize = 2000;
+const READ_MAX_BYTES: usize = 30_000;
 const GLOB_MAX_PATHS: usize = 500;
 const GREP_MAX_MATCHES: usize = 200;
 const GREP_MAX_LINE_CHARS: usize = 300;
@@ -304,6 +305,11 @@ fn read(root: &Utf8Path, args: &Value) -> Result<String, String> {
         out.push_str(&format!(
             "[lines {offset}-{shown_until} of {total}; use offset to read more]\n"
         ));
+    }
+    let truncated = out.len() > READ_MAX_BYTES;
+    let mut out = truncate_middle(&out, READ_MAX_BYTES);
+    if truncated {
+        out.push_str("[output truncated to fit; use offset and limit to read the omitted part]\n");
     }
     Ok(out)
 }
@@ -669,6 +675,28 @@ mod tests {
         assert!(!double.is_match("README.md"));
         assert!(glob_regex("a?c.txt").unwrap().is_match("abc.txt"));
         assert!(!glob_regex("a.c").unwrap().is_match("abc"));
+    }
+
+    #[tokio::test]
+    async fn read_caps_output_bytes_and_says_so() {
+        let (_tmp, root) = repo();
+        let payload = "x".repeat(100_000);
+        std::fs::write(root.join("min.json"), format!("{{\"k\":\"{payload}\"}}")).unwrap();
+        let out = run(&context(&root), &call("read", json!({"path": "min.json"}))).await;
+        assert!(out.len() < READ_MAX_BYTES + 300);
+        assert!(out.contains("bytes omitted"));
+        assert!(out.contains("output truncated to fit"));
+    }
+
+    #[tokio::test]
+    async fn read_of_an_ordinary_file_is_never_truncated() {
+        let (_tmp, root) = repo();
+        let out = run(
+            &context(&root),
+            &call("read", json!({"path": "src/main.rs"})),
+        )
+        .await;
+        assert_eq!(out, "1\tfn main() {\n2\t    run();\n3\t}\n");
     }
 
     #[tokio::test]
