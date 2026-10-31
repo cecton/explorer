@@ -44,12 +44,11 @@ integration, and native **git tooling** to replace `tig` (status, blame).
 
 ## Project Overview
 
-`explorer` is a Rust TUI workspace built around a git repository. Its file-explorer
-core:
+`explorer` is a Rust TUI workspace built around a git repository. Its core:
 1. Locates the nearest `.git` root from the current directory.
 2. Walks the entire repository tree in parallel (via `jwalk` + rayon), skipping `.git` and `target`.
-3. Loads every UTF-8 text file into memory as a `LoadedFile` struct.
-4. Displays files in an interactive TUI: left pane is the file list, right pane is a syntax-highlighted preview.
+3. Loads every UTF-8 text file into memory as a `LoadedFile` struct, so preview and search need no disk read.
+4. Shows it as a stack of windows laid out by `PaneManager` (`src/tui/pane_manager.rs`): a `Window` is a file preview, a terminal, a git log, a commit diff, the conversation tree, a discussion, a report, or a picker. Files are not listed anywhere — `WindowPicker` (`<leader>space`) opens one by fuzzy name.
 
 Source is organized as:
 - `src/main.rs` — async entry point, wires CLI → loader → TUI
@@ -95,7 +94,7 @@ Source is organized as:
 - `src/tui/text_layout.rs` — `wrap` (each line with its byte offset in the text), `truncate`, `display_width`
 - `src/tui/theme.rs` — `HelixTheme` type; loads bundled TOML files via `include!("../../themes/themes.rs")`
 - `src/tui/theme_picker.rs` — theme picker overlay with fuzzy search and live preview (exceptions → input → navigation)
-- `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting (right pane); text selection uses global `AppState`; its `:` and `/` `?` inputs live in `AppState.preview_inputs`, by file
+- `src/tui/preview.rs` — `FilePreviewComponent` with syntect syntax highlighting; text selection uses global `AppState`; its `:` and `/` `?` inputs live in `AppState.preview_inputs`, by file
 - `src/tui/terminal_pane.rs` — `TerminalPaneComponent` with PTY-based terminal emulation; `render_ofs_buf_to_ir()` emits `ResetColor` for `Spacer` runs to prevent stale SGR inheritance; supports mouse selection, word/line text extraction, and clipboard copy; synchronized output (DEC private mode 2026) is buffered natively by `OfsBufVT100` in r3bl-open-core
 - `src/tui/input_line.rs` — `InputLine`, a text input that owns its text and its cursor (`text`, `with_text`, `set_text` with the cursor to the end, `clear`), where it was last painted (`Painted`, recorded by `render`) and its mouse selection (a byte range) and lives in `AppState` beside what it edits (`DiscussionState.draft`, `FuzzyPickerState.query`, `GitLogWindowState.query`, `TreeViewState.query`, `TreeViewState.command`, `PreviewInput`, `CommandLine.input`), never in a component: a component belongs to a pane slot, and a window changes slot whenever the stack moves; Emacs-style key bindings; single flat `match` on `InputEvent`; soft-wraps over several rows, `Up`/`Down` between rows, `Ctrl+A`/`Ctrl+E` to the start and end of the line the cursor is on (newline to newline, whatever the wrapping), `Ctrl+K`/`Ctrl+U` kill within that line (`Ctrl+K` at the end of a line joins the next one), `Home`/`End` to the start and end of the whole text, height cap with internal scroll; optional placeholder passed to `render` and `height` at each frame: weak text laid out after the typed text, over as many rows as it needs, which the cursor and the keys never enter; `handle_mouse` (wired once, in `pane_component.rs`): a press on the painted cells puts the cursor there, a drag from it selects whole words across rows (`locate`, `word_bounds`, `drag_range`; a position outside the input stands for its nearest cell, no auto-scroll), the release copies the selection to the clipboard and drops it, a double click takes the word; the placeholder is never selected; `render` paints the selection on the third color it is given
 
@@ -211,8 +210,8 @@ cargo test <module>::<test_name>
 | `url`                  | 2.x     | URL parsing in `word_bounds` for cursor-based URL selection    |
 
 Planned feature areas and their likely dependencies:
-- **Git tooling** (remaining: status, blame — intended to replace `tig`; log and diff have shipped). See `docs/superpowers/specs/2026-09-21-git-log-pane-design.md`
-- **AI tooling** integration: the conversation-tree agent chat has shipped (see `docs/superpowers/specs/2026-10-05-conversation-agent-design.md`); its Future work section lists what remains (architecture-walking tool, in-repo export)
+- **Git tooling** (remaining: status, blame — intended to replace `tig`; log and diff have shipped)
+- **AI tooling** integration: the conversation-tree agent chat has shipped; what remains is an architecture-walking tool and an in-repo export of the tree
 
 ---
 

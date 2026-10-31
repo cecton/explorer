@@ -270,14 +270,12 @@ Explorer is used every day by its owner and by nobody else. Know this before try
   is git, not a sandbox.
 - Code intelligence is Rust only.
 - There is no file tree: files are opened by name.
-- Not built yet: git status and blame panes, a filter in the Conversation Tree, an
-  export of the tree into the repository, and a tool for the agent to walk the
-  architecture of a codebase without reading all of it.
+- Not built yet: git status and blame panes, an export of the tree into the repository,
+  and a tool for the agent to walk the architecture of a codebase without reading all of
+  it.
 
 ## Further reading
 
-- [`docs/superpowers/specs/2026-10-05-conversation-agent-design.md`](docs/superpowers/specs/2026-10-05-conversation-agent-design.md):
-  the design of the agent, with the reasoning behind each decision.
 - [`AGENTS.md`](AGENTS.md): the map of the source code, the build commands and the rules
   for working on it.
 - [`prompts/`](prompts): the system prompts of the two modes.
