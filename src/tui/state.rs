@@ -304,6 +304,8 @@ pub struct TreeViewState {
     pub before_search: Option<RowTarget>,
     /// MCP servers added from the command line whose start is still to be reported.
     pub announced_starts: HashSet<String>,
+    /// Nodes whose title and summary are being asked again after the cursor landed on them.
+    pub retitling: HashSet<NodeId>,
 }
 
 impl TreeViewState {
@@ -945,6 +947,10 @@ pub enum AppSignal {
     NodeTitleReady {
         node: NodeId,
         title: String,
+    },
+    /// The new attempt at the title and summary of `node` ended, whatever its outcome.
+    NodeRetitleEnded {
+        node: NodeId,
     },
     /// `summary.md` of `node` was written.
     NodeSummaryReady {

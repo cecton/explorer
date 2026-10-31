@@ -532,220 +532,7 @@ pub struct ConversationTreeComponent {
 }
 
 impl ConversationTreeComponent {
-    const TITLE: &str = "Conversations";
-
-    pub fn new(id: FlexBoxId) -> Self {
-        Self {
-            id,
-            content_origin_row: 0,
-            content_origin_col: 0,
-            line_rows: Vec::new(),
-            label_zones: Vec::new(),
-            shown_selection: None,
-            last_click: None,
-        }
-    }
-
-    pub(crate) fn title(state: &AppState) -> String {
-        // The tree is where a conversation starts, so it is where the repository says
-        // whether one can: its title carries that instead of a status-bar segment.
-        let name = if state.trusted {
-            Self::TITLE.to_string()
-        } else {
-            format!("{} (untrusted)", Self::TITLE)
-        };
-        if state.tree_view.filtering() {
-            format!("{name} — {}", state.tree_view.query.text().trim())
-        } else {
-            name
-        }
-    }
-
-    /// The row `selected` sits on. Without one, the newest root of the tree, or the
-    /// best match of a filter.
-    fn selected_index(rows: &[TreeRow], selected: Option<&RowTarget>, filtering: bool) -> usize {
-        selected
-            .and_then(|target| rows.iter().position(|row| &row.target == target))
-            .or_else(|| {
-                rows.iter()
-                    .rposition(|row| row.rails.is_empty())
-                    .filter(|_| !filtering)
-            })
-            .unwrap_or(0)
-    }
-
-    /// The rows the pane shows: the tree, plus a provisional row per queued prompt; or
-    /// the matches of the filter, flat.
-    fn rows(state: &AppState) -> Vec<TreeRow> {
-        let tree = state.conversations.read();
-        if state.tree_view.filtering() {
-            return flat_rows(&filter_nodes(&tree, state.tree_view.query.text()));
-        }
-        with_agents(
-            with_queued(
-                layout_rows(&tree, &state.tree_view.expanded),
-                &state.queued_turns,
-            ),
-            &tree,
-            &state.tree_view.shown_agents,
-        )
-    }
-
-    /// Selects `target` for the unfiltered tree, opening the folds that hide its node.
-    fn reveal(state: &mut AppState, target: RowTarget) {
-        if let Some(id) = target.node() {
-            let folds = folds_on_the_way(&state.conversations.read(), id);
-            state
-                .tree_view
-                .expanded
-                .extend(folds.into_iter().filter(|fold| fold != id));
-        }
-        state.tree_view.selected = Some(target);
-    }
-
-    fn select(state: &mut AppState, rows: &[TreeRow], index: usize) {
-        if let Some(row) = rows.get(index.min(rows.len().saturating_sub(1))) {
-            state.tree_view.selected = Some(row.target.clone());
-        }
-    }
-
-    /// Nearest ancestor that can be folded: the fork or root a branch hangs from.
-    fn foldable_ancestor(rows: &[TreeRow], tree: &ConversationTree, id: &NodeId) -> Option<usize> {
-        let mut current = tree.node(id)?.parent.clone();
-        while let Some(ancestor) = current {
-            if let Some(index) = rows
-                .iter()
-                .position(|row| row.target.node() == Some(&ancestor) && row.fold != Fold::Leaf)
-            {
-                return Some(index);
-            }
-            current = tree.node(&ancestor)?.parent.clone();
-        }
-        None
-    }
-
-    fn open_commits(
-        state: &mut AppState,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-        id: &NodeId,
-    ) {
-        let commits: Vec<[u8; 20]> = state
-            .conversations
-            .read()
-            .node(id)
-            .map(|node| {
-                node.meta
-                    .commits
-                    .iter()
-                    .filter_map(|hash| hex::decode(hash).ok())
-                    .filter_map(|bytes| <[u8; 20]>::try_from(bytes.as_slice()).ok())
-                    .collect()
-            })
-            .unwrap_or_default();
-        for commit in commits.into_iter().rev() {
-            GitLogPaneComponent::open_commit_diff(state, main_tx.clone(), commit);
-        }
-    }
-
-    fn delete_selected(state: &mut AppState, rows: &[TreeRow], index: usize) {
-        let Some(id) = rows.get(index).and_then(|row| row.target.node().cloned()) else {
-            return;
-        };
-        let running_below = {
-            let tree = state.conversations.read();
-            state
-                .running_turns
-                .keys()
-                .any(|running| tree.lineage(running).contains(&id))
-        };
-        if running_below {
-            state.tree_view.notice = Some("a turn is running in this branch".to_string());
-            return;
-        }
-        let removed = match state.conversations.write().delete(&id) {
-            Ok(removed) => removed,
-            Err(e) => {
-                tracing::warn!("failed to delete conversation node: {e}");
-                state.tree_view.notice = Some(format!("delete failed: {e}"));
-                return;
-            }
-        };
-        for id in &removed {
-            state.tree_view.expanded.remove(id);
-            state.tree_view.shown_agents.remove(id);
-            state.discussion_highlights.remove(id);
-        }
-        let closed: Vec<usize> = state
-            .discussions
-            .iter()
-            .filter(|(_, discussion)| {
-                discussion
-                    .node
-                    .as_ref()
-                    .is_some_and(|node| removed.contains(node))
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in closed {
-            crate::tui::discussion_pane::drop_queue_entry(state, id);
-            state.discussions.remove(&id);
-            state.pane_manager.remove_window(&Window::Discussion(id));
-        }
-        let rows = Self::rows(state);
-        state.tree_view.selected = None;
-        Self::select(state, &rows, index);
-        state.mark_session_dirty();
-    }
-}
-
-impl TitleRow for ConversationTreeComponent {
-    fn render_title_row(
-        &self,
-        ops: &mut RenderOpIRVec,
-        pane_box: &FlexBox,
-        focused: bool,
-        state: &mut AppState,
-    ) -> usize {
-        if !state.tree_view.search_active {
-            let title = Self::title(state);
-            render_pane_title(ops, pane_box, &title, false, &state.theme, focused);
-            return 1;
-        }
-        let origin = pane_box.style_adjusted_origin_pos;
-        let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
-        let (bg_rgb, fg_rgb) = title_bar_colors(focused, &state.theme);
-        let color_bg = TuiColor::from(bg_rgb);
-        let color_fg = TuiColor::from(fg_rgb);
-        let color_selection = TuiColor::from(title_selection_bg(focused, &state.theme));
-        let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
-        *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
-        *ops += RenderOpCommon::SetBgColor(color_bg);
-        *ops += RenderOpIR::PaintTextWithAttributes(
-            " ".repeat(width as usize).as_str().into(),
-            Some(bg_style),
-        );
-        state.tree_view.query.render(
-            ops,
-            None,
-            "/",
-            origin,
-            width,
-            1,
-            focused,
-            (color_bg, color_fg, color_selection),
-        );
-        1
-    }
-}
-
-impl Component<AppState, AppSignal> for ConversationTreeComponent {
-    fn reset(&mut self) {}
-
-    fn get_id(&self) -> FlexBoxId {
-        self.id
-    }
-
-    fn handle_event(
+    fn handle_input(
         &mut self,
         global_data: &mut GlobalData<AppState, AppSignal>,
         input_event: InputEvent,
@@ -1095,6 +882,304 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             _ => return Ok(EventPropagation::Propagate),
         }
         Ok(EventPropagation::ConsumedRender)
+    }
+
+    /// Asks the summary model again for an untitled node the cursor just landed on.
+    fn retitle_selected(
+        state: &mut AppState,
+        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+        id: NodeId,
+    ) {
+        let Some(backend) = state
+            .agent
+            .summary_model
+            .as_ref()
+            .and_then(|summary| state.agent.backend(summary))
+        else {
+            return;
+        };
+        let (node_dir, session, meta) = {
+            let tree = state.conversations.read();
+            let Some(node) = tree.node(&id) else { return };
+            let Some(node_dir) = tree.node_dir(&id) else {
+                return;
+            };
+            let has_reply = node.title.is_none()
+                && crate::conversation::has_content(
+                    &crate::conversation::read_prompt_and_reply(&node_dir).1,
+                );
+            if !needs_retitle(&id, node, has_reply, &state.tree_view.retitling) {
+                return;
+            }
+            let session = tree
+                .lineage(&id)
+                .first()
+                .unwrap_or(&id)
+                .as_str()
+                .to_string();
+            (node_dir, session, node.meta.clone())
+        };
+        state.tree_view.retitling.insert(id.clone());
+        let root = state.root.clone();
+        tokio::spawn(async move {
+            crate::agent::turn::retitle(
+                &id,
+                &node_dir,
+                &session,
+                &root,
+                meta.head_before,
+                meta.head_after,
+                &backend,
+                &main_tx,
+            )
+            .await;
+            let _ = main_tx
+                .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                    AppSignal::NodeRetitleEnded { node: id },
+                ))
+                .await;
+        });
+    }
+
+    const TITLE: &str = "Conversations";
+
+    pub fn new(id: FlexBoxId) -> Self {
+        Self {
+            id,
+            content_origin_row: 0,
+            content_origin_col: 0,
+            line_rows: Vec::new(),
+            label_zones: Vec::new(),
+            shown_selection: None,
+            last_click: None,
+        }
+    }
+
+    pub(crate) fn title(state: &AppState) -> String {
+        // The tree is where a conversation starts, so it is where the repository says
+        // whether one can: its title carries that instead of a status-bar segment.
+        let name = if state.trusted {
+            Self::TITLE.to_string()
+        } else {
+            format!("{} (untrusted)", Self::TITLE)
+        };
+        if state.tree_view.filtering() {
+            format!("{name} — {}", state.tree_view.query.text().trim())
+        } else {
+            name
+        }
+    }
+
+    /// The row `selected` sits on. Without one, the newest root of the tree, or the
+    /// best match of a filter.
+    fn selected_index(rows: &[TreeRow], selected: Option<&RowTarget>, filtering: bool) -> usize {
+        selected
+            .and_then(|target| rows.iter().position(|row| &row.target == target))
+            .or_else(|| {
+                rows.iter()
+                    .rposition(|row| row.rails.is_empty())
+                    .filter(|_| !filtering)
+            })
+            .unwrap_or(0)
+    }
+
+    /// The rows the pane shows: the tree, plus a provisional row per queued prompt; or
+    /// the matches of the filter, flat.
+    fn rows(state: &AppState) -> Vec<TreeRow> {
+        let tree = state.conversations.read();
+        if state.tree_view.filtering() {
+            return flat_rows(&filter_nodes(&tree, state.tree_view.query.text()));
+        }
+        with_agents(
+            with_queued(
+                layout_rows(&tree, &state.tree_view.expanded),
+                &state.queued_turns,
+            ),
+            &tree,
+            &state.tree_view.shown_agents,
+        )
+    }
+
+    /// Selects `target` for the unfiltered tree, opening the folds that hide its node.
+    fn reveal(state: &mut AppState, target: RowTarget) {
+        if let Some(id) = target.node() {
+            let folds = folds_on_the_way(&state.conversations.read(), id);
+            state
+                .tree_view
+                .expanded
+                .extend(folds.into_iter().filter(|fold| fold != id));
+        }
+        state.tree_view.selected = Some(target);
+    }
+
+    fn select(state: &mut AppState, rows: &[TreeRow], index: usize) {
+        if let Some(row) = rows.get(index.min(rows.len().saturating_sub(1))) {
+            state.tree_view.selected = Some(row.target.clone());
+        }
+    }
+
+    /// Nearest ancestor that can be folded: the fork or root a branch hangs from.
+    fn foldable_ancestor(rows: &[TreeRow], tree: &ConversationTree, id: &NodeId) -> Option<usize> {
+        let mut current = tree.node(id)?.parent.clone();
+        while let Some(ancestor) = current {
+            if let Some(index) = rows
+                .iter()
+                .position(|row| row.target.node() == Some(&ancestor) && row.fold != Fold::Leaf)
+            {
+                return Some(index);
+            }
+            current = tree.node(&ancestor)?.parent.clone();
+        }
+        None
+    }
+
+    fn open_commits(
+        state: &mut AppState,
+        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+        id: &NodeId,
+    ) {
+        let commits: Vec<[u8; 20]> = state
+            .conversations
+            .read()
+            .node(id)
+            .map(|node| {
+                node.meta
+                    .commits
+                    .iter()
+                    .filter_map(|hash| hex::decode(hash).ok())
+                    .filter_map(|bytes| <[u8; 20]>::try_from(bytes.as_slice()).ok())
+                    .collect()
+            })
+            .unwrap_or_default();
+        for commit in commits.into_iter().rev() {
+            GitLogPaneComponent::open_commit_diff(state, main_tx.clone(), commit);
+        }
+    }
+
+    fn delete_selected(state: &mut AppState, rows: &[TreeRow], index: usize) {
+        let Some(id) = rows.get(index).and_then(|row| row.target.node().cloned()) else {
+            return;
+        };
+        let running_below = {
+            let tree = state.conversations.read();
+            state
+                .running_turns
+                .keys()
+                .any(|running| tree.lineage(running).contains(&id))
+        };
+        if running_below {
+            state.tree_view.notice = Some("a turn is running in this branch".to_string());
+            return;
+        }
+        let removed = match state.conversations.write().delete(&id) {
+            Ok(removed) => removed,
+            Err(e) => {
+                tracing::warn!("failed to delete conversation node: {e}");
+                state.tree_view.notice = Some(format!("delete failed: {e}"));
+                return;
+            }
+        };
+        for id in &removed {
+            state.tree_view.expanded.remove(id);
+            state.tree_view.shown_agents.remove(id);
+            state.discussion_highlights.remove(id);
+        }
+        let closed: Vec<usize> = state
+            .discussions
+            .iter()
+            .filter(|(_, discussion)| {
+                discussion
+                    .node
+                    .as_ref()
+                    .is_some_and(|node| removed.contains(node))
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        for id in closed {
+            crate::tui::discussion_pane::drop_queue_entry(state, id);
+            state.discussions.remove(&id);
+            state.pane_manager.remove_window(&Window::Discussion(id));
+        }
+        let rows = Self::rows(state);
+        state.tree_view.selected = None;
+        Self::select(state, &rows, index);
+        state.mark_session_dirty();
+    }
+}
+
+impl TitleRow for ConversationTreeComponent {
+    fn render_title_row(
+        &self,
+        ops: &mut RenderOpIRVec,
+        pane_box: &FlexBox,
+        focused: bool,
+        state: &mut AppState,
+    ) -> usize {
+        if !state.tree_view.search_active {
+            let title = Self::title(state);
+            render_pane_title(ops, pane_box, &title, false, &state.theme, focused);
+            return 1;
+        }
+        let origin = pane_box.style_adjusted_origin_pos;
+        let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
+        let (bg_rgb, fg_rgb) = title_bar_colors(focused, &state.theme);
+        let color_bg = TuiColor::from(bg_rgb);
+        let color_fg = TuiColor::from(fg_rgb);
+        let color_selection = TuiColor::from(title_selection_bg(focused, &state.theme));
+        let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+        *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+        *ops += RenderOpCommon::SetBgColor(color_bg);
+        *ops += RenderOpIR::PaintTextWithAttributes(
+            " ".repeat(width as usize).as_str().into(),
+            Some(bg_style),
+        );
+        state.tree_view.query.render(
+            ops,
+            None,
+            "/",
+            origin,
+            width,
+            1,
+            focused,
+            (color_bg, color_fg, color_selection),
+        );
+        1
+    }
+}
+
+/// Whether an untitled finished node has something to describe and no retitle is running.
+fn needs_retitle(id: &NodeId, node: &Node, has_reply: bool, retitling: &HashSet<NodeId>) -> bool {
+    node.title.is_none()
+        && node.meta.status != Some(NodeStatus::Running)
+        && (node.meta.status == Some(NodeStatus::Done)
+            || has_reply
+            || !node.meta.commits.is_empty())
+        && !retitling.contains(id)
+}
+
+impl Component<AppState, AppSignal> for ConversationTreeComponent {
+    fn reset(&mut self) {}
+
+    fn get_id(&self) -> FlexBoxId {
+        self.id
+    }
+
+    fn handle_event(
+        &mut self,
+        global_data: &mut GlobalData<AppState, AppSignal>,
+        input_event: InputEvent,
+        has_focus: &mut HasFocus,
+    ) -> CommonResult<EventPropagation> {
+        let before = global_data.state.tree_view.selected.clone();
+        let propagation = self.handle_input(global_data, input_event, has_focus)?;
+        let state = &mut global_data.state;
+        if state.tree_view.selected != before
+            && let Some(RowTarget::Node(id)) = state.tree_view.selected.clone()
+        {
+            let main_tx = global_data.main_thread_channel_sender.clone();
+            Self::retitle_selected(state, main_tx, id);
+        }
+        Ok(propagation)
     }
 
     fn render(
@@ -1517,6 +1602,33 @@ mod tests {
         }
         let tree = ConversationTree::load(&root);
         (tmp, tree)
+    }
+
+    #[test]
+    fn only_finished_untitled_nodes_with_something_to_describe_are_retitled() {
+        let (_tmp, tree) = tree_with(&["a1"]);
+        let id = NodeId::new("a1");
+        let mut node = tree.node(&id).unwrap().clone();
+        let none = HashSet::new();
+        node.meta.status = Some(NodeStatus::Failed);
+        assert!(!needs_retitle(&id, &node, false, &none));
+        assert!(needs_retitle(&id, &node, true, &none));
+        node.meta.commits = vec!["abc".to_string()];
+        assert!(needs_retitle(&id, &node, false, &none));
+        node.meta.commits.clear();
+        node.meta.status = Some(NodeStatus::Done);
+        assert!(needs_retitle(&id, &node, false, &none));
+        assert!(!needs_retitle(
+            &id,
+            &node,
+            false,
+            &HashSet::from([id.clone()])
+        ));
+        node.meta.status = Some(NodeStatus::Running);
+        assert!(!needs_retitle(&id, &node, true, &none));
+        node.meta.status = Some(NodeStatus::Done);
+        node.title = Some("Titled".to_string());
+        assert!(!needs_retitle(&id, &node, true, &none));
     }
 
     fn shape(rows: &[TreeRow]) -> Vec<(&str, Vec<bool>, Fold)> {

@@ -1746,6 +1746,9 @@ impl App for AppMain {
                 AppSignal::NodeTitleReady { node, title } => {
                     state.conversations.write().set_title(node, title.clone());
                 }
+                AppSignal::NodeRetitleEnded { node } => {
+                    state.tree_view.retitling.remove(node);
+                }
                 AppSignal::NodeSummaryReady { node, summary } => {
                     state
                         .conversations

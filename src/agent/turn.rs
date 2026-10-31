@@ -555,19 +555,17 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
         if (status == NodeStatus::Done || !reply_blank || !commits.is_empty())
             && let Some(backend) = &request.summary_backend
         {
-            let root = request.root.clone();
-            let (before, after) = (request.head.clone(), head_after.clone());
-            let commits = tokio::task::spawn_blocking(move || match (before, after) {
-                (Some(before), Some(after)) => {
-                    crate::git::log_oneline(&root, &before, &after, COMMITS_MAX)
-                }
-                _ => Vec::new(),
-            })
-            .await
-            .unwrap_or_default();
-            let (prompt, reply) = crate::conversation::read_prompt_and_reply(&request.node_dir);
-            let input = title_input(&prompt, &reply, &commits);
-            title_and_summarize(&request, backend, &input, &main_tx).await;
+            retitle(
+                &request.node,
+                &request.node_dir,
+                &request.session,
+                &request.root,
+                request.head.clone(),
+                head_after.clone(),
+                backend,
+                &main_tx,
+            )
+            .await;
         }
     });
 
@@ -977,22 +975,41 @@ async fn complete(
     }
 }
 
+/// Writes the title and summary of a node from its prompt, reply and commits.
+#[allow(clippy::too_many_arguments)]
+pub async fn retitle(
+    node: &NodeId,
+    node_dir: &Utf8Path,
+    session: &str,
+    root: &Utf8Path,
+    head_before: Option<String>,
+    head_after: Option<String>,
+    backend: &Backend,
+    main_tx: &MainTx,
+) {
+    let root = root.to_path_buf();
+    let commits = tokio::task::spawn_blocking(move || match (head_before, head_after) {
+        (Some(before), Some(after)) => crate::git::log_oneline(&root, &before, &after, COMMITS_MAX),
+        _ => Vec::new(),
+    })
+    .await
+    .unwrap_or_default();
+    let (prompt, reply) = crate::conversation::read_prompt_and_reply(node_dir);
+    let input = title_input(&prompt, &reply, &commits);
+    title_and_summarize(node, node_dir, session, backend, &input, main_tx).await;
+}
+
 /// Replaces `title.md` and `summary.md` of a finished node with what the model makes of
-/// its turn. Failures are logged and leave the prompt-based text in place.
+/// its turn.
 async fn title_and_summarize(
-    request: &TurnRequest,
+    node: &NodeId,
+    node_dir: &Utf8Path,
+    session: &str,
     backend: &Backend,
     input: &str,
     main_tx: &MainTx,
 ) {
-    let answer = match complete(
-        backend,
-        &request.session,
-        context::TITLE_SUMMARY_PROMPT,
-        input,
-    )
-    .await
-    {
+    let answer = match complete(backend, session, context::TITLE_SUMMARY_PROMPT, input).await {
         Ok(answer) => answer,
         Err(e) => {
             tracing::warn!("title generation failed: {e}");
@@ -1003,11 +1020,11 @@ async fn title_and_summarize(
         tracing::warn!("title generation returned no title");
         return;
     };
-    if let Err(e) = write_atomic(&request.node_dir.join("title.md"), &title) {
+    if let Err(e) = write_atomic(&node_dir.join("title.md"), &title) {
         tracing::warn!("failed to write title.md: {e}");
     }
     let signal = AppSignal::NodeTitleReady {
-        node: request.node.clone(),
+        node: node.clone(),
         title,
     };
     let _ = main_tx
@@ -1016,11 +1033,11 @@ async fn title_and_summarize(
     if summary.is_empty() {
         return;
     }
-    if let Err(e) = write_atomic(&request.node_dir.join("summary.md"), &summary) {
+    if let Err(e) = write_atomic(&node_dir.join("summary.md"), &summary) {
         tracing::warn!("failed to write summary.md: {e}");
     }
     let signal = AppSignal::NodeSummaryReady {
-        node: request.node.clone(),
+        node: node.clone(),
         summary,
     };
     let _ = main_tx
