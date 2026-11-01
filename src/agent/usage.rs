@@ -27,6 +27,24 @@ pub struct UsageWindow {
 #[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Usage {
     pub windows: Vec<UsageWindow>,
+    /// What an OpenRouter key reports of its own spending; `None` for a subscription.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<KeyMoney>,
+}
+
+/// What an OpenRouter key reports of its own spending. Money is in micro-dollars
+/// (10⁻⁶ USD), the finest unit the API reports, kept integral.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct KeyMoney {
+    /// Total credit spent on the key, whatever the window of its limit.
+    pub spent: u64,
+    /// The spending limit the key enforces, `None` for a key without one.
+    pub limit: Option<u64>,
+    /// What is left of the limit. Never shown: it only colors the limit by how much
+    /// of it is spent.
+    pub remaining: Option<u64>,
+    /// `daily`, `weekly` or `monthly`, `None` for a limit that never resets.
+    pub resets: Option<String>,
 }
 
 impl UsageWindow {
@@ -95,6 +113,51 @@ impl Usage {
         pieces.push((" ".to_string(), None));
         pieces
     }
+
+    /// The status-bar entry of the OpenRouter key named `label`, as the pieces of
+    /// `label $0.50 · $1.00 daily`: the credit the key has spent, then its limit and
+    /// the window that limit counts over. The limit carries the percent of it spent,
+    /// for its color; a key without a limit states what it has spent alone.
+    pub fn money_pieces(&self, label: &str) -> Vec<(String, Option<u32>)> {
+        let Some(key) = &self.key else {
+            return Vec::new();
+        };
+        let mut pieces = Vec::with_capacity(5);
+        pieces.push((format!("│ {label}"), None));
+        pieces.push((format!(" {}", money(key.spent)), None));
+        if let Some(limit) = key.limit {
+            let percent = key
+                .remaining
+                .map(|remaining| percent_spent(remaining, limit));
+            pieces.push((format!(" · {}", money(limit)), percent));
+            if let Some(resets) = &key.resets {
+                pieces.push((format!(" {resets}"), None));
+            }
+        }
+        pieces.push((" ".to_string(), None));
+        pieces
+    }
+}
+
+/// `$1.23`. The status bar states money to the cent: a cheap turn is a fraction of
+/// one, and the exact figure is one request away.
+fn money(micros: u64) -> String {
+    format!("${}.{:02}", micros / 1_000_000, micros % 1_000_000 / 10_000)
+}
+
+/// The percent of `limit` spent, given what is left of it. A limit of nothing counts
+/// as nothing spent.
+fn percent_spent(remaining: u64, limit: u64) -> u32 {
+    let spent = limit.saturating_sub(remaining.min(limit));
+    (spent.saturating_mul(100) / limit.max(1)).min(100) as u32
+}
+
+/// USD as the micro-dollars the counters keep, rounded and never negative.
+fn micros(usd: f64) -> u64 {
+    if !usd.is_finite() || usd <= 0.0 {
+        return 0;
+    }
+    (usd * 1_000_000.0).round() as u64
 }
 
 #[derive(Deserialize)]
@@ -158,7 +221,7 @@ fn parse_go(body: &str) -> Result<Usage, String> {
             resets_at: Some(resets_at),
         });
     }
-    Ok(Usage { windows })
+    Ok(Usage { windows, key: None })
 }
 
 /// How much of an OpenCode Go subscription is used, from `GET <url>/usage`.
@@ -227,7 +290,7 @@ fn parse_kimi(body: &str) -> Result<Usage, String> {
             resets_at: Some(resets_at),
         });
     }
-    Ok(Usage { windows })
+    Ok(Usage { windows, key: None })
 }
 
 /// How much of a Kimi Code membership is used, from `GET <url>/usages`.
@@ -448,6 +511,7 @@ mod tests {
                     resets_at: Some(1_794_303_997),
                 },
             ],
+            key: None,
         };
         // Summer time until the monthly reset, which falls after the change.
         let offset_of = |at: i64| if at < 1_793_000_000 { 7200 } else { 3600 };
@@ -575,6 +639,7 @@ mod tests {
                     resets_at: Some(1_792_018_800),
                 },
             ],
+            key: None,
         };
         let pieces = usage.pieces("Claude", 1_791_817_200, |_| 7200);
         assert_eq!(text(&pieces), "│ Claude 0% · 18% Thu 01:00 ");
@@ -592,6 +657,106 @@ mod tests {
                 "st", "nd", "rd", "th", "th", "th", "th", "st", "nd", "rd", "th", "st"
             ]
         );
+    }
+
+    #[test]
+    fn openrouter_answer_gives_the_key_money() {
+        let body = r#"{"data":{"label":"sk-or-v1-483...f01","is_management_key":false,"is_free_tier":false,"usage":0.00072304,"usage_daily":0.00072304,"limit":1,"limit_remaining":0.99927696,"limit_reset":"daily","expires_at":null}}"#;
+        let usage = parse_openrouter(body).expect("valid answer");
+        assert_eq!(
+            usage.key,
+            Some(KeyMoney {
+                spent: 723,
+                limit: Some(1_000_000),
+                remaining: Some(999_277),
+                resets: Some("daily".to_string()),
+            })
+        );
+        assert!(usage.windows.is_empty());
+    }
+
+    #[test]
+    fn openrouter_answer_of_another_shape_is_an_error() {
+        assert!(parse_openrouter(r#"{"error":{"message":"User not found.","code":401}}"#).is_err());
+        assert!(parse_openrouter(r#"{"data":{"limit":1}}"#).is_err());
+    }
+
+    #[test]
+    fn openrouter_entry_shows_the_spend_and_the_limit() {
+        let usage = Usage {
+            windows: Vec::new(),
+            key: Some(KeyMoney {
+                spent: 500_000,
+                limit: Some(1_000_000),
+                remaining: Some(500_000),
+                resets: Some("daily".to_string()),
+            }),
+        };
+        let pieces = usage.money_pieces("OpenRouter");
+        assert_eq!(text(&pieces), "│ OpenRouter $0.50 · $1.00 daily ");
+        // Only the limit carries a percent, for its color.
+        let percents: Vec<Option<u32>> = pieces.iter().map(|(_, percent)| *percent).collect();
+        assert_eq!(percents, [None, None, Some(50), None, None]);
+    }
+
+    #[test]
+    fn openrouter_entry_without_a_limit_shows_the_spend_alone() {
+        let usage = Usage {
+            windows: Vec::new(),
+            key: Some(KeyMoney {
+                spent: 12_345_678,
+                limit: None,
+                remaining: None,
+                resets: None,
+            }),
+        };
+        assert_eq!(
+            text(&usage.money_pieces("OpenRouter")),
+            "│ OpenRouter $12.34 "
+        );
+    }
+
+    #[test]
+    fn openrouter_limit_that_never_resets_stays_unnamed() {
+        let usage = Usage {
+            windows: Vec::new(),
+            key: Some(KeyMoney {
+                spent: 500_000,
+                limit: Some(1_000_000),
+                remaining: Some(250_000),
+                resets: None,
+            }),
+        };
+        let pieces = usage.money_pieces("OpenRouter");
+        assert_eq!(text(&pieces), "│ OpenRouter $0.50 · $1.00 ");
+        assert_eq!(pieces[2].1, Some(75));
+    }
+
+    #[test]
+    fn the_percent_of_a_limit_spent_comes_from_what_is_left_of_it() {
+        assert_eq!(percent_spent(250_000, 1_000_000), 75);
+        assert_eq!(percent_spent(1_000_000, 1_000_000), 0);
+        assert_eq!(percent_spent(0, 1_000_000), 100);
+        assert_eq!(percent_spent(0, 0), 0);
+    }
+
+    #[test]
+    fn openrouter_endpoint_names_its_key() {
+        assert!(matches!(
+            EndpointKind::OpenRouter {
+                url: String::new(),
+                token: String::new(),
+            }
+            .usage_label(),
+            Some("OpenRouter")
+        ));
+    }
+
+    #[test]
+    fn a_usage_file_written_before_the_key_money_still_loads() {
+        let stored = r#"{"openrouter":{"windows":[]}}"#;
+        let usage: HashMap<String, Usage> = serde_json::from_str(stored).expect("valid store");
+        assert_eq!(usage["openrouter"].key, None);
     }
 }
 
@@ -666,7 +831,7 @@ fn parse_cline(body: &str) -> Result<Usage, String> {
         Span::Week => 1,
         Span::Month => 2,
     });
-    Ok(Usage { windows })
+    Ok(Usage { windows, key: None })
 }
 
 fn cline_span(kind: &str) -> Option<Span> {
@@ -696,4 +861,55 @@ pub async fn fetch_cline(url: &str, token: &str) -> Result<Usage, String> {
     }
     let body = response.text().await.map_err(|e| e.to_string())?;
     parse_cline(&body)
+}
+
+#[derive(Deserialize)]
+struct OpenRouterReply {
+    data: OpenRouterKey,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterKey {
+    usage: f64,
+    limit: Option<f64>,
+    #[serde(rename = "limit_remaining")]
+    limit_remaining: Option<f64>,
+    #[serde(rename = "limit_reset")]
+    limit_reset: Option<String>,
+}
+
+/// What an OpenRouter key reports of its own spending, from the answer of its `key`
+/// request: what it has cost, and the limit it enforces.
+fn parse_openrouter(body: &str) -> Result<Usage, String> {
+    let reply: OpenRouterReply = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    Ok(Usage {
+        windows: Vec::new(),
+        key: Some(KeyMoney {
+            spent: micros(reply.data.usage),
+            limit: reply.data.limit.map(micros),
+            remaining: reply.data.limit_remaining.map(micros),
+            resets: reply.data.limit_reset,
+        }),
+    })
+}
+
+/// What an OpenRouter key has cost and where its limit stands, from `GET <url>/key`.
+/// The plain inference key answers this; no management key is needed.
+pub async fn fetch_openrouter(url: &str, token: &str) -> Result<Usage, String> {
+    let url = format!("{}/key", url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("{url}: HTTP {}", response.status()));
+    }
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    parse_openrouter(&body)
 }

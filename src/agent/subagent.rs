@@ -284,7 +284,8 @@ fn prepare(
             EndpointKind::OpenAi { .. }
             | EndpointKind::OpenCodeGo { .. }
             | EndpointKind::KimiCode { .. }
-            | EndpointKind::Cline { .. },
+            | EndpointKind::Cline { .. }
+            | EndpointKind::OpenRouter { .. },
         ) if source.is_none() && spec != subagents.spec => Some(subagents.spec.clone()),
         _ => None,
     };

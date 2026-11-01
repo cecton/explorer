@@ -2,7 +2,7 @@ use crate::agent::commands::{self, Command};
 use crate::agent::subagent::Role;
 use crate::agent::{
     AgentConfig, CLAUDE_CODE_KIND, CLINE_KIND, DEFAULT_REVIEW_ROUNDS, Endpoint, EndpointKind,
-    KIMI_CODE_KIND, ModelSpec, OPENCODE_GO_KIND,
+    KIMI_CODE_KIND, ModelSpec, OPENCODE_GO_KIND, OPENROUTER_KIND,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -102,6 +102,7 @@ pub enum EndpointDecl {
     OpenCodeGo { name: String, url: String },
     KimiCode { name: String, url: String },
     Cline { name: String, url: String },
+    OpenRouter { name: String, url: String },
     ClaudeCode { name: String, models: Vec<String> },
 }
 
@@ -110,6 +111,9 @@ const CLAUDE_CODE_DEFAULT_MODELS: [&str; 3] = ["opus", "sonnet", "haiku"];
 
 /// Where an `opencode-go` endpoint that gives no `url` is reached.
 const OPENCODE_GO_URL: &str = "https://opencode.ai/zen/go/v1";
+
+/// Where an `openrouter` endpoint that gives no `url` is reached.
+const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 
 fn auth_path() -> Option<PathBuf> {
     directories::ProjectDirs::from("", "", "explorer").map(|dirs| dirs.data_dir().join("auth.kdl"))
@@ -281,6 +285,13 @@ pub fn resolve_agent(
                     kind: EndpointKind::Cline { url, token },
                 })
             }
+            EndpointDecl::OpenRouter { name, url } => {
+                let token = token_of(&name)?;
+                Some(Endpoint {
+                    name,
+                    kind: EndpointKind::OpenRouter { url, token },
+                })
+            }
         })
         .collect();
     AgentConfig {
@@ -353,6 +364,10 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                     },
                     CLINE_KIND => EndpointDecl::Cline {
                         url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
+                        name,
+                    },
+                    OPENROUTER_KIND => EndpointDecl::OpenRouter {
+                        url: url.unwrap_or_else(|| OPENROUTER_URL.to_string()),
                         name,
                     },
                     CLAUDE_CODE_KIND => {

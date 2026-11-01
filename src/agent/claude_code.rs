@@ -118,7 +118,7 @@ fn subscription_usage(info: &Value) -> Option<Usage> {
     .into_iter()
     .flatten()
     .collect();
-    (!windows.is_empty()).then_some(Usage { windows })
+    (!windows.is_empty()).then_some(Usage { windows, key: None })
 }
 
 /// Translates one output line. Lines of subagents and of kinds we do not use yield
@@ -491,7 +491,8 @@ mod tests {
                         percent: 18,
                         resets_at: Some(1_792_018_800)
                     },
-                ]
+                ],
+                key: None,
             })]
         );
     }

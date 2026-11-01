@@ -585,8 +585,8 @@ pub struct AppState {
     /// Endpoints, tokens and agent settings from `config.kdl` and `auth.kdl`.
     pub agent: Arc<AgentConfig>,
     pub models: ModelCatalog,
-    /// Last known usage of the subscription behind each endpoint, by endpoint name;
-    /// kept in `<data_dir>/usage.json`.
+    /// Last known usage of the spending behind each endpoint, by endpoint name; kept
+    /// in `<data_dir>/usage.json`.
     pub usage: HashMap<String, Usage>,
     /// MCP servers of the repository, as saved in its session.
     pub mcp_servers: Vec<McpServerDecl>,
@@ -913,8 +913,8 @@ pub enum AppSignal {
         endpoint: String,
         result: Result<Vec<String>, String>,
     },
-    /// How much of the subscription behind `endpoint` is used, as known when a turn
-    /// that spent some of it ended.
+    /// How much of the spending behind `endpoint` is used: as known when a turn that
+    /// spent some of it ended, or as just polled for an OpenRouter key.
     UsageFetched {
         endpoint: String,
         usage: Usage,

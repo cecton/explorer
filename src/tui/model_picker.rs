@@ -83,7 +83,8 @@ pub(crate) fn fetch_models(
         let result = match kind {
             EndpointKind::OpenAi { url, token }
             | EndpointKind::OpenCodeGo { url, token }
-            | EndpointKind::KimiCode { url, token } => {
+            | EndpointKind::KimiCode { url, token }
+            | EndpointKind::OpenRouter { url, token } => {
                 crate::agent::models::fetch(&url, &token).await
             }
             EndpointKind::Cline { url, token } => {

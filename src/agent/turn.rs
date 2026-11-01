@@ -417,10 +417,12 @@ impl Recorder {
     }
 }
 
-/// Tells the UI how much of the subscription behind `endpoint` is used once a turn has
-/// spent some of it: what the CLI last `reported`, or what OpenCode Go, Kimi Code or
-/// Cline answer now.
-pub(super) fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx: MainTx) {
+/// Tells the UI what the spending behind `endpoint` is: what the CLI last `reported`
+/// for a `claude-code` endpoint, or what OpenCode Go, Kimi Code, Cline or OpenRouter
+/// answer now. Called after every turn, and for an OpenRouter key at startup and every
+/// minute between turns, since its counter settles seconds after the requests that
+/// spent it.
+pub fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx: MainTx) {
     tokio::spawn(async move {
         let usage = match &endpoint.kind {
             EndpointKind::ClaudeCode { .. } => reported,
@@ -433,6 +435,10 @@ pub(super) fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx:
                 .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
                 .ok(),
             EndpointKind::Cline { url, token } => usage::fetch_cline(url, token)
+                .await
+                .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
+                .ok(),
+            EndpointKind::OpenRouter { url, token } => usage::fetch_openrouter(url, token)
                 .await
                 .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
                 .ok(),

@@ -101,6 +101,8 @@ pub struct AppMain {
     time_flush_ticks: u64,
     /// Counts 1s Noop ticks so the status-bar dirty flag is rechecked periodically.
     dirty_check_ticks: u64,
+    /// Counts 1s Noop ticks so the money of an OpenRouter key is polled periodically.
+    usage_poll_ticks: u64,
 }
 
 impl AppMain {
@@ -127,6 +129,7 @@ impl AppMain {
             watcher_guard: None,
             time_flush_ticks: 0,
             dirty_check_ticks: 0,
+            usage_poll_ticks: 0,
         })
     }
 
@@ -572,6 +575,9 @@ impl App for AppMain {
                 );
             });
         }
+
+        // Show what the OpenRouter keys have spent before any turn has spent some of it.
+        poll_openrouter_usage(&global_data.state, notify_tx.clone());
 
         let stack = global_data.state.pane_manager.window_stack.clone();
         for window in stack {
@@ -1801,6 +1807,19 @@ impl App for AppMain {
                             );
                         });
                     }
+                    // Poll what the OpenRouter keys have spent every minute: their
+                    // counters settle seconds after the requests that spent them. Only
+                    // the 1s Noop tick counts: a flooding pane drives this arm many
+                    // times a second and every poll is a request.
+                    if matches!(action, AppSignal::Noop) {
+                        self.usage_poll_ticks = self.usage_poll_ticks.wrapping_add(1);
+                        if self.usage_poll_ticks.is_multiple_of(60) {
+                            poll_openrouter_usage(
+                                state,
+                                global_data.main_thread_channel_sender.clone(),
+                            );
+                        }
+                    }
                     maybe_save_session(state, &self.root);
                     crate::lsp::try_drain_pending_requests();
                     let health = crate::lsp::health_check();
@@ -2245,10 +2264,10 @@ fn render_status_bar(
     render_tui_styled_texts_into(&styled_texts, &mut render_ops);
 
     // Right-aligned "dirty" flag (uncommitted staged/unstaged changes), shown in a
-    // bright error-like theme color, followed by the usage of the focused conversation's
-    // subscription and by the time counters. Each is independently optional: the flag
-    // reflects `state.is_dirty` unconditionally, the counters are gated on the
-    // `show-timers` config option.
+    // bright error-like theme color, followed by the usage of the spending behind the
+    // focused conversation's endpoint and by the time counters. Each is independently
+    // optional: the flag reflects `state.is_dirty` unconditionally, the counters are
+    // gated on the `show-timers` config option.
     let error_fg = TuiColor::from(theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG));
     let warning_fg = TuiColor::from(theme.ui_fg("warning").unwrap_or(DEFAULT_WARNING_FG));
     let dirty_style = new_style!(bold color_fg: {error_fg} color_bg: {color_bg});
@@ -2368,19 +2387,39 @@ fn focused_endpoint(state: &AppState) -> Option<String> {
     }
 }
 
-/// The status-bar entry for the subscription behind the focused window's endpoint;
-/// empty when that endpoint has no subscription or its usage is not known yet.
+/// The status-bar entry for the spending behind the focused window's endpoint;
+/// empty when that endpoint reports no usage or its usage is not known yet.
 fn focused_usage(state: &AppState) -> Vec<(String, Option<u32>)> {
     let entry = || {
         let endpoint = focused_endpoint(state)?;
-        let label = state.agent.endpoint(&endpoint)?.kind.usage_label()?;
+        let kind = &state.agent.endpoint(&endpoint)?.kind;
+        let label = kind.usage_label()?;
+        let usage = state.usage.get(&endpoint)?;
+        // An OpenRouter key states money and its limit, not the percents and reset
+        // times of a subscription.
+        if matches!(kind, crate::agent::EndpointKind::OpenRouter { .. }) {
+            return Some(usage.money_pieces(label));
+        }
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs() as i64);
-        let usage = state.usage.get(&endpoint)?;
         Some(usage.pieces(label, now, crate::conversation::local_offset_secs))
     };
     entry().unwrap_or_default()
+}
+
+/// Asks what each OpenRouter key of the configuration has spent. Its counter settles
+/// seconds after the requests that spent it, so the display is polled at startup and
+/// between turns, not only when a turn ends.
+fn poll_openrouter_usage(
+    state: &AppState,
+    main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+) {
+    for endpoint in &state.agent.endpoints {
+        if matches!(endpoint.kind, crate::agent::EndpointKind::OpenRouter { .. }) {
+            crate::agent::turn::report_usage(endpoint.clone(), None, main_tx.clone());
+        }
+    }
 }
 
 fn model_picker_hint(state: &AppState) -> String {

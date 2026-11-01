@@ -144,10 +144,10 @@ backed up without Explorer, and the agent itself can consult all of it, not only
 branch it is in, to find an earlier decision and the reason behind it.
 
 **Any model.** An endpoint is an OpenAI-compatible server, an OpenCode Go, Kimi Code or Cline
-subscription, or a Claude subscription through the local `claude` CLI. The model is
+subscription, an OpenRouter key, or a Claude subscription through the local `claude` CLI. The model is
 picked per prompt (`<leader>m`) as `endpoint/model/effort`, and a branch can change model
 on the way. The status bar shows how much of the subscription behind the focused
-conversation is used.
+conversation is used, or what an OpenRouter key has spent.
 
 Also there: custom slash commands (one Markdown file each), `/compact` to summarize a
 long branch and continue from the summary, a work log of the tools the agent called, and
@@ -212,6 +212,9 @@ agent {
         kind "cline"
         url "https://api.cline.bot/api/v1"
     }
+    endpoint "openrouter" {
+        kind "openrouter"
+    }
 
     summary-model "kimi/kimi-k2/low"
 }
@@ -230,7 +233,9 @@ agent {
   the repository, saved with its session, which wins over the config's; `alias <name>`
   removes it.
 - `agent`: the endpoints, and the model that writes the titles and summaries of the
-  tree. Without `summary-model` a node is titled by the first line of its prompt.
+  tree. Without `summary-model` a node is titled by the first line of its prompt. An
+  `openrouter` endpoint states what its API key has spent and the limit it enforces in
+  the status bar.
 
 Tokens stay out of the configuration, in `~/.local/share/explorer/auth.kdl`, one line
 per endpoint name. A `claude-code` endpoint needs none.
