@@ -86,6 +86,9 @@ pub(crate) fn fetch_models(
             | EndpointKind::KimiCode { url, token } => {
                 crate::agent::models::fetch(&url, &token).await
             }
+            EndpointKind::Cline { url, token } => {
+                crate::agent::models::fetch_cline(&url, &token).await
+            }
             EndpointKind::ClaudeCode { models } => Ok(models),
         };
         let _ = main_tx

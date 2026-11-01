@@ -19,8 +19,8 @@ pub enum Span {
 pub struct UsageWindow {
     pub span: Span,
     pub percent: u32,
-    /// Epoch seconds.
-    pub resets_at: i64,
+    /// Epoch seconds; `None` when the provider reports no reset for this window.
+    pub resets_at: Option<i64>,
 }
 
 /// What a subscription reports of its limits, shortest window first.
@@ -30,14 +30,18 @@ pub struct Usage {
 }
 
 impl UsageWindow {
-    /// The percent used at `now` and the local time of the reset, `offset_secs` being
+    /// The percent used at `now` and the local time of the reset, `offset_of` giving
     /// the local offset at that reset. A window whose reset has passed started over:
-    /// nothing of it is used, and its next reset is not known.
-    fn shown(&self, now: i64, offset_secs: i32) -> (u32, Option<String>) {
-        if self.resets_at <= now {
+    /// nothing of it is used, and its next reset is not known. A window with no known
+    /// reset states its percent alone.
+    fn shown(&self, now: i64, offset_of: &impl Fn(i64) -> i32) -> (u32, Option<String>) {
+        let Some(resets_at) = self.resets_at else {
+            return (self.percent, None);
+        };
+        if resets_at <= now {
             return (0, None);
         }
-        let local = self.resets_at + i64::from(offset_secs);
+        let local = resets_at + i64::from(offset_of(resets_at));
         let days = local.div_euclid(86_400);
         let secs = local.rem_euclid(86_400);
         let time = format!("{:02}:{:02}", secs / 3600, secs % 3600 / 60);
@@ -80,7 +84,7 @@ impl Usage {
         let mut pieces = Vec::with_capacity(self.windows.len() * 3 + 2);
         pieces.push((format!("│ {label}"), None));
         for (index, window) in self.windows.iter().enumerate() {
-            let (percent, reset) = window.shown(now, offset_of(window.resets_at));
+            let (percent, reset) = window.shown(now, &offset_of);
             let separator = if index == 0 { " " } else { " · " };
             pieces.push((separator.to_string(), None));
             pieces.push((format!("{percent}%"), Some(percent)));
@@ -151,7 +155,7 @@ fn parse_go(body: &str) -> Result<Usage, String> {
         windows.push(UsageWindow {
             span,
             percent: window.percent,
-            resets_at,
+            resets_at: Some(resets_at),
         });
     }
     Ok(Usage { windows })
@@ -220,7 +224,7 @@ fn parse_kimi(body: &str) -> Result<Usage, String> {
         windows.push(UsageWindow {
             span,
             percent: (window.used_ratio * 100.0).round().clamp(0.0, 100.0) as u32,
-            resets_at,
+            resets_at: Some(resets_at),
         });
     }
     Ok(Usage { windows })
@@ -308,17 +312,17 @@ mod tests {
                 UsageWindow {
                     span: Span::FiveHours,
                     percent: 1,
-                    resets_at: 1_791_817_892
+                    resets_at: Some(1_791_817_892)
                 },
                 UsageWindow {
                     span: Span::Week,
                     percent: 39,
-                    resets_at: 1_792_368_000
+                    resets_at: Some(1_792_368_000)
                 },
                 UsageWindow {
                     span: Span::Month,
                     percent: 19,
-                    resets_at: 1_794_303_997
+                    resets_at: Some(1_794_303_997)
                 },
             ]
         );
@@ -358,17 +362,17 @@ mod tests {
                 UsageWindow {
                     span: Span::FiveHours,
                     percent: 16,
-                    resets_at: 1_793_536_355
+                    resets_at: Some(1_793_536_355)
                 },
                 UsageWindow {
                     span: Span::Week,
                     percent: 20,
-                    resets_at: 1_794_009_600
+                    resets_at: Some(1_794_009_600)
                 },
                 UsageWindow {
                     span: Span::Month,
                     percent: 2,
-                    resets_at: 1_796_169_600
+                    resets_at: Some(1_796_169_600)
                 },
             ]
         );
@@ -387,7 +391,7 @@ mod tests {
             [UsageWindow {
                 span: Span::FiveHours,
                 percent: 50,
-                resets_at: 1_789_149_600
+                resets_at: Some(1_789_149_600)
             }]
         );
     }
@@ -431,17 +435,17 @@ mod tests {
                 UsageWindow {
                     span: Span::FiveHours,
                     percent: 22,
-                    resets_at: 1_791_817_200,
+                    resets_at: Some(1_791_817_200),
                 },
                 UsageWindow {
                     span: Span::Week,
                     percent: 18,
-                    resets_at: 1_792_018_800,
+                    resets_at: Some(1_792_018_800),
                 },
                 UsageWindow {
                     span: Span::Month,
                     percent: 91,
-                    resets_at: 1_794_303_997,
+                    resets_at: Some(1_794_303_997),
                 },
             ],
         };
@@ -457,18 +461,118 @@ mod tests {
     }
 
     #[test]
+    fn cline_answer_gives_the_three_windows_shortest_first() {
+        let body = r#"{"data":{"limits":[
+            {"type":"monthly","percentUsed":12.4,"resetsAt":"2026-12-01T12:43:48Z"},
+            {"type":"five_hour","percentUsed":3,"resetsAt":"2026-11-01T17:52:00Z"},
+            {"type":"weekly","percentUsed":47.5,"resetsAt":"2026-11-07T00:00:00Z"}
+        ]},"success":true}"#;
+        let usage = parse_cline(body).expect("valid answer");
+        assert_eq!(
+            usage.windows,
+            [
+                UsageWindow {
+                    span: Span::FiveHours,
+                    percent: 3,
+                    resets_at: Some(1_793_555_520)
+                },
+                UsageWindow {
+                    span: Span::Week,
+                    percent: 48,
+                    resets_at: Some(1_794_009_600)
+                },
+                UsageWindow {
+                    span: Span::Month,
+                    percent: 12,
+                    resets_at: Some(1_796_129_028)
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn cline_window_without_a_reset_time_keeps_its_percent() {
+        let body = r#"{"data":{"limits":[
+            {"type":"five_hour","percentUsed":0},
+            {"type":"weekly","percentUsed":0},
+            {"type":"monthly","percentUsed":0}
+        ]},"success":true}"#;
+        let usage = parse_cline(body).expect("valid answer");
+        assert_eq!(usage.windows.len(), 3);
+        assert!(
+            usage
+                .windows
+                .iter()
+                .all(|window| window.resets_at.is_none())
+        );
+        let pieces = usage.pieces("Cline", 1_791_800_000, |_| 3600);
+        assert_eq!(text(&pieces), "│ Cline 0% · 0% · 0% ");
+    }
+
+    #[test]
+    fn cline_reset_reads_a_timestamp_or_an_epoch_in_seconds_or_milliseconds() {
+        assert_eq!(
+            cline_reset(&serde_json::json!("2026-11-01T17:52:00Z")),
+            Some(1_793_555_520)
+        );
+        assert_eq!(
+            cline_reset(&serde_json::json!(1_793_555_520)),
+            Some(1_793_555_520)
+        );
+        assert_eq!(
+            cline_reset(&serde_json::json!(1_793_555_520_000_i64)),
+            Some(1_793_555_520)
+        );
+        assert_eq!(cline_reset(&serde_json::json!("soon")), None);
+        assert_eq!(cline_reset(&serde_json::json!(null)), None);
+    }
+
+    #[test]
+    fn cline_answer_of_another_shape_is_an_error() {
+        assert!(parse_cline(r#"{"code":500,"success":false}"#).is_err());
+        assert!(parse_cline(r#"{"data":{"limits":[]}}"#).is_err());
+        assert!(parse_cline(r#"{"data":{"limits":[{"type":"hourly","percentUsed":2}]}}"#).is_err());
+        assert!(
+            parse_cline(
+                r#"{"data":{"limits":[{"type":"weekly","percentUsed":2,"resetsAt":"soon"}]}}"#
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn a_usage_file_written_before_optional_resets_still_loads() {
+        let stored =
+            r#"{"cline":{"windows":[{"span":"week","percent":7,"resets_at":1794009600}]}}"#;
+        let usage: HashMap<String, Usage> = serde_json::from_str(stored).expect("valid store");
+        assert_eq!(usage["cline"].windows[0].resets_at, Some(1_794_009_600));
+    }
+
+    #[test]
+    fn cline_endpoint_names_its_subscription() {
+        assert!(matches!(
+            EndpointKind::Cline {
+                url: String::new(),
+                token: String::new(),
+            }
+            .usage_label(),
+            Some("Cline")
+        ));
+    }
+
+    #[test]
     fn window_past_its_reset_has_used_nothing() {
         let usage = Usage {
             windows: vec![
                 UsageWindow {
                     span: Span::FiveHours,
                     percent: 22,
-                    resets_at: 1_791_817_200,
+                    resets_at: Some(1_791_817_200),
                 },
                 UsageWindow {
                     span: Span::Week,
                     percent: 18,
-                    resets_at: 1_792_018_800,
+                    resets_at: Some(1_792_018_800),
                 },
             ],
         };
@@ -489,4 +593,107 @@ mod tests {
             ]
         );
     }
+}
+
+#[derive(Deserialize)]
+struct ClineReply {
+    data: ClineData,
+}
+
+#[derive(Deserialize)]
+struct ClineData {
+    limits: Vec<ClineLimit>,
+}
+
+#[derive(Deserialize)]
+struct ClineLimit {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(rename = "percentUsed")]
+    percent_used: f64,
+    /// Absent until the window has been spent once; Cline's dashboard reads it as an
+    /// ISO timestamp, but the browser's `Date` takes epoch numbers too.
+    #[serde(rename = "resetsAt")]
+    resets_at: Option<serde_json::Value>,
+}
+
+/// Epoch seconds of a Cline reset, which is an ISO timestamp or an epoch number in
+/// seconds or milliseconds.
+fn cline_reset(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::String(stamp) => utc_secs(stamp),
+        serde_json::Value::Number(number) => number.as_i64().map(|epoch| {
+            if epoch > 100_000_000_000 {
+                epoch / 1000
+            } else {
+                epoch
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// The usage in the answer of Cline's `users/me/plan/usage-limits` request. Cline
+/// reports a percent per window and no reset time while the window is untouched, so
+/// such a window states its percent only.
+fn parse_cline(body: &str) -> Result<Usage, String> {
+    let reply: ClineReply = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    if reply.data.limits.is_empty() {
+        return Err("no usage window in answer".to_string());
+    }
+    let mut windows = Vec::with_capacity(reply.data.limits.len());
+    for limit in reply.data.limits {
+        let Some(span) = cline_span(&limit.kind) else {
+            continue;
+        };
+        let resets_at = match &limit.resets_at {
+            Some(stamp) => {
+                Some(cline_reset(stamp).ok_or_else(|| format!("unreadable reset time {stamp}"))?)
+            }
+            None => None,
+        };
+        windows.push(UsageWindow {
+            span,
+            percent: limit.percent_used.round().clamp(0.0, 100.0) as u32,
+            resets_at,
+        });
+    }
+    if windows.is_empty() {
+        return Err("no known usage window in answer".to_string());
+    }
+    windows.sort_by_key(|window| match window.span {
+        Span::FiveHours => 0,
+        Span::Week => 1,
+        Span::Month => 2,
+    });
+    Ok(Usage { windows })
+}
+
+fn cline_span(kind: &str) -> Option<Span> {
+    match kind {
+        "five_hour" => Some(Span::FiveHours),
+        "weekly" => Some(Span::Week),
+        "monthly" => Some(Span::Month),
+        _ => None,
+    }
+}
+
+/// How much of a Cline Pass is used, from `GET <url>/users/me/plan/usage-limits`.
+pub async fn fetch_cline(url: &str, token: &str) -> Result<Usage, String> {
+    let url = format!("{}/users/me/plan/usage-limits", url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("{url}: HTTP {}", response.status()));
+    }
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    parse_cline(&body)
 }

@@ -1,8 +1,8 @@
 use crate::agent::commands::{self, Command};
 use crate::agent::subagent::Role;
 use crate::agent::{
-    AgentConfig, CLAUDE_CODE_KIND, DEFAULT_REVIEW_ROUNDS, Endpoint, EndpointKind, KIMI_CODE_KIND,
-    ModelSpec, OPENCODE_GO_KIND,
+    AgentConfig, CLAUDE_CODE_KIND, CLINE_KIND, DEFAULT_REVIEW_ROUNDS, Endpoint, EndpointKind,
+    KIMI_CODE_KIND, ModelSpec, OPENCODE_GO_KIND,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -101,6 +101,7 @@ pub enum EndpointDecl {
     OpenAi { name: String, url: String },
     OpenCodeGo { name: String, url: String },
     KimiCode { name: String, url: String },
+    Cline { name: String, url: String },
     ClaudeCode { name: String, models: Vec<String> },
 }
 
@@ -273,6 +274,13 @@ pub fn resolve_agent(
                     kind: EndpointKind::KimiCode { url, token },
                 })
             }
+            EndpointDecl::Cline { name, url } => {
+                let token = token_of(&name)?;
+                Some(Endpoint {
+                    name,
+                    kind: EndpointKind::Cline { url, token },
+                })
+            }
         })
         .collect();
     AgentConfig {
@@ -340,6 +348,10 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                         name,
                     },
                     KIMI_CODE_KIND => EndpointDecl::KimiCode {
+                        url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
+                        name,
+                    },
+                    CLINE_KIND => EndpointDecl::Cline {
                         url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
                         name,
                     },
@@ -734,6 +746,52 @@ mod config_tests {
             agent {
                 endpoint "kimi" {
                     kind "kimi-code"
+                }
+            }
+        "#,
+            )
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn cline_endpoint_needs_a_url_and_a_token() {
+        let config = parse(
+            r#"
+            agent {
+                endpoint "cline" {
+                    kind "cline"
+                    url "https://api.cline.bot/api/v1"
+                }
+            }
+        "#,
+        )
+        .expect("valid config");
+        assert_eq!(
+            config.agent.endpoints,
+            [EndpointDecl::Cline {
+                name: "cline".to_string(),
+                url: "https://api.cline.bot/api/v1".to_string()
+            }]
+        );
+        let tokens = parse_auth("cline \"sk_4d98\"").expect("valid auth");
+        let agent = resolve_agent(config.agent, &tokens, Vec::new(), Vec::new());
+        assert_eq!(
+            agent.endpoints,
+            [Endpoint {
+                name: "cline".to_string(),
+                kind: EndpointKind::Cline {
+                    url: "https://api.cline.bot/api/v1".to_string(),
+                    token: "sk_4d98".to_string()
+                }
+            }]
+        );
+        assert!(
+            parse(
+                r#"
+            agent {
+                endpoint "cline" {
+                    kind "cline"
                 }
             }
         "#,

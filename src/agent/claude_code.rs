@@ -108,7 +108,7 @@ fn subscription_usage(info: &Value) -> Option<Usage> {
         Some(UsageWindow {
             span,
             percent: (window.get("utilization")?.as_f64()? * 100.0).round() as u32,
-            resets_at: window.get("resetsAt")?.as_i64()?,
+            resets_at: Some(window.get("resetsAt")?.as_i64()?),
         })
     };
     let windows: Vec<UsageWindow> = [
@@ -484,12 +484,12 @@ mod tests {
                     UsageWindow {
                         span: Span::FiveHours,
                         percent: 22,
-                        resets_at: 1_791_817_200
+                        resets_at: Some(1_791_817_200)
                     },
                     UsageWindow {
                         span: Span::Week,
                         percent: 18,
-                        resets_at: 1_792_018_800
+                        resets_at: Some(1_792_018_800)
                     },
                 ]
             })]

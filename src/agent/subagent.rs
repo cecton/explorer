@@ -283,7 +283,8 @@ fn prepare(
         Some(
             EndpointKind::OpenAi { .. }
             | EndpointKind::OpenCodeGo { .. }
-            | EndpointKind::KimiCode { .. },
+            | EndpointKind::KimiCode { .. }
+            | EndpointKind::Cline { .. },
         ) if source.is_none() && spec != subagents.spec => Some(subagents.spec.clone()),
         _ => None,
     };

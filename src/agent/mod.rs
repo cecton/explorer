@@ -140,6 +140,10 @@ pub enum EndpointKind {
     /// A Kimi Code membership: an OpenAI-compatible server that also reports its
     /// quota windows at `<base>/usages`.
     KimiCode { url: String, token: String },
+    /// A Cline membership: an OpenAI-compatible server that also reports how much of
+    /// its Cline Pass is used at `<base>/users/me/plan/usage-limits`. Its plan models
+    /// are listed at `<base>/ai/cline/recommended-models`, not `<base>/models`.
+    Cline { url: String, token: String },
     /// The local `claude` CLI, which runs its own loop and tools with its own login.
     ClaudeCode { models: Vec<String> },
 }
@@ -151,6 +155,7 @@ impl EndpointKind {
             EndpointKind::OpenAi { .. } => "openai",
             EndpointKind::OpenCodeGo { .. } => OPENCODE_GO_KIND,
             EndpointKind::KimiCode { .. } => KIMI_CODE_KIND,
+            EndpointKind::Cline { .. } => CLINE_KIND,
             EndpointKind::ClaudeCode { .. } => CLAUDE_CODE_KIND,
         }
     }
@@ -162,6 +167,7 @@ impl EndpointKind {
             EndpointKind::OpenAi { .. } => None,
             EndpointKind::OpenCodeGo { .. } => Some("OpenCode"),
             EndpointKind::KimiCode { .. } => Some("Kimi"),
+            EndpointKind::Cline { .. } => Some("Cline"),
             EndpointKind::ClaudeCode { .. } => Some("Claude"),
         }
     }
@@ -170,6 +176,7 @@ impl EndpointKind {
 pub const CLAUDE_CODE_KIND: &str = "claude-code";
 pub const OPENCODE_GO_KIND: &str = "opencode-go";
 pub const KIMI_CODE_KIND: &str = "kimi-code";
+pub const CLINE_KIND: &str = "cline";
 
 /// A model ready to run: where it lives and how to reach it.
 #[derive(Clone, Debug)]
@@ -222,7 +229,8 @@ impl AgentConfig {
         Some(match &self.endpoint(&spec.endpoint)?.kind {
             EndpointKind::OpenAi { url, token }
             | EndpointKind::OpenCodeGo { url, token }
-            | EndpointKind::KimiCode { url, token } => Backend::OpenAi(llm::LlmTarget {
+            | EndpointKind::KimiCode { url, token }
+            | EndpointKind::Cline { url, token } => Backend::OpenAi(llm::LlmTarget {
                 url: url.clone(),
                 token: token.clone(),
                 model: spec.model.clone(),

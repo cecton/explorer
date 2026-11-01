@@ -418,8 +418,8 @@ impl Recorder {
 }
 
 /// Tells the UI how much of the subscription behind `endpoint` is used once a turn has
-/// spent some of it: what the CLI last `reported`, or what OpenCode Go or Kimi Code
-/// answer now.
+/// spent some of it: what the CLI last `reported`, or what OpenCode Go, Kimi Code or
+/// Cline answer now.
 pub(super) fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx: MainTx) {
     tokio::spawn(async move {
         let usage = match &endpoint.kind {
@@ -429,6 +429,10 @@ pub(super) fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx:
                 .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
                 .ok(),
             EndpointKind::KimiCode { url, token } => usage::fetch_kimi(url, token)
+                .await
+                .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
+                .ok(),
+            EndpointKind::Cline { url, token } => usage::fetch_cline(url, token)
                 .await
                 .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
                 .ok(),

@@ -143,7 +143,7 @@ repository in `~/.local/share/explorer/conversations/`. It can be read, searched
 backed up without Explorer, and the agent itself can consult all of it, not only the
 branch it is in, to find an earlier decision and the reason behind it.
 
-**Any model.** An endpoint is an OpenAI-compatible server, an OpenCode Go or Kimi Code
+**Any model.** An endpoint is an OpenAI-compatible server, an OpenCode Go, Kimi Code or Cline
 subscription, or a Claude subscription through the local `claude` CLI. The model is
 picked per prompt (`<leader>m`) as `endpoint/model/effort`, and a branch can change model
 on the way. The status bar shows how much of the subscription behind the focused
@@ -207,6 +207,10 @@ agent {
     }
     endpoint "opencode-go" {
         kind "opencode-go"
+    }
+    endpoint "cline" {
+        kind "cline"
+        url "https://api.cline.bot/api/v1"
     }
 
     summary-model "kimi/kimi-k2/low"
