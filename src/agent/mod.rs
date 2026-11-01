@@ -137,6 +137,9 @@ pub enum EndpointKind {
     /// An OpenCode Go subscription: an OpenAI-compatible server that also reports how
     /// much of the plan is used.
     OpenCodeGo { url: String, token: String },
+    /// A Kimi Code membership: an OpenAI-compatible server that also reports its
+    /// quota windows at `<base>/usages`.
+    KimiCode { url: String, token: String },
     /// The local `claude` CLI, which runs its own loop and tools with its own login.
     ClaudeCode { models: Vec<String> },
 }
@@ -147,6 +150,7 @@ impl EndpointKind {
         match self {
             EndpointKind::OpenAi { .. } => "openai",
             EndpointKind::OpenCodeGo { .. } => OPENCODE_GO_KIND,
+            EndpointKind::KimiCode { .. } => KIMI_CODE_KIND,
             EndpointKind::ClaudeCode { .. } => CLAUDE_CODE_KIND,
         }
     }
@@ -157,6 +161,7 @@ impl EndpointKind {
         match self {
             EndpointKind::OpenAi { .. } => None,
             EndpointKind::OpenCodeGo { .. } => Some("OpenCode"),
+            EndpointKind::KimiCode { .. } => Some("Kimi"),
             EndpointKind::ClaudeCode { .. } => Some("Claude"),
         }
     }
@@ -164,6 +169,7 @@ impl EndpointKind {
 
 pub const CLAUDE_CODE_KIND: &str = "claude-code";
 pub const OPENCODE_GO_KIND: &str = "opencode-go";
+pub const KIMI_CODE_KIND: &str = "kimi-code";
 
 /// A model ready to run: where it lives and how to reach it.
 #[derive(Clone, Debug)]
@@ -214,14 +220,14 @@ impl AgentConfig {
     /// The backend `spec` designates, if its endpoint is usable.
     pub fn backend(&self, spec: &ModelSpec) -> Option<Backend> {
         Some(match &self.endpoint(&spec.endpoint)?.kind {
-            EndpointKind::OpenAi { url, token } | EndpointKind::OpenCodeGo { url, token } => {
-                Backend::OpenAi(llm::LlmTarget {
-                    url: url.clone(),
-                    token: token.clone(),
-                    model: spec.model.clone(),
-                    effort: spec.effort,
-                })
-            }
+            EndpointKind::OpenAi { url, token }
+            | EndpointKind::OpenCodeGo { url, token }
+            | EndpointKind::KimiCode { url, token } => Backend::OpenAi(llm::LlmTarget {
+                url: url.clone(),
+                token: token.clone(),
+                model: spec.model.clone(),
+                effort: spec.effort,
+            }),
             EndpointKind::ClaudeCode { .. } => Backend::ClaudeCode(claude_code::ClaudeTarget {
                 model: spec.model.clone(),
                 effort: spec.effort,

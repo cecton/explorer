@@ -280,11 +280,11 @@ fn prepare(
         .endpoint(&spec.endpoint)
         .map(|endpoint| &endpoint.kind)
     {
-        Some(EndpointKind::OpenAi { .. } | EndpointKind::OpenCodeGo { .. })
-            if source.is_none() && spec != subagents.spec =>
-        {
-            Some(subagents.spec.clone())
-        }
+        Some(
+            EndpointKind::OpenAi { .. }
+            | EndpointKind::OpenCodeGo { .. }
+            | EndpointKind::KimiCode { .. },
+        ) if source.is_none() && spec != subagents.spec => Some(subagents.spec.clone()),
         _ => None,
     };
     let endpoint = config.endpoint(&spec.endpoint).cloned();

@@ -1,8 +1,8 @@
 use crate::agent::commands::{self, Command};
 use crate::agent::subagent::Role;
 use crate::agent::{
-    AgentConfig, CLAUDE_CODE_KIND, DEFAULT_REVIEW_ROUNDS, Endpoint, EndpointKind, ModelSpec,
-    OPENCODE_GO_KIND,
+    AgentConfig, CLAUDE_CODE_KIND, DEFAULT_REVIEW_ROUNDS, Endpoint, EndpointKind, KIMI_CODE_KIND,
+    ModelSpec, OPENCODE_GO_KIND,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -100,6 +100,7 @@ impl Config {
 pub enum EndpointDecl {
     OpenAi { name: String, url: String },
     OpenCodeGo { name: String, url: String },
+    KimiCode { name: String, url: String },
     ClaudeCode { name: String, models: Vec<String> },
 }
 
@@ -265,6 +266,13 @@ pub fn resolve_agent(
                     kind: EndpointKind::OpenCodeGo { url, token },
                 })
             }
+            EndpointDecl::KimiCode { name, url } => {
+                let token = token_of(&name)?;
+                Some(Endpoint {
+                    name,
+                    kind: EndpointKind::KimiCode { url, token },
+                })
+            }
         })
         .collect();
     AgentConfig {
@@ -329,6 +337,10 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                     },
                     OPENCODE_GO_KIND => EndpointDecl::OpenCodeGo {
                         url: url.unwrap_or_else(|| OPENCODE_GO_URL.to_string()),
+                        name,
+                    },
+                    KIMI_CODE_KIND => EndpointDecl::KimiCode {
+                        url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
                         name,
                     },
                     CLAUDE_CODE_KIND => {
@@ -681,6 +693,52 @@ mod config_tests {
                     token: "sk-go".to_string()
                 }
             }]
+        );
+    }
+
+    #[test]
+    fn kimi_code_endpoint_needs_a_url_and_a_token() {
+        let config = parse(
+            r#"
+            agent {
+                endpoint "kimi" {
+                    kind "kimi-code"
+                    url "https://api.kimi.ai/coding/v1"
+                }
+            }
+        "#,
+        )
+        .expect("valid config");
+        assert_eq!(
+            config.agent.endpoints,
+            [EndpointDecl::KimiCode {
+                name: "kimi".to_string(),
+                url: "https://api.kimi.ai/coding/v1".to_string()
+            }]
+        );
+        let tokens = parse_auth("kimi \"sk-kimi\"").expect("valid auth");
+        let agent = resolve_agent(config.agent, &tokens, Vec::new(), Vec::new());
+        assert_eq!(
+            agent.endpoints,
+            [Endpoint {
+                name: "kimi".to_string(),
+                kind: EndpointKind::KimiCode {
+                    url: "https://api.kimi.ai/coding/v1".to_string(),
+                    token: "sk-kimi".to_string()
+                }
+            }]
+        );
+        assert!(
+            parse(
+                r#"
+            agent {
+                endpoint "kimi" {
+                    kind "kimi-code"
+                }
+            }
+        "#,
+            )
+            .is_err()
         );
     }
 

@@ -110,11 +110,11 @@ taking another direction keeps the first one. The same prompt can be replayed wi
 another model as a sibling, for a second opinion. Each node gets a generated title and
 summary, so the tree of a repository reads like the history of how it was thought out.
 
-**Two kinds of turn.** A prompt is a *feedback* turn unless you say otherwise. The agent
+**Two kinds of turn.** A prompt is a _feedback_ turn unless you say otherwise. The agent
 is then a teacher: it explains, gives its opinion, disagrees when it should, and may
 edit, build and run the tests to check what it claims. Whatever it changed is discarded
 when the turn ends. Once the discussion has settled on something, `/commit` starts a
-*commit* turn: the agent carries out what was decided and commits it. You choose which
+_commit_ turn: the agent carries out what was decided and commits it. You choose which
 one a prompt is; Explorer never guesses.
 
 **Every change is a commit, and every commit has a prompt.** The tree records the
@@ -143,10 +143,11 @@ repository in `~/.local/share/explorer/conversations/`. It can be read, searched
 backed up without Explorer, and the agent itself can consult all of it, not only the
 branch it is in, to find an earlier decision and the reason behind it.
 
-**Any model.** An endpoint is an OpenAI-compatible server, OpenCode Go, or a Claude
-subscription through the local `claude` CLI. The model is picked per prompt
-(`<leader>m`) as `endpoint/model/effort`, and a branch can change model on the way. The
-status bar shows how much of the subscription behind the focused conversation is used.
+**Any model.** An endpoint is an OpenAI-compatible server, an OpenCode Go or Kimi Code
+subscription, or a Claude subscription through the local `claude` CLI. The model is
+picked per prompt (`<leader>m`) as `endpoint/model/effort`, and a branch can change model
+on the way. The status bar shows how much of the subscription behind the focused
+conversation is used.
 
 Also there: custom slash commands (one Markdown file each), `/compact` to summarize a
 long branch and continue from the summary, a work log of the tools the agent called, and
@@ -201,7 +202,8 @@ agent {
         models "opus" "sonnet"
     }
     endpoint "kimi" {
-        url "https://api.moonshot.ai/v1"
+        kind "kimi-code"
+        url "https://api.kimi.ai/coding/v1"
     }
     endpoint "opencode-go" {
         kind "opencode-go"
@@ -246,6 +248,7 @@ system-prompt: off
 argument: commit-like
 description: Squash commits since a given ref into one with a new detailed message
 ---
+
 Squash all commits into a single commit since <ref>. Discard the existing commit
 messages. Generate a new detailed, structured commit message that summarizes all
 changes made in the squashed commits. Use `git reset --soft <ref>` and `git commit` to

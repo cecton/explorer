@@ -177,6 +177,75 @@ pub async fn fetch(url: &str, token: &str) -> Result<Usage, String> {
     parse_go(&body)
 }
 
+#[derive(Deserialize)]
+struct KimiReply {
+    usages: KimiUsages,
+}
+
+#[derive(Deserialize, Default)]
+struct KimiUsages {
+    limit_5h: Option<KimiWindow>,
+    limit_7d: Option<KimiWindow>,
+    limit_month_total: Option<KimiWindow>,
+}
+
+#[derive(Deserialize)]
+struct KimiWindow {
+    used_ratio: f64,
+    reset_time: String,
+}
+
+impl KimiUsages {
+    fn is_empty(&self) -> bool {
+        self.limit_5h.is_none() && self.limit_7d.is_none() && self.limit_month_total.is_none()
+    }
+}
+
+fn parse_kimi(body: &str) -> Result<Usage, String> {
+    let reply: KimiReply = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    if reply.usages.is_empty() {
+        return Err("no usage window in answer".to_string());
+    }
+    let mut windows = Vec::with_capacity(3);
+    for (span, window) in [
+        (Span::FiveHours, reply.usages.limit_5h),
+        (Span::Week, reply.usages.limit_7d),
+        (Span::Month, reply.usages.limit_month_total),
+    ] {
+        let Some(window) = window else {
+            continue;
+        };
+        let resets_at = utc_secs(&window.reset_time)
+            .ok_or_else(|| format!("unreadable reset time '{}'", window.reset_time))?;
+        windows.push(UsageWindow {
+            span,
+            percent: (window.used_ratio * 100.0).round().clamp(0.0, 100.0) as u32,
+            resets_at,
+        });
+    }
+    Ok(Usage { windows })
+}
+
+/// How much of a Kimi Code membership is used, from `GET <url>/usages`.
+pub async fn fetch_kimi(url: &str, token: &str) -> Result<Usage, String> {
+    let url = format!("{}/usages", url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("{url}: HTTP {}", response.status()));
+    }
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    parse_kimi(&body)
+}
+
 /// `<data_dir>/usage.json`: a subscription is the same in every repository, so its
 /// last known usage is not part of a repository's session.
 fn store_path() -> Option<Utf8PathBuf> {
@@ -223,6 +292,7 @@ pub fn save(usage: &HashMap<String, Usage>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::EndpointKind;
 
     fn text(pieces: &[(String, Option<u32>)]) -> String {
         pieces.iter().map(|(text, _)| text.as_str()).collect()
@@ -258,6 +328,100 @@ mod tests {
     fn go_answer_of_another_shape_is_an_error() {
         assert!(parse_go(r#"{"code":500,"success":false}"#).is_err());
         assert!(parse_go(r#"{"usage":{"rolling":{"percent":1,"resetsAt":"tomorrow"}}}"#).is_err());
+    }
+
+    #[test]
+    fn kimi_answer_gives_the_quota_windows_shortest_first() {
+        let body = r#"{
+            "limits": [
+                {
+                    "window": {"duration": 300, "timeUnit": "TIME_UNIT_MINUTE"},
+                    "detail": {
+                        "limit": "100",
+                        "used": "16",
+                        "remaining": "84",
+                        "resetTime": "2026-11-01T12:32:35.416426Z"
+                    }
+                }
+            ],
+            "usages": {
+                "limit_5h": {"used_ratio": 0.1561, "reset_time": "2026-11-01T12:32:35Z"},
+                "limit_7d": {"used_ratio": 0.2, "reset_time": "2026-11-07T00:00:00Z"},
+                "limit_month_total": {"used_ratio": 0.0192, "reset_time": "2026-12-02T00:00:00Z"},
+                "limit_month_code": {"used_ratio": 0.0192, "reset_time": "2026-12-02T00:00:00Z"}
+            }
+        }"#;
+        let usage = parse_kimi(body).expect("valid answer");
+        assert_eq!(
+            usage.windows,
+            [
+                UsageWindow {
+                    span: Span::FiveHours,
+                    percent: 16,
+                    resets_at: 1_793_536_355
+                },
+                UsageWindow {
+                    span: Span::Week,
+                    percent: 20,
+                    resets_at: 1_794_009_600
+                },
+                UsageWindow {
+                    span: Span::Month,
+                    percent: 2,
+                    resets_at: 1_796_169_600
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn kimi_answer_with_a_single_window_keeps_it() {
+        let body = r#"{
+            "usages": {
+                "limit_5h": {"used_ratio": 0.5, "reset_time": "2026-09-11T18:00:00Z"}
+            }
+        }"#;
+        let usage = parse_kimi(body).expect("valid answer");
+        assert_eq!(
+            usage.windows,
+            [UsageWindow {
+                span: Span::FiveHours,
+                percent: 50,
+                resets_at: 1_789_149_600
+            }]
+        );
+    }
+
+    #[test]
+    fn kimi_answer_of_another_shape_is_an_error() {
+        assert!(
+            parse_kimi(r#"{"usages":{"limit_5h":{"used_ratio":1,"reset_time":"tomorrow"}}}"#)
+                .is_err()
+        );
+        assert!(parse_kimi(
+            r#"{"usages":{"limit_5h":{"used_ratio":"half","reset_time":"2026-09-11T18:00:00Z"}}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn kimi_usage_empty_payload_is_an_error() {
+        assert!(parse_kimi("{}").is_err());
+        assert!(parse_kimi(r#"{"usages":null}"#).is_err());
+        assert!(parse_kimi(r#"{"usages":{}}"#).is_err());
+        assert!(parse_kimi(r#"{"usages":{"limit_5h":null}}"#).is_err());
+    }
+
+    #[test]
+    fn kimi_endpoint_names_its_subscription() {
+        assert!(matches!(
+            EndpointKind::KimiCode {
+                url: String::new(),
+                token: String::new(),
+            }
+            .usage_label(),
+            Some("Kimi")
+        ));
     }
 
     #[test]

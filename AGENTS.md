@@ -25,7 +25,7 @@ multiplexer (tmux), a TUI file manager (yazi/nnn), and — eventually — `tig`.
 Guiding principles:
 
 - **Get back to work fast, every day.** Session persistence is the north star:
-  Explorer saves and restores *everything that was running* — pane layout, open files,
+  Explorer saves and restores _everything that was running_ — pane layout, open files,
   live terminals, and highlights (see `src/session.rs`) — so a work session resumes
   instantly.
 - **Speed via whole-repo-in-memory.** The entire repository is walked in parallel and
@@ -48,19 +48,21 @@ integration, and native **git tooling** to replace `tig` (status, blame).
 ## Project Overview
 
 `explorer` is a Rust TUI workspace built around a git repository. Its core:
+
 1. Locates the nearest `.git` root from the current directory.
 2. Walks the entire repository tree in parallel (via `jwalk` + rayon), skipping `.git` and `target`.
 3. Loads every UTF-8 text file into memory as a `LoadedFile` struct, so preview and search need no disk read.
 4. Shows it as a stack of windows laid out by `PaneManager` (`src/tui/pane_manager.rs`): a `Window` is a file preview, a terminal, a git log, a commit diff, the conversation tree, a discussion, a report, or a picker. Files are not listed anywhere — `WindowPicker` (`<leader>space`) opens one by fuzzy name.
 
 Source is organized as:
+
 - `src/main.rs` — async entry point, wires CLI → loader → TUI
 - `src/cli.rs` — CLI argument parsing via `pico-args` (`--scan` prints the scan report and exits before the UI starts; `fmt-md [paths]`, the first argument only, formats markdown and exits, see `src/markdown_format.rs`)
-- `src/config.rs` — KDL configuration file parsing (theme, `keybindings` block, `counters` block, `agent` block with endpoints, `summary-model`, `subagent-model` and `review-rounds` (the most review rounds a commit turn runs on each commit, at least 1, default 3, filled into the `{review_rounds}` placeholder of `prompts/commit.md`); an endpoint's `kind` is `openai` when absent, `opencode-go` (its `url` defaults to OpenCode Go's) or `claude-code`); an `after-agents { grace-seconds <n> }` block (`AfterAgentsConfig`: grace default 5, 0 runs the command at once) and top-level `alias <name> "<command>"` lines (`Alias`, `Config.aliases`: a one-word, unique name; also the type of the project aliases of the session); `load_commands` reads the custom slash commands from `<config_dir>/commands/<name>.md` (a file that cannot make a command is logged and skipped); `load_roles` reads the sub-agent roles from `<config_dir>/agents/<name>.md` the same way; `load_auth` reads endpoint tokens from `<data_dir>/auth.kdl` and `resolve_agent` joins them (an endpoint without a token is logged and skipped)
+- `src/config.rs` — KDL configuration file parsing (theme, `keybindings` block, `counters` block, `agent` block with endpoints, `summary-model`, `subagent-model` and `review-rounds` (the most review rounds a commit turn runs on each commit, at least 1, default 3, filled into the `{review_rounds}` placeholder of `prompts/commit.md`); an endpoint's `kind` is `openai` when absent, `opencode-go` (its `url` defaults to OpenCode Go's), `kimi-code` (its `url` is required) or `claude-code`); an `after-agents { grace-seconds <n> }` block (`AfterAgentsConfig`: grace default 5, 0 runs the command at once) and top-level `alias <name> "<command>"` lines (`Alias`, `Config.aliases`: a one-word, unique name; also the type of the project aliases of the session); `load_commands` reads the custom slash commands from `<config_dir>/commands/<name>.md` (a file that cannot make a command is logged and skipped); `load_roles` reads the sub-agent roles from `<config_dir>/agents/<name>.md` the same way; `load_auth` reads endpoint tokens from `<data_dir>/auth.kdl` and `resolve_agent` joins them (an endpoint without a token is logged and skipped)
 - `src/conversation.rs` — the agent conversation tree: `NodeId` (a node's directory name), `Node`, `AgentRecord` (a sub-agent run of a node's turn, in `<node dir>/agents/<index>/`, never a node: `load_children` skips that directory, as it skips `processes/`, the logs of background commands; `agent_id` is `<node>/<index>`, `resumable_agent` accepts only runs of the asking node's lineage, `agent_chain` follows `resumed-from`), `Metadata` (flat `key: value` `metadata.md`), `ConversationTree` (metadata, titles and summaries only; prompts, replies and transcripts stay on disk), node creation/delete, `turn_context` (what a node's turn replays, cut off at the nearest compact node), table-of-contents pages and commit lookup for the agent's `conversation` tool
 - `src/markdown_format.rs` — the markdown formatter (`dprint-plugin-markdown` as a library, line breaks of prose kept): `format_markdown`, `is_formatted` (`.md` outside `vendor/`, `target/` and `tests/fixtures/`), `expand_directories` (a directory argument becomes the files git lists under it, ignored ones left out), `format_files` (in place, returns the files rewritten), `format_committed` (run when a commit turn ends: formats the markdown of the commits made and amends it into the newest, skipped while the tree is dirty); also behind the `explorer fmt-md [paths]` subcommand (default: the markdown changed in the working tree) and the `format_markdown` agent tool; a directory argument formats recursively
-- `src/agent/mod.rs` — `Mode` (feedback/commit: how a turn runs and closes, never a setting of a window), `ModelSpec` (`endpoint/model/effort`), `Endpoint`/`EndpointKind` (`OpenAi`, `OpenCodeGo`, `ClaudeCode`; `usage_label` names the subscription behind a kind, `None` for a plain OpenAI-compatible server), `Backend`, transcript `Message`
-- `src/agent/turn.rs` — turn lifecycle off the UI thread: `spawn` (with a `TurnProgress` redraw every `REDRAW_INTERVAL` while the turn runs), `spinner_frame` (shared by the tree marker and the Discussion status line), `run` (opens with `McpHost::snapshot`, the MCP tools of the turn and of its sub-agents), `Recorder` (live reply and work log, `reply.md`, `activity.md`, `transcript.jsonl`; a sub-agent's recorder also logs its tool calls, indented, in its caller's work log), `LiveTurn.subagent` (the `LiveSubagent` the turn is waiting for), running sub-agent records marked cancelled when the turn ends, commit-turn closing (commit range, hidden nudge, discard of what is left uncommitted), the post-turn title and summary (one commit-message-style call, `retitle`, also run by the tree pane), `report_usage` (after `TurnFinished`, whatever the status: sends `AppSignal::UsageFetched` with what the CLI last reported or what OpenCode Go answers)
+- `src/agent/mod.rs` — `Mode` (feedback/commit: how a turn runs and closes, never a setting of a window), `ModelSpec` (`endpoint/model/effort`), `Endpoint`/`EndpointKind` (`OpenAi`, `OpenCodeGo`, `KimiCode`, `ClaudeCode`; `usage_label` names the subscription behind a kind, `None` for a plain OpenAI-compatible server), `Backend`, transcript `Message`
+- `src/agent/turn.rs` — turn lifecycle off the UI thread: `spawn` (with a `TurnProgress` redraw every `REDRAW_INTERVAL` while the turn runs), `spinner_frame` (shared by the tree marker and the Discussion status line), `run` (opens with `McpHost::snapshot`, the MCP tools of the turn and of its sub-agents), `Recorder` (live reply and work log, `reply.md`, `activity.md`, `transcript.jsonl`; a sub-agent's recorder also logs its tool calls, indented, in its caller's work log), `LiveTurn.subagent` (the `LiveSubagent` the turn is waiting for), running sub-agent records marked cancelled when the turn ends, commit-turn closing (commit range, hidden nudge, discard of what is left uncommitted), the post-turn title and summary (one commit-message-style call, `retitle`, also run by the tree pane), `report_usage` (after `TurnFinished`, whatever the status: sends `AppSignal::UsageFetched` with what the CLI last reported or what OpenCode Go or Kimi Code answers)
 - `src/agent/llm.rs` — the only file importing `genai`: streaming chat with tool calls (missing or empty arguments become `{}`, so the transcript replays an object), one-shot completion
 - `src/agent/agent_loop.rs` — our own agent loop for OpenAI-compatible endpoints; `run` returns a boxed future, since an `agent` call runs the loop again for the sub-agent, and takes the run's time budget (start and duration, `None` for turns), injecting wrap-up nudges like the language correction: one soft at deadline − min(2 minutes, half the budget), then a firm one every round past the deadline; `repair_tail` answers the dangling tool calls of a transcript cut inside a round, so a `/continue` can replay it; a round that dies mid-stream flushes what had streamed into the transcript as an incomplete assistant message
 - `src/agent/subagent.rs` — sub-agents of own-loop turns: the `agent` tool (`spec` lists the `Role`s, `describe` is its work-log line), `Role` (`<config_dir>/agents/<name>.md`: metadata block with a required `description` and an optional `model` and `budget-minutes`, the soft time budget of one run, then the system prompt), `Subagents` (what a turn lends its sub-agents), `run` (records the run, runs it with no context of the caller on the role's model, then `subagent-model`, then the caller's; a resumed run keeps its model and replays its chain (without the feedback note when the caller is a commit turn), or forks its Claude Code session unless a commit caller resumes a run made under a feedback node; returns `agent_id: <id>` and the final answer, behind an over-budget note when the run reached its budget)
@@ -70,7 +72,7 @@ Source is organized as:
 - `src/agent/context.rs` — system prompts (from `prompts/*.md`), ancestor replay, handover preamble, `budget_note` (the run's budget, start and expiry, closing a budgeted run's system prompt; composed in `execute`, so every run names its own times), the notes Explorer injects (repository state, compaction, repository-moved), `strip_workspace_note` (what a commit turn replays carries no feedback note)
 - `src/agent/commands.rs` — slash commands: `Command` (a custom command file: optional metadata block between two `---` lines with `system-prompt: on | off`, `argument`, `description`, then the base prompt), expansion (`/compact`, `/commit` and `/continue` built in; `commit_prompt` is the go-ahead a `/commit` sends), `placeholder` (the hint for a draft that is a command name with nothing after it)
 - `src/agent/models.rs` — `GET <url>/models`
-- `src/agent/usage.rs` — subscription usage: `Usage` (its `UsageWindow`s: five hours, week, month; each a percent and a reset time), `fetch` (`GET <url>/usage` of OpenCode Go), `pieces` (the status-bar entry, `Claude 22% 17:00 · 18% Thu 01:00`: local 24h reset times, a day of the month as an ordinal, `0%` and no time for a window past its reset), `load`/`save` of `<data_dir>/usage.json` (the last known usage by endpoint name, shared by every repository)
+- `src/agent/usage.rs` — subscription usage: `Usage` (its `UsageWindow`s: five hours, week, month; each a percent and a reset time), `fetch` (`GET <url>/usage` of OpenCode Go), `fetch_kimi` (`GET <url>/usages` of Kimi Code), `pieces` (the status-bar entry, `Claude 22% 17:00 · 18% Thu 01:00`: local 24h reset times, a day of the month as an ordinal, `0%` and no time for a window past its reset), `load`/`save` of `<data_dir>/usage.json` (the last known usage by endpoint name, shared by every repository)
 - `src/git.rs` — gix-backed git data: `load_log` (first-parent walk of HEAD or a resolved branch/tag ref, capped at `MAX_LOG_ENTRIES` entries in a `LogHistory`, plus `refs`: commit → branches/remote branches/tags map built by peeling every ref), `load_refs` (flat branch/tag list for the branch picker), `load_commit_diff` (unified text), `LogEntry`, `GitRef`/`RefKind`, `DiffLine`/`DiffKind`, `commit_type_prefix` (conventional-commit parsing), datetime + short-id helpers
 - `src/keymap.rs` — configurable top-level shortcuts: `Action` enum, `Keymap` mapping `KeyPress` → action per leader/global context, key-spec parsing, status-bar hint rendering; `<leader>Backspace` (`Action::SendToBack`, dispatched in `app.rs`) sends the focused window to the back; `<leader>f` (`Action::ToggleFavorite`, dispatched in `app.rs`) toggles the favorite of the node in focus: the one a Discussion window shows or the selected row of the Conversation Tree; `<leader>m` (`Action::OpenModelPicker`, dispatched in `app.rs`) opens the Model Picker for the Discussion window in focus; `<leader>:` (`Action::OpenCommandLine`, dispatched in `app.rs`) opens the global command line
 - `src/loader.rs` — parallel file walking and `LoadedFile` construction; `word_bounds` (the word, URL or whitespace run around a byte) and `drag_range` (a drag from a clicked word to the word under the mouse), shared by every text selection
@@ -182,40 +184,41 @@ cargo test <module>::<test_name>
 
 ## Dependencies
 
-| Crate                  | Version | Purpose                                                        |
-|------------------------|---------|----------------------------------------------------------------|
-| `arc-swap`             | 1.x     | Lock-free atomic swap for the shared file list (`Arc<ArcSwap<Vec<Arc<LoadedFile>>>>`) |
-| `camino`               | 1.x     | UTF-8–typed path types (`Utf8PathBuf`, etc.)                   |
-| `directories`          | 5.x     | XDG Base Directory resolution for config and session storage   |
-| `dprint-core`          | 0.71.x  | Newline configuration of the markdown formatter                |
-| `dprint-plugin-markdown` | 0.28.x | In-process markdown formatting (`src/markdown_format.rs`)     |
-| `futures-util`         | 0.3.x   | Reading `genai`'s chat stream                                  |
-| `genai`                | 0.6.x   | LLM wire client for OpenAI-compatible endpoints (only in `src/agent/llm.rs`) |
-| `gix`                  | 0.87.x  | Git data (log walk, tree diff, blob unified diff); pure Rust   |
-| `hex`                  | 0.4.x   | Hex encoding for session filename hashes                       |
-| `jwalk`                | 0.8.x   | Parallel directory traversal (uses rayon)                      |
-| `kdl`                  | 6.x     | KDL config file parsing                                        |
-| `libc`                 | 0.2.x   | PTY/OS-level syscalls used by terminal emulation               |
-| `lsp-types`            | 0.97.x  | Typed LSP protocol structs (with `proposed` feature)           |
-| `miette`               | 7.x     | Error reporting                                                |
-| `notify`               | 8.x     | Filesystem event watching (used in `watcher.rs`)               |
-| `nucleo`               | 0.5.x   | Fuzzy matching for paths and file content                      |
-| `parking_lot`          | 0.12.x  | Poison-free `Mutex`/`RwLock` primitives (used for shared panes, file data) |
-| `pico-args`            | 0.5.x   | Lightweight CLI argument parsing (no proc macros)              |
-| `r3bl_tui`             | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
-| `reqwest`              | 0.12.x  | Model list fetch from OpenAI-compatible endpoints              |
-| `serde`                | 1.x     | Derive macros for serialization (`derive` feature)             |
-| `serde_json`           | 1.x     | JSON-RPC message serialization for LSP protocol                |
-| `sha2`                 | 0.10.x  | Stable repo-root hashing for session filenames                 |
-| `toml`                 | 0.8.x   | Theme file parsing (`themes/*.toml`)                           |
-| `tokio`                | 1.x     | Async runtime required by `r3bl_tui`                           |
-| `tracing`              | 0.1.x   | Structured logging macros (`debug!`, `info!`, etc.)            |
-| `tracing-core`         | 0.1.x   | `LevelFilter` type used to configure `r3bl_tui` logger         |
-| `unicode-general-category` | 1.x | General category lookup for the scan rules                    |
-| `unicode-segmentation` | 1.x     | Word boundary detection in `input_line`                        |
-| `url`                  | 2.x     | URL parsing in `word_bounds` for cursor-based URL selection    |
+| Crate                      | Version | Purpose                                                                                    |
+| -------------------------- | ------- | ------------------------------------------------------------------------------------------ |
+| `arc-swap`                 | 1.x     | Lock-free atomic swap for the shared file list (`Arc<ArcSwap<Vec<Arc<LoadedFile>>>>`)      |
+| `camino`                   | 1.x     | UTF-8–typed path types (`Utf8PathBuf`, etc.)                                               |
+| `directories`              | 5.x     | XDG Base Directory resolution for config and session storage                               |
+| `dprint-core`              | 0.71.x  | Newline configuration of the markdown formatter                                            |
+| `dprint-plugin-markdown`   | 0.28.x  | In-process markdown formatting (`src/markdown_format.rs`)                                  |
+| `futures-util`             | 0.3.x   | Reading `genai`'s chat stream                                                              |
+| `genai`                    | 0.6.x   | LLM wire client for OpenAI-compatible endpoints (only in `src/agent/llm.rs`)               |
+| `gix`                      | 0.87.x  | Git data (log walk, tree diff, blob unified diff); pure Rust                               |
+| `hex`                      | 0.4.x   | Hex encoding for session filename hashes                                                   |
+| `jwalk`                    | 0.8.x   | Parallel directory traversal (uses rayon)                                                  |
+| `kdl`                      | 6.x     | KDL config file parsing                                                                    |
+| `libc`                     | 0.2.x   | PTY/OS-level syscalls used by terminal emulation                                           |
+| `lsp-types`                | 0.97.x  | Typed LSP protocol structs (with `proposed` feature)                                       |
+| `miette`                   | 7.x     | Error reporting                                                                            |
+| `notify`                   | 8.x     | Filesystem event watching (used in `watcher.rs`)                                           |
+| `nucleo`                   | 0.5.x   | Fuzzy matching for paths and file content                                                  |
+| `parking_lot`              | 0.12.x  | Poison-free `Mutex`/`RwLock` primitives (used for shared panes, file data)                 |
+| `pico-args`                | 0.5.x   | Lightweight CLI argument parsing (no proc macros)                                          |
+| `r3bl_tui`                 | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
+| `reqwest`                  | 0.12.x  | Model list fetch from OpenAI-compatible endpoints                                          |
+| `serde`                    | 1.x     | Derive macros for serialization (`derive` feature)                                         |
+| `serde_json`               | 1.x     | JSON-RPC message serialization for LSP protocol                                            |
+| `sha2`                     | 0.10.x  | Stable repo-root hashing for session filenames                                             |
+| `toml`                     | 0.8.x   | Theme file parsing (`themes/*.toml`)                                                       |
+| `tokio`                    | 1.x     | Async runtime required by `r3bl_tui`                                                       |
+| `tracing`                  | 0.1.x   | Structured logging macros (`debug!`, `info!`, etc.)                                        |
+| `tracing-core`             | 0.1.x   | `LevelFilter` type used to configure `r3bl_tui` logger                                     |
+| `unicode-general-category` | 1.x     | General category lookup for the scan rules                                                 |
+| `unicode-segmentation`     | 1.x     | Word boundary detection in `input_line`                                                    |
+| `url`                      | 2.x     | URL parsing in `word_bounds` for cursor-based URL selection                                |
 
 Planned feature areas and their likely dependencies:
+
 - **Git tooling** (remaining: status, blame — intended to replace `tig`; log and diff have shipped)
 - **AI tooling** integration: the conversation-tree agent chat has shipped; what remains is an architecture-walking tool and an in-repo export of the tree
 
@@ -233,7 +236,7 @@ Planned feature areas and their likely dependencies:
 - Types and traits: `UpperCamelCase`
 - Functions, methods, variables, modules: `snake_case`
 - Constants and statics: `SCREAMING_SNAKE_CASE`
-- No Hungarian notation. Name by what a thing *is*, not its type.
+- No Hungarian notation. Name by what a thing _is_, not its type.
 
 ### Imports
 
@@ -246,12 +249,12 @@ Planned feature areas and their likely dependencies:
 
 - **Always** use `camino::Utf8PathBuf` / `camino::Utf8Path` for paths stored in structs or passed between functions.
 - Use `std::path::PathBuf` only at FFI/OS boundaries (e.g., values returned by `std::env::current_dir` or `jwalk`), and convert to `Utf8PathBuf` as early as possible via `Utf8PathBuf::from_path_buf(p).ok()?`.
-- For filesystem *name comparisons* (not full paths), use `OsString` / `OsStr` directly — do not convert to `String` just to compare.
+- For filesystem _name comparisons_ (not full paths), use `OsString` / `OsStr` directly — do not convert to `String` just to compare.
 
 ### Error Handling
 
 - In functions that return `Option<T>`, propagate failures with `?` and return `None` for expected failure modes (file unreadable, non-UTF-8 path).
-- Use `.expect("message")` only for conditions that are truly unrecoverable programmer errors (e.g., `current_dir()` failing). The message should state *what invariant was violated*.
+- Use `.expect("message")` only for conditions that are truly unrecoverable programmer errors (e.g., `current_dir()` failing). The message should state _what invariant was violated_.
 - Never use `.unwrap()` except in tests or throwaway prototypes.
 - Do not add error handling for scenarios that cannot happen given the surrounding invariants.
 
@@ -307,14 +310,14 @@ Planned feature areas and their likely dependencies:
 - A background `shell` command never outlives its turn: the turn's `Background` is dropped, killing its process groups, before the turn is closed (the tree is reset), and the `read` tool stays confined to the repository, so the agent reads `<node dir>/processes/<n>.log` through `shell`.
 - No turn runs in a repository the user has not trusted (`AppState.trusted`, saved in the session, set by the command line's `trust`/`untrust`, and shown in the Conversation Tree's title). A refused turn says so and names `scan` then `trust`. A report is not a turn and never touches the conversation tree.
 - Every prompt requires a clean working tree, and only one turn runs at a time; a prompt sent meanwhile is queued. Every turn ends with a hard reset of the tree: a feedback turn's scratch work and a commit turn's leftovers are both discarded, so nothing of a turn survives outside the commits it made. A commit they make in a feedback turn is not recorded to the conversation, so feedback turns must not commit.
-- Subscription usage is only known for `claude-code` (pushed by the CLI while a turn runs) and `opencode-go` (asked once a turn has ended). OpenCode Zen is another product with another accounting: do not treat an endpoint as `opencode-go` because of its host. A new provider gets its own `EndpointKind`, never a probe of `<url>/usage` on plain `openai` endpoints.
+- Subscription usage is only known for `claude-code` (pushed by the CLI while a turn runs), `opencode-go` and `kimi-code` (asked once a turn has ended). OpenCode Zen is another product with another accounting: do not treat an endpoint as `opencode-go` because of its host. A new provider gets its own `EndpointKind`, never a probe of `<url>/usage` on plain `openai` endpoints.
 - The system prompt holds nothing that changes between turns. The repository state (root, date, HEAD) opens the user message as an Explorer note, together with the compaction and repository-moved notes: HEAD moves on every commit, and the endpoints cache on the longest common prefix, so a change ahead of the replayed ancestors throws the cache of the whole transcript away.
 
 ### Comments
 
 - Write no comments by default.
-- Add a comment only when the *why* is non-obvious: a hidden constraint, a subtle invariant, a workaround for a specific external bug.
-- Never describe *what* the code does — well-named identifiers already do that.
+- Add a comment only when the _why_ is non-obvious: a hidden constraint, a subtle invariant, a workaround for a specific external bug.
+- Never describe _what_ the code does — well-named identifiers already do that.
 - No multi-line comment blocks. One short line maximum.
 
 ### Pattern Matching
