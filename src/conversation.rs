@@ -250,12 +250,18 @@ pub struct AgentRecord {
     /// Starts at 1, in the order the runs started.
     pub index: u32,
     pub meta: Metadata,
+    /// What the summary model made of the run once it finished; `None` until then.
+    pub title: Option<String>,
 }
 
 impl AgentRecord {
-    /// `agent reviewer: description`, or `agent: description` for the default role:
+    /// What the summary model called the finished run; without one,
+    /// `agent reviewer: description`, or `agent: description` for the default role —
     /// the run as the work log of its node names it.
     pub fn title(&self) -> String {
+        if let Some(title) = &self.title {
+            return title.clone();
+        }
         let description = self
             .meta
             .description
@@ -299,9 +305,14 @@ fn read_agents(node_dir: &Utf8Path) -> Vec<AgentRecord> {
         .filter_map(|entry| {
             let index: u32 = entry.file_name().to_str()?.parse().ok()?;
             let dir = Utf8PathBuf::from_path_buf(entry.path()).ok()?;
+            let title = std::fs::read_to_string(dir.join("title.md"))
+                .ok()
+                .map(|text| single_line(&text))
+                .filter(|text| !text.is_empty());
             Some(AgentRecord {
                 index,
                 meta: read_meta(&dir),
+                title,
             })
         })
         .collect();
@@ -590,7 +601,11 @@ impl ConversationTree {
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("prompt.md"), prompt)?;
         write_atomic(&dir.join("metadata.md"), &meta.to_text())?;
-        owner.agents.push(AgentRecord { index, meta });
+        owner.agents.push(AgentRecord {
+            index,
+            meta,
+            title: None,
+        });
         Ok(index)
     }
 
@@ -609,6 +624,18 @@ impl ConversationTree {
             .ok_or_else(unknown_node)?;
         change(&mut agent.meta);
         write_atomic(&dir.join("metadata.md"), &agent.meta.to_text())
+    }
+
+    /// Sets the title of sub-agent run `index` of `node` in memory; `title.md` is
+    /// written by the task that asked the summary model, like a node's.
+    pub fn set_agent_title(&mut self, node: &NodeId, index: u32, title: String) {
+        if let Some(agent) = self
+            .nodes
+            .get_mut(node)
+            .and_then(|owner| owner.agents.iter_mut().find(|agent| agent.index == index))
+        {
+            agent.title = Some(title);
+        }
     }
 
     /// Marks the runs of `node` still running as cancelled: its turn is over, and a
@@ -1113,6 +1140,59 @@ mod tests {
             [(1, Some(NodeStatus::Done)), (2, Some(NodeStatus::Failed))]
         );
         assert_eq!(node.agents[0].title(), "agent reviewer: Review");
+    }
+
+    #[test]
+    fn a_run_is_titled_by_its_own_title_md_and_falls_back_to_the_description() {
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+        let parent = tree
+            .create_node(None, 86_401, Metadata::default(), "p", None)
+            .unwrap();
+        let meta = Metadata {
+            status: Some(NodeStatus::Done),
+            role: Some("reviewer-fixer".into()),
+            description: Some("Review round six".into()),
+            ..Default::default()
+        };
+        tree.create_agent(&parent, 86_402, meta.clone(), "task")
+            .unwrap();
+        assert_eq!(
+            tree.agent(&parent, 1).unwrap().title(),
+            "agent reviewer-fixer: Review round six"
+        );
+
+        let dir = tree.agent_dir(&parent, 1).unwrap();
+        std::fs::write(dir.join("title.md"), "One i18n fix left\nuncommitted\n").unwrap();
+        let reloaded = ConversationTree::load(&root);
+        assert_eq!(
+            reloaded.agent(&parent, 1).unwrap().title(),
+            "One i18n fix left uncommitted"
+        );
+
+        // An empty file is no title: the caller's description stands in.
+        std::fs::write(dir.join("title.md"), "  \n").unwrap();
+        let reloaded = ConversationTree::load(&root);
+        assert_eq!(
+            reloaded.agent(&parent, 1).unwrap().title(),
+            "agent reviewer-fixer: Review round six"
+        );
+    }
+
+    #[test]
+    fn setting_a_run_title_keeps_it_in_memory() {
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+        let parent = tree
+            .create_node(None, 86_401, Metadata::default(), "p", None)
+            .unwrap();
+        tree.create_agent(&parent, 86_402, Metadata::default(), "task")
+            .unwrap();
+        tree.set_agent_title(&parent, 1, "Nothing to fix".to_string());
+        assert_eq!(tree.agent(&parent, 1).unwrap().title(), "Nothing to fix");
+        // An unknown run is a no-op, not a panic.
+        tree.set_agent_title(&parent, 9, "Nowhere".to_string());
+        assert_eq!(tree.agent(&parent, 1).unwrap().title(), "Nothing to fix");
     }
 
     #[test]

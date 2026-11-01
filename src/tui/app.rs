@@ -1755,6 +1755,12 @@ impl App for AppMain {
                 AppSignal::NodeRetitleEnded { node } => {
                     state.tree_view.retitling.remove(node);
                 }
+                AppSignal::AgentTitleReady { node, index, title } => {
+                    state
+                        .conversations
+                        .write()
+                        .set_agent_title(node, *index, title.clone());
+                }
                 AppSignal::NodeSummaryReady { node, summary } => {
                     state
                         .conversations

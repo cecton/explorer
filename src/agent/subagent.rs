@@ -2,7 +2,7 @@ use super::claude_code::{self, ClaudeTarget, Invocation, Resume, RunError};
 use super::commands::split_metadata;
 use super::llm::{LlmTarget, ToolSpec};
 use super::tools::ToolContext;
-use super::turn::{self, LiveSubagent, Recorder};
+use super::turn::{self, LiveSubagent, MainTx, Recorder};
 use super::usage::Usage;
 use super::{
     AgentConfig, Backend, Endpoint, EndpointKind, Message, Mode, ModelSpec, ToolCall, agent_loop,
@@ -12,6 +12,7 @@ use crate::conversation::{self, ConversationTree, Metadata, NodeId, NodeStatus, 
 use crate::tui::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
 use parking_lot::RwLock;
+use r3bl_tui::TerminalWindowMainThreadSignal;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -444,6 +445,14 @@ impl Outcome {
     fn error(&self) -> Option<&str> {
         self.result.as_ref().err().map(String::as_str)
     }
+
+    /// The status the record ends with.
+    fn status(&self) -> NodeStatus {
+        match &self.result {
+            Err(_) => NodeStatus::Failed,
+            Ok(()) => NodeStatus::Done,
+        }
+    }
 }
 
 /// The fallback run of a failed OpenAI-backed launch: a fresh record on `spec`'s
@@ -551,7 +560,14 @@ pub async fn run(
     let first_error = outcome.result.as_ref().err().cloned();
     match (first_error.as_deref(), launch.fallback.as_ref()) {
         (Some(error), Some(spec)) => {
-            conclude(context, subagents.repo.as_ref(), &outcome, recorder).await;
+            conclude(
+                context,
+                subagents,
+                subagents.repo.as_ref(),
+                &outcome,
+                recorder,
+            )
+            .await;
             match prepare_retry(context, &launch, spec, &subagents.config).await {
                 Ok(retry) => {
                     recorder.log(format!(
@@ -559,7 +575,14 @@ pub async fn run(
                         launch.spec, retry.spec
                     ));
                     let retried = execute(context, recorder, &retry, &retry.backend).await;
-                    conclude(context, subagents.repo.as_ref(), &retried, recorder).await;
+                    conclude(
+                        context,
+                        subagents,
+                        subagents.repo.as_ref(),
+                        &retried,
+                        recorder,
+                    )
+                    .await;
                     let retry_spec = retried.spec.clone();
                     let retry_error = retried.result.as_ref().err().cloned();
                     outcome = match retry_error {
@@ -580,7 +603,16 @@ pub async fn run(
                 }
             }
         }
-        _ => conclude(context, subagents.repo.as_ref(), &outcome, recorder).await,
+        _ => {
+            conclude(
+                context,
+                subagents,
+                subagents.repo.as_ref(),
+                &outcome,
+                recorder,
+            )
+            .await
+        }
     }
     turn::report_usage(
         outcome.endpoint.clone(),
@@ -620,6 +652,7 @@ pub async fn run(
 /// session on disk, and a `SubagentFinished` for the tree and open windows.
 async fn conclude(
     context: &ToolContext,
+    subagents: &Subagents,
     repo: Option<&gix::ThreadSafeRepository>,
     outcome: &Outcome,
     recorder: &mut Recorder,
@@ -629,10 +662,7 @@ async fn conclude(
         .tree
         .write()
         .update_agent_meta(&context.node, outcome.index, |meta| {
-            meta.status = Some(match &outcome.result {
-                Err(_) => NodeStatus::Failed,
-                Ok(()) => NodeStatus::Done,
-            });
+            meta.status = Some(outcome.status());
             meta.error = outcome.error().map(str::to_string);
             meta.secs = Some(outcome.secs);
             meta.head_after = repo.and_then(crate::git::head_id);
@@ -643,12 +673,87 @@ async fn conclude(
     if let Err(e) = updated {
         tracing::warn!("failed to save the outcome of sub-agent {id}: {e}");
     }
+    title_run(context, subagents, outcome, recorder.main_tx());
     recorder
         .send(AppSignal::SubagentFinished {
             node: context.node.clone(),
             index: outcome.index,
         })
         .await;
+}
+
+/// Asks the summary model what the finished run came to, and writes its answer as the
+/// run's `title.md`. Detached: the caller is waiting on the run's answer, which the
+/// title does not belong to.
+fn title_run(context: &ToolContext, subagents: &Subagents, outcome: &Outcome, main_tx: MainTx) {
+    let Some(backend) = title_backend(subagents, outcome) else {
+        return;
+    };
+    let (node, index) = (context.node.clone(), outcome.index);
+    let session = conversation::agent_id(&node, index);
+    let dir = match context.tree.read().agent_dir(&node, index) {
+        Some(dir) => dir,
+        None => return,
+    };
+    let reply = outcome.reply.clone();
+    tokio::spawn(async move {
+        let task = std::fs::read_to_string(dir.join("prompt.md")).unwrap_or_default();
+        let input = run_title_input(&task, &reply);
+        let answer = match turn::complete(
+            &backend,
+            &session,
+            context::SUBAGENT_TITLE_PROMPT,
+            &input,
+        )
+        .await
+        {
+            Ok(answer) => answer,
+            Err(e) => {
+                tracing::warn!("title generation for sub-agent {session} failed: {e}");
+                return;
+            }
+        };
+        let Some((title, _)) = turn::parse_title_and_summary(&answer) else {
+            tracing::warn!("title generation for sub-agent {session} returned no title");
+            return;
+        };
+        if let Err(e) = conversation::write_atomic(&dir.join("title.md"), &title) {
+            tracing::warn!("failed to write the title of sub-agent {session}: {e}");
+        }
+        let _ = main_tx
+            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                AppSignal::AgentTitleReady { node, index, title },
+            ))
+            .await;
+    });
+}
+
+/// The backend that titles a finished run, or `None` when the run has nothing to
+/// describe or no summary model is configured.
+fn title_backend(subagents: &Subagents, outcome: &Outcome) -> Option<Backend> {
+    if !conversation::has_content(&outcome.reply) {
+        return None;
+    }
+    subagents
+        .config
+        .summary_model
+        .as_ref()
+        .and_then(|summary| subagents.config.backend(summary))
+}
+
+/// What the summary model reads for one run: the task and the end of its answer. The
+/// task says what was asked; the end of the answer is where the run's verdict is.
+fn run_title_input(task: &str, reply: &str) -> String {
+    let reply = match reply.char_indices().rev().nth(turn::REPLY_MAX_CHARS - 1) {
+        Some((start, _)) => &reply[start..],
+        None => reply,
+    };
+    format!(
+        "<task>\n{}\n</task>\n\n<reply>\n{}\n</reply>\n\n\
+         Write the title of the run recorded above.\n",
+        task.trim(),
+        reply.trim()
+    )
 }
 
 /// What the caller gets back before a fallback run's answer: the primary spec, its
@@ -820,6 +925,85 @@ mod tests {
         let call = json!({"role": "reviewer", "description": "Review it\nsecond line"});
         assert_eq!(describe(&call), "agent reviewer: Review it");
         assert_eq!(describe(&json!({"description": "Fix"})), "agent: Fix");
+    }
+
+    #[test]
+    fn only_a_finished_run_with_something_to_describe_and_a_summary_model_is_titled() {
+        let config = |summary: Option<ModelSpec>| Subagents {
+            config: Arc::new(AgentConfig {
+                endpoints: vec![Endpoint {
+                    name: "router".to_string(),
+                    kind: EndpointKind::OpenAi {
+                        url: "https://r".to_string(),
+                        token: "sk-or".to_string(),
+                    },
+                }],
+                summary_model: summary,
+                ..Default::default()
+            }),
+            mode: Mode::Commit,
+            date: "2026-11-01".to_string(),
+            repo: None,
+            spec: ModelSpec::parse("router/x/low").unwrap(),
+        };
+        let outcome = |result: Result<(), String>, reply: &str| Outcome {
+            index: 1,
+            spec: ModelSpec::parse("router/x/low").unwrap(),
+            endpoint: Endpoint {
+                name: "router".to_string(),
+                kind: EndpointKind::OpenAi {
+                    url: "https://r".to_string(),
+                    token: "sk-or".to_string(),
+                },
+            },
+            result,
+            reply: reply.to_string(),
+            secs: 1,
+            tokens_in: None,
+            cached_in: None,
+            session_id: None,
+            usage: None,
+        };
+        let summary = Some(ModelSpec::parse("router/x/low").unwrap());
+
+        // A finished run with an answer, and a summary model to ask.
+        assert!(title_backend(&config(summary.clone()), &outcome(Ok(()), "done")).is_some());
+        // Nothing to describe: an empty answer, whatever the status.
+        assert!(title_backend(&config(summary.clone()), &outcome(Ok(()), "  ")).is_none());
+        assert!(title_backend(&config(summary.clone()), &outcome(Err("x".into()), "")).is_none());
+        // A failed run that still answered is described like any other.
+        assert!(
+            title_backend(
+                &config(summary.clone()),
+                &outcome(Err("x".into()), "half an answer")
+            )
+            .is_some()
+        );
+        // No summary model, nothing asked.
+        assert!(title_backend(&config(None), &outcome(Ok(()), "done")).is_none());
+        // An endpoint without a token resolves to no backend.
+        let unknown = Some(ModelSpec::parse("gone/x/low").unwrap());
+        assert!(title_backend(&config(unknown), &outcome(Ok(()), "done")).is_none());
+    }
+
+    #[test]
+    fn the_run_input_keeps_the_end_of_a_long_answer() {
+        let reply = format!("{}\nVerdict: merge.", "x".repeat(20_000));
+        let input = run_title_input("Review it", &reply);
+        assert!(input.starts_with("<task>\nReview it\n</task>\n\n<reply>\n"));
+        assert!(input.ends_with(
+            "Verdict: merge.\n</reply>\n\nWrite the title of the run recorded above.\n"
+        ));
+        assert!(input.len() < 20_000);
+        // The cap counts characters, and never splices one, as the node path's does.
+        let multibyte = "é".repeat(turn::REPLY_MAX_CHARS + 10);
+        let input = run_title_input("Task", &multibyte);
+        assert_eq!(input.matches('é').count(), turn::REPLY_MAX_CHARS);
+        assert_eq!(
+            run_title_input("Task", "Short."),
+            "<task>\nTask\n</task>\n\n<reply>\nShort.\n</reply>\n\n\
+             Write the title of the run recorded above.\n"
+        );
     }
 
     #[test]

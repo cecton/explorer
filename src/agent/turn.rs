@@ -24,7 +24,7 @@ const PROGRESS_SIGNAL_INTERVAL: Duration = Duration::from_millis(80);
 pub const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
 const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const TITLE_MAX_CHARS: usize = 100;
-const REPLY_MAX_CHARS: usize = 8000;
+pub(super) const REPLY_MAX_CHARS: usize = 8000;
 const COMMITS_MAX: usize = 20;
 /// Times a commit turn is asked to commit what it left behind before Explorer discards it.
 const MAX_NUDGES: usize = 2;
@@ -33,7 +33,7 @@ pub const TOOL_LINE_PREFIX: &str = "- ";
 /// Sets a sub-agent's tool calls apart in the work log of the turn that called it.
 const SUBAGENT_INDENT: &str = "  ";
 
-type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
+pub(super) type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
 
 /// What a running turn has produced so far, read by Discussion windows at render time.
 #[derive(Default)]
@@ -984,7 +984,7 @@ fn title_input(prompt: &str, reply: &str, commits: &[String]) -> String {
 }
 
 /// Splits the model's answer into the title (first line) and the summary (the rest).
-fn parse_title_and_summary(answer: &str) -> Option<(String, String)> {
+pub(super) fn parse_title_and_summary(answer: &str) -> Option<(String, String)> {
     let answer = answer.trim();
     let (first, rest) = answer.split_once('\n').unwrap_or((answer, ""));
     let title: String = single_line(first).chars().take(TITLE_MAX_CHARS).collect();
@@ -992,7 +992,7 @@ fn parse_title_and_summary(answer: &str) -> Option<(String, String)> {
 }
 
 /// One answer without tools from the summary model.
-async fn complete(
+pub(super) async fn complete(
     backend: &Backend,
     session: &str,
     system: &str,

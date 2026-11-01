@@ -952,6 +952,12 @@ pub enum AppSignal {
     NodeRetitleEnded {
         node: NodeId,
     },
+    /// `title.md` of sub-agent run `index` of `node` was written.
+    AgentTitleReady {
+        node: NodeId,
+        index: u32,
+        title: String,
+    },
     /// `summary.md` of `node` was written.
     NodeSummaryReady {
         node: NodeId,

@@ -6,6 +6,8 @@ const FEEDBACK_PROMPT: &str = include_str!("../../prompts/feedback.md");
 const COMMIT_PROMPT: &str = include_str!("../../prompts/commit.md");
 const CONVERSATION_TOOL_PROMPT: &str = include_str!("../../prompts/conversation_tool.md");
 pub const TITLE_SUMMARY_PROMPT: &str = include_str!("../../prompts/title_summary.md");
+/// System prompt of the one-shot call that titles a finished sub-agent run.
+pub const SUBAGENT_TITLE_PROMPT: &str = include_str!("../../prompts/subagent_title.md");
 const COMPACT_PROMPT: &str = include_str!("../../prompts/compact.md");
 /// System prompt of a sub-agent called without a role.
 pub const SUBAGENT_PROMPT: &str = include_str!("../../prompts/subagent.md");
