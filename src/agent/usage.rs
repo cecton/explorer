@@ -43,8 +43,20 @@ pub struct KeyMoney {
     /// What is left of the limit. Never shown: it only colors the limit by how much
     /// of it is spent.
     pub remaining: Option<u64>,
-    /// `daily`, `weekly` or `monthly`, `None` for a limit that never resets.
+    /// `daily`, `weekly` or `monthly`, `None` for a limit that never resets. A key
+    /// whose limit was removed keeps reporting one, so this never stands alone.
     pub resets: Option<String>,
+    /// What is left of the account's credit; shown instead of the limit when the key
+    /// has none, which is the only case that fetches it.
+    pub credit: Option<Credit>,
+}
+
+/// What is left of the account's purchased credit: `left` of `total`, the purchases
+/// that paid for it. Micro-dollars like [`KeyMoney`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Credit {
+    pub left: u64,
+    pub total: u64,
 }
 
 impl UsageWindow {
@@ -117,7 +129,8 @@ impl Usage {
     /// The status-bar entry of the OpenRouter key named `label`, as the pieces of
     /// `label $0.50 · $1.00 daily`: the credit the key has spent, then its limit and
     /// the window that limit counts over. The limit carries the percent of it spent,
-    /// for its color; a key without a limit states what it has spent alone.
+    /// for its color; a key without a limit states what is left of the account's
+    /// credit instead, and one without a credit states what it has spent alone.
     pub fn money_pieces(&self, label: &str) -> Vec<(String, Option<u32>)> {
         let Some(key) = &self.key else {
             return Vec::new();
@@ -133,6 +146,12 @@ impl Usage {
             if let Some(resets) = &key.resets {
                 pieces.push((format!(" {resets}"), None));
             }
+        } else if let Some(credit) = key.credit {
+            pieces.push((
+                format!(" · {}", money(credit.left)),
+                Some(percent_spent(credit.left, credit.total)),
+            ));
+            pieces.push((" left".to_string(), None));
         }
         pieces.push((" ".to_string(), None));
         pieces
@@ -670,9 +689,44 @@ mod tests {
                 limit: Some(1_000_000),
                 remaining: Some(999_277),
                 resets: Some("daily".to_string()),
+                credit: None,
             })
         );
         assert!(usage.windows.is_empty());
+    }
+
+    #[test]
+    fn openrouter_answer_of_a_key_without_a_limit_keeps_its_window_word() {
+        // A key whose limit was removed: `limit_reset` stays, so the entry is keyed on
+        // the limit alone and shows the spend without the account credit it never got.
+        let body = r#"{"data":{"label":"sk-or-v1-483...f01","limit":null,"limit_reset":"daily","limit_remaining":null,"usage":0.00072304,"budgets":[],"effective_budget":null}}"#;
+        let usage = parse_openrouter(body).expect("valid answer");
+        let key = usage.key.as_ref().expect("key money");
+        assert_eq!(key.limit, None);
+        assert_eq!(key.resets.as_deref(), Some("daily"));
+        assert_eq!(
+            text(&usage.money_pieces("OpenRouter")),
+            "│ OpenRouter $0.00 "
+        );
+    }
+
+    #[test]
+    fn openrouter_credits_state_what_is_left_of_the_account() {
+        let body = r#"{"data":{"total_credits":170,"total_usage":150.686801757}}"#;
+        let credit = parse_credit(body).expect("valid answer");
+        assert_eq!(
+            credit,
+            Credit {
+                left: 19_313_198,
+                total: 170_000_000,
+            }
+        );
+    }
+
+    #[test]
+    fn openrouter_credits_of_another_shape_is_an_error() {
+        assert!(parse_credit(r#"{"data":{"total_credits":170}}"#).is_err());
+        assert!(parse_credit(r#"{"code":500}"#).is_err());
     }
 
     #[test]
@@ -690,6 +744,7 @@ mod tests {
                 limit: Some(1_000_000),
                 remaining: Some(500_000),
                 resets: Some("daily".to_string()),
+                credit: None,
             }),
         };
         let pieces = usage.money_pieces("OpenRouter");
@@ -697,6 +752,48 @@ mod tests {
         // Only the limit carries a percent, for its color.
         let percents: Vec<Option<u32>> = pieces.iter().map(|(_, percent)| *percent).collect();
         assert_eq!(percents, [None, None, Some(50), None, None]);
+    }
+
+    #[test]
+    fn a_key_without_a_limit_states_what_is_left_of_the_account_credit() {
+        let usage = Usage {
+            windows: Vec::new(),
+            key: Some(KeyMoney {
+                spent: 723,
+                limit: None,
+                remaining: None,
+                resets: Some("daily".to_string()),
+                credit: Some(Credit {
+                    left: 19_313_198,
+                    total: 170_000_000,
+                }),
+            }),
+        };
+        let pieces = usage.money_pieces("OpenRouter");
+        assert_eq!(text(&pieces), "│ OpenRouter $0.00 · $19.31 left ");
+        // The credit carries the percent of the purchased credit spent, for its color.
+        assert_eq!(pieces[2].1, Some(88));
+    }
+
+    #[test]
+    fn a_limit_wins_over_the_account_credit() {
+        let usage = Usage {
+            windows: Vec::new(),
+            key: Some(KeyMoney {
+                spent: 500_000,
+                limit: Some(1_000_000),
+                remaining: Some(500_000),
+                resets: Some("daily".to_string()),
+                credit: Some(Credit {
+                    left: 19_313_198,
+                    total: 170_000_000,
+                }),
+            }),
+        };
+        assert_eq!(
+            text(&usage.money_pieces("OpenRouter")),
+            "│ OpenRouter $0.50 · $1.00 daily "
+        );
     }
 
     #[test]
@@ -708,6 +805,7 @@ mod tests {
                 limit: None,
                 remaining: None,
                 resets: None,
+                credit: None,
             }),
         };
         assert_eq!(
@@ -725,6 +823,7 @@ mod tests {
                 limit: Some(1_000_000),
                 remaining: Some(250_000),
                 resets: None,
+                credit: None,
             }),
         };
         let pieces = usage.money_pieces("OpenRouter");
@@ -878,6 +977,17 @@ struct OpenRouterKey {
     limit_reset: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct CreditsReply {
+    data: Credits,
+}
+
+#[derive(Deserialize)]
+struct Credits {
+    total_credits: f64,
+    total_usage: f64,
+}
+
 /// What an OpenRouter key reports of its own spending, from the answer of its `key`
 /// request: what it has cost, and the limit it enforces.
 fn parse_openrouter(body: &str) -> Result<Usage, String> {
@@ -889,20 +999,30 @@ fn parse_openrouter(body: &str) -> Result<Usage, String> {
             limit: reply.data.limit.map(micros),
             remaining: reply.data.limit_remaining.map(micros),
             resets: reply.data.limit_reset,
+            credit: None,
         }),
     })
 }
 
-/// What an OpenRouter key has cost and where its limit stands, from `GET <url>/key`.
-/// The plain inference key answers this; no management key is needed.
-pub async fn fetch_openrouter(url: &str, token: &str) -> Result<Usage, String> {
-    let url = format!("{}/key", url.trim_end_matches('/'));
+/// What is left of the account's purchased credit, from the answer of its `credits`
+/// request.
+fn parse_credit(body: &str) -> Result<Credit, String> {
+    let reply: CreditsReply = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    let total = micros(reply.data.total_credits);
+    Ok(Credit {
+        left: total.saturating_sub(micros(reply.data.total_usage)),
+        total,
+    })
+}
+
+/// The body of `GET url` with the bearer `token`, or why it failed.
+async fn get(url: &str, token: &str) -> Result<String, String> {
     let client = reqwest::Client::builder()
         .timeout(Duration::from_secs(20))
         .build()
         .map_err(|e| e.to_string())?;
     let response = client
-        .get(&url)
+        .get(url)
         .bearer_auth(token)
         .send()
         .await
@@ -910,6 +1030,24 @@ pub async fn fetch_openrouter(url: &str, token: &str) -> Result<Usage, String> {
     if !response.status().is_success() {
         return Err(format!("{url}: HTTP {}", response.status()));
     }
-    let body = response.text().await.map_err(|e| e.to_string())?;
-    parse_openrouter(&body)
+    response.text().await.map_err(|e| e.to_string())
+}
+
+/// What an OpenRouter key has cost and where its limit stands, from `GET <url>/key`.
+/// The plain inference key answers this; no management key is needed. A key without a
+/// limit also gets what is left of the account's credit, from `GET <url>/credits`; a
+/// failure of that second request is only logged.
+pub async fn fetch_openrouter(url: &str, token: &str) -> Result<Usage, String> {
+    let base = url.trim_end_matches('/');
+    let mut usage = parse_openrouter(&get(&format!("{base}/key"), token).await?)?;
+    if usage.key.as_ref().is_some_and(|key| key.limit.is_none()) {
+        let credit = get(&format!("{base}/credits"), token)
+            .await
+            .and_then(|body| parse_credit(&body))
+            .map_err(|e| tracing::warn!("credits of '{base}' failed: {e}"));
+        if let (Ok(credit), Some(key)) = (credit, usage.key.as_mut()) {
+            key.credit = Some(credit);
+        }
+    }
+    Ok(usage)
 }
