@@ -228,15 +228,21 @@ pub fn compact_request(instructions: &str) -> String {
 }
 
 /// What a `/continue` turn asks the model: the state of the interrupted turn of the
-/// node it replays, then how to go on. `interrupted` is how the turn ended,
-/// `discarded` whether the uncommitted work of that turn was discarded when it ended.
-pub fn continue_request(interrupted: &str, discarded: bool, instructions: &str) -> String {
-    let mut note = format!(
-        "[Note from Explorer: your previous turn on this conversation was interrupted: \
-         {interrupted}. Everything above is what you did and said before the \
-         interruption. Continue where you left off; if the failure came from something \
-         in your approach, adapt."
-    );
+/// node it replays, then how to go on. `interrupted` is how the turn ended, `None` for
+/// one that ran to completion; `discarded` whether the uncommitted work of that turn
+/// was discarded when it ended.
+pub fn continue_request(interrupted: Option<&str>, discarded: bool, instructions: &str) -> String {
+    let mut note = match interrupted {
+        Some(interrupted) => format!(
+            "[Note from Explorer: your previous turn on this conversation was interrupted: \
+             {interrupted}. Everything above is what you did and said before the \
+             interruption. Continue where you left off; if the failure came from something \
+             in your approach, adapt."
+        ),
+        None => "[Note from Explorer: your previous turn on this conversation ran to its \
+                 end. Everything above is what you did and said. Carry on from there."
+            .to_string(),
+    };
     if discarded {
         note.push_str(
             " The changes that turn left uncommitted were discarded when it ended: the \
@@ -378,7 +384,7 @@ mod tests {
 
     #[test]
     fn continue_request_reports_the_interruption_and_the_discarded_work() {
-        let bare = continue_request("rate limited", true, "  ");
+        let bare = continue_request(Some("rate limited"), true, "  ");
         assert!(bare.starts_with("[Note from Explorer:"));
         assert!(bare.contains("was interrupted: rate limited."));
         assert!(bare.contains("discarded"));
@@ -386,12 +392,17 @@ mod tests {
         assert!(!bare.contains("stash"));
         assert!(bare.ends_with("made.]"));
 
-        let kept = continue_request("boom", false, "");
+        let kept = continue_request(Some("boom"), false, "");
         assert!(kept.contains("nothing was lost"));
         assert!(!kept.contains("discarded"));
 
-        let extra = continue_request("boom", true, " skip the refactor");
+        let extra = continue_request(Some("boom"), true, " skip the refactor");
         assert!(extra.ends_with("Additional instructions from the user: skip the refactor"));
+
+        // A turn that ran to its end was not interrupted, and the note says so.
+        let done = continue_request(None, false, "");
+        assert!(done.contains("ran to its end"));
+        assert!(!done.contains("interrupted"));
     }
 
     #[test]

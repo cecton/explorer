@@ -25,6 +25,18 @@ impl ModelPickerComponent {
         main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
         purpose: ModelPickerPurpose,
     ) {
+        // The model of a window whose turn is running is settled for the whole turn:
+        // the turn already runs on it, and the node records the model it ran on. Once
+        // the turn is over the reasoning on disk resumes on whatever is picked here.
+        if let ModelPickerPurpose::Window(id) = purpose
+            && crate::tui::discussion_pane::window_is_running(state, id)
+        {
+            if let Some(discussion) = state.discussions.get_mut(&id) {
+                discussion.notice =
+                    Some("this turn is running: its model is fixed until it ends".to_string());
+            }
+            return;
+        }
         for endpoint in &state.agent.endpoints {
             if matches!(state.models.lists.get(&endpoint.name), Some(Err(_))) {
                 fetch_models(endpoint, main_tx.clone());

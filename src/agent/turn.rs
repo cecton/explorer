@@ -722,9 +722,11 @@ async fn run_claude_code(
         .await
         .map_err(|e| e.to_string())?
     };
-    // A continue turn owns the node's own session: the CLI kept its thinking and its
-    // tool state, so resuming it is the whole point. When it is gone, a fresh session
-    // opens with the ancestors as plain text.
+    // A continue turn starts from the node's own session, which holds its thinking and
+    // its tool state. It forks rather than appending in place: two resumes of one
+    // interrupted node are two independent branches of the tree, and a fork keeps them
+    // from reading each other's work. When the session is gone, a fresh one opens with
+    // the ancestors as plain text.
     if let Some(continue_session) = &request.continue_session {
         let run = claude_code::run(
             &invocation(
@@ -733,7 +735,7 @@ async fn run_claude_code(
                 target,
                 &system,
                 &message,
-                Resume::Continue(continue_session),
+                Resume::Fork(continue_session),
             ),
             recorder,
         )

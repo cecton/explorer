@@ -1731,12 +1731,11 @@ impl App for AppMain {
                     if let Err(e) = updated {
                         tracing::warn!("failed to save the outcome of {}: {e}", node.as_str());
                     }
-                    if outcome.status == crate::conversation::NodeStatus::Failed {
-                        DiscussionComponent::restore_prompt(state, node);
-                    }
+                    // A failed turn does not hand its prompt back: the input stays as the
+                    // user left it, and a message sent there resumes the turn.
+                    //
                     // What the user sent that the turn never read goes back to the input
-                    // rather than vanishing with it; after `restore_prompt`, which would
-                    // otherwise overwrite it with the node's prompt.
+                    // rather than vanishing with it.
                     if let Some(handle) = &finished {
                         DiscussionComponent::restore_injected(state, node, handle);
                     }

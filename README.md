@@ -109,6 +109,9 @@ node can be continued, so any node can be forked. Going back to an earlier point
 taking another direction keeps the first one. The same prompt can be replayed with
 another model as a sibling, for a second opinion. Each node gets a generated title and
 summary, so the tree of a repository reads like the history of how it was thought out.
+A turn that stopped — a rate limit, a failure, a cancel — keeps its reasoning: sending a
+message on that node resumes it where it left off, and `/continue` resumes it with
+nothing to add.
 
 **Two kinds of turn.** A prompt is a _feedback_ turn unless you say otherwise. The agent
 is then a teacher: it explains, gives its opinion, disagrees when it should, and may

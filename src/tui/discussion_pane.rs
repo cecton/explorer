@@ -266,13 +266,14 @@ pub(crate) fn start_turn(
         return Err(Refusal::Busy("this node is still running"));
     }
     // A continue turn replays the interrupted node's transcript: it is the one prompt
-    // that may build on an incomplete node, and only while it is a leaf. A cancelled
-    // node always cut short with something to show, so it is complete like a done one.
+    // that may build on an incomplete node. A cancelled node cut short with something to
+    // show is complete like a done one, so it takes children, and it takes a resume
+    // whatever it already has — a resume forks the node's session, so the branches stay
+    // independent. A failed node is only built on by a resume, never by a fresh child.
     let allowed = match parent_status {
-        None | Some(NodeStatus::Done | NodeStatus::Cancelled) => {
-            !continuing || !parent_has_children
-        }
+        None | Some(NodeStatus::Done) => !continuing || !parent_has_children,
         Some(NodeStatus::Failed) => continuing,
+        Some(NodeStatus::Cancelled) => true,
         Some(NodeStatus::Running) => false,
     };
     if !allowed {
@@ -367,6 +368,15 @@ pub(crate) fn start_turn(
 /// The model a node was run with, when its metadata names one completely.
 pub(crate) fn node_model(node: &Node) -> Option<ModelSpec> {
     node.meta.model_spec()
+}
+
+/// Whether the node shown by Discussion window `id` has a turn running.
+pub(crate) fn window_is_running(state: &AppState, id: usize) -> bool {
+    state
+        .discussions
+        .get(&id)
+        .and_then(|discussion| discussion.node.as_ref())
+        .is_some_and(|node| state.running_turns.contains_key(node))
 }
 
 /// The sub-agent run window `discussion` shows, while it runs.
@@ -496,6 +506,46 @@ fn move_queued(state: &mut AppState, window: usize, earlier: bool) {
     }
 }
 
+/// How the turn of `node` ended, for the note a resume sends: `None` when it ran to
+/// completion, since nothing was interrupted then.
+fn interrupted_of(node: &Node) -> Option<String> {
+    match node.meta.status {
+        Some(NodeStatus::Failed) => Some(
+            node.meta
+                .error
+                .clone()
+                .unwrap_or_else(|| "the turn ended without an error message".to_string()),
+        ),
+        Some(NodeStatus::Cancelled) => Some(crate::conversation::CANCELLED_ERROR.to_string()),
+        _ => None,
+    }
+}
+
+/// What a resume of `node` sends: how its turn ended, the mode it ran in, and whether
+/// its uncommitted work was discarded.
+fn resume_of(node: &Node) -> (Option<String>, Mode, bool) {
+    (
+        interrupted_of(node),
+        node_mode(node),
+        node.meta.scratch_reset,
+    )
+}
+
+/// Whether a plain message on the node window `id` shows resumes it, the way
+/// `/continue` does: its turn stopped without finishing, so the reasoning on disk is
+/// what the message builds on. A compact node is left out — it has no work to resume,
+/// and a resume would replay the summary request and read a summary that is not there.
+fn resumes_on_message(state: &AppState, discussion: &DiscussionState) -> bool {
+    discussion.node.as_ref().is_some_and(|node| {
+        state.conversations.read().node(node).is_some_and(|node| {
+            matches!(
+                node.meta.status,
+                Some(NodeStatus::Failed | NodeStatus::Cancelled)
+            ) && node.meta.node_type != Some(NodeType::Compact)
+        })
+    })
+}
+
 /// The turn the draft of window `id` asks for, as the window stands now: a new node
 /// below the node shown, or a sibling of it when its turn failed. A cancelled node
 /// cut short with something to show, so follow-ups build on it. `None` without a
@@ -507,6 +557,18 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
         return None;
     }
     let expansion = commands::expand(&typed, &state.agent.commands);
+    // A message sent to a node whose turn stopped for any reason resumes that turn, the
+    // way `/continue` does, rather than starting a sibling that knows nothing of it: the
+    // reasoning is on disk, and this is what builds on it. A slash command keeps its own
+    // meaning, since it says what to run rather than that the turn goes on.
+    let expansion = match expansion {
+        Expansion::Prompt { command: None, .. } if resumes_on_message(state, discussion) => {
+            Expansion::Continue {
+                instructions: typed.clone(),
+            }
+        }
+        other => other,
+    };
     let spec = discussion.model.clone()?;
     let continue_on_node = expansion.matches_command(commands::CONTINUE);
     let parent = {
@@ -536,20 +598,20 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
             };
             let (interrupted, mode, discarded) = {
                 let tree = state.conversations.read();
-                let resumed = tree.node(node)?;
-                let meta = &resumed.meta;
-                let interrupted = match meta.status {
-                    Some(NodeStatus::Failed) => meta
-                        .error
-                        .clone()
-                        .unwrap_or_else(|| "the turn ended without an error message".to_string()),
-                    Some(NodeStatus::Cancelled) => crate::conversation::CANCELLED_ERROR.to_string(),
-                    _ => "the turn stopped before an answer".to_string(),
+                let Some(resumed) = tree.node(node) else {
+                    return Some(Err(Refusal::Rejected(
+                        "the node to resume is gone".to_string(),
+                    )));
                 };
-                (interrupted, node_mode(resumed), meta.scratch_reset)
+                if resumed.meta.node_type == Some(NodeType::Compact) {
+                    return Some(Err(Refusal::Rejected(
+                        "a compact turn has no work to resume; send the message again".to_string(),
+                    )));
+                }
+                resume_of(resumed)
             };
             (
-                context::continue_request(&interrupted, discarded, &instructions),
+                context::continue_request(interrupted.as_deref(), discarded, &instructions),
                 Some(typed),
                 TurnKind::Continue(mode),
                 None,
@@ -1322,34 +1384,6 @@ impl DiscussionComponent {
         }
     }
 
-    /// Gives the prompt of `node`, whose turn failed, back to the windows showing it:
-    /// as it was typed, over whatever their input held, a queued follow-up included.
-    pub(crate) fn restore_prompt(state: &mut AppState, node: &NodeId) {
-        let Some(input) = state
-            .conversations
-            .read()
-            .node_dir(node)
-            .map(|dir| crate::conversation::read_input(&dir))
-        else {
-            return;
-        };
-        let shown: Vec<usize> = state
-            .discussions
-            .iter()
-            .filter(|(_, discussion)| {
-                discussion.node.as_ref() == Some(node) && discussion.agent.is_none()
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in shown {
-            drop_queue_entry(state, id);
-            if let Some(discussion) = state.discussions.get_mut(&id) {
-                discussion.draft.set_text(input.as_str());
-            }
-        }
-        state.mark_session_dirty();
-    }
-
     fn doc_lines(
         &mut self,
         discussion: &DiscussionState,
@@ -1594,6 +1628,16 @@ fn work_log_shown(tree: &ConversationTree, discussion: &DiscussionState) -> bool
             shown_meta(tree, discussion).is_some_and(|meta| meta.status == Some(NodeStatus::Done));
         !done || discussion.reply.trim().is_empty()
     })
+}
+
+/// Hint of the input of a window whose node's turn stopped: sending a message there
+/// resumes the turn, the way `/continue` does.
+fn resume_hint(state: &AppState, discussion: &DiscussionState) -> Option<String> {
+    if discussion.agent.is_some() || !discussion.draft.text().trim().is_empty() {
+        return None;
+    }
+    resumes_on_message(state, discussion)
+        .then(|| "sending a message resumes the interrupted turn".to_string())
 }
 
 /// Status line of window `id`: a refusal, the progress of a running turn, the place of
@@ -1903,7 +1947,8 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
 
             let (status, alert) = status_line(state, self.window_id, discussion);
             let read_only = discussion.agent.is_some();
-            let hint = commands::placeholder(discussion.draft.text(), &state.agent.commands);
+            let hint = commands::placeholder(discussion.draft.text(), &state.agent.commands)
+                .or_else(|| resume_hint(state, discussion));
             let input_rows = if read_only {
                 0
             } else {
@@ -2516,6 +2561,72 @@ mod tests {
         assert_eq!(state.discussions[&0].draft.text(), "again");
     }
 
+    #[tokio::test]
+    async fn a_resume_is_allowed_on_an_interrupted_node_that_already_has_children() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state.agent = agent_with_endpoint();
+        state.trusted = true;
+        // a2 already has a child, and its own turn failed.
+        let root = state
+            .conversations
+            .read()
+            .node_dir(&NodeId::new("a1"))
+            .unwrap()
+            .parent()
+            .unwrap()
+            .to_path_buf();
+        let dir = root.join("a1").join("a2");
+        std::fs::create_dir_all(dir.join("a3")).unwrap();
+        std::fs::write(dir.join("a3").join("metadata.md"), "status: done\n").unwrap();
+        *state.conversations.write() = ConversationTree::load(&root);
+        assert!(
+            !state
+                .conversations
+                .read()
+                .node(&NodeId::new("a2"))
+                .unwrap()
+                .children
+                .is_empty()
+        );
+
+        let (main_tx, _rx) = mpsc::channel(1);
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("go on");
+        let launch = compose_launch(&state, 1).unwrap().unwrap();
+        assert!(matches!(launch.kind, TurnKind::Continue(_)));
+        assert!(
+            start_turn(&mut state, main_tx, launch).is_ok(),
+            "a resume of an interrupted node with children must be allowed"
+        );
+    }
+
+    #[tokio::test]
+    async fn the_model_of_a_window_whose_turn_runs_cannot_be_changed() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state.agent = agent_with_endpoint();
+        state.trusted = true;
+        let (main_tx, _rx) = mpsc::channel(1);
+        let node = start_turn(&mut state, main_tx.clone(), feedback_launch()).unwrap();
+        state.discussions.get_mut(&0).unwrap().node = Some(node);
+
+        ModelPickerComponent::open(&mut state, main_tx, ModelPickerPurpose::Window(0));
+
+        assert!(
+            !state
+                .pane_manager
+                .window_stack
+                .contains(&Window::ModelPicker)
+        );
+        assert_eq!(
+            state.discussions[&0].notice.as_deref(),
+            Some("this turn is running: its model is fixed until it ends")
+        );
+    }
+
     #[test]
     fn ordinal_names_a_place_in_the_queue() {
         let places: Vec<String> = [1, 2, 3, 4, 11, 12, 13, 21, 22, 101, 111]
@@ -2775,20 +2886,131 @@ mod tests {
     }
 
     #[test]
-    fn a_failed_turn_gives_its_typed_prompt_back_over_the_draft() {
+    fn the_empty_input_of_an_interrupted_node_says_a_message_resumes_it() {
+        let (_tmp, state) = state_with_failed_child();
+        // Window 1 shows the failed a2; window 0 shows the done a1.
+        assert_eq!(
+            resume_hint(&state, &state.discussions[&1]).as_deref(),
+            Some("sending a message resumes the interrupted turn")
+        );
+        assert!(resume_hint(&state, &state.discussions[&0]).is_none());
+    }
+
+    #[test]
+    fn a_plain_message_on_a_failed_node_resumes_it() {
         let (_tmp, mut state) = state_with_failed_child();
-        for discussion in state.discussions.values_mut() {
-            discussion.draft.set_text("a follow-up");
-        }
-        queue(&mut state, &[1, 0]);
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("keep going, use the other parser");
+        let launch = compose_launch(&state, 1).unwrap().unwrap();
+        assert_eq!(launch.parent, Some(NodeId::new("a2")));
+        assert!(matches!(launch.kind, TurnKind::Continue(Mode::Feedback)));
+        assert!(launch.prompt.contains("was interrupted"));
+        assert_eq!(
+            launch.input.as_deref(),
+            Some("keep going, use the other parser")
+        );
+        assert!(launch.command.is_none());
 
-        DiscussionComponent::restore_prompt(&mut state, &NodeId::new("a2"));
+        // A slash command keeps its meaning: it runs as a sibling of the failed node.
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("/review bar");
+        let launch = compose_launch(&state, 1).unwrap().unwrap();
+        assert_eq!(launch.parent, Some(NodeId::new("a1")));
+        assert!(matches!(launch.kind, TurnKind::Prompt(Mode::Feedback)));
 
-        let shown = &state.discussions[&1];
-        assert_eq!(shown.draft.text(), "/review foo");
-        let other = &state.discussions[&0];
-        assert_eq!(other.draft.text(), "a follow-up");
-        assert_eq!(queued_windows(&state), [0]);
+        // A done node takes a child as before.
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("and now this");
+        let launch = compose_launch(&state, 0).unwrap().unwrap();
+        assert_eq!(launch.parent, Some(NodeId::new("a1")));
+        assert!(matches!(launch.kind, TurnKind::Prompt(Mode::Feedback)));
+    }
+
+    #[test]
+    fn a_message_on_a_cancelled_node_resumes_it() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state
+            .conversations
+            .write()
+            .update_meta(&NodeId::new("a2"), |meta| {
+                meta.status = Some(NodeStatus::Cancelled);
+            })
+            .unwrap();
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("go on");
+        let launch = compose_launch(&state, 1).unwrap().unwrap();
+        assert_eq!(launch.parent, Some(NodeId::new("a2")));
+        assert!(matches!(launch.kind, TurnKind::Continue(Mode::Feedback)));
+        assert!(launch.prompt.contains(crate::conversation::CANCELLED_ERROR));
+    }
+
+    #[test]
+    fn a_failed_commit_node_resumes_in_commit_mode() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state
+            .conversations
+            .write()
+            .update_meta(&NodeId::new("a2"), |meta| {
+                meta.node_type = Some(NodeType::Commit);
+            })
+            .unwrap();
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("go on");
+        let launch = compose_launch(&state, 1).unwrap().unwrap();
+        assert!(matches!(launch.kind, TurnKind::Continue(Mode::Commit)));
+    }
+
+    #[test]
+    fn a_message_on_a_failed_compact_node_does_not_resume_it() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state
+            .conversations
+            .write()
+            .update_meta(&NodeId::new("a2"), |meta| {
+                meta.node_type = Some(NodeType::Compact);
+            })
+            .unwrap();
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("try again");
+        let launch = compose_launch(&state, 1).unwrap().unwrap();
+        assert_eq!(launch.parent, Some(NodeId::new("a1")));
+        assert!(matches!(launch.kind, TurnKind::Prompt(Mode::Feedback)));
+
+        // And `/continue` there is refused rather than building on nothing.
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("/continue");
+        assert!(matches!(
+            compose_launch(&state, 1),
+            Some(Err(Refusal::Rejected(reason))) if reason.contains("no work to resume")
+        ));
     }
 
     #[test]
