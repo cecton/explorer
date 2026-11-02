@@ -1697,7 +1697,8 @@ impl App for AppMain {
                     );
                 }
                 AppSignal::TurnFinished { node, outcome } => {
-                    if let Some(handle) = state.running_turns.remove(node) {
+                    let finished = state.running_turns.remove(node);
+                    if let Some(handle) = &finished {
                         let (reply, work_log) = {
                             let live = handle.live.lock();
                             (live.reply.clone(), live.work_log.clone())
@@ -1732,6 +1733,12 @@ impl App for AppMain {
                     }
                     if outcome.status == crate::conversation::NodeStatus::Failed {
                         DiscussionComponent::restore_prompt(state, node);
+                    }
+                    // What the user sent that the turn never read goes back to the input
+                    // rather than vanishing with it; after `restore_prompt`, which would
+                    // otherwise overwrite it with the node's prompt.
+                    if let Some(handle) = &finished {
+                        DiscussionComponent::restore_injected(state, node, handle);
                     }
                     // A turn may have moved HEAD or discarded its work: refresh what shows git state.
                     let main_tx = global_data.main_thread_channel_sender.clone();

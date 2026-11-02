@@ -122,7 +122,9 @@ commits each node produced, so any line of code can be traced, through `git blam
 to the sentence that asked for it. The commits themselves stay clean: no trailer, no
 link, no mention of a tool. Since everything the agent does either ends up in git or is
 thrown away, it works without permission prompts. The price is two rules: a prompt needs
-a clean working tree, and one turn runs at a time. Prompts sent meanwhile are queued.
+a clean working tree, and one turn runs at a time. A message sent to the window of the
+turn that is running joins that turn, at its next round, so it can steer the agent while
+it works; a prompt for another window is queued.
 
 **Run something when the agents are done.** `<leader>:` opens a command line over the
 status bar. `!<command>` runs a command in a new terminal, and

@@ -118,6 +118,12 @@ async fn run_loop(
     let tool_specs = tools::specs(context);
     let mut warned = false;
     loop {
+        // What the user sent while the turn was working joins here, after the tool
+        // results of the round before: the next request carries it.
+        let injector = recorder.injector();
+        for content in injector.take() {
+            messages.push(injector.sent(&content));
+        }
         if let Some((started, limit)) = budget {
             let elapsed = started.elapsed();
             if let Some(nudge) = time_nudge(elapsed, limit, warned) {
@@ -182,7 +188,12 @@ async fn run_loop(
         }
 
         if response.tool_calls.is_empty() {
-            return Ok(());
+            // An answer that calls no tools ends the turn, unless something the user
+            // sent arrived while it streamed: that keeps the loop going.
+            if !injector.pending() {
+                return Ok(());
+            }
+            continue;
         }
         recorder.answer_calls_tools();
         for call in &response.tool_calls {

@@ -1,16 +1,21 @@
 use super::Effort;
 use super::mcp::McpTools;
 use super::tools::arguments_detail;
-use super::turn::Recorder;
+use super::turn::{Injector, Recorder};
 use super::usage::{Span, Usage, UsageWindow};
 use camino::Utf8Path;
 use serde_json::Value;
 use std::process::Stdio;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 /// Settings every run gets: no trailer on the commits it makes, and no hooks, which are
 /// code a repository supplies and which Claude Code runs before the model is called.
 const SETTINGS: &str = r#"{"attribution":{"commit":"","pr":""},"disableAllHooks":true}"#;
+
+/// How often the steering task looks for a message the user sent while the CLI works.
+const STEERING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
 /// A model of the local `claude` CLI and the effort to run it with.
 #[derive(Clone, Debug)]
@@ -207,6 +212,10 @@ fn arguments(invocation: &Invocation<'_>) -> Vec<String> {
         "-p",
         "--output-format",
         "stream-json",
+        // The prompt and everything the user sends while the run works arrive on stdin
+        // as user messages, which is how the CLI takes steering mid-run.
+        "--input-format",
+        "stream-json",
         "--verbose",
         "--include-partial-messages",
         "--permission-mode",
@@ -271,6 +280,15 @@ fn spawn_error(error: std::io::Error) -> String {
     }
 }
 
+/// One user message, in the `stream-json` input format of the CLI.
+fn input_frame(content: &str) -> String {
+    let frame = serde_json::json!({
+        "type": "user",
+        "message": { "role": "user", "content": content },
+    });
+    format!("{frame}\n")
+}
+
 /// Runs the CLI once and feeds its output to `recorder`. The session id is recorded as
 /// soon as it is known, so it survives a failure or a cancellation.
 pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result<(), RunError> {
@@ -285,9 +303,43 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
         .map_err(|e| RunError::Failed(spawn_error(e)))?;
     let mut terminator = GroupTerminator(child.id());
 
-    if let Some(mut stdin) = child.stdin.take() {
-        let _ = stdin.write_all(invocation.prompt.as_bytes()).await;
-    }
+    // stdin stays open for the whole run: what the user sends while the CLI works is
+    // written there, and the CLI reads it as a new user message of the session. The CLI
+    // answers each frame with its own result event and waits for more, so closing stdin
+    // once every frame has been answered is what ends the run.
+    let injector: Injector = recorder.injector();
+    let first = input_frame(invocation.prompt);
+    let answered = Arc::new(AtomicUsize::new(0));
+    let steering = child.stdin.take().map(|mut stdin| {
+        let injector = injector.clone();
+        let answered = Arc::clone(&answered);
+        tokio::spawn(async move {
+            let mut written = 1;
+            if stdin.write_all(first.as_bytes()).await.is_err() {
+                return;
+            }
+            let _ = stdin.flush().await;
+            loop {
+                tokio::time::sleep(STEERING_INTERVAL).await;
+                for content in injector.take() {
+                    if stdin
+                        .write_all(input_frame(&content).as_bytes())
+                        .await
+                        .is_err()
+                    {
+                        return;
+                    }
+                    let _ = stdin.flush().await;
+                    injector.sent(&content);
+                    written += 1;
+                }
+                if !injector.pending() && answered.load(Ordering::SeqCst) >= written {
+                    // Every frame has been answered: closing stdin ends the run.
+                    return;
+                }
+            }
+        })
+    });
     let stderr = child.stderr.take().map(|mut stderr| {
         tokio::spawn(async move {
             let mut text = String::new();
@@ -314,10 +366,19 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
                     StreamEvent::TokensIn(tokens) => recorder.tokens_in(tokens),
                     StreamEvent::CachedIn(tokens) => recorder.cached_in(Some(tokens)),
                     StreamEvent::Usage(usage) => recorder.usage(usage),
-                    StreamEvent::Result { error, no_turn } => outcome = Some((error, no_turn)),
+                    StreamEvent::Result { error, no_turn } => {
+                        // The run is over when its last frame has been answered.
+                        answered.fetch_add(1, Ordering::SeqCst);
+                        outcome = Some((error, no_turn));
+                    }
                 }
             }
         }
+    }
+    if let Some(steering) = steering {
+        // The task closes stdin itself once the frames are answered; a run cut short
+        // leaves it waiting, so it is dropped with the process it was writing to.
+        steering.abort();
     }
     let status = child.wait().await;
     terminator.0 = None;
@@ -541,5 +602,15 @@ mod tests {
         assert!(!fresh.contains("--effort"));
         assert!(!fresh.contains("--resume"));
         assert!(fresh.contains("--setting-sources user"));
+        assert!(fresh.contains("--input-format stream-json"));
+    }
+
+    #[test]
+    fn a_steering_message_is_a_user_frame_of_the_stream_json_input() {
+        assert_eq!(
+            input_frame("also handle the parser"),
+            "{\"message\":{\"content\":\"also handle the parser\",\"role\":\"user\"},\
+             \"type\":\"user\"}\n"
+        );
     }
 }

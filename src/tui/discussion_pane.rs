@@ -1,6 +1,6 @@
 use crate::agent::commands::{self, Command, Expansion};
 use crate::agent::context;
-use crate::agent::turn::{self, LiveSubagent, LiveTurn, TurnRequest};
+use crate::agent::turn::{self, LiveSubagent, LiveTurn, TurnHandle, TurnRequest};
 use crate::agent::{Mode, ModelSpec};
 use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
 use crate::keymap::{Action, Keymap, hint};
@@ -1144,10 +1144,14 @@ impl DiscussionComponent {
         });
     }
 
-    /// Sends the draft of window `id`, or queues it while a turn is running: the draft
-    /// then stays in the input until its turn starts. A refused send keeps the draft and
-    /// explains itself in the window's notice.
+    /// Sends the draft of window `id`. A turn running on the node it shows takes it
+    /// directly: it joins the loop at its next round and the draft is cleared. A prompt
+    /// for any other turn is queued, and stays in the input until its turn starts. A
+    /// refused send keeps the draft and explains itself in the window's notice.
     fn send(state: &mut AppState, main_tx: MainTx, id: usize) {
+        if Self::inject(state, id) {
+            return;
+        }
         let has_model = {
             let Some(discussion) = state.discussions.get(&id) else {
                 return;
@@ -1189,6 +1193,62 @@ impl DiscussionComponent {
                 }
             }
         }
+    }
+
+    /// Hands the draft of window `id` to the turn running on the node it shows, when
+    /// there is one: it joins the loop at its next round and the draft is cleared.
+    /// Returns whether it did.
+    fn inject(state: &mut AppState, id: usize) -> bool {
+        let Some(discussion) = state.discussions.get_mut(&id) else {
+            return false;
+        };
+        let typed = discussion.draft.text().trim().to_string();
+        if typed.is_empty() {
+            return false;
+        }
+        let running = discussion
+            .node
+            .clone()
+            .and_then(|node| state.running_turns.get(&node));
+        let Some(handle) = running else {
+            return false;
+        };
+        handle.live.lock().injected.push_back(typed);
+        discussion.draft.clear();
+        discussion.notice = None;
+        state.mark_session_dirty();
+        true
+    }
+
+    /// Gives the messages the user sent that the turn never read back to the windows
+    /// showing `node`, under whatever they hold now.
+    pub(crate) fn restore_injected(state: &mut AppState, node: &NodeId, handle: &TurnHandle) {
+        let pending = handle.live.lock().take_injected();
+        if pending.is_empty() {
+            return;
+        }
+        let shown: Vec<usize> = state
+            .discussions
+            .iter()
+            .filter(|(_, discussion)| {
+                discussion.node.as_ref() == Some(node) && discussion.agent.is_none()
+            })
+            .map(|(id, _)| *id)
+            .collect();
+        let Some(&first) = shown.first() else {
+            return;
+        };
+        if let Some(discussion) = state.discussions.get_mut(&first) {
+            let mut text = discussion.draft.text().to_string();
+            for content in &pending {
+                if !text.trim().is_empty() && !text.ends_with('\n') {
+                    text.push('\n');
+                }
+                text.push_str(content);
+            }
+            discussion.draft.set_text(text);
+        }
+        state.mark_session_dirty();
     }
 
     /// Makes window `id` show `node`, the node its draft was just sent as.
@@ -1668,8 +1728,18 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Esc),
             }) if running.is_some() => {
-                if let Some(handle) = running {
+                let Some(node) = discussion.node.clone() else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
+                let Some(handle) = state.running_turns.get(&node).cloned() else {
+                    return Ok(EventPropagation::ConsumedRender);
+                };
+                // A message the turn has not read yet comes back to the input; only a
+                // second Esc cancels the turn itself.
+                if handle.live.lock().injected.is_empty() {
                     handle.cancel();
+                } else {
+                    Self::restore_injected(state, &node, &handle);
                 }
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -1794,6 +1864,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                     || live.work_log.len() != discussion.work_log.len()
                     || live.visible_work_log().len() != discussion.visible_work_log.len()
                     || live.thinking.len() != discussion.thinking.len()
+                    || live.prompt.len() != discussion.prompt.len()
                 {
                     discussion.reply.clone_from(&live.reply);
                     discussion.work_log.clone_from(&live.work_log);
@@ -1802,6 +1873,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                         .visible_work_log
                         .extend_from_slice(live.visible_work_log());
                     discussion.thinking.clone_from(&live.thinking);
+                    discussion.prompt.clone_from(&live.prompt);
                 }
             }
             let Some(discussion) = state.discussions.get(&self.window_id) else {
@@ -2381,6 +2453,67 @@ mod tests {
             .iter()
             .map(|entry| entry.window)
             .collect()
+    }
+
+    #[tokio::test]
+    async fn a_message_sent_while_the_turn_runs_reaches_the_turn_instead_of_the_queue() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state.agent = agent_with_endpoint();
+        state.trusted = true;
+        let (main_tx, _rx) = mpsc::channel(1);
+        let node = start_turn(&mut state, main_tx.clone(), feedback_launch()).unwrap();
+        state.discussions.get_mut(&0).unwrap().node = Some(node.clone());
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("also handle the parser");
+
+        DiscussionComponent::send(&mut state, main_tx, 0);
+
+        let handle = state.running_turns.get(&node).unwrap();
+        assert_eq!(
+            handle.live.lock().take_injected(),
+            ["also handle the parser"]
+        );
+        assert!(state.discussions[&0].draft.text().is_empty());
+        assert!(state.queued_turns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_message_the_turn_never_read_goes_back_to_the_input() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state.agent = agent_with_endpoint();
+        state.trusted = true;
+        let (main_tx, _rx) = mpsc::channel(1);
+        let node = start_turn(&mut state, main_tx.clone(), feedback_launch()).unwrap();
+        let handle = state.running_turns.get(&node).unwrap().clone();
+        handle
+            .live
+            .lock()
+            .injected
+            .push_back("never read".to_string());
+
+        // The window has something newer typed in it; the message lands under it.
+        state.discussions.get_mut(&0).unwrap().node = Some(node.clone());
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("typed later");
+        DiscussionComponent::restore_injected(&mut state, &node, &handle);
+        assert_eq!(
+            state.discussions[&0].draft.text(),
+            "typed later\nnever read"
+        );
+
+        // An empty input takes the message as is.
+        state.discussions.get_mut(&0).unwrap().draft.clear();
+        handle.live.lock().injected.push_back("again".to_string());
+        DiscussionComponent::restore_injected(&mut state, &node, &handle);
+        assert_eq!(state.discussions[&0].draft.text(), "again");
     }
 
     #[test]

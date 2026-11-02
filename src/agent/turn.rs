@@ -13,6 +13,7 @@ use crate::tui::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
 use parking_lot::{Mutex, RwLock};
 use r3bl_tui::TerminalWindowMainThreadSignal;
+use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
@@ -53,6 +54,9 @@ pub struct LiveTurn {
     pub thinking: String,
     /// Model this turn was sent to, shown next to its outcome.
     pub model: String,
+    /// The prompt block shown above the reply: the prompt as sent, with the messages
+    /// the user sent while the turn was working appended.
+    pub prompt: String,
     pub tokens_in: Option<u64>,
     /// Input tokens of the turn's first request the provider served from its prompt cache.
     pub cached_in: Option<u64>,
@@ -62,6 +66,9 @@ pub struct LiveTurn {
     pub usage: Option<Usage>,
     /// The sub-agent this turn is waiting for.
     pub subagent: Option<LiveSubagent>,
+    /// What the user sent while the turn was working, waiting to join the loop at its
+    /// next round.
+    pub injected: VecDeque<String>,
 }
 
 /// A sub-agent run in progress, as the turn that called it sees it.
@@ -97,6 +104,58 @@ impl LiveTurn {
     /// Work log entries from the current answer in progress.
     pub fn visible_work_log(&self) -> &[String] {
         &self.work_log[self.log_start.min(self.work_log.len())..]
+    }
+
+    /// Takes what the user sent while the turn was working.
+    pub fn take_injected(&mut self) -> Vec<String> {
+        self.injected.drain(..).collect()
+    }
+}
+
+/// What the user sends while a turn is working. The own loop drains it; the Claude
+/// Code driver writes it to the CLI's stdin. Either way it joins the prompt block,
+/// the node's `prompt.md` and the transcript when it is sent.
+#[derive(Clone)]
+pub(super) struct Injector {
+    live: Arc<Mutex<LiveTurn>>,
+    node_dir: Utf8PathBuf,
+}
+
+impl Injector {
+    /// The messages waiting, in the order they were sent.
+    pub(super) fn take(&self) -> Vec<String> {
+        self.live.lock().take_injected()
+    }
+
+    /// Whether a message is waiting.
+    pub(super) fn pending(&self) -> bool {
+        !self.live.lock().injected.is_empty()
+    }
+
+    /// Records one as sent: it joins the prompt block, `prompt.md` and the transcript,
+    /// and is handed back for the loop to push onto its messages.
+    pub(super) fn sent(&self, content: &str) -> Message {
+        {
+            let mut live = self.live.lock();
+            if !live.prompt.is_empty() && !live.prompt.ends_with("\n\n") {
+                live.prompt.push_str("\n\n");
+            }
+            live.prompt.push_str(content);
+        }
+        let appended = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(self.node_dir.join("prompt.md"))
+            .and_then(|mut file| write!(file, "\n\n{content}"));
+        if let Err(e) = appended {
+            tracing::warn!("failed to append to prompt.md: {e}");
+        }
+        let message = Message::User {
+            content: content.to_string(),
+            injected: false,
+        };
+        append_transcript(&self.node_dir, &message);
+        message
     }
 }
 
@@ -214,6 +273,23 @@ pub struct Recorder {
 struct Caller {
     live: Arc<Mutex<LiveTurn>>,
     node_dir: Utf8PathBuf,
+}
+
+/// Appends one message to the `transcript.jsonl` of `dir`, which is what a child node
+/// replays.
+fn append_transcript(dir: &Utf8Path, message: &Message) {
+    let appended = serde_json::to_string(message)
+        .map_err(std::io::Error::other)
+        .and_then(|line| {
+            let mut file = std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(dir.join("transcript.jsonl"))?;
+            writeln!(file, "{line}")
+        });
+    if let Err(e) = appended {
+        tracing::warn!("failed to append to transcript.jsonl: {e}");
+    }
 }
 
 /// Appends one entry to a work log and to the `activity.md` of `dir`.
@@ -375,17 +451,14 @@ impl Recorder {
 
     /// Appends one message to `transcript.jsonl`.
     pub fn message(&mut self, message: &Message) {
-        let appended = serde_json::to_string(message)
-            .map_err(std::io::Error::other)
-            .and_then(|line| {
-                let mut file = std::fs::OpenOptions::new()
-                    .create(true)
-                    .append(true)
-                    .open(self.node_dir.join("transcript.jsonl"))?;
-                writeln!(file, "{line}")
-            });
-        if let Err(e) = appended {
-            tracing::warn!("failed to append to transcript.jsonl: {e}");
+        append_transcript(&self.node_dir, message);
+    }
+
+    /// The injector of this turn, for what the user sends while it works.
+    pub(super) fn injector(&self) -> Injector {
+        Injector {
+            live: Arc::clone(&self.live),
+            node_dir: self.node_dir.clone(),
         }
     }
 
@@ -494,7 +567,11 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
     tokio::spawn(async move {
         let mut recorder =
             Recorder::new(Arc::clone(&live), request.node_dir.clone(), main_tx.clone());
-        live.lock().model = request.spec.to_string();
+        {
+            let mut live = live.lock();
+            live.model = request.spec.to_string();
+            live.prompt = request.prompt.clone();
+        }
         let (mut status, mut error) = tokio::select! {
             result = run(&request, &mut recorder) => match result {
                 Ok(()) => (NodeStatus::Done, None),
@@ -1088,6 +1165,37 @@ mod tests {
         assert_eq!(spinner_frame(REDRAW_INTERVAL), '⠙');
         assert_eq!(spinner_frame(REDRAW_INTERVAL * 9), '⠏');
         assert_eq!(spinner_frame(REDRAW_INTERVAL * 10), '⠋');
+    }
+
+    #[test]
+    fn an_injected_message_joins_the_prompt_block_and_the_transcript() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::write(dir.join("prompt.md"), "the first prompt").unwrap();
+        let live = Arc::new(Mutex::new(LiveTurn {
+            prompt: "the first prompt".to_string(),
+            ..Default::default()
+        }));
+        let injector = Injector {
+            live: Arc::clone(&live),
+            node_dir: dir.clone(),
+        };
+
+        injector.sent("also handle the parser");
+
+        assert_eq!(
+            live.lock().prompt,
+            "the first prompt\n\nalso handle the parser"
+        );
+        assert_eq!(
+            std::fs::read_to_string(dir.join("prompt.md")).unwrap(),
+            "the first prompt\n\nalso handle the parser"
+        );
+        let transcript = std::fs::read_to_string(dir.join("transcript.jsonl")).unwrap();
+        assert_eq!(
+            transcript,
+            "{\"role\":\"user\",\"content\":\"also handle the parser\"}\n"
+        );
     }
 
     #[test]
