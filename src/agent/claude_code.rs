@@ -7,7 +7,7 @@ use camino::Utf8Path;
 use serde_json::Value;
 use std::process::Stdio;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 /// Settings every run gets: no trailer on the commits it makes, and no hooks, which are
@@ -305,20 +305,21 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
 
     // stdin stays open for the whole run: what the user sends while the CLI works is
     // written there, and the CLI reads it as a new user message of the session. The CLI
-    // answers each frame with its own result event and waits for more, so closing stdin
-    // once every frame has been answered is what ends the run.
+    // may answer several frames with one result (it folds a frame sent mid-turn into the
+    // running one) or one frame with several, so frames are not counted: the run is over
+    // once a result came after the last write, and closing stdin then ends it.
     let injector: Injector = recorder.injector();
     let first = input_frame(invocation.prompt);
-    let answered = Arc::new(AtomicUsize::new(0));
+    let settled = Arc::new(AtomicBool::new(false));
     let steering = child.stdin.take().map(|mut stdin| {
         let injector = injector.clone();
-        let answered = Arc::clone(&answered);
+        let settled = Arc::clone(&settled);
         tokio::spawn(async move {
-            let mut written = 1;
             if stdin.write_all(first.as_bytes()).await.is_err() {
                 return;
             }
             let _ = stdin.flush().await;
+            settled.store(false, Ordering::SeqCst);
             loop {
                 tokio::time::sleep(STEERING_INTERVAL).await;
                 for content in injector.take() {
@@ -331,10 +332,10 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
                     }
                     let _ = stdin.flush().await;
                     injector.sent(&content);
-                    written += 1;
+                    settled.store(false, Ordering::SeqCst);
                 }
-                if !injector.pending() && answered.load(Ordering::SeqCst) >= written {
-                    // Every frame has been answered: closing stdin ends the run.
+                if should_close(injector.pending(), settled.load(Ordering::SeqCst)) {
+                    // A result came after the last write: closing stdin ends the run.
                     return;
                 }
             }
@@ -367,8 +368,8 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
                     StreamEvent::CachedIn(tokens) => recorder.cached_in(Some(tokens)),
                     StreamEvent::Usage(usage) => recorder.usage(usage),
                     StreamEvent::Result { error, no_turn } => {
-                        // The run is over when its last frame has been answered.
-                        answered.fetch_add(1, Ordering::SeqCst);
+                        // The run is over when a result follows the last frame written.
+                        settled.store(true, Ordering::SeqCst);
                         outcome = Some((error, no_turn));
                     }
                 }
@@ -376,7 +377,7 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
         }
     }
     if let Some(steering) = steering {
-        // The task closes stdin itself once the frames are answered; a run cut short
+        // The task closes stdin itself once a result follows the last write; a run cut short
         // leaves it waiting, so it is dropped with the process it was writing to.
         steering.abort();
     }
@@ -443,9 +444,25 @@ pub async fn complete(target: &ClaudeTarget, system: &str, user: &str) -> Result
     Ok(answer)
 }
 
+/// Whether the steering task may close stdin: nothing waits to be written and a result
+/// came after the last frame.
+fn should_close(pending: bool, settled: bool) -> bool {
+    !pending && settled
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn stdin_closes_once_a_result_follows_the_last_write() {
+        // Two frames folded into one result: the result came after both writes.
+        assert!(should_close(false, true));
+        // A frame written after the last result waits for its own.
+        assert!(!should_close(false, false));
+        // A message still queued keeps the run open.
+        assert!(!should_close(true, true));
+    }
 
     const FIXTURE: &str = include_str!("fixtures/claude_stream.jsonl");
 
