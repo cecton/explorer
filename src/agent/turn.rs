@@ -934,6 +934,10 @@ async fn run_own_loop(
         background: Arc::default(),
         mcp: mcp.clone(),
     };
+    let limits = agent_loop::Limits {
+        budget: None,
+        repeat_limit: request.agent.repeat_limit,
+    };
     agent_loop::run(
         &tool_context,
         target,
@@ -941,7 +945,7 @@ async fn run_own_loop(
         &system,
         &mut messages,
         recorder,
-        None,
+        limits,
     )
     .await?;
     if request.mode == Mode::Feedback {
@@ -963,7 +967,7 @@ async fn run_own_loop(
             &system,
             &mut messages,
             recorder,
-            None,
+            limits,
         )
         .await?;
     }

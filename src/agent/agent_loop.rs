@@ -1,9 +1,11 @@
-use super::Message;
 use super::llm::{self, LlmTarget};
 use super::subagent;
 use super::tools::{self, ToolContext};
 use super::turn::Recorder;
+use super::{Message, ToolCall};
+use std::collections::{HashSet, VecDeque};
 use std::future::Future;
+use std::hash::{DefaultHasher, Hash, Hasher};
 use std::pin::Pin;
 use std::time::{Duration, Instant};
 
@@ -67,6 +69,101 @@ fn nudge_text(nudge: Nudge, elapsed: Duration, budget: Duration) -> String {
     }
 }
 
+/// What bounds one run of the loop.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Start and duration of the run's time budget; a turn has none.
+    pub budget: Option<(Instant, Duration)>,
+    /// Times one call may return the same result before the loop steps in; 0 is off.
+    pub repeat_limit: u32,
+}
+
+/// serde_json sorts the keys of the arguments, so equal arguments print alike.
+type Signature = (String, String, u64);
+
+fn signature(call: &ToolCall, result: &str) -> Signature {
+    let mut hasher = DefaultHasher::new();
+    result.hash(&mut hasher);
+    (
+        call.name.clone(),
+        call.arguments.to_string(),
+        hasher.finish(),
+    )
+}
+
+/// What the stall detector asks of the loop.
+#[derive(Debug, PartialEq, Eq)]
+enum Stall {
+    /// A call returned the same result `limit` times: tell the model.
+    Nudge,
+    /// A call already warned about did it again `limit` times: stop the run.
+    Fail,
+}
+
+/// Flags a call that keeps returning the same result; a cycle of calls counts too.
+struct StallDetector {
+    limit: usize,
+    window: VecDeque<Signature>,
+    warned: HashSet<Signature>,
+}
+
+impl StallDetector {
+    fn new(limit: u32) -> Self {
+        Self {
+            limit: limit as usize,
+            window: VecDeque::new(),
+            warned: HashSet::new(),
+        }
+    }
+
+    fn record(&mut self, signature: Signature) -> Option<Stall> {
+        if self.limit == 0 {
+            return None;
+        }
+        if self.window.len() == 2 * self.limit {
+            self.window.pop_front();
+        }
+        self.window.push_back(signature.clone());
+        let count = self
+            .window
+            .iter()
+            .filter(|seen| **seen == signature)
+            .count();
+        if count < self.limit {
+            return None;
+        }
+        self.window.clear();
+        Some(if self.warned.insert(signature) {
+            Stall::Nudge
+        } else {
+            Stall::Fail
+        })
+    }
+}
+
+/// The call as the model sent it, not as it meant to send it.
+fn quoted_call(call: &ToolCall) -> String {
+    format!("{} {}", call.name, call.arguments)
+}
+
+fn stall_text(call: &ToolCall, limit: u32) -> String {
+    format!(
+        "[Note from Explorer: the call `{}` has now returned the same result {limit} \
+         times. These are the arguments you sent, whatever you meant to send. Repeating \
+         it will not change the outcome: send different arguments, take another \
+         approach, or write your answer.]",
+        quoted_call(call)
+    )
+}
+
+fn stall_error(call: &ToolCall, limit: u32) -> String {
+    format!(
+        "the call `{}` returned the same result {limit} more times after Explorer \
+         warned about it; the run was stopped",
+        quoted_call(call)
+    )
+}
+
 /// Repairs a transcript that ends inside a round: an assistant message asking for
 /// tool calls whose results never arrived, because the turn died mid-stream or
 /// mid-tool. The calls are answered with a note, so replaying the transcript is a
@@ -88,10 +185,7 @@ pub fn repair_tail(messages: &mut Vec<Message>) {
     }
 }
 
-/// Our own agent loop: ask the model, run the tools it asks for, feed the results
-/// back, and stop when an answer asks for none. Boxed: a sub-agent call runs it in
-/// turn. A `budget` of start and duration nudges the model to wrap up as the run's
-/// time runs out; a turn has none.
+/// Our own agent loop, until an answer asks for no tool; boxed, as sub-agents recurse into it.
 pub fn run<'a>(
     context: &'a ToolContext,
     target: &'a LlmTarget,
@@ -99,10 +193,10 @@ pub fn run<'a>(
     system: &'a str,
     messages: &'a mut Vec<Message>,
     recorder: &'a mut Recorder,
-    budget: Option<(Instant, Duration)>,
+    limits: Limits,
 ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
     Box::pin(run_loop(
-        context, target, session, system, messages, recorder, budget,
+        context, target, session, system, messages, recorder, limits,
     ))
 }
 
@@ -113,10 +207,11 @@ async fn run_loop(
     system: &str,
     messages: &mut Vec<Message>,
     recorder: &mut Recorder,
-    budget: Option<(Instant, Duration)>,
+    limits: Limits,
 ) -> Result<(), String> {
     let tool_specs = tools::specs(context);
     let mut warned = false;
+    let mut stalls = StallDetector::new(limits.repeat_limit);
     loop {
         // What the user sent while the turn was working joins here, after the tool
         // results of the round before: the next request carries it.
@@ -124,7 +219,7 @@ async fn run_loop(
         for content in injector.take() {
             messages.push(injector.sent(&content));
         }
-        if let Some((started, limit)) = budget {
+        if let Some((started, limit)) = limits.budget {
             let elapsed = started.elapsed();
             if let Some(nudge) = time_nudge(elapsed, limit, warned) {
                 warned |= nudge == Nudge::Soft;
@@ -196,6 +291,9 @@ async fn run_loop(
             continue;
         }
         recorder.answer_calls_tools();
+        // Acted on once every call of the round has its result.
+        let mut failed: Option<&ToolCall> = None;
+        let mut nudged: Vec<&ToolCall> = Vec::new();
         for call in &response.tool_calls {
             recorder.tool_call(tools::describe(call));
             let content = match &context.subagents {
@@ -204,6 +302,11 @@ async fn run_loop(
                 }
                 _ => tools::run(context, call).await,
             };
+            match stalls.record(signature(call, &content)) {
+                Some(Stall::Fail) => failed = Some(call),
+                Some(Stall::Nudge) => nudged.push(call),
+                None => {}
+            }
             let result = Message::Tool {
                 call_id: call.id.clone(),
                 name: call.name.clone(),
@@ -213,14 +316,122 @@ async fn run_loop(
             messages.push(result);
         }
         recorder.activity(None);
+        if let Some(call) = failed {
+            return Err(stall_error(call, limits.repeat_limit));
+        }
+        // Each stuck call gets its own note, since the detector has already warned it.
+        for call in nudged {
+            let nudge = Message::User {
+                content: stall_text(call, limits.repeat_limit),
+                injected: true,
+            };
+            recorder.message(&nudge);
+            messages.push(nudge);
+        }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{super::ToolCall, Nudge, nudge_text, repair_tail, time_nudge};
+    use super::{
+        super::ToolCall, Nudge, Stall, StallDetector, nudge_text, repair_tail, signature,
+        stall_text, time_nudge,
+    };
     use crate::agent::Message;
     use std::time::Duration;
+
+    fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
+        ToolCall {
+            id: "c".into(),
+            name: name.into(),
+            arguments,
+        }
+    }
+
+    /// Feeds the detector `times` copies of one call and result; what the last asked.
+    fn repeat(
+        detector: &mut StallDetector,
+        call: &ToolCall,
+        result: &str,
+        times: usize,
+    ) -> Vec<Option<Stall>> {
+        (0..times)
+            .map(|_| detector.record(signature(call, result)))
+            .collect()
+    }
+
+    #[test]
+    fn the_same_call_with_new_results_is_progress() {
+        let mut detector = StallDetector::new(5);
+        let build = call("shell", serde_json::json!({"command": "cargo build"}));
+        for attempt in 0..20 {
+            let result = format!("error E0382 at line {attempt}");
+            assert_eq!(detector.record(signature(&build, &result)), None);
+        }
+    }
+
+    #[test]
+    fn a_stuck_call_is_nudged_then_fails_when_it_repeats_after_the_nudge() {
+        let mut detector = StallDetector::new(5);
+        let shot = call("screenshot", serde_json::json!({"save_path": null}));
+        let seen = repeat(&mut detector, &shot, "saved_to: null", 5);
+        assert_eq!(seen[..4], [None, None, None, None]);
+        assert_eq!(seen[4], Some(Stall::Nudge));
+
+        // The grace period: as many fresh repeats again before the run fails.
+        let seen = repeat(&mut detector, &shot, "saved_to: null", 5);
+        assert_eq!(seen[..4], [None, None, None, None]);
+        assert_eq!(seen[4], Some(Stall::Fail));
+    }
+
+    #[test]
+    fn another_stuck_call_after_a_nudge_gets_its_own_nudge() {
+        let mut detector = StallDetector::new(5);
+        let first = call(
+            "screenshot",
+            serde_json::json!({"pixels_per_point": 1, "save_path": null}),
+        );
+        let second = call("screenshot", serde_json::json!({"save_path": null}));
+        assert_eq!(repeat(&mut detector, &first, "r", 5)[4], Some(Stall::Nudge));
+        assert_eq!(
+            repeat(&mut detector, &second, "r", 5)[4],
+            Some(Stall::Nudge)
+        );
+        assert_eq!(repeat(&mut detector, &first, "r", 5)[4], Some(Stall::Fail));
+    }
+
+    #[test]
+    fn a_cycle_between_two_stuck_calls_counts() {
+        let mut detector = StallDetector::new(5);
+        let a = call("read", serde_json::json!({"path": "a"}));
+        let b = call("read", serde_json::json!({"path": "b"}));
+        let mut seen = Vec::new();
+        for _ in 0..5 {
+            seen.push(detector.record(signature(&a, "same a")));
+            seen.push(detector.record(signature(&b, "same b")));
+        }
+        assert_eq!(seen[8], Some(Stall::Nudge));
+        assert!(seen[..8].iter().all(Option::is_none));
+    }
+
+    #[test]
+    fn a_limit_of_zero_never_steps_in() {
+        let mut detector = StallDetector::new(0);
+        let shot = call("screenshot", serde_json::json!({}));
+        assert!(
+            repeat(&mut detector, &shot, "r", 50)
+                .iter()
+                .all(Option::is_none)
+        );
+    }
+
+    #[test]
+    fn a_stall_note_quotes_the_arguments_as_sent() {
+        let shot = call("screenshot", serde_json::json!({"save_path": null}));
+        let text = stall_text(&shot, 5);
+        assert!(text.contains("`screenshot {\"save_path\":null}`"));
+        assert!(text.contains("same result 5 times"));
+    }
 
     #[test]
     fn a_budget_warns_once_then_nags_every_round_past_it() {

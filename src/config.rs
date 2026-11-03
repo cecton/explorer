@@ -1,8 +1,8 @@
 use crate::agent::commands::{self, Command};
 use crate::agent::subagent::Role;
 use crate::agent::{
-    AgentConfig, CLAUDE_CODE_KIND, CLINE_KIND, DEFAULT_REVIEW_ROUNDS, Endpoint, EndpointKind,
-    KIMI_CODE_KIND, ModelSpec, OPENCODE_GO_KIND, OPENROUTER_KIND,
+    AgentConfig, CLAUDE_CODE_KIND, CLINE_KIND, DEFAULT_REPEAT_LIMIT, DEFAULT_REVIEW_ROUNDS,
+    Endpoint, EndpointKind, KIMI_CODE_KIND, ModelSpec, OPENCODE_GO_KIND, OPENROUTER_KIND,
 };
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -54,6 +54,7 @@ pub struct AgentSettings {
     pub summary_model: Option<ModelSpec>,
     pub subagent_model: Option<ModelSpec>,
     pub review_rounds: Option<u32>,
+    pub repeat_limit: Option<u32>,
 }
 
 impl Config {
@@ -280,6 +281,7 @@ pub fn resolve_agent(
         subagent_model: settings.subagent_model,
         roles,
         review_rounds: settings.review_rounds.unwrap_or(DEFAULT_REVIEW_ROUNDS),
+        repeat_limit: settings.repeat_limit.unwrap_or(DEFAULT_REPEAT_LIMIT),
     }
 }
 
@@ -384,6 +386,19 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                     .filter(|n| *n >= 1)
                     .ok_or("agent.review-rounds must have an integer argument of at least 1")?;
                 settings.review_rounds = Some(rounds);
+            }
+            "repeat-limit" => {
+                let limit = child
+                    .entries()
+                    .iter()
+                    .find(|e| e.name().is_none())
+                    .and_then(|e| e.value().as_integer())
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n != 1)
+                    .ok_or(
+                        "agent.repeat-limit must have an integer argument of 0 (off) or at least 2",
+                    )?;
+                settings.repeat_limit = Some(limit);
             }
             _ => {}
         }
@@ -795,6 +810,21 @@ mod config_tests {
     }
 
     #[test]
+    fn repeat_limit_defaults_to_five_and_is_zero_or_at_least_two() {
+        let tokens = HashMap::new();
+        let resolve = |content: &str| {
+            let config = parse(content).expect("valid config");
+            resolve_agent(config.agent, &tokens, Vec::new(), Vec::new()).repeat_limit
+        };
+        assert_eq!(resolve("theme \"night_owl\""), 5);
+        assert_eq!(resolve("agent {\n repeat-limit 3\n}"), 3);
+        assert_eq!(resolve("agent {\n repeat-limit 0\n}"), 0);
+        assert!(parse("agent {\n repeat-limit 1\n}").is_err());
+        assert!(parse("agent {\n repeat-limit -2\n}").is_err());
+        assert!(parse("agent {\n repeat-limit \"5\"\n}").is_err());
+    }
+
+    #[test]
     fn roles_are_read_from_markdown_files_and_need_a_description() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path();
@@ -837,6 +867,7 @@ mod config_tests {
             summary_model: None,
             subagent_model: None,
             review_rounds: None,
+            repeat_limit: None,
         };
         let tokens = parse_auth("router \"sk-or\"\nunused \"x\"").expect("valid auth");
         let agent = resolve_agent(settings, &tokens, Vec::new(), Vec::new());

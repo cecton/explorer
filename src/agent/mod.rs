@@ -194,6 +194,9 @@ pub enum Backend {
 /// Review rounds of a commit when the `agent` block sets none.
 pub const DEFAULT_REVIEW_ROUNDS: u32 = 3;
 
+/// Times a tool call may return the same result before the run is stuck, by default.
+pub const DEFAULT_REPEAT_LIMIT: u32 = 5;
+
 /// The `agent` block of `config.kdl`, joined with the tokens of `auth.kdl`.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentConfig {
@@ -210,6 +213,8 @@ pub struct AgentConfig {
     pub roles: Vec<subagent::Role>,
     /// Most review rounds a commit turn runs on each of its commits; at least 1.
     pub review_rounds: u32,
+    /// Times one tool call may return the same result before a nudge; 0 is off.
+    pub repeat_limit: u32,
 }
 
 impl Default for AgentConfig {
@@ -221,6 +226,7 @@ impl Default for AgentConfig {
             subagent_model: None,
             roles: Vec::new(),
             review_rounds: DEFAULT_REVIEW_ROUNDS,
+            repeat_limit: DEFAULT_REPEAT_LIMIT,
         }
     }
 }

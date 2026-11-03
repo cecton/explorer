@@ -369,6 +369,7 @@ fn prepare(
 /// `transcript.jsonl`.
 async fn execute(
     context: &ToolContext,
+    subagents: &Subagents,
     recorder: &mut Recorder,
     launch: &Launch,
     backend: &Backend,
@@ -392,7 +393,10 @@ async fn execute(
     };
     let result = match backend {
         Backend::OpenAi(target) => {
-            run_own_loop(context, launch, target, &system, started, &mut child).await
+            run_own_loop(
+                context, subagents, launch, target, &system, started, &mut child,
+            )
+            .await
         }
         Backend::ClaudeCode(target) => {
             run_claude_code(context, launch, target, &system, &mut child).await
@@ -554,7 +558,7 @@ pub async fn run(
         })
         .await;
 
-    let mut outcome = execute(context, recorder, &launch, &launch.backend).await;
+    let mut outcome = execute(context, subagents, recorder, &launch, &launch.backend).await;
     // A failed run is concluded at once, so a cancel mid-retry cannot leave it Running;
     // the combined error is only what the caller model reads, never a record's.
     let first_error = outcome.result.as_ref().err().cloned();
@@ -574,7 +578,8 @@ pub async fn run(
                         "first run on {} failed ({error}); retrying on {}",
                         launch.spec, retry.spec
                     ));
-                    let retried = execute(context, recorder, &retry, &retry.backend).await;
+                    let retried =
+                        execute(context, subagents, recorder, &retry, &retry.backend).await;
                     conclude(
                         context,
                         subagents,
@@ -770,6 +775,7 @@ fn retry_note(launch: &Launch, first_error: &str) -> Option<String> {
 
 async fn run_own_loop(
     context: &ToolContext,
+    subagents: &Subagents,
     launch: &Launch,
     target: &LlmTarget,
     system: &str,
@@ -815,7 +821,10 @@ async fn run_own_loop(
         &system,
         &mut messages,
         recorder,
-        launch.budget.map(|budget| (started, budget)),
+        agent_loop::Limits {
+            budget: launch.budget.map(|budget| (started, budget)),
+            repeat_limit: subagents.config.repeat_limit,
+        },
     )
     .await
 }
