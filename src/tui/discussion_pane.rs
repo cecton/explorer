@@ -2549,10 +2549,23 @@ mod tests {
             .set_text("too late");
 
         assert!(!DiscussionComponent::inject(&mut state, 0));
-
         let handle = state.running_turns.get(&node).unwrap();
         assert!(handle.live.lock().injected.is_empty());
         assert_eq!(state.discussions[&0].draft.text(), "too late");
+
+        // Sent, it queues on the running turn rather than reaching it.
+        DiscussionComponent::send(&mut state, main_tx, 0);
+        assert_eq!(queued_windows(&state), [0]);
+        assert!(
+            state
+                .running_turns
+                .get(&node)
+                .unwrap()
+                .live
+                .lock()
+                .injected
+                .is_empty()
+        );
     }
 
     #[tokio::test]

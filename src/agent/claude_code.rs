@@ -323,7 +323,9 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
             let _ = stdin.flush().await;
             loop {
                 tokio::time::sleep(STEERING_INTERVAL).await;
-                for content in injector.take() {
+                // One at a time, taken only once written: a write that fails, or a task
+                // dropped mid-write, leaves the message for the window to give back.
+                while let Some(content) = injector.front() {
                     settled.store(false, Ordering::SeqCst);
                     if stdin
                         .write_all(input_frame(&content).as_bytes())
@@ -334,7 +336,7 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
                         return;
                     }
                     let _ = stdin.flush().await;
-                    injector.sent(&content);
+                    injector.wrote(&content);
                 }
                 if injector.close_if_idle(settled.load(Ordering::SeqCst)) {
                     // A result came after the last write: closing stdin ends the run.

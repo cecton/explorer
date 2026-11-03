@@ -218,10 +218,11 @@ async fn run_loop(
     let mut nameless_rounds = 0;
     loop {
         // What the user sent while the turn was working joins here, after the tool
-        // results of the round before: the next request carries it.
+        // results of the round before: the next request carries it. Each leaves the
+        // queue only as it is taken, so a round that dies leaves the rest for the input.
         let injector = recorder.injector();
-        for content in injector.take() {
-            messages.push(injector.sent(&content));
+        while let Some(content) = injector.front() {
+            messages.push(injector.wrote(&content));
         }
         if let Some((started, limit)) = limits.budget {
             let elapsed = started.elapsed();

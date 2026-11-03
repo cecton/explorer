@@ -124,9 +124,9 @@ pub(super) struct Injector {
 }
 
 impl Injector {
-    /// The messages waiting, in the order they were sent.
-    pub(super) fn take(&self) -> Vec<String> {
-        self.live.lock().take_injected()
+    /// The message at the front of the queue, which stays there until it is written.
+    pub(super) fn front(&self) -> Option<String> {
+        self.live.lock().injected.front().cloned()
     }
 
     /// Whether a message is waiting.
@@ -151,9 +151,22 @@ impl Injector {
         self.live.lock().closed = true;
     }
 
+    /// Records one as written and takes it out of the queue. It leaves the queue only
+    /// here, once the model has it: a write that fails, or a task dropped mid-write,
+    /// leaves the message for the window to give back.
+    pub(super) fn wrote(&self, content: &str) -> Message {
+        {
+            let mut live = self.live.lock();
+            if live.injected.front().map(String::as_str) == Some(content) {
+                live.injected.pop_front();
+            }
+        }
+        self.sent(content)
+    }
+
     /// Records one as sent: it joins the prompt block, `prompt.md` and the transcript,
     /// and is handed back for the loop to push onto its messages.
-    pub(super) fn sent(&self, content: &str) -> Message {
+    fn sent(&self, content: &str) -> Message {
         {
             let mut live = self.live.lock();
             if !live.prompt.is_empty() && !live.prompt.ends_with("\n\n") {
@@ -1206,6 +1219,38 @@ mod tests {
         assert!(!live.lock().closed);
         live.lock().injected.clear();
         assert!(injector.close_if_idle(true));
+        assert!(live.lock().closed);
+    }
+
+    #[test]
+    fn a_message_leaves_the_queue_only_once_it_is_written() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let live = Arc::new(Mutex::new(LiveTurn::default()));
+        let injector = Injector {
+            live: Arc::clone(&live),
+            node_dir: dir,
+        };
+        live.lock().injected.push_back("one".to_string());
+        live.lock().injected.push_back("two".to_string());
+
+        assert_eq!(injector.front().as_deref(), Some("one"));
+        injector.wrote("one");
+        assert_eq!(injector.front().as_deref(), Some("two"));
+        // What was never written is still there for the window to give back.
+        assert_eq!(live.lock().take_injected(), ["two"]);
+    }
+
+    #[test]
+    fn a_dead_stdin_closes_the_turn_whatever_waits() {
+        let live = Arc::new(Mutex::new(LiveTurn::default()));
+        let injector = Injector {
+            live: Arc::clone(&live),
+            node_dir: Utf8PathBuf::new(),
+        };
+        // A message still waiting must not keep the turn open to more: the CLI is gone.
+        live.lock().injected.push_back("unsent".to_string());
+        injector.close();
         assert!(live.lock().closed);
     }
 
