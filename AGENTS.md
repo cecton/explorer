@@ -205,7 +205,7 @@ cargo test <module>::<test_name>
 | `parking_lot`              | 0.12.x  | Poison-free `Mutex`/`RwLock` primitives (used for shared panes, file data)                 |
 | `pico-args`                | 0.5.x   | Lightweight CLI argument parsing (no proc macros)                                          |
 | `r3bl_tui`                 | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
-| `reqwest`                  | 0.12.x  | Model list fetch from OpenAI-compatible endpoints                                          |
+| `reqwest`                  | 0.13.x  | Model list fetch from OpenAI-compatible endpoints                                          |
 | `serde`                    | 1.x     | Derive macros for serialization (`derive` feature)                                         |
 | `serde_json`               | 1.x     | JSON-RPC message serialization for LSP protocol                                            |
 | `sha2`                     | 0.10.x  | Stable repo-root hashing for session filenames                                             |

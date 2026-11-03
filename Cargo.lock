@@ -1257,7 +1257,7 @@ dependencies = [
  "pulldown-cmark",
  "r3bl_tui",
  "regex",
- "reqwest 0.12.28",
+ "reqwest 0.13.5",
  "rustix 0.38.44",
  "serde",
  "serde_json",
