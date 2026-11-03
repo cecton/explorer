@@ -31,12 +31,6 @@ pub struct Session {
     pub highlight_ranges: HashMap<String, Vec<(usize, usize)>>,
     #[serde(default)]
     pub symbol_highlights: Vec<SessionSymbolGroup>,
-    /// Cumulative active time (excluding inactivity) spent on this project, in seconds.
-    #[serde(default)]
-    pub time_active_secs: u64,
-    /// Cumulative total wall-clock time spent on this project, in seconds.
-    #[serde(default)]
-    pub time_total_secs: u64,
     /// Which Cargo features rust-analyzer analyzes for this project.
     #[serde(default)]
     pub cargo_features: crate::lsp::CargoFeatureSelection,
@@ -220,8 +214,6 @@ impl Session {
             panes,
             highlight_ranges,
             symbol_highlights,
-            time_active_secs: state.time.project_active().as_secs(),
-            time_total_secs: state.time.project_total().as_secs(),
             cargo_features: state.cargo_features.clone(),
             theme: Some(state.theme.name().to_string()),
             conversation_expanded,
@@ -648,7 +640,6 @@ mod tests {
     use parking_lot::Mutex;
     use r3bl_tui::{OfsBufVT100, Size};
     use std::sync::Arc;
-    use std::time::Instant;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
 
@@ -678,7 +669,6 @@ mod tests {
             scroll_offset: 0,
             cwd,
             command,
-            last_output: Instant::now(),
         }
     }
 
@@ -713,8 +703,6 @@ mod tests {
                 qualified_name: "crate::lib::add_numbers".to_string(),
                 color: [255, 100, 100],
             }],
-            time_active_secs: 1230,
-            time_total_secs: 4560,
             cargo_features: crate::lsp::CargoFeatureSelection::Explicit {
                 no_default_features: true,
                 features: vec!["foo".to_string()],
@@ -732,8 +720,6 @@ mod tests {
         let restored: Session = serde_json::from_value(value.clone()).unwrap();
         let value2 = serde_json::to_value(&restored).unwrap();
         assert_eq!(value, value2);
-        assert_eq!(restored.time_active_secs, 1230);
-        assert_eq!(restored.time_total_secs, 4560);
     }
 
     #[test]
@@ -839,8 +825,6 @@ mod tests {
                 m
             },
             symbol_highlights: Vec::new(),
-            time_active_secs: 0,
-            time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
@@ -904,8 +888,6 @@ mod tests {
             ],
             highlight_ranges: HashMap::new(),
             symbol_highlights: Vec::new(),
-            time_active_secs: 0,
-            time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
@@ -955,8 +937,6 @@ mod tests {
             }],
             highlight_ranges: HashMap::new(),
             symbol_highlights: Vec::new(),
-            time_active_secs: 0,
-            time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
@@ -992,8 +972,6 @@ mod tests {
             }],
             highlight_ranges: HashMap::new(),
             symbol_highlights: Vec::new(),
-            time_active_secs: 0,
-            time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
@@ -1062,8 +1040,6 @@ mod tests {
                     color: [100, 200, 255],
                 },
             ],
-            time_active_secs: 0,
-            time_total_secs: 0,
             cargo_features: crate::lsp::CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),

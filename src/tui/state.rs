@@ -29,193 +29,6 @@ use tokio::sync::mpsc;
 
 static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
 
-/// A gap longer than this between input events (or a loss of terminal focus) is treated
-/// as inactivity and excluded from the "active" time counter.
-const IDLE_THRESHOLD: Duration = Duration::from_secs(60);
-
-/// Tracks time spent in the app, split into "active" (excluding inactivity) and "total"
-/// (wall-clock) for both the current session and, cumulatively, the whole project.
-///
-/// Accrual is a monotonic "heartbeat with timeout": every settle point adds the elapsed
-/// wall time to `active_accum` only while the terminal is focused and the last real input
-/// was within [`IDLE_THRESHOLD`]. The 1s `AppSignal::Noop` tick calls [`Self::tick`], so
-/// the counters advance live without a dedicated timer.
-#[derive(Clone, Debug)]
-pub struct SessionTime {
-    /// When this session (app launch) began.
-    session_start: Instant,
-    /// Timestamp of the last real input event.
-    last_activity: Instant,
-    /// Last point `active_accum` was settled up to.
-    last_tick: Instant,
-    /// Active time accumulated so far this session.
-    active_accum: Duration,
-    /// Whether the terminal window currently has focus.
-    focused: bool,
-    /// Active time carried over from previous sessions (loaded from the session file).
-    prior_active: Duration,
-    /// Total time carried over from previous sessions (loaded from the session file).
-    prior_total: Duration,
-}
-
-impl Default for SessionTime {
-    fn default() -> Self {
-        let now = Instant::now();
-        Self {
-            session_start: now,
-            last_activity: now,
-            last_tick: now,
-            active_accum: Duration::ZERO,
-            focused: true,
-            prior_active: Duration::ZERO,
-            prior_total: Duration::ZERO,
-        }
-    }
-}
-
-impl SessionTime {
-    /// Fold the wall time since the last settle into `active_accum`, but only while the
-    /// user is focused and was recently active. Idle stretches (and unfocused time) are
-    /// silently dropped, so active time never counts inactivity — and never decreases.
-    fn settle(&mut self, now: Instant) {
-        let delta = now.saturating_duration_since(self.last_tick);
-        if self.focused && now.saturating_duration_since(self.last_activity) <= IDLE_THRESHOLD {
-            self.active_accum += delta;
-        }
-        self.last_tick = now;
-    }
-
-    /// Record a real input event (keyboard, mouse, resize, paste).
-    pub fn on_input(&mut self) {
-        let now = Instant::now();
-        self.settle(now);
-        self.last_activity = now;
-    }
-
-    /// Record a terminal focus change. Losing focus immediately stops active accrual;
-    /// regaining it restarts the idle clock (the away period is never counted).
-    pub fn on_focus(&mut self, gained: bool) {
-        let now = Instant::now();
-        self.settle(now);
-        self.focused = gained;
-        if gained {
-            self.last_activity = now;
-        }
-    }
-
-    /// Advance the counters (called from the 1s tick) without registering activity.
-    pub fn tick(&mut self) {
-        self.settle(Instant::now());
-    }
-
-    /// Treat a terminal-output render frame as recent activity, so streaming output
-    /// keeps the active counter alive even without keyboard input. Same effect as
-    /// [`Self::on_input`]; gated by the `render-counts-as-active` config at the call site.
-    pub fn note_render(&mut self) {
-        let now = Instant::now();
-        self.settle(now);
-        self.last_activity = now;
-    }
-
-    /// Seed the cumulative project totals restored from the session file.
-    pub fn set_prior(&mut self, active: Duration, total: Duration) {
-        self.prior_active = active;
-        self.prior_total = total;
-    }
-
-    /// Active time this session (excludes inactivity).
-    pub fn session_active(&self) -> Duration {
-        self.active_accum
-    }
-
-    /// Wall-clock time this session (includes inactivity).
-    pub fn session_total(&self) -> Duration {
-        self.session_start.elapsed()
-    }
-
-    /// Cumulative active time across all sessions for this project.
-    pub fn project_active(&self) -> Duration {
-        self.prior_active + self.active_accum
-    }
-
-    /// Cumulative wall-clock time across all sessions for this project.
-    pub fn project_total(&self) -> Duration {
-        self.prior_total + self.session_total()
-    }
-}
-
-#[cfg(test)]
-mod session_time_tests {
-    use super::*;
-
-    fn tracker_at(now: Instant) -> SessionTime {
-        SessionTime {
-            session_start: now,
-            last_activity: now,
-            last_tick: now,
-            active_accum: Duration::ZERO,
-            focused: true,
-            prior_active: Duration::ZERO,
-            prior_total: Duration::ZERO,
-        }
-    }
-
-    #[test]
-    fn settle_counts_recent_activity_but_drops_idle_gaps() {
-        let t0 = Instant::now();
-        let mut st = tracker_at(t0);
-
-        // A settle 10s after the last activity is within the threshold -> counted.
-        st.settle(t0 + Duration::from_secs(10));
-        assert_eq!(st.active_accum, Duration::from_secs(10));
-
-        // New activity at t=10s, then a long silence.
-        st.last_activity = t0 + Duration::from_secs(10);
-        // Settle at t=100s: the 90s gap since last activity exceeds the threshold, so the
-        // idle stretch contributes nothing.
-        st.settle(t0 + Duration::from_secs(100));
-        assert_eq!(st.active_accum, Duration::from_secs(10));
-    }
-
-    #[test]
-    fn unfocused_time_is_never_active() {
-        let t0 = Instant::now();
-        let mut st = tracker_at(t0);
-        st.focused = false;
-        st.settle(t0 + Duration::from_secs(5));
-        assert_eq!(st.active_accum, Duration::ZERO);
-    }
-
-    #[test]
-    fn note_render_keeps_active_accruing_past_idle() {
-        let t0 = Instant::now();
-        let mut st = tracker_at(t0);
-
-        // No input for 90s: a plain settle drops the idle stretch (nothing accrues).
-        st.settle(t0 + Duration::from_secs(90));
-        assert_eq!(st.active_accum, Duration::ZERO);
-
-        // A render frame refreshes last_activity to "now" (its internal Instant::now),
-        // so from that point the idle clock restarts.
-        st.note_render();
-        let base = st.active_accum;
-        // Settle 10s past that render: within the idle threshold -> the 10s counts,
-        // even though no key was ever pressed.
-        st.settle(st.last_tick + Duration::from_secs(10));
-        assert_eq!(st.active_accum, base + Duration::from_secs(10));
-    }
-
-    #[test]
-    fn project_totals_add_prior_sessions() {
-        let t0 = Instant::now();
-        let mut st = tracker_at(t0);
-        st.set_prior(Duration::from_secs(100), Duration::from_secs(200));
-        st.settle(t0 + Duration::from_secs(10));
-        assert_eq!(st.project_active(), Duration::from_secs(110));
-        assert!(st.project_total() >= Duration::from_secs(200));
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct FuzzyPickerState<T> {
     pub query: InputLine,
@@ -502,11 +315,6 @@ pub struct TerminalPane {
     pub cwd: Utf8PathBuf,
     /// Command used to start the terminal process, if any.
     pub command: Option<String>,
-    /// Last time this pane's PTY produced output, updated by the feed task while it
-    /// already holds the pane lock. Lets the time counters treat streaming output as
-    /// activity without depending on the render-signal backoff path (which goes silent
-    /// while the main-thread channel is saturated).
-    pub last_output: Instant,
 }
 
 impl Debug for TerminalPane {
@@ -624,13 +432,6 @@ pub struct AppState {
     pub terminal_grabbed: bool,
     pub text_selection: Option<TextSelection>,
     pub session_dirty_at: Option<Instant>,
-    /// Active/total time tracking for the session and project time counters.
-    pub time: SessionTime,
-    /// Whether the status-bar time counters are rendered (config `counters.show`).
-    pub show_timers: bool,
-    /// Whether terminal output counts as active time even without keyboard input
-    /// (config `counters.render-counts-as-active`).
-    pub count_render_as_active: bool,
     /// Whether the repository has uncommitted changes (staged or unstaged),
     /// refreshed periodically by a background `git::is_dirty` check.
     pub is_dirty: bool,
@@ -731,15 +532,6 @@ impl AppState {
     ) -> Option<R> {
         self.terminal_panes.get(&id).map(|p| f(&mut p.lock()))
     }
-
-    /// True if any terminal pane produced output within `window`. Deliberately ignores
-    /// pane focus (any pane streaming output counts); window focus is still enforced
-    /// downstream by [`SessionTime::settle`].
-    pub fn any_terminal_output_recently(&self, window: Duration) -> bool {
-        self.terminal_panes
-            .values()
-            .any(|p| p.lock().last_output.elapsed() <= window)
-    }
 }
 
 impl AppState {
@@ -807,9 +599,6 @@ impl AppState {
             terminal_grabbed: false,
             text_selection: None,
             session_dirty_at: None,
-            time: SessionTime::default(),
-            show_timers: true,
-            count_render_as_active: true,
             is_dirty: false,
             symbol_highlights: Vec::new(),
             next_palette_index: 0,
@@ -880,9 +669,9 @@ pub enum AppSignal {
     /// running in a terminal pane) to explorer's own stdout, so the host terminal
     /// handles it. Written to the real terminal on the main thread in `app_handle_signal`.
     ForwardOscToTerminal(Vec<u8>),
-    /// A terminal pane produced output and was re-rendered. Handled like [`Self::Noop`]
-    /// for tick/flush bookkeeping, but additionally registers activity when
-    /// `count_render_as_active` is set, so streaming output keeps the active counter alive.
+    /// A terminal pane produced output and should be re-painted. Kept apart from
+    /// [`Self::Noop`] on purpose: a flooding pane drives this many times a second, and
+    /// the once-a-minute OpenRouter poll must only ever count the 1s tick.
     TerminalOutput,
     /// Change which Cargo features rust-analyzer analyzes. rust-analyzer doesn't
     /// hot-reload `cargo.*` settings, so applying this restarts the LSP worker
@@ -1105,60 +894,3 @@ pub const SYMBOL_PALETTE: [RgbValue; 8] = [
         blue: 200,
     },
 ];
-
-#[cfg(test)]
-mod recent_output_tests {
-    use super::*;
-
-    fn dummy_pane(last_output: Instant) -> TerminalPane {
-        let (pty_input_tx, _) = mpsc::channel(1);
-        TerminalPane {
-            ofs_buf: OfsBufVT100::new_empty(Size::default()),
-            title: None,
-            pty_input_tx: Arc::new(pty_input_tx),
-            child_killer: None,
-            last_size: Size::default(),
-            is_command_pane: false,
-            exited: false,
-            exit_code: None,
-            exit_signal: None,
-            scroll_offset: 0,
-            cwd: Utf8PathBuf::from("/tmp"),
-            command: None,
-            last_output,
-        }
-    }
-
-    fn empty_state() -> AppState {
-        let files = Arc::new(ArcSwap::from_pointee(Vec::<Arc<LoadedFile>>::new()));
-        AppState::new(
-            files,
-            Utf8PathBuf::from("/tmp"),
-            HelixTheme::default(),
-            Keymap::default(),
-        )
-    }
-
-    #[test]
-    fn any_terminal_output_recently_ignores_stale_and_missing_panes() {
-        let mut state = empty_state();
-
-        // No panes at all -> nothing counts as recent output.
-        assert!(!state.any_terminal_output_recently(Duration::from_secs(2)));
-
-        // A pane whose last output is older than the window doesn't count.
-        state.terminal_panes.insert(
-            0,
-            Arc::new(Mutex::new(dummy_pane(
-                Instant::now() - Duration::from_secs(10),
-            ))),
-        );
-        assert!(!state.any_terminal_output_recently(Duration::from_secs(2)));
-
-        // Any pane with fresh output counts, regardless of focus.
-        state
-            .terminal_panes
-            .insert(1, Arc::new(Mutex::new(dummy_pane(Instant::now()))));
-        assert!(state.any_terminal_output_recently(Duration::from_secs(2)));
-    }
-}

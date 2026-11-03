@@ -97,8 +97,6 @@ pub struct AppMain {
     /// rejoin the still-running old worker instead of restarting it.
     lsp_restart_pending: bool,
     watcher_guard: Option<SubscriberGuard<WatcherWorker>>,
-    /// Counts 1s Noop ticks so the time counters are flushed to disk periodically.
-    time_flush_ticks: u64,
     /// Counts 1s Noop ticks so the status-bar dirty flag is rechecked periodically.
     dirty_check_ticks: u64,
     /// Counts 1s Noop ticks so the money of an OpenRouter key is polled periodically.
@@ -127,7 +125,6 @@ impl AppMain {
             lsp_health_skip: 0,
             lsp_restart_pending: false,
             watcher_guard: None,
-            time_flush_ticks: 0,
             dirty_check_ticks: 0,
             usage_poll_ticks: 0,
         })
@@ -208,7 +205,6 @@ impl AppMain {
                 scroll_offset: 0,
                 cwd: pane_cwd,
                 command: pane_command,
-                last_output: Instant::now(),
             }));
 
             state.terminal_panes.insert(id, Arc::clone(&pane));
@@ -224,12 +220,6 @@ impl AppMain {
                     match event {
                         PtyOutputEvent::Output(bytes) => {
                             let mut pane = pane.lock();
-                            // Recorded even when sync-buffered (the bytes render once
-                            // sync releases). This — not the render signal below — is
-                            // what keeps the time counters accruing during output: the
-                            // signal path goes silent once the main-thread channel
-                            // saturates, while the 1s Noop tick keeps polling this.
-                            pane.last_output = Instant::now();
                             match pane.ofs_buf.feed_pty_bytes(&bytes) {
                                 Some(result) => {
                                     if pane.scroll_offset > 0 {
@@ -538,15 +528,6 @@ impl App for AppMain {
             Err(e) => tracing::warn!("watcher failed to start: {e}"),
         }
 
-        // Enable terminal focus reporting (DECSET ?1004h) so the host terminal emits
-        // FocusGained/FocusLost. The r3bl setup doesn't turn this on, and without it the
-        // "active" time counter can't pause the instant the window loses focus. Disabled
-        // again in `run` on teardown. Safe here: runs before the first paint.
-        global_data.output_device.write(|w| {
-            let _ = w.write_all(b"\x1b[?1004h");
-        });
-        let _ = global_data.output_device.flush();
-
         // Global 1s refresh timer — catches any final render state that the
         // per-task 1s debounce might miss (burst ends, no more events).
         let timer_notify = notify_tx.clone();
@@ -695,19 +676,6 @@ impl App for AppMain {
         sync_has_focus(&global_data.state, has_focus);
         let surface_size = surface_size(global_data.window_size);
         global_data.state.last_surface_size = surface_size;
-
-        // Terminal focus gained/lost pauses/resumes the "active" time counter immediately,
-        // rather than waiting for the idle threshold. Focus events carry no other meaning
-        // for the app, so consume and re-render (the status-bar counter reflects the pause).
-        if let InputEvent::Focus(focus) = input_event {
-            global_data
-                .state
-                .time
-                .on_focus(matches!(focus, FocusEvent::Gained));
-            return Ok(EventPropagation::ConsumedRender);
-        }
-        // Any other input event counts as activity for the "active" time counter.
-        global_data.state.time.on_input();
 
         if after_agents::cancel_on_input(&mut global_data.state, &input_event) {
             return Ok(EventPropagation::ConsumedRender);
@@ -1783,25 +1751,6 @@ impl App for AppMain {
                 AppSignal::AfterAgentsExited { run } => after_agents::exited(state, *run),
                 AppSignal::Noop | AppSignal::TerminalOutput => {
                     after_agents::tick(state, global_data.main_thread_channel_sender.clone());
-                    // Streaming terminal output counts as activity when the option is on,
-                    // so a running command keeps the active counter alive without input.
-                    // Polled from per-pane `last_output` timestamps rather than tied to
-                    // TerminalOutput signal delivery: the render backoff suppresses all
-                    // signals during a sustained flood, while this 1s tick (and the
-                    // persisted timestamps) keep working through it.
-                    if state.count_render_as_active
-                        && state.any_terminal_output_recently(Duration::from_secs(2))
-                    {
-                        state.time.note_render();
-                    }
-                    // Advance the time counters live (the status bar re-renders each tick).
-                    state.time.tick();
-                    // Flush the time counters to the session file roughly once a minute so a
-                    // crash loses at most ~1 min; the on-exit save captures the final value.
-                    self.time_flush_ticks = self.time_flush_ticks.wrapping_add(1);
-                    if self.time_flush_ticks.is_multiple_of(60) {
-                        state.mark_session_dirty();
-                    }
                     // Recheck the working-tree dirty status every ~5s rather than every
                     // render, since it requires walking the index/worktree.
                     self.dirty_check_ticks = self.dirty_check_ticks.wrapping_add(1);
@@ -2277,9 +2226,7 @@ fn render_status_bar(
 
     // Right-aligned "dirty" flag (uncommitted staged/unstaged changes), shown in a
     // bright error-like theme color, followed by the usage of the spending behind the
-    // focused conversation's endpoint and by the time counters. Each is independently
-    // optional: the flag reflects `state.is_dirty` unconditionally, the counters are
-    // gated on the `show-timers` config option.
+    // focused conversation's endpoint. The flag reflects `state.is_dirty` unconditionally.
     let error_fg = TuiColor::from(theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG));
     let warning_fg = TuiColor::from(theme.ui_fg("warning").unwrap_or(DEFAULT_WARNING_FG));
     let dirty_style = new_style!(bold color_fg: {error_fg} color_bg: {color_bg});
@@ -2291,16 +2238,6 @@ fn render_status_bar(
         .after_agents
         .as_ref()
         .map(|after| after_agents::status_text(after, Instant::now()));
-    let counters = state.show_timers.then(|| {
-        let t = &state.time;
-        format!(
-            "│ {}/{}  Σ {}/{} ",
-            fmt_duration(t.session_active()),
-            fmt_duration(t.session_total()),
-            fmt_duration(t.project_active()),
-            fmt_duration(t.project_total()),
-        )
-    });
     let clock = {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -2311,11 +2248,10 @@ fn render_status_bar(
     let dirty_width = dirty.map_or(0, |(bar, label)| width_of(bar) + width_of(label));
     let usage_width: usize = usage.iter().map(|(text, _)| width_of(text)).sum();
     let after_width = after_agents.as_ref().map_or(0, |(text, _)| width_of(text));
-    let counters_width = counters.as_deref().map(width_of).unwrap_or(0);
     let clock_width = width_of(&clock);
     let total_width = size.col_width.as_usize();
-    // Usage goes first, then after-agents: a narrow terminal keeps the flag, counters and clock.
-    let base_width = dirty_width + counters_width + clock_width;
+    // Usage goes first, then after-agents: a narrow terminal keeps the flag and the clock.
+    let base_width = dirty_width + clock_width;
     let usage_fits = total_width > base_width + after_width + usage_width + 2;
     let after_fits = total_width > base_width + after_width + 2;
     let combined_width = base_width
@@ -2348,9 +2284,6 @@ fn render_status_bar(
                 };
                 render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
             }
-        }
-        if let Some(counters) = counters {
-            render_ops += RenderOpIR::PaintTextWithAttributes(counters.into(), Some(normal_style));
         }
         render_ops += RenderOpIR::PaintTextWithAttributes(clock.into(), Some(normal_style));
     }
@@ -2458,25 +2391,6 @@ fn conversation_tree_alert(state: &AppState) -> Option<String> {
     ))
 }
 
-/// Formats a duration compactly for the status bar: `5s`, `12m`, `1h20m`, `3h`.
-fn fmt_duration(d: Duration) -> String {
-    let secs = d.as_secs();
-    let h = secs / 3600;
-    let m = (secs % 3600) / 60;
-    let s = secs % 60;
-    if h > 0 {
-        if m > 0 {
-            format!("{h}h{m}m")
-        } else {
-            format!("{h}h")
-        }
-    } else if m > 0 {
-        format!("{m}m")
-    } else {
-        format!("{s}s")
-    }
-}
-
 pub fn build_state(
     files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
     root: Utf8PathBuf,
@@ -2534,12 +2448,6 @@ pub async fn run(
             TuiAvailability::Available(future) => future.await?,
             it => return it.into_err(),
         };
-
-    // Disable terminal focus reporting enabled in `app_start_background_services`.
-    global_data.output_device.write(|w| {
-        let _ = w.write_all(b"\x1b[?1004l");
-    });
-    let _ = global_data.output_device.flush();
 
     // Stop running turns: keep what they produced. One with a reply or commits is
     // cancelled, part of the discussion; one without has nothing to show and fails.
