@@ -9,6 +9,7 @@ use genai::resolver::{AuthData, Endpoint};
 use genai::{Client, ModelIden, ServiceTarget};
 use serde_json::{Value, json};
 use std::sync::OnceLock;
+use std::time::Duration;
 
 /// Where and how to run one model: an OpenAI-compatible server, a model and an effort.
 #[derive(Clone, Debug)]
@@ -38,9 +39,32 @@ pub struct LlmResponse {
     pub cached_in: Option<u64>,
 }
 
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(30);
+const READ_TIMEOUT: Duration = Duration::from_secs(120);
+/// Requests made at most for one answer: the first one and its retries.
+const MAX_ATTEMPTS: u32 = 4;
+const BACKOFF_CAP: Duration = Duration::from_secs(30);
+
 fn client() -> &'static Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
-    CLIENT.get_or_init(Client::default)
+    // No total timeout, so a long answer that keeps streaming is never cut.
+    CLIENT.get_or_init(|| web_client(Some(READ_TIMEOUT)))
+}
+
+/// A complete answer arrives only once it is ready, so it gets no read timeout.
+fn complete_client() -> &'static Client {
+    static CLIENT: OnceLock<Client> = OnceLock::new();
+    CLIENT.get_or_init(|| web_client(None))
+}
+
+fn web_client(read_timeout: Option<Duration>) -> Client {
+    Client::builder()
+        .with_web_config(genai::WebConfig {
+            connect_timeout: Some(CONNECT_TIMEOUT),
+            read_timeout,
+            ..Default::default()
+        })
+        .build()
 }
 
 fn service_target(target: &LlmTarget) -> ServiceTarget {
@@ -128,8 +152,7 @@ fn one_line(text: &str) -> String {
     cut
 }
 
-/// Runs one provider turn, calling `on_text` for every piece of text as it arrives.
-/// `session` names the conversation the request belongs to.
+/// Runs one provider turn for `session`; retried only while nothing has streamed to `on_chunk`.
 pub async fn stream_chat(
     target: &LlmTarget,
     session: &str,
@@ -138,6 +161,44 @@ pub async fn stream_chat(
     tools: &[ToolSpec],
     mut on_chunk: impl FnMut(bool, &str),
 ) -> Result<LlmResponse, String> {
+    let mut attempt = 1;
+    loop {
+        let mut streamed = false;
+        let error = match attempt_chat(
+            target,
+            session,
+            system,
+            messages,
+            tools,
+            &mut streamed,
+            &mut on_chunk,
+        )
+        .await
+        {
+            Ok(response) => return Ok(response),
+            Err(error) => error,
+        };
+        if streamed || attempt >= MAX_ATTEMPTS || !is_transient(&error) {
+            let mut text = error_text(error);
+            if attempt > 1 {
+                text.push_str(&format!(" (after {attempt} attempts)"));
+            }
+            return Err(text);
+        }
+        tokio::time::sleep(backoff(attempt, jitter())).await;
+        attempt += 1;
+    }
+}
+
+async fn attempt_chat(
+    target: &LlmTarget,
+    session: &str,
+    system: &str,
+    messages: &[Message],
+    tools: &[ToolSpec],
+    streamed: &mut bool,
+    on_chunk: &mut impl FnMut(bool, &str),
+) -> Result<LlmResponse, genai::Error> {
     let options = chat_options(target.effort, session);
     let mut stream = client()
         .exec_chat_stream(
@@ -145,18 +206,21 @@ pub async fn stream_chat(
             request(system, messages, tools),
             Some(&options),
         )
-        .await
-        .map_err(error_text)?
+        .await?
         .stream;
 
     let mut response = LlmResponse::default();
     while let Some(event) = stream.next().await {
-        match event.map_err(error_text)? {
+        match event? {
             ChatStreamEvent::Chunk(chunk) => {
+                *streamed = true;
                 on_chunk(false, &chunk.content);
                 response.text.push_str(&chunk.content);
             }
-            ChatStreamEvent::ReasoningChunk(chunk) => on_chunk(true, &chunk.content),
+            ChatStreamEvent::ReasoningChunk(chunk) => {
+                *streamed = true;
+                on_chunk(true, &chunk.content);
+            }
             ChatStreamEvent::End(end) => {
                 let usage = end.captured_usage.as_ref();
                 response.tokens_in = usage
@@ -183,6 +247,55 @@ pub async fn stream_chat(
     Ok(response)
 }
 
+/// Whether the same request may succeed when made again (server or network failure, not a refusal).
+fn is_transient(error: &genai::Error) -> bool {
+    use genai::Error;
+    use genai::webc::Error as Web;
+    fn status_is_transient(status: u16) -> bool {
+        matches!(status, 408 | 429 | 500..=599)
+    }
+    // A malformed URL or header fails the request before it is sent: retrying cannot help.
+    fn reqwest_is_transient(error: &reqwest::Error) -> bool {
+        !error.is_builder() && !error.is_redirect()
+    }
+    match error {
+        Error::HttpError { status, .. } => status_is_transient(status.as_u16()),
+        Error::WebModelCall { webc_error, .. } | Error::WebAdapterCall { webc_error, .. } => {
+            match webc_error {
+                Web::Reqwest(error) => reqwest_is_transient(error),
+                Web::ResponseFailedStatus { status, .. } => status_is_transient(status.as_u16()),
+                _ => false,
+            }
+        }
+        // genai wraps status errors in the stream error; other stream failures are dropped connections.
+        Error::WebStream { error, .. } => {
+            if let Some(inner) = error.downcast_ref::<Error>() {
+                is_transient(inner)
+            } else if let Some(error) = error.downcast_ref::<reqwest::Error>() {
+                reqwest_is_transient(error)
+            } else {
+                true
+            }
+        }
+        Error::StreamParse { .. } => true,
+        // A failure the provider reported inside a stream that was answering.
+        _ => false,
+    }
+}
+
+/// Pause before the next attempt: 1s, 2s, 4s, ... capped, scaled by `jitter` in `0.5..1.5`.
+fn backoff(attempt: u32, jitter: f64) -> Duration {
+    let base = Duration::from_secs(1 << attempt.saturating_sub(1).min(5)).min(BACKOFF_CAP);
+    base.mul_f64(jitter)
+}
+
+fn jitter() -> f64 {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.subsec_nanos());
+    0.5 + f64::from(nanos % 1000) / 1000.0
+}
+
 /// genai hands over unparsable arguments as a string, `""` for a call without any.
 fn tool_arguments(arguments: Value) -> Value {
     match arguments {
@@ -204,7 +317,7 @@ pub async fn complete(
         content: user.to_string(),
         injected: false,
     }];
-    let response = client()
+    let response = complete_client()
         .exec_chat(
             service_target(target),
             request(system, &messages, &[]),
@@ -239,5 +352,56 @@ mod tests {
         let long = one_line(&"x".repeat(400));
         assert_eq!(long.chars().count(), ERROR_MAX_CHARS + 1);
         assert!(long.ends_with('…'));
+    }
+
+    fn http(status: u16) -> genai::Error {
+        genai::Error::HttpError {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            canonical_reason: String::new(),
+            body: String::new(),
+        }
+    }
+
+    fn stream_error(error: impl Into<genai::BoxError>) -> genai::Error {
+        genai::Error::WebStream {
+            model_iden: ModelIden::new(AdapterKind::OpenAI, "m"),
+            cause: String::new(),
+            error: error.into(),
+        }
+    }
+
+    #[test]
+    fn server_failures_are_transient_and_refusals_are_not() {
+        for status in [408, 429, 500, 502, 503, 504] {
+            assert!(is_transient(&http(status)), "{status}");
+        }
+        for status in [400, 401, 403, 404] {
+            assert!(!is_transient(&http(status)), "{status}");
+        }
+    }
+
+    #[test]
+    fn stream_errors_follow_the_status_they_wrap() {
+        assert!(is_transient(&stream_error(http(502))));
+        assert!(!is_transient(&stream_error(http(401))));
+        assert!(is_transient(&stream_error("error decoding response body")));
+    }
+
+    #[test]
+    fn a_request_that_cannot_be_built_is_not_retried() {
+        let error = reqwest::Client::new().get("not a url").build().unwrap_err();
+        let failed = genai::Error::WebModelCall {
+            model_iden: ModelIden::new(AdapterKind::OpenAI, "m"),
+            webc_error: genai::webc::Error::Reqwest(error),
+        };
+        assert!(!is_transient(&failed));
+    }
+
+    #[test]
+    fn backoff_doubles_up_to_the_cap() {
+        assert_eq!(backoff(1, 1.0), Duration::from_secs(1));
+        assert_eq!(backoff(3, 1.0), Duration::from_secs(4));
+        assert_eq!(backoff(9, 1.0), BACKOFF_CAP);
+        assert_eq!(backoff(2, 0.5), Duration::from_secs(1));
     }
 }
