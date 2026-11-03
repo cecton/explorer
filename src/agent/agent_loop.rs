@@ -69,6 +69,9 @@ fn nudge_text(nudge: Nudge, elapsed: Duration, budget: Duration) -> String {
     }
 }
 
+/// Rounds in a row that may ask only for tool calls without a name before the run fails.
+const MAX_NAMELESS_ROUNDS: u32 = 3;
+
 /// What bounds one run of the loop.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
@@ -212,6 +215,7 @@ async fn run_loop(
     let tool_specs = tools::specs(context);
     let mut warned = false;
     let mut stalls = StallDetector::new(limits.repeat_limit);
+    let mut nameless_rounds = 0;
     loop {
         // What the user sent while the turn was working joins here, after the tool
         // results of the round before: the next request carries it.
@@ -265,12 +269,15 @@ async fn run_loop(
         // Detect if response contains excessive Chinese before moving the text.
         let detected_chinese = has_excessive_chinese(&response.text);
 
-        let answer = Message::Assistant {
-            content: response.text,
-            tool_calls: response.tool_calls.clone(),
-        };
-        recorder.message(&answer);
-        messages.push(answer);
+        let nameless = response.tool_calls.is_empty() && response.dropped_calls > 0;
+        if !(nameless && response.text.trim().is_empty()) {
+            let answer = Message::Assistant {
+                content: response.text,
+                tool_calls: response.tool_calls.clone(),
+            };
+            recorder.message(&answer);
+            messages.push(answer);
+        }
 
         // Inject correction if excessive Chinese was detected.
         if detected_chinese {
@@ -282,6 +289,25 @@ async fn run_loop(
             messages.push(correction);
         }
 
+        if nameless {
+            // The model meant to call a tool, so its text is work in progress, not a reply.
+            recorder.answer_calls_tools();
+            // Same context, same answer: the model has to be told what went wrong.
+            nameless_rounds += 1;
+            if nameless_rounds > MAX_NAMELESS_ROUNDS {
+                return Err("the model keeps calling tools without naming them".to_string());
+            }
+            let note = Message::User {
+                content: "[Note from Explorer: your last tool call arrived without a tool \
+                          name and was ignored. Call the tool again.]"
+                    .to_string(),
+                injected: true,
+            };
+            recorder.message(&note);
+            messages.push(note);
+            continue;
+        }
+        nameless_rounds = 0;
         if response.tool_calls.is_empty() {
             // An answer that calls no tools ends the turn, unless something the user
             // sent arrived while it streamed: that keeps the loop going.

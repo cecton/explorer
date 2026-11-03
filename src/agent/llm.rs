@@ -33,6 +33,8 @@ pub struct ToolSpec {
 pub struct LlmResponse {
     pub text: String,
     pub tool_calls: Vec<ToolCall>,
+    /// Tool calls left out of `tool_calls` because they arrived without a name.
+    pub dropped_calls: usize,
     pub tokens_in: Option<u64>,
     /// Input tokens of this request the provider served from its prompt cache;
     /// `None` when the provider does not report caching at all.
@@ -230,21 +232,31 @@ async fn attempt_chat(
                     .and_then(|usage| usage.prompt_tokens_details.as_ref())
                     .and_then(|details| details.cached_tokens)
                     .and_then(|tokens| u64::try_from(tokens).ok());
-                response.tool_calls = end
-                    .captured_into_tool_calls()
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|call| ToolCall {
-                        id: call.call_id,
-                        name: call.fn_name,
-                        arguments: tool_arguments(call.fn_arguments),
-                    })
-                    .collect();
+                (response.tool_calls, response.dropped_calls) =
+                    named_calls(end.captured_into_tool_calls().unwrap_or_default());
             }
             _ => {}
         }
     }
     Ok(response)
+}
+
+/// The calls with a name, and how many were left out. A provider that splits a call
+/// across chunks can hand over one with no name; replayed in the transcript it makes
+/// the next request a 400.
+fn named_calls(calls: Vec<genai::chat::ToolCall>) -> (Vec<ToolCall>, usize) {
+    let received = calls.len();
+    let named: Vec<ToolCall> = calls
+        .into_iter()
+        .filter(|call| !call.fn_name.trim().is_empty())
+        .map(|call| ToolCall {
+            id: call.call_id,
+            name: call.fn_name,
+            arguments: tool_arguments(call.fn_arguments),
+        })
+        .collect();
+    let dropped = received - named.len();
+    (named, dropped)
 }
 
 /// Whether the same request may succeed when made again (server or network failure, not a refusal).
@@ -341,6 +353,20 @@ mod tests {
         assert_eq!(tool_arguments(Value::Null), json!({}));
         assert_eq!(tool_arguments(json!({"id": 4})), json!({"id": 4}));
         assert_eq!(tool_arguments(json!("{oops")), json!("{oops"));
+    }
+
+    #[test]
+    fn calls_without_a_name_are_left_out_and_counted() {
+        let call = |name: &str| genai::chat::ToolCall {
+            call_id: "c".into(),
+            fn_name: name.into(),
+            fn_arguments: json!({}),
+            thought_signatures: None,
+        };
+        let (kept, dropped) = named_calls(vec![call("read"), call(""), call(" \t"), call("grep")]);
+        let names: Vec<&str> = kept.iter().map(|call| call.name.as_str()).collect();
+        assert_eq!(names, ["read", "grep"]);
+        assert_eq!(dropped, 2);
     }
 
     #[test]
