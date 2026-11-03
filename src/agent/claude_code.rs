@@ -315,26 +315,28 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
         let injector = injector.clone();
         let settled = Arc::clone(&settled);
         tokio::spawn(async move {
+            settled.store(false, Ordering::SeqCst);
             if stdin.write_all(first.as_bytes()).await.is_err() {
+                injector.close();
                 return;
             }
             let _ = stdin.flush().await;
-            settled.store(false, Ordering::SeqCst);
             loop {
                 tokio::time::sleep(STEERING_INTERVAL).await;
                 for content in injector.take() {
+                    settled.store(false, Ordering::SeqCst);
                     if stdin
                         .write_all(input_frame(&content).as_bytes())
                         .await
                         .is_err()
                     {
+                        injector.close();
                         return;
                     }
                     let _ = stdin.flush().await;
                     injector.sent(&content);
-                    settled.store(false, Ordering::SeqCst);
                 }
-                if should_close(injector.pending(), settled.load(Ordering::SeqCst)) {
+                if injector.close_if_idle(settled.load(Ordering::SeqCst)) {
                     // A result came after the last write: closing stdin ends the run.
                     return;
                 }
@@ -444,25 +446,9 @@ pub async fn complete(target: &ClaudeTarget, system: &str, user: &str) -> Result
     Ok(answer)
 }
 
-/// Whether the steering task may close stdin: nothing waits to be written and a result
-/// came after the last frame.
-fn should_close(pending: bool, settled: bool) -> bool {
-    !pending && settled
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn stdin_closes_once_a_result_follows_the_last_write() {
-        // Two frames folded into one result: the result came after both writes.
-        assert!(should_close(false, true));
-        // A frame written after the last result waits for its own.
-        assert!(!should_close(false, false));
-        // A message still queued keeps the run open.
-        assert!(!should_close(true, true));
-    }
 
     const FIXTURE: &str = include_str!("fixtures/claude_stream.jsonl");
 

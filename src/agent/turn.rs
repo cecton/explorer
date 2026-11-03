@@ -69,6 +69,8 @@ pub struct LiveTurn {
     /// What the user sent while the turn was working, waiting to join the loop at its
     /// next round.
     pub injected: VecDeque<String>,
+    /// The turn takes no more messages: the Claude Code driver closed the CLI's stdin.
+    pub closed: bool,
 }
 
 /// A sub-agent run in progress, as the turn that called it sees it.
@@ -130,6 +132,23 @@ impl Injector {
     /// Whether a message is waiting.
     pub(super) fn pending(&self) -> bool {
         !self.live.lock().injected.is_empty()
+    }
+
+    /// Closes the turn to new messages when none waits and `settled` (a result came
+    /// after the last write). The check and the flag share one lock, so a message
+    /// either is seen here or is refused by the window.
+    pub(super) fn close_if_idle(&self, settled: bool) -> bool {
+        let mut live = self.live.lock();
+        let idle = live.injected.is_empty() && settled;
+        if idle {
+            live.closed = true;
+        }
+        idle
+    }
+
+    /// Closes the turn to new messages whatever waits: the CLI's stdin is gone.
+    pub(super) fn close(&self) {
+        self.live.lock().closed = true;
     }
 
     /// Records one as sent: it joins the prompt block, `prompt.md` and the transcript,
@@ -1171,6 +1190,23 @@ mod tests {
         assert_eq!(spinner_frame(REDRAW_INTERVAL), '⠙');
         assert_eq!(spinner_frame(REDRAW_INTERVAL * 9), '⠏');
         assert_eq!(spinner_frame(REDRAW_INTERVAL * 10), '⠋');
+    }
+
+    #[test]
+    fn a_turn_closes_only_when_idle_and_settled() {
+        let live = Arc::new(Mutex::new(LiveTurn::default()));
+        let injector = Injector {
+            live: Arc::clone(&live),
+            node_dir: Utf8PathBuf::new(),
+        };
+        assert!(!injector.close_if_idle(false));
+        assert!(!live.lock().closed);
+        live.lock().injected.push_back("late".to_string());
+        assert!(!injector.close_if_idle(true));
+        assert!(!live.lock().closed);
+        live.lock().injected.clear();
+        assert!(injector.close_if_idle(true));
+        assert!(live.lock().closed);
     }
 
     #[test]

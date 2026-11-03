@@ -1275,7 +1275,13 @@ impl DiscussionComponent {
         let Some(handle) = running else {
             return false;
         };
-        handle.live.lock().injected.push_back(typed);
+        {
+            let mut live = handle.live.lock();
+            if live.closed {
+                return false;
+            }
+            live.injected.push_back(typed);
+        }
         discussion.draft.clear();
         discussion.notice = None;
         state.mark_session_dirty();
@@ -2524,6 +2530,29 @@ mod tests {
         );
         assert!(state.discussions[&0].draft.text().is_empty());
         assert!(state.queued_turns.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_message_for_a_closed_turn_is_queued_instead() {
+        let (_tmp, mut state) = state_with_failed_child();
+        state.agent = agent_with_endpoint();
+        state.trusted = true;
+        let (main_tx, _rx) = mpsc::channel(1);
+        let node = start_turn(&mut state, main_tx.clone(), feedback_launch()).unwrap();
+        state.discussions.get_mut(&0).unwrap().node = Some(node.clone());
+        state.running_turns.get(&node).unwrap().live.lock().closed = true;
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("too late");
+
+        assert!(!DiscussionComponent::inject(&mut state, 0));
+
+        let handle = state.running_turns.get(&node).unwrap();
+        assert!(handle.live.lock().injected.is_empty());
+        assert_eq!(state.discussions[&0].draft.text(), "too late");
     }
 
     #[tokio::test]
