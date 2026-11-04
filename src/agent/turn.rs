@@ -20,10 +20,9 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::{mpsc, watch};
 
 const REPLY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
-const PROGRESS_SIGNAL_INTERVAL: Duration = Duration::from_millis(80);
-/// How often a running turn asks for a redraw, which is also one spinner frame.
-pub const REDRAW_INTERVAL: Duration = Duration::from_millis(100);
-const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+/// How often the spinners advance one frame.
+pub const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
+pub const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const TITLE_MAX_CHARS: usize = 100;
 pub(super) const REPLY_MAX_CHARS: usize = 8000;
 const COMMITS_MAX: usize = 20;
@@ -81,10 +80,9 @@ pub struct LiveSubagent {
     pub live: Arc<Mutex<LiveTurn>>,
 }
 
-/// The spinner frame of a turn that has been running for `elapsed`.
-pub fn spinner_frame(elapsed: Duration) -> char {
-    let frame = elapsed.as_millis() / REDRAW_INTERVAL.as_millis();
-    SPINNER[frame as usize % SPINNER.len()]
+/// The spinner character for the shared animation step `tick`.
+pub fn spinner_char(tick: u8) -> char {
+    SPINNER[tick as usize % SPINNER.len()]
 }
 
 /// Main-thread handle on a running turn.
@@ -295,7 +293,6 @@ pub struct Recorder {
     /// Where the text of the current answer starts in the live reply.
     answer_start: usize,
     last_flush: Instant,
-    last_signal: Instant,
     /// Chars of thinking recorded for the answer in progress; lets the recorder drop
     /// the live thinking when the answer turns out to call tools.
     thinking_start: usize,
@@ -346,7 +343,6 @@ impl Recorder {
             caller: None,
             answer_start: 0,
             last_flush: Instant::now(),
-            last_signal: Instant::now(),
             thinking_start: 0,
         }
     }
@@ -372,15 +368,6 @@ impl Recorder {
             .main_tx
             .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
             .await;
-    }
-
-    fn signal(&mut self) {
-        self.last_signal = Instant::now();
-        let _ = self
-            .main_tx
-            .try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                AppSignal::TurnProgress,
-            ));
     }
 
     pub(super) fn flush_reply(&mut self) {
@@ -468,17 +455,11 @@ impl Recorder {
         if self.last_flush.elapsed() >= REPLY_FLUSH_INTERVAL {
             self.flush_reply();
         }
-        if self.last_signal.elapsed() >= PROGRESS_SIGNAL_INTERVAL {
-            self.signal();
-        }
     }
 
     /// Thinking of the answer in progress; shown dimmed and never recorded.
     pub fn reasoning(&mut self, chunk: &str) {
         self.live.lock().thinking.push_str(chunk);
-        if self.last_signal.elapsed() >= PROGRESS_SIGNAL_INTERVAL {
-            self.signal();
-        }
     }
 
     /// Appends one message to `transcript.jsonl`.
@@ -496,7 +477,6 @@ impl Recorder {
 
     pub fn activity(&mut self, activity: Option<String>) {
         self.live.lock().activity = activity;
-        self.signal();
     }
 
     pub fn tokens_in(&mut self, tokens: u64) {
@@ -584,17 +564,6 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
         mode: request.mode,
         cancel: Arc::new(cancel_tx),
     };
-
-    let redraw_tx = main_tx.clone();
-    let redraw = tokio::spawn(async move {
-        let mut interval = tokio::time::interval(REDRAW_INTERVAL);
-        loop {
-            interval.tick().await;
-            let _ = redraw_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                AppSignal::TurnProgress,
-            ));
-        }
-    });
 
     tokio::spawn(async move {
         let mut recorder =
@@ -687,7 +656,6 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
                 },
             ))
             .await;
-        redraw.abort();
         report_usage(request.endpoint.clone(), reported_usage, main_tx.clone());
         let reply_blank = recorder.live.lock().reply.trim().is_empty();
         if (status == NodeStatus::Done || !reply_blank || !commits.is_empty())
@@ -1194,15 +1162,11 @@ mod tests {
     use super::*;
 
     #[test]
-    fn spinner_advances_with_the_elapsed_time_and_wraps() {
-        assert_eq!(spinner_frame(Duration::ZERO), '⠋');
-        assert_eq!(
-            spinner_frame(REDRAW_INTERVAL - Duration::from_millis(1)),
-            '⠋'
-        );
-        assert_eq!(spinner_frame(REDRAW_INTERVAL), '⠙');
-        assert_eq!(spinner_frame(REDRAW_INTERVAL * 9), '⠏');
-        assert_eq!(spinner_frame(REDRAW_INTERVAL * 10), '⠋');
+    fn spinner_char_follows_the_tick_and_wraps() {
+        assert_eq!(spinner_char(0), '⠋');
+        assert_eq!(spinner_char(1), '⠙');
+        assert_eq!(spinner_char(9), '⠏');
+        assert_eq!(spinner_char(10), '⠋');
     }
 
     #[test]

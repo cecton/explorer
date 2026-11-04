@@ -417,6 +417,8 @@ pub struct AppState {
     pub model_picker_purpose: Option<ModelPickerPurpose>,
     /// Turns in progress, by node.
     pub running_turns: HashMap<NodeId, TurnHandle>,
+    /// Animation step shared by every spinner on screen; advanced by `TurnTick`.
+    pub spinner_tick: u8,
     /// Prompts waiting for their turn, next to start first. Never saved with the session.
     pub queued_turns: Vec<PendingTurn>,
     /// The `after-agents` command, in memory only; replacing or clearing it kills a running one.
@@ -591,6 +593,7 @@ impl AppState {
             model_picker: FuzzyPickerState::default(),
             model_picker_purpose: None,
             running_turns: HashMap::new(),
+            spinner_tick: 0,
             queued_turns: Vec::new(),
             after_agents: None,
             config_aliases: Vec::new(),
@@ -707,8 +710,9 @@ pub enum AppSignal {
         endpoint: String,
         usage: Usage,
     },
-    /// A running turn produced output; nothing to apply, only a render.
-    TurnProgress,
+    /// The shared spinner advances one frame (`SPINNER_INTERVAL`); renders only while
+    /// a turn runs.
+    TurnTick,
     /// The turn of `node` started a sub-agent, already recorded in the tree.
     SubagentStarted {
         node: NodeId,

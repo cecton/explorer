@@ -1,4 +1,5 @@
 use crate::agent::mcp::{McpStatus, Notify};
+use crate::agent::turn::{SPINNER, SPINNER_INTERVAL};
 use crate::keymap::Action;
 use crate::loader::LoadedFile;
 use crate::lsp::{self, LSP_RRT};
@@ -635,12 +636,14 @@ impl App for AppMain {
             Err(e) => tracing::warn!("watcher failed to start: {e}"),
         }
 
-        // Each period gets its own signal. Only `Tick` may repaint, so timers that fire
-        // together never cost more than one render. The first tick of each interval is
-        // immediate: the dirty flag and the OpenRouter spending are loaded at startup.
+        // Each period gets its own signal. Only `Tick` and `TurnTick` (while a turn runs)
+        // may repaint, so timers that fire together cost at most two renders. The first
+        // tick of each interval is immediate: the dirty flag and the OpenRouter spending
+        // are loaded at startup.
         every(&notify_tx, Duration::from_secs(1), AppSignal::Tick);
         every(&notify_tx, Duration::from_secs(5), AppSignal::Housekeeping);
         every(&notify_tx, Duration::from_secs(60), AppSignal::UsagePollDue);
+        every(&notify_tx, SPINNER_INTERVAL, AppSignal::TurnTick);
 
         let stack = global_data.state.pane_manager.window_stack.clone();
         for window in stack {
@@ -1708,7 +1711,12 @@ impl App for AppMain {
                     state.usage.insert(endpoint.clone(), usage.clone());
                     crate::agent::usage::save(&state.usage);
                 }
-                AppSignal::TurnProgress => {}
+                AppSignal::TurnTick => {
+                    state.spinner_tick = (state.spinner_tick + 1) % SPINNER.len() as u8;
+                    if state.running_turns.is_empty() {
+                        propagation = EventPropagation::Consumed;
+                    }
+                }
                 AppSignal::McpStatus { name } => {
                     let reported = match state.mcp.status(name) {
                         Some(McpStatus::Starting) | None => None,

@@ -1,4 +1,4 @@
-use crate::agent::turn::spinner_frame;
+use crate::agent::turn::spinner_char;
 use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
 use crate::tui::state::{PendingTurn, RowTarget};
 use crate::tui::text_layout::{display_width, truncate, wrap};
@@ -330,9 +330,9 @@ struct Line {
     text: String,
 }
 
-fn state_marker(meta: &Metadata, running_for: Option<Duration>) -> Option<char> {
+fn state_marker(meta: &Metadata, spinner_tick: u8) -> Option<char> {
     match (meta.status, meta.node_type) {
-        (Some(NodeStatus::Running), _) => Some(spinner_frame(running_for.unwrap_or_default())),
+        (Some(NodeStatus::Running), _) => Some(spinner_char(spinner_tick)),
         (Some(NodeStatus::Failed), _) => Some('✗'),
         (_, Some(NodeType::Compact)) => Some('≡'),
         _ => None,
@@ -419,17 +419,6 @@ pub(crate) fn with_agents(
         }
     }
     lines
-}
-
-/// How long sub-agent run `index` of `node` has been running, while it runs.
-fn agent_running_for(state: &AppState, node: &NodeId, index: u32) -> Option<Duration> {
-    let handle = state.running_turns.get(node)?;
-    let live = handle.live.lock();
-    let running = live
-        .subagent
-        .as_ref()
-        .filter(|running| running.index == index)?;
-    Some(running.started.elapsed())
 }
 
 /// One column, nine digits.
@@ -1440,12 +1429,14 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         }
                         RowTarget::Agent { node, index } => {
                             let meta = tree.agent(node, *index).map(|agent| &agent.meta);
-                            let running_for = agent_running_for(state, node, *index);
                             let fg = match meta.and_then(|meta| meta.status) {
                                 Some(NodeStatus::Failed) => error_fg,
                                 _ => running_fg,
                             };
-                            (meta.and_then(|meta| state_marker(meta, running_for)), fg)
+                            (
+                                meta.and_then(|meta| state_marker(meta, state.spinner_tick)),
+                                fg,
+                            )
                         }
                         RowTarget::Node(_) => continue,
                     };
@@ -1516,11 +1507,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     }
                 };
 
-                let running_for = state
-                    .running_turns
-                    .get(node_id)
-                    .map(|handle| handle.started.elapsed());
-                let marker = state_marker(&node.meta, running_for);
+                let marker = state_marker(&node.meta, state.spinner_tick);
                 match line.kind {
                     LineKind::Head => {
                         paint_plain(&mut render_ops, 0, &node.created_display, gutter);

@@ -1666,7 +1666,10 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
     if discussion.agent.is_some()
         && let Some(running) = running_agent(state, discussion)
     {
-        return (progress_text(&running.live.lock(), running.started), false);
+        return (
+            progress_text(&running.live.lock(), running.started, state.spinner_tick),
+            false,
+        );
     }
     let queued = queue_hint(state, id);
     let Some(node) = &discussion.node else {
@@ -1676,7 +1679,7 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
     if discussion.agent.is_none()
         && let Some(handle) = state.running_turns.get(node)
     {
-        let mut text = progress_text(&handle.live.lock(), handle.started);
+        let mut text = progress_text(&handle.live.lock(), handle.started, state.spinner_tick);
         text.push_str(" · ");
         text.push_str(queued.as_deref().unwrap_or("Esc:Cancel"));
         let hiding_dropped = discussion.show_work_log != Some(true)
@@ -1704,9 +1707,9 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
 
 /// The progress of a turn or a sub-agent run started at `started`: spinner, time,
 /// activity and context size.
-fn progress_text(live: &LiveTurn, started: Instant) -> String {
+fn progress_text(live: &LiveTurn, started: Instant, spinner_tick: u8) -> String {
     let elapsed = started.elapsed();
-    let spinner = turn::spinner_frame(elapsed);
+    let spinner = turn::spinner_char(spinner_tick);
     let time = fmt_elapsed(elapsed.as_secs());
     let mut text = match (&live.activity, live.reply.is_empty()) {
         (Some(activity), _) => format!("{spinner} running {time} · {activity}"),
