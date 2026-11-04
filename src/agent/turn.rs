@@ -101,9 +101,9 @@ impl TurnHandle {
 }
 
 impl LiveTurn {
-    /// Work log entries from the current answer in progress.
-    pub fn visible_work_log(&self) -> &[String] {
-        &self.work_log[self.log_start.min(self.work_log.len())..]
+    /// Index of the first work log entry of the current answer in progress.
+    pub fn log_start(&self) -> usize {
+        self.log_start.min(self.work_log.len())
     }
 
     /// Takes what the user sent while the turn was working.
@@ -1392,7 +1392,7 @@ mod tests {
         let live = recorder.live.lock();
         assert_eq!(live.thinking, "deep thought");
         assert_eq!(live.reply, "Done.");
-        assert_eq!(live.visible_work_log().len(), 1);
+        assert_eq!(live.work_log.len() - live.log_start(), 1);
         assert_eq!(live.log_start, 1);
     }
 
@@ -1424,7 +1424,7 @@ mod tests {
         let live = recorder.live.lock();
         assert_eq!(live.work_log.len(), 4);
         assert_eq!(live.log_start, 3);
-        assert_eq!(live.visible_work_log().len(), 1);
+        assert_eq!(live.work_log.len() - live.log_start(), 1);
     }
 
     #[test]

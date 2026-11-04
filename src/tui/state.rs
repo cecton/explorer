@@ -138,8 +138,8 @@ pub struct DiscussionState {
     pub reply: String,
     /// Work log of the node's turn: narration and tool calls, never part of the reply.
     pub work_log: Vec<String>,
-    /// Work log entries of the current round, synced from the running turn.
-    pub visible_work_log: Vec<String>,
+    /// First work log entry of the current round; 0 again once the next render sees no running turn.
+    pub log_start: usize,
     /// Thinking of the running turn, streamed dimmed; empty once the turn is over.
     pub thinking: String,
     /// Whether the work log is shown, once toggled with Ctrl+O; `None` shows it only
@@ -209,6 +209,17 @@ pub struct NodeHighlights {
     pub reply: Vec<(usize, usize)>,
 }
 
+impl DiscussionState {
+    /// The work log entries on screen; layout, selection and status line all read them.
+    pub fn shown_work_log(&self) -> &[String] {
+        if self.show_work_log == Some(true) {
+            &self.work_log
+        } else {
+            &self.work_log[self.log_start.min(self.work_log.len())..]
+        }
+    }
+}
+
 impl NodeHighlights {
     pub fn part(&self, part: DocPart) -> &[(usize, usize)] {
         match part {
@@ -218,7 +229,7 @@ impl NodeHighlights {
         }
     }
 
-    /// The ranges of `part`; the work log has none, it is not kept on screen.
+    /// The ranges of `part`; the work log and thinking have none, highlights cover the prompt and reply.
     pub fn part_mut(&mut self, part: DocPart) -> Option<&mut Vec<(usize, usize)>> {
         match part {
             DocPart::Prompt => Some(&mut self.prompt),

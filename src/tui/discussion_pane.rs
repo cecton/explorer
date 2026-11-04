@@ -29,28 +29,30 @@ struct DocLine {
     bg: Option<RgbValue>,
 }
 
-/// Wrapped prompt, work log and reply of one window, reused until the text or the
-/// width changes.
+/// Wrapped prompt, thinking, work log and reply of one window, reused while the texts and view hold.
 struct DocCache {
     window_id: usize,
     width: usize,
     prompt_len: usize,
     reply_len: usize,
     work_log_len: usize,
-    visible_log_len: usize,
+    log_start: usize,
     thinking_len: usize,
+    show_work_log: Option<bool>,
     work_log_shown: bool,
-    running_turn: bool,
     lines: Vec<DocLine>,
 }
 
 impl DocCache {
-    /// Whether the lines were laid out from the texts `discussion` holds now.
+    /// Whether the lines were laid out from the texts and view settings `discussion` has now.
     fn shows(&self, window_id: usize, discussion: &DiscussionState) -> bool {
         self.window_id == window_id
             && self.prompt_len == discussion.prompt.len()
             && self.reply_len == discussion.reply.len()
             && self.work_log_len == discussion.work_log.len()
+            && self.log_start == discussion.log_start
+            && self.show_work_log == discussion.show_work_log
+            && self.thinking_len == discussion.thinking.len()
     }
 }
 
@@ -655,7 +657,7 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
 fn part_text(discussion: &DiscussionState, part: DocPart) -> Cow<'_, str> {
     match part {
         DocPart::Prompt => Cow::Borrowed(&discussion.prompt),
-        DocPart::WorkLog => Cow::Owned(discussion.work_log.join("\n")),
+        DocPart::WorkLog => Cow::Owned(discussion.shown_work_log().join("\n")),
         DocPart::Thinking => Cow::Borrowed(&discussion.thinking),
         DocPart::Reply => Cow::Borrowed(&discussion.reply),
     }
@@ -1328,7 +1330,7 @@ impl DiscussionComponent {
         discussion.prompt = prompt;
         discussion.reply.clear();
         discussion.work_log.clear();
-        discussion.visible_work_log.clear();
+        discussion.log_start = 0;
         discussion.thinking.clear();
         discussion.show_work_log = None;
         discussion.draft.clear();
@@ -1396,7 +1398,6 @@ impl DiscussionComponent {
         work_log_shown: bool,
         theme: &HelixTheme,
         width: usize,
-        running_turn: bool,
     ) -> &[DocLine] {
         let fresh = self.cache.as_ref().is_some_and(|cache| {
             cache.window_id == self.window_id
@@ -1404,10 +1405,10 @@ impl DiscussionComponent {
                 && cache.prompt_len == discussion.prompt.len()
                 && cache.reply_len == discussion.reply.len()
                 && cache.work_log_len == discussion.work_log.len()
-                && cache.visible_log_len == discussion.visible_work_log.len()
+                && cache.log_start == discussion.log_start
+                && cache.show_work_log == discussion.show_work_log
                 && cache.thinking_len == discussion.thinking.len()
                 && cache.work_log_shown == work_log_shown
-                && cache.running_turn == running_turn
         });
         if !fresh {
             let text_fg = theme
@@ -1448,12 +1449,7 @@ impl DiscussionComponent {
                         bg: None,
                     });
                 }
-                let hiding_dropped_rounds = running_turn && discussion.show_work_log != Some(true);
-                let work_log_to_show = if hiding_dropped_rounds {
-                    &discussion.visible_work_log
-                } else {
-                    &discussion.work_log
-                };
+                let work_log_to_show = discussion.shown_work_log();
                 if work_log_shown && !work_log_to_show.is_empty() {
                     let mut base = 0;
                     for entry in work_log_to_show {
@@ -1489,10 +1485,10 @@ impl DiscussionComponent {
                 prompt_len: discussion.prompt.len(),
                 reply_len: discussion.reply.len(),
                 work_log_len: discussion.work_log.len(),
-                visible_log_len: discussion.visible_work_log.len(),
+                log_start: discussion.log_start,
+                show_work_log: discussion.show_work_log,
                 thinking_len: discussion.thinking.len(),
                 work_log_shown,
-                running_turn,
                 lines,
             });
         }
@@ -1682,9 +1678,7 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
         let mut text = progress_text(&handle.live.lock(), handle.started, state.spinner_tick);
         text.push_str(" · ");
         text.push_str(queued.as_deref().unwrap_or("Esc:Cancel"));
-        let hiding_dropped = discussion.show_work_log != Some(true)
-            && !discussion.work_log.is_empty()
-            && discussion.work_log.len() > discussion.visible_work_log.len();
+        let hiding_dropped = discussion.shown_work_log().len() < discussion.work_log.len();
         if hiding_dropped {
             text.push_str(" · Ctrl+O:Full log");
         }
@@ -1922,19 +1916,21 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 let live = output.lock();
                 if live.reply.len() != discussion.reply.len()
                     || live.work_log.len() != discussion.work_log.len()
-                    || live.visible_work_log().len() != discussion.visible_work_log.len()
+                    || live.log_start() != discussion.log_start
                     || live.thinking.len() != discussion.thinking.len()
                     || live.prompt.len() != discussion.prompt.len()
                 {
                     discussion.reply.clone_from(&live.reply);
                     discussion.work_log.clone_from(&live.work_log);
-                    discussion.visible_work_log.clear();
-                    discussion
-                        .visible_work_log
-                        .extend_from_slice(live.visible_work_log());
+                    discussion.log_start = live.log_start();
                     discussion.thinking.clone_from(&live.thinking);
                     discussion.prompt.clone_from(&live.prompt);
                 }
+            } else if let Some(discussion) = state.discussions.get_mut(&self.window_id)
+                && discussion.log_start != 0
+            {
+                // Once the turn is over, its whole work log is on screen again.
+                discussion.log_start = 0;
             }
             let Some(discussion) = state.discussions.get(&self.window_id) else {
                 return Ok(());
@@ -2039,21 +2035,21 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 marked(DocPart::Prompt),
                 marked(DocPart::WorkLog),
                 marked(DocPart::Reply),
+                marked(DocPart::Thinking),
             ];
             let marks_of = |part: Option<DocPart>| -> (&[(usize, usize)], RgbValue, bool) {
                 match part {
                     Some(DocPart::Prompt) => (&marks[0].0, marks[0].1, marks[0].2),
-                    Some(DocPart::WorkLog | DocPart::Thinking) => {
-                        (&marks[1].0, marks[1].1, marks[1].2)
-                    }
+                    Some(DocPart::WorkLog) => (&marks[1].0, marks[1].1, marks[1].2),
                     Some(DocPart::Reply) => (&marks[2].0, marks[2].1, marks[2].2),
+                    Some(DocPart::Thinking) => (&marks[3].0, marks[3].1, marks[3].2),
                     None => (&[], pane_bg, true),
                 }
             };
 
             let shown = work_log_shown(&state.conversations.read(), discussion);
             let running = output.is_some();
-            let lines = self.doc_lines(discussion, shown, theme, doc_width, running);
+            let lines = self.doc_lines(discussion, shown, theme, doc_width);
             let line_count = lines.len();
             let max_scroll = line_count.saturating_sub(doc_rows);
             let stored = state.pane_manager.window_scroll(&window);
@@ -2728,6 +2724,18 @@ mod tests {
         assert_eq!(fmt_elapsed(125), "2m 5s");
         assert_eq!(fmt_elapsed(3605), "1h 0m 5s");
         assert_eq!(fmt_elapsed(3725), "1h 2m 5s");
+    }
+
+    #[test]
+    fn the_work_log_text_follows_the_entries_shown() {
+        let mut discussion = DiscussionState {
+            work_log: vec!["old".into(), "new".into()],
+            log_start: 1,
+            ..DiscussionState::default()
+        };
+        assert_eq!(part_text(&discussion, DocPart::WorkLog), "new");
+        discussion.show_work_log = Some(true);
+        assert_eq!(part_text(&discussion, DocPart::WorkLog), "old\nnew");
     }
 
     #[test]
