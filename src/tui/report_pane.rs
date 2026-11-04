@@ -150,7 +150,7 @@ impl Component<AppState, AppSignal> for ReportComponent {
         &mut self,
         global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
-        _surface_bounds: SurfaceBounds,
+        _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
         throws!({
@@ -162,8 +162,8 @@ impl Component<AppState, AppSignal> for ReportComponent {
                 return Ok(());
             };
             let window = Window::Report(id);
-            let origin = current_box.style_adjusted_origin_pos;
-            let bounds = current_box.style_adjusted_bounds_size;
+            let origin = current_box.style_adjusted_bounds.origin_pos;
+            let bounds = current_box.style_adjusted_bounds.bounds_size;
             let rows = bounds.row_height.as_usize();
             let width = bounds.col_width.as_usize();
             if rows == 0 || width == 0 {
@@ -179,7 +179,7 @@ impl Component<AppState, AppSignal> for ReportComponent {
             for row_offset in 0..rows {
                 ops += RenderOpCommon::MoveCursorPositionRelTo(
                     origin,
-                    col(0) + row(row_offset as u16),
+                    vp_col(0) + vp_row(row_offset as u16),
                 );
                 ops += RenderOpCommon::ApplyColors(Some(blank));
                 ops += RenderOpIR::PaintTextWithAttributes(" ".repeat(width).into(), Some(blank));
@@ -198,7 +198,7 @@ impl Component<AppState, AppSignal> for ReportComponent {
                 let background = new_style!(color_bg: {TuiColor::from(bg)});
                 ops += RenderOpCommon::MoveCursorPositionRelTo(
                     origin,
-                    col(0) + row(row_offset as u16),
+                    vp_col(0) + vp_row(row_offset as u16),
                 );
                 ops += RenderOpCommon::ApplyColors(Some(background));
                 ops +=
@@ -216,7 +216,7 @@ impl Component<AppState, AppSignal> for ReportComponent {
                     let style = crate::tui::discussion_pane::span_style(span, bg);
                     ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
-                        col(x as u16) + row(row_offset as u16),
+                        vp_col(x as u16) + vp_row(row_offset as u16),
                     );
                     ops += RenderOpCommon::ApplyColors(Some(style));
                     ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
@@ -309,7 +309,7 @@ mod tests {
 
     fn global_data_with_a_report(state: AppState) -> GlobalData<AppState, AppSignal> {
         let (main_tx, _) = mpsc::channel(8);
-        let size = width(80) + height(24);
+        let size = vp_width(80) + vp_height(24);
         GlobalData::try_to_create_instance(
             main_tx,
             state,

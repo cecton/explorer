@@ -1,5 +1,5 @@
 use crate::loader::FileKey;
-use r3bl_tui::{FlexBox, Size, col, height, row, width};
+use r3bl_tui::{FlexBox, VPBoundingBox, VPSize, vp_col, vp_height, vp_row, vp_width};
 use std::collections::HashMap;
 
 /// Maximum number of panes the layout engine may render at once.
@@ -298,7 +298,7 @@ impl PaneManager {
     /// Within each column, panes are stacked top-to-bottom using their requested
     /// `PaneSize`. The last pane in each column is stretched to fill any remaining
     /// vertical space in that column.
-    pub fn layout(&self, surface_size: Size) -> Vec<PaneSlot> {
+    pub fn layout(&self, surface_size: VPSize) -> Vec<PaneSlot> {
         const MIN_PANE_WIDTH: u16 = 100;
 
         let surface_cols = surface_size.col_width.as_u16();
@@ -355,7 +355,7 @@ impl PaneManager {
                     // Small leftover (< 25%) — absorb into the last placed
                     // pane, then wrap (or drop if this is the last column).
                     if let Some(last) = slots.last_mut() {
-                        last.box_.style_adjusted_bounds_size.row_height += remaining_rows;
+                        last.box_.style_adjusted_bounds.bounds_size.row_height += remaining_rows;
                     }
                     col_used_rows[current_col] += remaining_rows;
                     used_rows_in_col += remaining_rows;
@@ -386,11 +386,10 @@ impl PaneManager {
                     0
                 };
 
-            let origin = col(origin_col) + row(used_rows_in_col);
-            let size = width(pane_width) + height(actual_rows);
+            let origin = vp_col(origin_col) + vp_row(used_rows_in_col);
+            let size = vp_width(pane_width) + vp_height(actual_rows);
             let box_ = FlexBox {
-                style_adjusted_origin_pos: origin,
-                style_adjusted_bounds_size: size,
+                style_adjusted_bounds: VPBoundingBox::new(origin, size),
                 ..FlexBox::default()
             };
 
@@ -414,7 +413,11 @@ impl PaneManager {
             let remaining = surface_rows.saturating_sub(used);
             if remaining > 0 {
                 let last_idx = col_last_slot[col];
-                slots[last_idx].box_.style_adjusted_bounds_size.row_height += remaining;
+                slots[last_idx]
+                    .box_
+                    .style_adjusted_bounds
+                    .bounds_size
+                    .row_height += remaining;
             }
         }
 
@@ -498,8 +501,8 @@ mod tests {
         manager
     }
 
-    fn size(cols: u16, rows: u16) -> Size {
-        width(cols) + height(rows)
+    fn size(cols: u16, rows: u16) -> VPSize {
+        vp_width(cols) + vp_height(rows)
     }
 
     #[test]
@@ -508,7 +511,12 @@ mod tests {
         let slots = manager.layout(size(80, 24));
         assert_eq!(slots.len(), 1);
         assert_eq!(
-            slots[0].box_.style_adjusted_bounds_size.row_height.as_u16(),
+            slots[0]
+                .box_
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16(),
             24
         );
     }
@@ -519,11 +527,21 @@ mod tests {
         let slots = manager.layout(size(240, 24));
         assert_eq!(slots.len(), 2);
         assert_eq!(
-            slots[0].box_.style_adjusted_origin_pos.col_index.as_u16(),
+            slots[0]
+                .box_
+                .style_adjusted_bounds
+                .origin_pos
+                .col_index
+                .as_u16(),
             0
         );
         assert_eq!(
-            slots[1].box_.style_adjusted_origin_pos.col_index.as_u16(),
+            slots[1]
+                .box_
+                .style_adjusted_bounds
+                .origin_pos
+                .col_index
+                .as_u16(),
             120
         );
     }
@@ -537,11 +555,21 @@ mod tests {
         let slots = manager.layout(size(80, 24));
         assert_eq!(slots.len(), 2);
         assert_eq!(
-            slots[0].box_.style_adjusted_bounds_size.row_height.as_u16(),
+            slots[0]
+                .box_
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16(),
             12
         );
         assert_eq!(
-            slots[1].box_.style_adjusted_bounds_size.row_height.as_u16(),
+            slots[1]
+                .box_
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16(),
             12
         );
     }
@@ -572,21 +600,41 @@ mod tests {
         assert_eq!(slots.len(), 3);
         // First column: full height.
         assert_eq!(
-            slots[0].box_.style_adjusted_bounds_size.row_height.as_u16(),
+            slots[0]
+                .box_
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16(),
             24
         );
         // Second column top: half height.
         assert_eq!(
-            slots[1].box_.style_adjusted_bounds_size.row_height.as_u16(),
+            slots[1]
+                .box_
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16(),
             12
         );
         // Second column bottom: shrunk to remaining 12 rows.
         assert_eq!(
-            slots[2].box_.style_adjusted_bounds_size.row_height.as_u16(),
+            slots[2]
+                .box_
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16(),
             12
         );
         assert_eq!(
-            slots[2].box_.style_adjusted_origin_pos.row_index.as_u16(),
+            slots[2]
+                .box_
+                .style_adjusted_bounds
+                .origin_pos
+                .row_index
+                .as_u16(),
             12
         );
     }
@@ -605,8 +653,22 @@ mod tests {
         let slots = manager.layout(size(80, 24));
         assert_eq!(slots.len(), 4);
         for slot in &slots {
-            assert_eq!(slot.box_.style_adjusted_bounds_size.row_height.as_u16(), 6);
-            assert_eq!(slot.box_.style_adjusted_origin_pos.col_index.as_u16(), 0);
+            assert_eq!(
+                slot.box_
+                    .style_adjusted_bounds
+                    .bounds_size
+                    .row_height
+                    .as_u16(),
+                6
+            );
+            assert_eq!(
+                slot.box_
+                    .style_adjusted_bounds
+                    .origin_pos
+                    .col_index
+                    .as_u16(),
+                0
+            );
         }
     }
 
@@ -626,12 +688,22 @@ mod tests {
         let slots = manager.layout(size(80, 24));
         assert_eq!(slots.len(), 2);
         assert_eq!(
-            slots[0].box_.style_adjusted_bounds_size.row_height.as_u16(),
+            slots[0]
+                .box_
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16(),
             6
         );
         // 25% leftover (6 rows) absorbed into the last pane.
         assert_eq!(
-            slots[1].box_.style_adjusted_bounds_size.row_height.as_u16(),
+            slots[1]
+                .box_
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16(),
             18
         );
     }
@@ -652,8 +724,22 @@ mod tests {
         let slots = manager.layout(size(200, 12));
         assert_eq!(slots.len(), 4);
         for slot in &slots {
-            assert_eq!(slot.box_.style_adjusted_bounds_size.row_height.as_u16(), 3);
-            assert_eq!(slot.box_.style_adjusted_origin_pos.col_index.as_u16(), 0);
+            assert_eq!(
+                slot.box_
+                    .style_adjusted_bounds
+                    .bounds_size
+                    .row_height
+                    .as_u16(),
+                3
+            );
+            assert_eq!(
+                slot.box_
+                    .style_adjusted_bounds
+                    .origin_pos
+                    .col_index
+                    .as_u16(),
+                0
+            );
         }
     }
 
@@ -683,15 +769,30 @@ mod tests {
         let slots = manager.layout(size(80, 47));
         assert_eq!(slots.len(), 3);
         assert_eq!(
-            slots[0].box_.style_adjusted_bounds_size.row_height.as_u16(),
+            slots[0]
+                .box_
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16(),
             11
         );
         assert_eq!(
-            slots[1].box_.style_adjusted_bounds_size.row_height.as_u16(),
+            slots[1]
+                .box_
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16(),
             11
         );
         assert_eq!(
-            slots[2].box_.style_adjusted_bounds_size.row_height.as_u16(),
+            slots[2]
+                .box_
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16(),
             25
         );
     }
@@ -926,7 +1027,14 @@ mod tests {
         let slots = manager.layout(size(80, 24));
         assert_eq!(slots.len(), 2);
         for slot in &slots {
-            assert_eq!(slot.box_.style_adjusted_origin_pos.col_index.as_u16(), 0);
+            assert_eq!(
+                slot.box_
+                    .style_adjusted_bounds
+                    .origin_pos
+                    .col_index
+                    .as_u16(),
+                0
+            );
         }
     }
 

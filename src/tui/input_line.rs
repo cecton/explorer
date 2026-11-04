@@ -114,7 +114,7 @@ impl InputLine {
     /// The grapheme a screen position puts the cursor on, and the one it points at:
     /// they differ past the end of a row. `None` outside the cells the input was last
     /// painted on, unless `clamp` brings the position back into them.
-    fn locate(&self, pos: Pos, clamp: bool) -> Option<(usize, usize)> {
+    fn locate(&self, pos: VPPos, clamp: bool) -> Option<(usize, usize)> {
         let painted = self.painted?;
         let (row, col) = (pos.row_index.as_usize(), pos.col_index.as_usize());
         let inside = (painted.row..painted.row + painted.rows).contains(&row)
@@ -141,7 +141,7 @@ impl InputLine {
 
     /// Puts the cursor under the mouse and anchors a selection on the word there; a
     /// second press on the same grapheme selects that word. False outside the input.
-    fn press(&mut self, pos: Pos, now: Instant) -> bool {
+    fn press(&mut self, pos: VPPos, now: Instant) -> bool {
         let Some((cursor, pointed)) = self.locate(pos, false) else {
             return false;
         };
@@ -166,7 +166,7 @@ impl InputLine {
 
     /// Extends the selection to the word under the mouse, whatever the rows in between.
     /// A position outside the input stands for the nearest cell of it.
-    fn drag(&mut self, pos: Pos) {
+    fn drag(&mut self, pos: VPPos) {
         let (Some(selection), Some((_, pointed))) = (self.selection, self.locate(pos, true)) else {
             return;
         };
@@ -736,7 +736,7 @@ impl InputLine {
         mut ops: &mut RenderOpIRVec,
         placeholder: Option<(&str, TuiColor)>,
         prompt: &str,
-        origin: Pos,
+        origin: VPPos,
         width: u16,
         max_rows: usize,
         focused: bool,
@@ -804,7 +804,7 @@ impl InputLine {
         });
 
         if prompt_width > 0 {
-            ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+            ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
             ops += RenderOpIR::PaintTextWithAttributes(prompt.into(), Some(text_style));
         }
 
@@ -817,7 +817,7 @@ impl InputLine {
         {
             ops += RenderOpCommon::MoveCursorPositionRelTo(
                 origin,
-                col(prompt_width as u16) + row(screen_row as u16),
+                vp_col(prompt_width as u16) + vp_row(screen_row as u16),
             );
             let mut pen = None;
             for (column, gr) in graphemes[visual.start..visual.start + visual.len]
@@ -834,7 +834,7 @@ impl InputLine {
             if focused && row_idx == cursor_row && cursor == visual.start + visual.len {
                 ops += RenderOpCommon::MoveCursorPositionRelTo(
                     origin,
-                    col((prompt_width + visual.len) as u16) + row(screen_row as u16),
+                    vp_col((prompt_width + visual.len) as u16) + vp_row(screen_row as u16),
                 );
                 ops += RenderOpCommon::ApplyColors(Some(cursor_style));
                 ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(cursor_style));
@@ -893,7 +893,7 @@ mod cursor_render_tests {
             &mut ops,
             None,
             "",
-            col(0) + row(0),
+            vp_col(0) + vp_row(0),
             20,
             1,
             true,
@@ -929,7 +929,7 @@ mod cursor_render_tests {
             &mut ops,
             Some((placeholder, weak)),
             "",
-            col(0) + row(0),
+            vp_col(0) + vp_row(0),
             20,
             4,
             true,
@@ -964,7 +964,7 @@ mod cursor_render_tests {
             &mut ops,
             Some(("\nSquash the commits", weak)),
             "",
-            col(0) + row(0),
+            vp_col(0) + vp_row(0),
             20,
             4,
             true,
@@ -994,7 +994,7 @@ mod cursor_render_tests {
             &mut ops,
             None,
             "",
-            col(0) + row(0),
+            vp_col(0) + vp_row(0),
             20,
             1,
             true,
@@ -1015,7 +1015,7 @@ mod cursor_render_tests {
             &mut ops,
             None,
             "",
-            col(0) + row(0),
+            vp_col(0) + vp_row(0),
             20,
             1,
             false,
@@ -1234,7 +1234,16 @@ mod wrap_tests {
             TuiColor::from(RgbValue::from_u8(255, 255, 255)),
             TuiColor::from(RgbValue::from_u8(90, 60, 20)),
         );
-        input.render(&mut ops, None, "", col(0) + row(0), 4, 3, true, colors);
+        input.render(
+            &mut ops,
+            None,
+            "",
+            vp_col(0) + vp_row(0),
+            4,
+            3,
+            true,
+            colors,
+        );
         input.cursor = 1;
         assert!(input.handle_key(&down()));
         assert_eq!(input.cursor, 5);
@@ -1250,7 +1259,16 @@ mod wrap_tests {
             TuiColor::from(RgbValue::from_u8(255, 255, 255)),
             TuiColor::from(RgbValue::from_u8(90, 60, 20)),
         );
-        input.render(&mut ops, None, "", col(0) + row(0), 10, 2, false, colors);
+        input.render(
+            &mut ops,
+            None,
+            "",
+            vp_col(0) + vp_row(0),
+            10,
+            2,
+            false,
+            colors,
+        );
         let painted: Vec<&str> = ops
             .iter()
             .filter_map(|op| match op {
@@ -1278,7 +1296,7 @@ mod selection_tests {
     fn painted(text: &str, prompt: &str, width: u16, max_rows: usize) -> InputLine {
         let mut input = InputLine::with_text(text);
         let mut ops = RenderOpIRVec::new();
-        let origin = col(3) + row(5);
+        let origin = vp_col(3) + vp_row(5);
         input.render(
             &mut ops,
             None,
@@ -1292,14 +1310,23 @@ mod selection_tests {
         input
     }
 
-    fn at(row_index: u16, col_index: u16) -> Pos {
-        col(col_index) + row(row_index)
+    fn at(row_index: u16, col_index: u16) -> VPPos {
+        vp_col(col_index) + vp_row(row_index)
     }
 
     /// Background of the pen in force when each grapheme of the text is painted.
     fn backgrounds(input: &mut InputLine) -> Vec<(String, Option<TuiColor>)> {
         let mut ops = RenderOpIRVec::new();
-        input.render(&mut ops, None, "", col(3) + row(5), 20, 3, false, colors());
+        input.render(
+            &mut ops,
+            None,
+            "",
+            vp_col(3) + vp_row(5),
+            20,
+            3,
+            false,
+            colors(),
+        );
         let mut pen = None;
         let mut cells = Vec::new();
         for op in ops.iter() {

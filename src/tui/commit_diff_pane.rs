@@ -208,12 +208,12 @@ impl Component<AppState, AppSignal> for CommitDiffPaneComponent {
         &mut self,
         global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
-        _surface_bounds: SurfaceBounds,
+        _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
         throws!({
-            let origin = current_box.style_adjusted_origin_pos;
-            let bounds = current_box.style_adjusted_bounds_size;
+            let origin = current_box.style_adjusted_bounds.origin_pos;
+            let bounds = current_box.style_adjusted_bounds.bounds_size;
             let total_rows = bounds.row_height.as_usize();
             let pane_width = bounds.col_width.as_usize();
 
@@ -291,7 +291,7 @@ impl Component<AppState, AppSignal> for CommitDiffPaneComponent {
                     for row_offset in 0..total_rows {
                         render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                             origin,
-                            col(0) + row(row_offset as u16),
+                            vp_col(0) + vp_row(row_offset as u16),
                         );
                         render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
                         render_ops += RenderOpIR::PaintTextWithAttributes(
@@ -304,7 +304,7 @@ impl Component<AppState, AppSignal> for CommitDiffPaneComponent {
                         };
                         render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                             origin,
-                            col(0) + row(row_offset as u16),
+                            vp_col(0) + vp_row(row_offset as u16),
                         );
                         let fg = Self::kind_color(&state.theme, line.kind);
                         let style = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {bg});
@@ -324,7 +324,7 @@ impl Component<AppState, AppSignal> for CommitDiffPaneComponent {
 
 fn paint_centered(
     mut render_ops: &mut RenderOpIRVec,
-    origin: &Pos,
+    origin: &VPPos,
     pane_width: usize,
     total_rows: usize,
     text: &str,
@@ -338,12 +338,12 @@ fn paint_centered(
     let bg_style = new_style!(color_bg: {TuiColor::from(pane_bg)});
     for row_offset in 0..total_rows {
         render_ops +=
-            RenderOpCommon::MoveCursorPositionRelTo(*origin, col(0) + row(row_offset as u16));
+            RenderOpCommon::MoveCursorPositionRelTo(*origin, vp_col(0) + vp_row(row_offset as u16));
         render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
         render_ops +=
             RenderOpIR::PaintTextWithAttributes(" ".repeat(pane_width).into(), Some(bg_style));
     }
-    render_ops += RenderOpCommon::MoveCursorPositionRelTo(*origin, col(0) + row(0));
+    render_ops += RenderOpCommon::MoveCursorPositionRelTo(*origin, vp_col(0) + vp_row(0));
     render_ops += RenderOpCommon::ApplyColors(Some(style));
     render_ops += RenderOpIR::PaintTextWithAttributes(padded.into(), Some(style));
 }

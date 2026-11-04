@@ -31,9 +31,24 @@ impl SurfaceRender<AppState, AppSignal> for PanesRenderer<'_> {
             let mut column_id;
 
             for slot in self.visible {
-                let slot_origin_col = slot.box_.style_adjusted_origin_pos.col_index.as_u16();
-                let slot_width = slot.box_.style_adjusted_bounds_size.col_width.as_u16();
-                let slot_height = slot.box_.style_adjusted_bounds_size.row_height.as_u16();
+                let slot_origin_col = slot
+                    .box_
+                    .style_adjusted_bounds
+                    .origin_pos
+                    .col_index
+                    .as_u16();
+                let slot_width = slot
+                    .box_
+                    .style_adjusted_bounds
+                    .bounds_size
+                    .col_width
+                    .as_u16();
+                let slot_height = slot
+                    .box_
+                    .style_adjusted_bounds
+                    .bounds_size
+                    .row_height
+                    .as_u16();
 
                 if current_col_origin != Some(slot_origin_col) {
                     if current_col_origin.is_some() {

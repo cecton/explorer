@@ -1120,14 +1120,18 @@ impl TitleRow for ConversationTreeComponent {
             render_pane_title(ops, pane_box, &title, false, &state.theme, focused);
             return 1;
         }
-        let origin = pane_box.style_adjusted_origin_pos;
-        let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
+        let origin = pane_box.style_adjusted_bounds.origin_pos;
+        let width = pane_box
+            .style_adjusted_bounds
+            .bounds_size
+            .col_width
+            .as_u16();
         let (bg_rgb, fg_rgb) = title_bar_colors(focused, &state.theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
         let color_selection = TuiColor::from(title_selection_bg(focused, &state.theme));
         let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
-        *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+        *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
         *ops += RenderOpCommon::SetBgColor(color_bg);
         *ops += RenderOpIR::PaintTextWithAttributes(
             " ".repeat(width as usize).as_str().into(),
@@ -1186,12 +1190,12 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
         &mut self,
         global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
-        _surface_bounds: SurfaceBounds,
+        _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
         throws!({
-            let origin = current_box.style_adjusted_origin_pos;
-            let bounds = current_box.style_adjusted_bounds_size;
+            let origin = current_box.style_adjusted_bounds.origin_pos;
+            let bounds = current_box.style_adjusted_bounds.bounds_size;
             let total_rows = bounds.row_height.as_usize();
             let pane_width = bounds.col_width.as_usize();
             self.content_origin_row = origin.row_index.as_usize();
@@ -1271,7 +1275,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 for row_offset in 0..total_rows {
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
-                        col(0) + row(row_offset as u16),
+                        vp_col(0) + vp_row(row_offset as u16),
                     );
                     render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
                     render_ops += RenderOpIR::PaintTextWithAttributes(
@@ -1279,7 +1283,8 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         Some(bg_style),
                     );
                 }
-                render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+                render_ops +=
+                    RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
                 render_ops += RenderOpCommon::ApplyColors(Some(text_style));
                 render_ops += RenderOpIR::PaintTextWithAttributes(message.into(), Some(text_style));
                 state.pane_manager.set_window_scroll_max(&window, 0);
@@ -1392,7 +1397,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let bg_style = new_style!(color_bg: {bg});
                 render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                     origin,
-                    col(0) + row(row_offset as u16),
+                    vp_col(0) + vp_row(row_offset as u16),
                 );
                 render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
                 render_ops += RenderOpIR::PaintTextWithAttributes(
@@ -1417,7 +1422,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         let style = plain(fg);
                         *ops += RenderOpCommon::MoveCursorPositionRelTo(
                             origin,
-                            col(column as u16) + row(row_offset as u16),
+                            vp_col(column as u16) + vp_row(row_offset as u16),
                         );
                         *ops += RenderOpCommon::ApplyColors(Some(style));
                         *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
@@ -1482,7 +1487,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     let style = styled(fg);
                     *ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
-                        col(column as u16) + row(row_offset as u16),
+                        vp_col(column as u16) + vp_row(row_offset as u16),
                     );
                     *ops += RenderOpCommon::ApplyColors(Some(style));
                     *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
@@ -1503,7 +1508,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         }
                         *ops += RenderOpCommon::MoveCursorPositionRelTo(
                             origin,
-                            col(column as u16) + row(row_offset as u16),
+                            vp_col(column as u16) + vp_row(row_offset as u16),
                         );
                         *ops += RenderOpCommon::ApplyColors(Some(style));
                         *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));

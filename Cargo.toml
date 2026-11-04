@@ -57,6 +57,9 @@ proc-macro2 = { git = "https://github.com/dtolnay/proc-macro2" }
 
 [workspace.lints]
 
+[lints]
+workspace = true
+
 [profile.release-with-debug]
 inherits = "release"
 debug-assertions = true

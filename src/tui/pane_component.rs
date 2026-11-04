@@ -36,7 +36,7 @@ pub struct PaneComponent {
     scrollbar_grab_state: Option<(usize, usize)>,
     preview_drag_active: bool,
     text_drag_active: bool,
-    last_click: Option<(Instant, Pos)>,
+    last_click: Option<(Instant, VPPos)>,
     consecutive_clicks: u8,
 }
 
@@ -99,11 +99,12 @@ impl PaneComponent {
                     return EventPropagation::Propagate;
                 };
                 let pane = pane.lock();
-                if pane.ofs_buf.terminal_mode.active_screen_buffer == ActiveScreenBuffer::Alternate
+                if pane.ofs_buf.get_terminal_mode().active_screen_buffer
+                    == ActiveScreenBuffer::Alternate
                 {
                     return EventPropagation::Propagate;
                 }
-                let scrollback_len = pane.ofs_buf.scrollback_len();
+                let scrollback_len = pane.ofs_buf.get_history_len();
                 let buffer_height = pane.ofs_buf.get_window_size().row_height.as_usize();
                 if scrollback_len == 0 {
                     return EventPropagation::Propagate;
@@ -243,7 +244,7 @@ impl PaneComponent {
                     return EventPropagation::ConsumedRender;
                 };
                 let mut pane = pane.lock();
-                let scrollback_len = pane.ofs_buf.scrollback_len();
+                let scrollback_len = pane.ofs_buf.get_history_len();
                 let clamped = target.min(scrollback_len);
                 pane.scroll_offset = scrollback_len.saturating_sub(clamped);
                 state.terminal_grabbed = false;
@@ -760,10 +761,10 @@ impl Component<AppState, AppSignal> for PaneComponent {
             let (is_alternate, mouse_tracking_active) = global_data
                 .state
                 .with_terminal(term_id, |p| {
-                    let alt = p.ofs_buf.terminal_mode.active_screen_buffer
+                    let alt = p.ofs_buf.get_terminal_mode().active_screen_buffer
                         == ActiveScreenBuffer::Alternate;
-                    let mouse =
-                        p.ofs_buf.terminal_mode.mouse_tracking_mode != MouseTrackingMode::Disabled;
+                    let mouse = p.ofs_buf.get_terminal_mode().mouse_tracking_mode
+                        != MouseTrackingMode::Disabled;
                     (alt, mouse)
                 })
                 .unwrap_or((false, false));
@@ -778,7 +779,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     let rel_col = col - origin_col;
 
                     let word_bounds = global_data.state.with_terminal(term_id, |pane| {
-                        let (line, _) = terminal_line_at_viewport_row(pane, rel_row, row_count);
+                        let (line, _) = terminal_line_at_viewport_row(pane, rel_row);
                         let (ws, we) = terminal_word_bounds(&line, rel_col);
                         (ws, we)
                     });
@@ -852,8 +853,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     let (word_bounds, cur_line_len) = global_data
                         .state
                         .with_terminal(term_id, |pane| {
-                            let (line, count) =
-                                terminal_line_at_viewport_row(pane, rel_row, row_count);
+                            let (line, count) = terminal_line_at_viewport_row(pane, rel_row);
                             let wb = terminal_word_bounds(&line, rel_col);
                             let cl = click_anchor_row.filter(|&ar| ar != rel_row).map(|_| count);
                             (Some(wb), cl)
@@ -934,7 +934,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                             global_data
                                 .state
                                 .with_terminal(term_id, |pane| {
-                                    extract_terminal_text(pane, sel.start, sel.end, row_count)
+                                    extract_terminal_text(pane, sel.start, sel.end)
                                         .filter(|t| !t.is_empty())
                                 })
                                 .flatten()
@@ -944,9 +944,18 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     } else {
                         None
                     };
-                    if let Some(text) = maybe_text {
-                        let mut cb = r3bl_tui::SystemClipboard;
-                        let _ = cb.try_to_put_content_into_clipboard(text);
+                    match maybe_text {
+                        Some(text) => {
+                            let length = text.len();
+                            let mut cb = r3bl_tui::SystemClipboard;
+                            match cb.try_to_put_content_into_clipboard(text) {
+                                Ok(()) => tracing::debug!(length, "terminal selection copied"),
+                                Err(error) => {
+                                    tracing::warn!(%error, "terminal selection not copied");
+                                }
+                            }
+                        }
+                        None => tracing::debug!("terminal selection released with no text"),
                     }
                     let state = &mut global_data.state;
                     state.text_selection = None;
@@ -1009,7 +1018,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
         &mut self,
         global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
-        surface_bounds: SurfaceBounds,
+        surface_bounds: VPBoundingBox,
         has_focus: &mut HasFocus,
     ) -> CommonResult {
         throws!({
@@ -1027,7 +1036,7 @@ impl Component<AppState, AppSignal> for PaneComponent {
                 Some(Window::Terminal(id)) => global_data
                     .state
                     .with_terminal(id, |pane| {
-                        pane.ofs_buf.terminal_mode.active_screen_buffer
+                        pane.ofs_buf.get_terminal_mode().active_screen_buffer
                             != ActiveScreenBuffer::Alternate
                     })
                     .unwrap_or(true),
@@ -1035,55 +1044,76 @@ impl Component<AppState, AppSignal> for PaneComponent {
             };
 
             let (content_box, inner_bounds) = if title_height > 0 {
-                let origin = current_box.style_adjusted_origin_pos + height(title_height as u16);
-                let bounds = current_box.style_adjusted_bounds_size.col_width
-                    + (current_box.style_adjusted_bounds_size.row_height
-                        - height(title_height as u16));
+                let origin =
+                    current_box.style_adjusted_bounds.origin_pos + vp_height(title_height as u16);
+                let bounds = current_box.style_adjusted_bounds.bounds_size.col_width
+                    + (current_box.style_adjusted_bounds.bounds_size.row_height
+                        - vp_height(title_height as u16));
                 let scrollbar_col = if has_scrollbar {
-                    bounds.col_width - width(1)
+                    bounds.col_width - vp_width(1)
                 } else {
                     bounds.col_width
                 };
                 let inner_bounds = scrollbar_col + bounds.row_height;
                 let boxed = FlexBox {
-                    style_adjusted_origin_pos: origin,
-                    style_adjusted_bounds_size: bounds,
+                    style_adjusted_bounds: VPBoundingBox::new(origin, bounds),
                     ..current_box
                 };
                 (
                     boxed,
                     FlexBox {
-                        style_adjusted_origin_pos: origin,
-                        style_adjusted_bounds_size: inner_bounds,
+                        style_adjusted_bounds: VPBoundingBox::new(origin, inner_bounds),
                         ..current_box
                     },
                 )
             } else {
-                let bounds = current_box.style_adjusted_bounds_size;
+                let bounds = current_box.style_adjusted_bounds.bounds_size;
                 let scrollbar_col = if has_scrollbar {
-                    bounds.col_width - width(1)
+                    bounds.col_width - vp_width(1)
                 } else {
                     bounds.col_width
                 };
                 let inner_bounds = scrollbar_col + bounds.row_height;
                 let boxed = FlexBox {
-                    style_adjusted_bounds_size: bounds,
+                    style_adjusted_bounds: VPBoundingBox::new(
+                        current_box.style_adjusted_bounds.origin_pos,
+                        bounds,
+                    ),
                     ..current_box
                 };
                 (
                     boxed,
                     FlexBox {
-                        style_adjusted_bounds_size: inner_bounds,
+                        style_adjusted_bounds: VPBoundingBox::new(
+                            current_box.style_adjusted_bounds.origin_pos,
+                            inner_bounds,
+                        ),
                         ..current_box
                     },
                 )
             };
 
             // Store content area geometry for scrollbar mouse event handling.
-            self.content_origin_row = content_box.style_adjusted_origin_pos.row_index.as_u16();
-            self.content_origin_col = content_box.style_adjusted_origin_pos.col_index.as_u16();
-            self.content_col_count = content_box.style_adjusted_bounds_size.col_width.as_u16();
-            self.content_row_count = content_box.style_adjusted_bounds_size.row_height.as_u16();
+            self.content_origin_row = content_box
+                .style_adjusted_bounds
+                .origin_pos
+                .row_index
+                .as_u16();
+            self.content_origin_col = content_box
+                .style_adjusted_bounds
+                .origin_pos
+                .col_index
+                .as_u16();
+            self.content_col_count = content_box
+                .style_adjusted_bounds
+                .bounds_size
+                .col_width
+                .as_u16();
+            self.content_row_count = content_box
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_u16();
 
             // Push title ops first (display behind content).
             if title_height > 0 {
@@ -1158,12 +1188,12 @@ impl Component<AppState, AppSignal> for PaneComponent {
                             return Ok(());
                         };
                         let pane = pane.lock();
-                        if pane.ofs_buf.terminal_mode.active_screen_buffer
+                        if pane.ofs_buf.get_terminal_mode().active_screen_buffer
                             == ActiveScreenBuffer::Alternate
                         {
                             return Ok(());
                         }
-                        let scrollback_len = pane.ofs_buf.scrollback_len();
+                        let scrollback_len = pane.ofs_buf.get_history_len();
                         let buffer_height = pane.ofs_buf.get_window_size().row_height.as_usize();
                         let scroll =
                             scrollback_len.saturating_sub(pane.scroll_offset.min(scrollback_len));
@@ -1206,9 +1236,13 @@ fn render_scrollbar(
         return;
     }
 
-    let origin = content_box.style_adjusted_origin_pos;
-    let scroll_col =
-        (content_box.style_adjusted_bounds_size.col_width.as_usize()).saturating_sub(1);
+    let origin = content_box.style_adjusted_bounds.origin_pos;
+    let scroll_col = (content_box
+        .style_adjusted_bounds
+        .bounds_size
+        .col_width
+        .as_usize())
+    .saturating_sub(1);
 
     // Track: theme scrollbar bg -> virtual ruler -> default.
     let track_rgb = theme
@@ -1265,7 +1299,7 @@ fn render_scrollbar(
         let style = new_style!(color_fg: {bg} color_bg: {track_bg});
         *render_ops += RenderOpCommon::MoveCursorPositionRelTo(
             origin,
-            col(scroll_col as u16) + row(row_offset),
+            vp_col(scroll_col as u16) + vp_row(row_offset),
         );
         *render_ops += RenderOpCommon::ApplyColors(Some(style));
         *render_ops += RenderOpIR::PaintTextWithAttributes(ch.to_string().into(), Some(style));

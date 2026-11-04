@@ -710,7 +710,7 @@ fn command_hint(typed: &str, state: &AppState) -> Option<String> {
 }
 
 /// Paints over the bottom rows, growing upward: the panes are not resized while typing.
-pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mut AppState) {
+pub fn render_command_line(pipeline: &mut RenderPipeline, size: VPSize, state: &mut AppState) {
     let palette = state.command_line.as_ref().and_then(|command_line| {
         Palette::new(command_line.input.text(), command_line.selected, state)
     });
@@ -777,7 +777,7 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mu
     let fill_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
     let mut ops = RenderOpIRVec::new();
     for row_idx in top..(top + rows + list_rows).min(screen_rows) {
-        ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row(row_idx as u16));
+        ops += RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + vp_row(row_idx as u16));
         ops += RenderOpCommon::ApplyColors(Some(fill_style));
         ops += RenderOpIR::PaintTextWithAttributes(
             " ".repeat(width as usize).as_str().into(),
@@ -790,7 +790,7 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mu
             .as_ref()
             .map(|(text, color)| (text.as_str(), *color)),
         PROMPT,
-        col(0) + row(top as u16),
+        vp_col(0) + vp_row(top as u16),
         width,
         rows,
         true,
@@ -822,7 +822,8 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: Size, state: &mu
         let bg = if *picked { picked_bg } else { color_bg };
         let style = new_style!(color_fg: {color_fg} color_bg: {bg});
         let line = truncate(line, width as usize);
-        ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row((top + rows + offset) as u16));
+        ops +=
+            RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + vp_row((top + rows + offset) as u16));
         ops += RenderOpCommon::ApplyColors(Some(style));
         ops += RenderOpIR::PaintTextWithAttributes(line.into(), Some(style));
     }

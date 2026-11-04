@@ -277,7 +277,7 @@ mod tests {
         };
         let mouse = |kind| {
             InputEvent::Mouse(MouseInput {
-                pos: col(0) + row(0),
+                pos: vp_col(0) + vp_row(0),
                 kind,
                 maybe_modifier_keys: None,
             })
@@ -315,7 +315,7 @@ mod tests {
         ));
         assert!(!cancel_on_input(
             &mut state,
-            &InputEvent::Resize(Size::default())
+            &InputEvent::Resize(VPSize::default())
         ));
         assert!(state.after_agents.is_some());
     }

@@ -78,8 +78,12 @@ pub(crate) fn render_pane_title(
     theme: &HelixTheme,
     focused: bool,
 ) {
-    let origin = pane_box.style_adjusted_origin_pos;
-    let width = pane_box.style_adjusted_bounds_size.col_width.as_usize();
+    let origin = pane_box.style_adjusted_bounds.origin_pos;
+    let width = pane_box
+        .style_adjusted_bounds
+        .bounds_size
+        .col_width
+        .as_usize();
 
     let (bg_active_rgb, fg_active_rgb) = title_bar_colors(true, theme);
     let (bg_inactive_rgb, fg_inactive_rgb) = title_bar_colors(false, theme);
@@ -101,11 +105,11 @@ pub(crate) fn render_pane_title(
     let padded = format!(" {title} ");
     let display = truncate_title(&padded, width);
 
-    render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+    render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
     render_ops += RenderOpCommon::ResetColor;
     render_ops += RenderOpCommon::SetBgColor(color_bg);
     render_ops += RenderOpIR::PaintTextWithAttributes(SPACER_GLYPH.repeat(width).into(), None);
-    render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+    render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
     render_ops += RenderOpIR::PaintTextWithAttributes(
         display.into(),
         Some(if focused {

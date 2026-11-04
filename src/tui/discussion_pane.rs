@@ -820,7 +820,7 @@ impl DiscussionComponent {
         self.doc_rows + self.status_rows
     }
 
-    fn in_doc(&self, pos: Pos) -> bool {
+    fn in_doc(&self, pos: VPPos) -> bool {
         let (origin_row, origin_col) = self.doc_origin;
         let row = pos.row_index.as_usize();
         let col = pos.col_index.as_usize();
@@ -834,7 +834,7 @@ impl DiscussionComponent {
         state: &AppState,
         discussion: &DiscussionState,
         window_id: usize,
-        pos: Pos,
+        pos: VPPos,
     ) -> Option<(DocPart, usize)> {
         let cache = self
             .cache
@@ -923,7 +923,7 @@ impl DiscussionComponent {
 
     /// Extends the drag to the word under the mouse. A drag never leaves the text it
     /// began in: past it, it reaches that text's start or end.
-    fn update_drag(&mut self, state: &mut AppState, pos: Pos) {
+    fn update_drag(&mut self, state: &mut AppState, pos: VPPos) {
         let Some(drag) = &self.drag else {
             return;
         };
@@ -1536,12 +1536,19 @@ impl DiscussionComponent {
                 |spec| spec.short_label(),
             );
 
-        let pane_width = pane_box.style_adjusted_bounds_size.col_width.as_usize();
+        let pane_width = pane_box
+            .style_adjusted_bounds
+            .bounds_size
+            .col_width
+            .as_usize();
         let label = format!(" {model} ");
         let label_width = display_width(&label);
         let title_box = FlexBox {
-            style_adjusted_bounds_size: width(pane_width.saturating_sub(label_width) as u16)
-                + pane_box.style_adjusted_bounds_size.row_height,
+            style_adjusted_bounds: VPBoundingBox::new(
+                pane_box.style_adjusted_bounds.origin_pos,
+                vp_width(pane_width.saturating_sub(label_width) as u16)
+                    + pane_box.style_adjusted_bounds.bounds_size.row_height,
+            ),
             ..*pane_box
         };
         render_pane_title(ops, pane_box, "", false, theme, focused);
@@ -1550,8 +1557,8 @@ impl DiscussionComponent {
             let (bg, fg) = title_bar_colors(focused, theme);
             let style = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
             *ops += RenderOpCommon::MoveCursorPositionRelTo(
-                pane_box.style_adjusted_origin_pos,
-                col((pane_width - label_width) as u16) + row(0),
+                pane_box.style_adjusted_bounds.origin_pos,
+                vp_col((pane_width - label_width) as u16) + vp_row(0),
             );
             *ops += RenderOpCommon::ApplyColors(Some(style));
             *ops += RenderOpIR::PaintTextWithAttributes(label.into(), Some(style));
@@ -1887,12 +1894,12 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
         &mut self,
         global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
-        _surface_bounds: SurfaceBounds,
+        _surface_bounds: VPBoundingBox,
         has_focus: &mut HasFocus,
     ) -> CommonResult {
         throws!({
-            let origin = current_box.style_adjusted_origin_pos;
-            let bounds = current_box.style_adjusted_bounds_size;
+            let origin = current_box.style_adjusted_bounds.origin_pos;
+            let bounds = current_box.style_adjusted_bounds.bounds_size;
             let total_rows = bounds.row_height.as_usize();
             let pane_width = bounds.col_width.as_usize();
             // The pane's scrollbar takes the last column, down to the status line.
@@ -1972,14 +1979,14 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let doc_rows = total_rows - input_rows - status_rows;
 
             let mut input_ops = RenderOpIRVec::new();
-            let input_origin = origin + height((doc_rows + status_rows) as u16);
+            let input_origin = origin + vp_height((doc_rows + status_rows) as u16);
             let input_style = new_style!(
                 color_fg: {TuiColor::from(text_fg)} color_bg: {TuiColor::from(input_bg)}
             );
             for row_offset in 0..input_rows {
                 input_ops += RenderOpCommon::MoveCursorPositionRelTo(
                     input_origin,
-                    col(0) + row(row_offset as u16),
+                    vp_col(0) + vp_row(row_offset as u16),
                 );
                 input_ops += RenderOpCommon::ApplyColors(Some(input_style));
                 input_ops += RenderOpIR::PaintTextWithAttributes(
@@ -2076,7 +2083,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                     new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
                 *ops += RenderOpCommon::MoveCursorPositionRelTo(
                     origin,
-                    col(0) + row(row_offset as u16),
+                    vp_col(0) + vp_row(row_offset as u16),
                 );
                 *ops += RenderOpCommon::ApplyColors(Some(strip_style));
                 *ops += RenderOpIR::PaintTextWithAttributes(
@@ -2102,7 +2109,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                     }
                     *ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
-                        col(x as u16) + row(row_offset as u16),
+                        vp_col(x as u16) + vp_row(row_offset as u16),
                     );
                     *ops += RenderOpCommon::ApplyColors(Some(style));
                     *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
@@ -3253,7 +3260,7 @@ mod tests {
             );
         }
         let (main_tx, _) = mpsc::channel(8);
-        let size = width(80) + height(24);
+        let size = vp_width(80) + vp_height(24);
         GlobalData::try_to_create_instance(
             main_tx,
             state,
@@ -3335,14 +3342,14 @@ mod tests {
             &mut ops,
             None,
             "",
-            col(0) + row(9),
+            vp_col(0) + vp_row(9),
             20,
             1,
             true,
             (color, color, color),
         );
         let mouse = |kind| MouseInput {
-            pos: col(1) + row(9),
+            pos: vp_col(1) + vp_row(9),
             kind,
             maybe_modifier_keys: None,
         };

@@ -64,7 +64,7 @@ impl FuzzyPicker {
         &mut self,
         state: &AppState,
         picker_state: &FuzzyPickerState<K>,
-        results_origin: Pos,
+        results_origin: VPPos,
         result_rows: usize,
         pane_width: usize,
         display: impl Fn(&K, &AppState) -> (String, Option<RgbValue>),
@@ -102,8 +102,10 @@ impl FuzzyPicker {
 
         for row_offset in 0..result_rows {
             let result_idx = self.scroll_offset + row_offset;
-            render_ops +=
-                RenderOpCommon::MoveCursorPositionRelTo(results_origin, col(0) + row(row_offset));
+            render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                results_origin,
+                vp_col(0) + vp_row(row_offset),
+            );
 
             let is_selected = result_idx < result_count && result_idx == selected_idx;
             let row_bg = if is_selected {
@@ -123,7 +125,7 @@ impl FuzzyPicker {
                 if result_count == 0 && row_offset == 0 {
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                         results_origin,
-                        col(0) + row(row_offset),
+                        vp_col(0) + vp_row(row_offset),
                     );
                     let msg = "No results";
                     let pad = (pane_width.saturating_sub(msg.len())) / 2;
@@ -136,8 +138,10 @@ impl FuzzyPicker {
                 continue;
             }
 
-            render_ops +=
-                RenderOpCommon::MoveCursorPositionRelTo(results_origin, col(0) + row(row_offset));
+            render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                results_origin,
+                vp_col(0) + vp_row(row_offset),
+            );
 
             let (key, matched_positions) = {
                 let (k, pos) = &picker_state.results[result_idx];

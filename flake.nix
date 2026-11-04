@@ -10,7 +10,7 @@
       let
         overlays = [ (import rust-overlay) ];
         pkgs = import nixpkgs { inherit system overlays; };
-        toolchain = pkgs.rust-bin.nightly.latest.default.override {
+        toolchain = pkgs.rust-bin.nightly."2026-10-17".default.override {
           extensions = [ "rust-src" "clippy" "rustfmt" "rust-analyzer" ];
         };
       in {

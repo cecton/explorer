@@ -155,10 +155,20 @@ impl TitleRow for ModelPickerComponent {
         focused: bool,
         state: &mut AppState,
     ) -> usize {
-        let origin = pane_box.style_adjusted_origin_pos;
-        let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
+        let origin = pane_box.style_adjusted_bounds.origin_pos;
+        let width = pane_box
+            .style_adjusted_bounds
+            .bounds_size
+            .col_width
+            .as_u16();
         let prompt = "Model: ";
-        let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
+        let max_rows = (pane_box
+            .style_adjusted_bounds
+            .bounds_size
+            .row_height
+            .as_usize()
+            / 2)
+        .max(1);
         let height = state
             .model_picker
             .query
@@ -172,8 +182,10 @@ impl TitleRow for ModelPickerComponent {
         let query = &mut state.model_picker.query;
 
         for row_offset in 0..height {
-            *ops +=
-                RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset as u16));
+            *ops += RenderOpCommon::MoveCursorPositionRelTo(
+                origin,
+                vp_col(0) + vp_row(row_offset as u16),
+            );
             *ops += RenderOpCommon::SetBgColor(color_bg);
             *ops += RenderOpIR::PaintTextWithAttributes(
                 " ".repeat(width as usize).as_str().into(),
@@ -266,12 +278,12 @@ impl Component<AppState, AppSignal> for ModelPickerComponent {
         &mut self,
         global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
-        _surface_bounds: SurfaceBounds,
+        _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
         throws!({
-            let origin = current_box.style_adjusted_origin_pos;
-            let bounds = current_box.style_adjusted_bounds_size;
+            let origin = current_box.style_adjusted_bounds.origin_pos;
+            let bounds = current_box.style_adjusted_bounds.bounds_size;
             let total_rows = bounds.row_height.as_usize();
             let pane_width = bounds.col_width.as_usize();
             if total_rows == 0 {

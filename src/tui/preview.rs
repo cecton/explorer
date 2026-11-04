@@ -219,7 +219,7 @@ impl FilePreviewComponent {
         ops: &mut RenderOpIRVec,
         input: &mut InputLine,
         prompt: &str,
-        origin: Pos,
+        origin: VPPos,
         width: u16,
         height: usize,
         focused: bool,
@@ -232,8 +232,10 @@ impl FilePreviewComponent {
         let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
         for row_offset in 0..height {
-            *ops +=
-                RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(row_offset as u16));
+            *ops += RenderOpCommon::MoveCursorPositionRelTo(
+                origin,
+                vp_col(0) + vp_row(row_offset as u16),
+            );
             *ops += RenderOpCommon::SetBgColor(color_bg);
             *ops += RenderOpIR::PaintTextWithAttributes(
                 " ".repeat(width as usize).as_str().into(),
@@ -635,12 +637,12 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
         &mut self,
         global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
-        _surface_bounds: SurfaceBounds,
+        _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
         throws!({
-            let origin = current_box.style_adjusted_origin_pos;
-            let bounds = current_box.style_adjusted_bounds_size;
+            let origin = current_box.style_adjusted_bounds.origin_pos;
+            let bounds = current_box.style_adjusted_bounds.bounds_size;
             let visible_rows = bounds.row_height.as_usize();
 
             self.content_origin_row = origin.row_index.as_usize();
@@ -791,8 +793,10 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                     let seg_end_char = (seg_start_char + content_width).min(char_len);
                     let is_first_sub = seg_start_char == 0;
 
-                    render_ops +=
-                        RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(rendered));
+                    render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                        origin,
+                        vp_col(0) + vp_row(rendered),
+                    );
                     render_ops += RenderOpCommon::ApplyColors(Some(row_bg_style));
                     render_ops += RenderOpIR::PaintTextWithAttributes(
                         " ".repeat(pane_width).as_str().into(),
@@ -801,8 +805,10 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
 
                     if is_first_sub {
                         let line_num = line_idx + 1;
-                        render_ops +=
-                            RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(rendered));
+                        render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                            origin,
+                            vp_col(0) + vp_row(rendered),
+                        );
                         render_ops += RenderOpCommon::ApplyColors(Some(row_ln_style));
                         let line_num_str =
                             format!("{:>width$}{GUTTER_GAP}", line_num, width = line_num_width);
@@ -811,8 +817,10 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                             Some(row_ln_style),
                         );
                     } else {
-                        render_ops +=
-                            RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(rendered));
+                        render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                            origin,
+                            vp_col(0) + vp_row(rendered),
+                        );
                         render_ops += RenderOpCommon::ApplyColors(Some(row_ln_style));
                         render_ops += RenderOpIR::PaintTextWithAttributes(
                             " ".repeat(line_num_width + GUTTER_GAP.len())
@@ -824,7 +832,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
 
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
-                        col(content_start_col) + row(rendered),
+                        vp_col(content_start_col) + vp_row(rendered),
                     );
                     // Build color intervals for this sub-row segment.
                     // Each interval is (start_char, end_char, bg_color, fg_override). A `Some`
@@ -995,9 +1003,19 @@ impl TitleRow for FilePreviewComponent {
                 PreviewInput::Search(_, SearchDirection::Forward) => "/",
                 PreviewInput::Search(_, SearchDirection::Backward) => "?",
             };
-            let origin = pane_box.style_adjusted_origin_pos;
-            let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
-            let max_rows = (pane_box.style_adjusted_bounds_size.row_height.as_usize() / 2).max(1);
+            let origin = pane_box.style_adjusted_bounds.origin_pos;
+            let width = pane_box
+                .style_adjusted_bounds
+                .bounds_size
+                .col_width
+                .as_u16();
+            let max_rows = (pane_box
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_usize()
+                / 2)
+            .max(1);
             let height = input.line().height(None, prompt, width, max_rows);
             Self::render_input_title(
                 ops,

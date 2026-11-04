@@ -638,7 +638,7 @@ mod tests {
     use arc_swap::ArcSwap;
     use camino::Utf8PathBuf;
     use parking_lot::Mutex;
-    use r3bl_tui::{OfsBufVT100, Size};
+    use r3bl_tui::{OfsBufVT100, VPSize};
     use std::sync::Arc;
     use tempfile::TempDir;
     use tokio::sync::mpsc;
@@ -657,11 +657,11 @@ mod tests {
     fn dummy_terminal_pane(cwd: Utf8PathBuf, command: Option<String>) -> TerminalPane {
         let (pty_input_tx, _) = mpsc::channel(1);
         TerminalPane {
-            ofs_buf: OfsBufVT100::new_empty(Size::default()),
+            ofs_buf: OfsBufVT100::new_empty(VPSize::default()),
             title: None,
             pty_input_tx: Arc::new(pty_input_tx),
             child_killer: None,
-            last_size: Size::default(),
+            last_size: VPSize::default(),
             is_command_pane: command.is_some(),
             exited: false,
             exit_code: None,

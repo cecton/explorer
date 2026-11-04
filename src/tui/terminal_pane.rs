@@ -39,7 +39,13 @@ impl TerminalPaneComponent {
             .layout(state.last_surface_size)
             .iter()
             .find(|s| s.slot == slot)
-            .map(|s| s.box_.style_adjusted_bounds_size.row_height.as_usize())
+            .map(|s| {
+                s.box_
+                    .style_adjusted_bounds
+                    .bounds_size
+                    .row_height
+                    .as_usize()
+            })
             .unwrap_or(0)
     }
 }
@@ -136,37 +142,21 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
 
             let mut pane = pane_arc.lock();
             let tx = pane.pty_input_tx.clone();
-            let alternate_screen_active =
-                pane.ofs_buf.terminal_mode.active_screen_buffer == ActiveScreenBuffer::Alternate;
-            let scrollback_len = pane.ofs_buf.scrollback_len();
+            let alternate_screen_active = pane.ofs_buf.get_terminal_mode().active_screen_buffer
+                == ActiveScreenBuffer::Alternate;
+            let scrollback_len = pane.ofs_buf.get_history_len();
 
             if global_data.state.terminal_grabbed {
                 match &input_event {
                     InputEvent::Keyboard(keypress) => {
-                        let mode = pane.ofs_buf.terminal_mode.cursor_key_mode;
-                        if let Some(pty_event) = (*keypress).into() {
-                            let pty_event = match pty_event {
-                                PtyInputEvent::SendControl(ctrl, _)
-                                    if matches!(
-                                        ctrl,
-                                        ControlSequence::ArrowUp
-                                            | ControlSequence::ArrowDown
-                                            | ControlSequence::ArrowLeft
-                                            | ControlSequence::ArrowRight
-                                            | ControlSequence::Home
-                                            | ControlSequence::End
-                                    ) =>
-                                {
-                                    PtyInputEvent::SendControl(ctrl, mode)
-                                }
-                                other => other,
-                            };
+                        if let Some(pty_event) = pane.ofs_buf.keypress_to_pty_input_event(*keypress)
+                        {
                             let _ = tx.try_send(pty_event);
                             return Ok(EventPropagation::ConsumedRender);
                         }
                     }
                     InputEvent::Mouse(mouse)
-                        if pane.ofs_buf.terminal_mode.mouse_tracking_mode
+                        if pane.ofs_buf.get_terminal_mode().mouse_tracking_mode
                             == MouseTrackingMode::Enabled =>
                     {
                         let col = mouse
@@ -181,15 +171,19 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                             .saturating_sub(self.content_origin_row);
                         if let Some(bytes) = r3bl_tui::ansi::mouse_sgr::generate(
                             mouse,
-                            TermCol::from_zero_based(ColIndex::from(ch(col))),
-                            TermRow::from_zero_based(RowIndex::from(ch(row))),
+                            TermCol::from_zero_based(vp_col(col as u16)),
+                            TermRow::from_zero_based(vp_row(row as u16)),
                         ) {
                             let _ = tx.try_send(PtyInputEvent::Write(bytes));
                             return Ok(EventPropagation::ConsumedRender);
                         }
                     }
                     InputEvent::BracketedPaste(text) => {
-                        let bytes = if pane.ofs_buf.terminal_mode.is_bracketed_paste_enabled() {
+                        let bytes = if pane
+                            .ofs_buf
+                            .get_terminal_mode()
+                            .is_bracketed_paste_enabled()
+                        {
                             let mut b = Vec::with_capacity(text.len() + 6);
                             b.extend_from_slice(b"\x1b[200~");
                             b.extend_from_slice(text.as_bytes());
@@ -275,7 +269,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     pane.scroll_offset = pane
                         .scroll_offset
                         .saturating_add(pane_height)
-                        .min(pane.ofs_buf.scrollback_len());
+                        .min(pane.ofs_buf.get_history_len());
                     EventPropagation::ConsumedRender
                 }
 
@@ -293,7 +287,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     pane.scroll_offset = pane
                         .scroll_offset
                         .saturating_add(1)
-                        .min(pane.ofs_buf.scrollback_len());
+                        .min(pane.ofs_buf.get_history_len());
                     EventPropagation::ConsumedRender
                 }
 
@@ -313,7 +307,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
         &mut self,
         global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
-        _surface_bounds: SurfaceBounds,
+        _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
         throws!({
@@ -324,19 +318,27 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 return Ok(());
             };
             let mut pane = pane.lock();
-            let origin = current_box.style_adjusted_origin_pos;
+            let origin = current_box.style_adjusted_bounds.origin_pos;
 
-            let pane_width = current_box.style_adjusted_bounds_size.col_width.as_usize();
-            let pane_height = current_box.style_adjusted_bounds_size.row_height.as_usize();
+            let pane_width = current_box
+                .style_adjusted_bounds
+                .bounds_size
+                .col_width
+                .as_usize();
+            let pane_height = current_box
+                .style_adjusted_bounds
+                .bounds_size
+                .row_height
+                .as_usize();
             self.content_origin_row = origin.row_index.as_usize();
             self.content_origin_col = origin.col_index.as_usize();
             self.content_col_count = pane_width;
             self.content_row_count = pane_height;
 
             // Resize the offscreen buffer if the pane dimensions changed.
-            let new_size = Size {
-                col_width: width(pane_width as u16),
-                row_height: height(pane_height as u16),
+            let new_size = VPSize {
+                col_width: vp_width(pane_width as u16),
+                row_height: vp_height(pane_height as u16),
             };
             if pane.last_size != new_size {
                 pane.ofs_buf.resize(new_size);
@@ -344,7 +346,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 pane.last_size = new_size;
             }
 
-            let scrollback_len = pane.ofs_buf.scrollback_len();
+            let scrollback_len = pane.ofs_buf.get_history_len();
             let scroll_offset = pane.scroll_offset.min(scrollback_len);
             let buffer_height = pane.ofs_buf.get_window_size().row_height.as_usize();
 
@@ -384,12 +386,12 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     global_data.state.pane_manager.focused_window,
                     Some(Window::Terminal(focused_id)) if focused_id == id
                 );
-                let cursor_visible = pane.ofs_buf.parser_global_state.cursor_visibility
+                let cursor_visible = pane.ofs_buf.get_parser_global_state().cursor_visibility
                     == CursorVisibilityMode::Visible
                     && is_grabbed
                     && is_active;
                 let cursor_pos = if cursor_visible {
-                    Some(pane.ofs_buf.get_cursor_pos())
+                    Some(pane.ofs_buf.get_active_screen_buffer().get_cursor_pos())
                 } else {
                     None
                 };
@@ -398,7 +400,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     for row_idx in visible_rows..pane_height {
                         ops += RenderOpCommon::MoveCursorPositionRelTo(
                             origin,
-                            col(0) + row(row_idx as u16),
+                            vp_col(0) + vp_row(row_idx as u16),
                         );
                         ops += RenderOpIR::PaintTextWithAttributes(
                             " ".repeat(pane_width).into(),
@@ -408,33 +410,22 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 }
                 if let Some(rect) = selection_rect {
                     let lines: Vec<&[PixelChar]> = (0..visible_rows)
-                        .filter_map(|r| pane.ofs_buf.get_row(r))
+                        .filter_map(|r| terminal_row(&pane.ofs_buf, 0, r))
                         .collect();
                     overlay_selection(&mut ops, &lines, origin, rect, hl_rgb);
                 }
                 ops
             } else {
-                let combined_bottom = scrollback_len + buffer_height;
-                let viewport_bottom = combined_bottom.saturating_sub(scroll_offset);
-                let viewport_top = viewport_bottom.saturating_sub(pane_height);
-
-                let mut lines: Vec<&[PixelChar]> = Vec::with_capacity(pane_height);
-                for combined_idx in viewport_top..viewport_bottom {
-                    if let Some(line) = pane.ofs_buf.scrollback_buffer.lines.get(combined_idx) {
-                        lines.push(line);
-                    } else if let Some(line) = pane.ofs_buf.get_row(combined_idx - scrollback_len) {
-                        lines.push(line);
-                    } else {
-                        break;
-                    }
-                }
+                let lines: Vec<&[PixelChar]> = (0..pane_height)
+                    .map_while(|r| terminal_row(&pane.ofs_buf, scroll_offset, r))
+                    .collect();
 
                 let mut ops = render_lines_to_ir(&lines, origin, None);
                 if lines.len() < pane_height {
                     for row_idx in lines.len()..pane_height {
                         ops += RenderOpCommon::MoveCursorPositionRelTo(
                             origin,
-                            col(0) + row(row_idx as u16),
+                            vp_col(0) + vp_row(row_idx as u16),
                         );
                         ops += RenderOpIR::PaintTextWithAttributes(
                             " ".repeat(pane_width).into(),
@@ -461,24 +452,37 @@ struct SelectionRect {
     end_col: usize,
 }
 
-fn cursor_at(row_idx: usize, col_idx: usize, cursor: Option<r3bl_tui::Pos>) -> bool {
-    cursor == Some(col(col_idx as u16) + row(row_idx as u16))
+fn cursor_at(row_idx: usize, col_idx: usize, cursor: Option<r3bl_tui::VPPos>) -> bool {
+    cursor == Some(vp_col(col_idx as u16) + vp_row(row_idx as u16))
+}
+
+fn terminal_row(
+    ofs_buf: &OfsBufVT100,
+    scroll_offset: usize,
+    viewport_row: usize,
+) -> Option<&[PixelChar]> {
+    ofs_buf.get_active_screen_buffer().get_row_with_scrollback(
+        vp_row(viewport_row as u16),
+        scrollback_amount(scroll_offset),
+    )
 }
 
 fn render_ofs_buf_to_ir(
-    ofs_buf: &r3bl_tui::OfsBuf,
-    origin: r3bl_tui::Pos,
+    ofs_buf: &OfsBufVT100,
+    origin: r3bl_tui::VPPos,
     max_rows: usize,
-    cursor_pos: Option<r3bl_tui::Pos>,
+    cursor_pos: Option<r3bl_tui::VPPos>,
 ) -> RenderOpIRVec {
-    let lines: Vec<&[PixelChar]> = (0..max_rows).filter_map(|r| ofs_buf.get_row(r)).collect();
+    let lines: Vec<&[PixelChar]> = (0..max_rows)
+        .filter_map(|r| terminal_row(ofs_buf, 0, r))
+        .collect();
     render_lines_to_ir(&lines, origin, cursor_pos)
 }
 
 fn render_lines_to_ir(
     lines: &[&[PixelChar]],
-    origin: r3bl_tui::Pos,
-    cursor_pos: Option<r3bl_tui::Pos>,
+    origin: r3bl_tui::VPPos,
+    cursor_pos: Option<r3bl_tui::VPPos>,
 ) -> RenderOpIRVec {
     let mut ops = RenderOpIRVec::new();
     for (row_index, line) in lines.iter().enumerate() {
@@ -499,7 +503,7 @@ fn render_lines_to_ir(
                 };
                 ops += RenderOpCommon::MoveCursorPositionRelTo(
                     origin,
-                    col(col_index as u16) + row(row_index as u16),
+                    vp_col(col_index as u16) + vp_row(row_index as u16),
                 );
                 ops += RenderOpCommon::ApplyColors(Some(s));
                 ops += RenderOpIR::PaintTextWithAttributes(ch.to_string().into(), Some(s));
@@ -543,7 +547,7 @@ fn render_lines_to_ir(
             if !text.is_empty() {
                 ops += RenderOpCommon::MoveCursorPositionRelTo(
                     origin,
-                    col(run_start as u16) + row(row_index as u16),
+                    vp_col(run_start as u16) + vp_row(row_index as u16),
                 );
                 if run_style.is_some() {
                     ops += RenderOpCommon::ApplyColors(run_style);
@@ -595,7 +599,7 @@ fn compute_terminal_selection_ranges(
 fn overlay_selection(
     ops: &mut RenderOpIRVec,
     lines: &[&[PixelChar]],
-    origin: r3bl_tui::Pos,
+    origin: r3bl_tui::VPPos,
     selection: SelectionRect,
     hl_bg: RgbValue,
 ) {
@@ -639,7 +643,7 @@ fn overlay_selection(
             let sel_style = new_style!(color_fg: {fg} color_bg: {sel_bg});
             *ops += RenderOpCommon::MoveCursorPositionRelTo(
                 origin,
-                col(col_idx as u16) + row(row_idx as u16),
+                vp_col(col_idx as u16) + vp_row(row_idx as u16),
             );
             *ops += RenderOpCommon::ApplyColors(Some(sel_style));
             *ops += RenderOpIR::PaintTextWithAttributes(ch.to_string().into(), Some(sel_style));
@@ -723,47 +727,16 @@ fn trimmed_pixel_char_line(line: &[PixelChar]) -> (String, usize) {
     (s, trimmed_len)
 }
 
-pub fn terminal_line_at_viewport_row(
-    pane: &TerminalPane,
-    viewport_row: usize,
-    pane_height: usize,
-) -> (String, usize) {
-    let scrollback_len = pane.ofs_buf.scrollback_len();
-    let buffer_height = pane.ofs_buf.get_window_size().row_height.as_usize();
-    let scroll_offset = pane.scroll_offset.min(scrollback_len);
-
-    if scroll_offset == 0 {
-        if let Some(line) = pane.ofs_buf.get_row(viewport_row) {
-            let (s, trimmed_len) = trimmed_pixel_char_line(line);
-            return (s, trimmed_len);
-        }
-    } else {
-        let combined_bottom = scrollback_len + buffer_height;
-        let viewport_bottom = combined_bottom.saturating_sub(scroll_offset);
-        let viewport_top = viewport_bottom.saturating_sub(pane_height);
-        let combined_idx = viewport_top + viewport_row;
-        let line: Option<&[PixelChar]> = if combined_idx < scrollback_len {
-            pane.ofs_buf
-                .scrollback_buffer
-                .lines
-                .get(combined_idx)
-                .map(|l| l.pixel_chars.as_slice())
-        } else {
-            pane.ofs_buf.get_row(combined_idx - scrollback_len)
-        };
-        if let Some(line) = line {
-            let (s, trimmed_len) = trimmed_pixel_char_line(line);
-            return (s, trimmed_len);
-        }
-    }
-    (String::new(), 0)
+pub fn terminal_line_at_viewport_row(pane: &TerminalPane, viewport_row: usize) -> (String, usize) {
+    let scroll_offset = pane.scroll_offset.min(pane.ofs_buf.get_history_len());
+    terminal_row(&pane.ofs_buf, scroll_offset, viewport_row)
+        .map_or((String::new(), 0), trimmed_pixel_char_line)
 }
 
 pub fn extract_terminal_text(
     pane: &TerminalPane,
     start: SelPoint,
     end: SelPoint,
-    pane_height: usize,
 ) -> Option<String> {
     let (
         SelPoint::Terminal {
@@ -783,41 +756,16 @@ pub fn extract_terminal_text(
     let mut sc = raw_sc.min(raw_ec);
     let mut ec = raw_sc.max(raw_ec);
 
-    let scrollback_len = pane.ofs_buf.scrollback_len();
-    let buffer_height = pane.ofs_buf.get_window_size().row_height.as_usize();
-    let scroll_offset = pane.scroll_offset.min(scrollback_len);
+    let scroll_offset = pane.scroll_offset.min(pane.ofs_buf.get_history_len());
 
     let mut lines: Vec<String> = Vec::with_capacity(er - sr + 1);
     let mut line_lengths: Vec<usize> = Vec::with_capacity(er - sr + 1);
 
-    if scroll_offset == 0 {
-        for i in sr..=er.min(buffer_height.saturating_sub(1)) {
-            if let Some(line) = pane.ofs_buf.get_row(i) {
-                let (s, trimmed_len) = trimmed_pixel_char_line(line);
-                line_lengths.push(trimmed_len);
-                lines.push(s);
-            }
-        }
-    } else {
-        let combined_bottom = scrollback_len + buffer_height;
-        let viewport_bottom = combined_bottom.saturating_sub(scroll_offset);
-        let viewport_top = viewport_bottom.saturating_sub(pane_height);
-        for viewport_row in sr..=er {
-            let combined_idx = viewport_top + viewport_row;
-            let line: Option<&[PixelChar]> = if combined_idx < scrollback_len {
-                pane.ofs_buf
-                    .scrollback_buffer
-                    .lines
-                    .get(combined_idx)
-                    .map(|l| l.pixel_chars.as_slice())
-            } else {
-                pane.ofs_buf.get_row(combined_idx - scrollback_len)
-            };
-            if let Some(line) = line {
-                let (s, trimmed_len) = trimmed_pixel_char_line(line);
-                line_lengths.push(trimmed_len);
-                lines.push(s);
-            }
+    for viewport_row in sr..=er {
+        if let Some(line) = terminal_row(&pane.ofs_buf, scroll_offset, viewport_row) {
+            let (s, trimmed_len) = trimmed_pixel_char_line(line);
+            line_lengths.push(trimmed_len);
+            lines.push(s);
         }
     }
 
@@ -1026,5 +974,53 @@ mod tests {
         assert_eq!(s, "█▒");
         // Byte len: 6 (2 × 3-byte UTF-8 chars).
         assert_eq!(s.len(), 6);
+    }
+
+    #[test]
+    fn extracts_the_selected_text_of_the_live_screen() {
+        use super::extract_terminal_text;
+        use crate::tui::{SelPoint, TerminalPane};
+        use r3bl_tui::{OfsBufVT100, vp_height, vp_width};
+        use std::sync::Arc;
+
+        let mut ofs_buf = OfsBufVT100::new_empty(vp_width(20) + vp_height(5));
+        let _unused = ofs_buf.apply_ansi_bytes("hello world\r\nsecond line");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let pane = TerminalPane {
+            ofs_buf,
+            title: None,
+            pty_input_tx: Arc::new(tx),
+            child_killer: None,
+            last_size: vp_width(20) + vp_height(5),
+            is_command_pane: false,
+            exited: false,
+            exit_code: None,
+            exit_signal: None,
+            scroll_offset: 0,
+            cwd: camino::Utf8PathBuf::from("/"),
+            command: None,
+        };
+
+        let start = SelPoint::Terminal {
+            viewport_row: 0,
+            col: 6,
+        };
+        let end = SelPoint::Terminal {
+            viewport_row: 0,
+            col: 11,
+        };
+        assert_eq!(
+            extract_terminal_text(&pane, start, end).as_deref(),
+            Some("world")
+        );
+
+        let end = SelPoint::Terminal {
+            viewport_row: 1,
+            col: 6,
+        };
+        assert_eq!(
+            extract_terminal_text(&pane, start, end).as_deref(),
+            Some("hello world\nsecond line")
+        );
     }
 }

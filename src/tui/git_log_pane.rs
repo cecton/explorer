@@ -225,14 +225,18 @@ impl GitLogPaneComponent {
             None
         };
         if let Some((input_line, prompt)) = input_mode {
-            let origin = pane_box.style_adjusted_origin_pos;
-            let width = pane_box.style_adjusted_bounds_size.col_width.as_u16();
+            let origin = pane_box.style_adjusted_bounds.origin_pos;
+            let width = pane_box
+                .style_adjusted_bounds
+                .bounds_size
+                .col_width
+                .as_u16();
             let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
             let color_bg = TuiColor::from(bg_rgb);
             let color_fg = TuiColor::from(fg_rgb);
             let color_selection = TuiColor::from(title_selection_bg(focused, theme));
             let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
-            *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+            *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
             *ops += RenderOpCommon::SetBgColor(color_bg);
             *ops += RenderOpIR::PaintTextWithAttributes(
                 " ".repeat(width as usize).as_str().into(),
@@ -531,13 +535,13 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
         &mut self,
         global_data: &mut GlobalData<AppState, AppSignal>,
         current_box: FlexBox,
-        _surface_bounds: SurfaceBounds,
+        _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
         throws!({
             let window_id = self.window_id;
-            let origin = current_box.style_adjusted_origin_pos;
-            let bounds = current_box.style_adjusted_bounds_size;
+            let origin = current_box.style_adjusted_bounds.origin_pos;
+            let bounds = current_box.style_adjusted_bounds.bounds_size;
             let total_rows = bounds.row_height.as_usize();
             let pane_width = bounds.col_width.as_usize();
             self.content_origin_row = origin.row_index.as_usize();
@@ -608,7 +612,7 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                 };
                 if let Some(win) = state.git_logs.get(&window_id) {
                     let results_origin =
-                        col(origin.col_index.as_u16()) + row(origin.row_index.as_u16());
+                        vp_col(origin.col_index.as_u16()) + vp_row(origin.row_index.as_u16());
                     let picker_ops = self.branch_fuzzy.render_results(
                         state,
                         &win.branch_picker,
@@ -642,7 +646,7 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                 for row_offset in 0..total_rows {
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
-                        col(0) + row(row_offset as u16),
+                        vp_col(0) + vp_row(row_offset as u16),
                     );
                     render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
                     render_ops += RenderOpIR::PaintTextWithAttributes(
@@ -651,7 +655,7 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                     );
                     if row_offset == 0 {
                         render_ops +=
-                            RenderOpCommon::MoveCursorPositionRelTo(origin, col(0) + row(0));
+                            RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
                         render_ops += RenderOpCommon::ApplyColors(Some(message_style));
                         render_ops += RenderOpIR::PaintTextWithAttributes(
                             message.0.clone().into(),
@@ -725,7 +729,7 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                     };
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
-                        col(0) + row(row_offset as u16),
+                        vp_col(0) + vp_row(row_offset as u16),
                     );
                     let is_selected = vis_idx == selected;
                     let row_style = if is_selected {
@@ -748,7 +752,7 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                     let left_chars = left.chars().count();
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
-                        col(0) + row(row_offset as u16),
+                        vp_col(0) + vp_row(row_offset as u16),
                     );
                     let left_style = if is_selected {
                         linenum_selected_style
@@ -806,7 +810,7 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                         let start = pane_width.saturating_sub(names_width + ell_width);
                         render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                             origin,
-                            col(start as u16) + row(row_offset as u16),
+                            vp_col(start as u16) + vp_row(row_offset as u16),
                         );
                         for (i, git_ref) in shown.iter().enumerate() {
                             if i > 0 {

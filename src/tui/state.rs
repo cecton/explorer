@@ -19,7 +19,7 @@ use arc_swap::ArcSwap;
 use camino::Utf8PathBuf;
 use parking_lot::{Mutex, RwLock};
 use r3bl_tui::core::pty::{ControlledChildTerminationHandle, PtyInputEvent};
-use r3bl_tui::{MouseInput, OfsBufVT100, Size};
+use r3bl_tui::{MouseInput, OfsBufVT100, VPSize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
@@ -298,7 +298,7 @@ pub struct TerminalPane {
     pub title: Option<String>,
     pub pty_input_tx: Arc<mpsc::Sender<PtyInputEvent>>,
     pub child_killer: Option<ControlledChildTerminationHandle>,
-    pub last_size: Size,
+    pub last_size: VPSize,
     /// True when this pane was opened via `!<cmd>` rather than as an interactive shell.
     /// Command panes are dismissed by Esc or Enter instead of being auto-closed on PTY exit.
     pub is_command_pane: bool,
@@ -352,7 +352,7 @@ pub struct AppState {
     /// Pane stack, sizes, layout, and focus state.
     pub pane_manager: PaneManager,
     /// Last known surface size used for on-demand layout recomputation.
-    pub last_surface_size: Size,
+    pub last_surface_size: VPSize,
     /// Per-file highlight ranges (1-indexed, inclusive).
     pub highlight_ranges: HashMap<FileKey, Vec<(usize, usize)>>,
     pub leader_active: bool,
@@ -554,7 +554,7 @@ impl AppState {
             root,
             repo,
             pane_manager,
-            last_surface_size: Size::default(),
+            last_surface_size: VPSize::default(),
             highlight_ranges: HashMap::new(),
             leader_active: false,
             window_picker: FuzzyPickerState::default(),
@@ -665,10 +665,6 @@ pub enum AppSignal {
         origin_locations: Vec<SymbolRefLocation>,
         reference_locations: Vec<SymbolRefLocation>,
     },
-    /// Forward a raw escape sequence (e.g. an OSC 52 clipboard copy emitted by an app
-    /// running in a terminal pane) to explorer's own stdout, so the host terminal
-    /// handles it. Written to the real terminal on the main thread in `app_handle_signal`.
-    ForwardOscToTerminal(Vec<u8>),
     /// A terminal pane produced output and should be re-painted. Kept apart from
     /// [`Self::Noop`] on purpose: a flooding pane drives this many times a second, and
     /// the once-a-minute OpenRouter poll must only ever count the 1s tick.

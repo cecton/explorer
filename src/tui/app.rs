@@ -10,10 +10,10 @@ use crate::watcher::{WATCHER_RRT, WatcherWorker};
 use arc_swap::ArcSwap;
 use camino::{Utf8Path, Utf8PathBuf};
 use parking_lot::Mutex;
+use r3bl_tui::OscPtyEvent;
 use r3bl_tui::SubscriberGuard;
-use r3bl_tui::core::osc::OscEvent;
 use r3bl_tui::core::pty::{
-    CursorKeyMode, DefaultPtySessionConfig, PtyInputEvent, PtyOutputEvent, PtySessionBuilder,
+    DefaultPtySessionConfig, PtyInputEvent, PtyOutputEvent, PtySessionBuilder,
     PtySessionConfigOption,
 };
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -153,9 +153,9 @@ impl AppMain {
             // the actual pane slot assigned by the layout.
             let pty_cols = window_size.col_width.as_u16().max(80);
             let pty_rows = window_size.row_height.as_u16().saturating_sub(2);
-            let pty_size = Size {
-                col_width: width(pty_cols),
-                row_height: height(pty_rows),
+            let pty_size = VPSize {
+                col_width: vp_width(pty_cols),
+                row_height: vp_height(pty_rows),
             };
 
             let is_command_pane = cmd.as_deref().is_some_and(|s| !s.is_empty());
@@ -169,7 +169,7 @@ impl AppMain {
             }
             let mut session = match builder
                 .with_config(DefaultPtySessionConfig + PtySessionConfigOption::Size(pty_size))
-                .start()
+                .start_async()
             {
                 Ok(s) => s,
                 Err(e) => {
@@ -178,8 +178,7 @@ impl AppMain {
                 }
             };
 
-            let mut ofs_buf = r3bl_tui::OfsBufVT100::new_empty(pty_size);
-            ofs_buf.terminal_mode.cursor_key_mode = CursorKeyMode::Normal;
+            let ofs_buf = r3bl_tui::OfsBufVT100::new_empty(pty_size);
             let pty_input_tx = Arc::new(session.tx_input_event.clone());
             let child_killer = session.child_process_termination_handle;
             let initial_title = cmd.as_deref().filter(|s| !s.is_empty()).map(|cmd| {
@@ -224,38 +223,16 @@ impl AppMain {
                                 Some(result) => {
                                     if pane.scroll_offset > 0 {
                                         let true_delta = result
-                                            .combined_after
-                                            .saturating_sub(result.combined_before)
-                                            .saturating_sub(result.evictions);
+                                            .history_len_after
+                                            .saturating_sub(result.history_len_before);
                                         pane.scroll_offset = pane
                                             .scroll_offset
                                             .saturating_add(true_delta)
-                                            .min(pane.ofs_buf.scrollback_len());
+                                            .min(pane.ofs_buf.get_history_len());
                                     }
                                     for osc_event in result.osc_events {
-                                        match osc_event {
-                                            OscEvent::SetTitleAndTab(title) => {
-                                                pane.title = Some(title);
-                                            }
-                                            // An app in the pane asked to set the
-                                            // clipboard via OSC 52. Forward it to the
-                                            // real (outer) terminal so the host
-                                            // handles the copy. Skip queries
-                                            // (Pd == "?"): the host would reply to
-                                            // explorer's stdin, which we can't route
-                                            // back into the inner PTY.
-                                            OscEvent::ClipboardCopy { selection, data }
-                                                if data != "?" =>
-                                            {
-                                                let seq = format!("\x1b]52;{selection};{data}\x07")
-                                                    .into_bytes();
-                                                let _ = notify_tx.try_send(
-                                                    TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                                        AppSignal::ForwardOscToTerminal(seq),
-                                                    ),
-                                                );
-                                            }
-                                            _ => {}
+                                        if let OscPtyEvent::SetTitleAndTab(title) = osc_event {
+                                            pane.title = Some(title);
                                         }
                                     }
                                     for pty_response in result.pty_response_events {
@@ -365,7 +342,8 @@ fn is_buffer_empty(ofs_buf: &r3bl_tui::OfsBufVT100) -> bool {
     let height = ofs_buf.get_window_size().row_height.as_usize();
     (0..height).all(|r| {
         ofs_buf
-            .get_row(r)
+            .get_active_screen_buffer()
+            .get_row(vp_row(r as u16))
             .unwrap_or(&[])
             .iter()
             .all(|pc| !matches!(pc, PixelChar::PlainText { .. }))
@@ -385,7 +363,7 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
                 // Send focus-lost before removing the pane.
                 if let Some(pane) = state.terminal_panes.get(&id) {
                     let p = pane.lock();
-                    if p.ofs_buf.terminal_mode.focus_events {
+                    if p.ofs_buf.get_terminal_mode().focus_events {
                         let _ = p
                             .pty_input_tx
                             .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
@@ -1087,10 +1065,10 @@ impl App for AppMain {
         {
             let layout = global_data.state.pane_manager.layout(surface_size);
             for slot in &layout {
-                let ox = slot.box_.style_adjusted_origin_pos.col_index;
-                let oy = slot.box_.style_adjusted_origin_pos.row_index;
-                let w = slot.box_.style_adjusted_bounds_size.col_width;
-                let h = slot.box_.style_adjusted_bounds_size.row_height;
+                let ox = slot.box_.style_adjusted_bounds.origin_pos.col_index;
+                let oy = slot.box_.style_adjusted_bounds.origin_pos.row_index;
+                let w = slot.box_.style_adjusted_bounds.bounds_size.col_width;
+                let h = slot.box_.style_adjusted_bounds.bounds_size.row_height;
                 if pos.col_index >= ox
                     && pos.col_index < ox + w
                     && pos.row_index >= oy
@@ -1168,16 +1146,6 @@ impl App for AppMain {
             self.lsp_guard = None;
             self.lsp_restart_pending = true;
             return Ok(EventPropagation::ConsumedRender);
-        }
-        if let AppSignal::ForwardOscToTerminal(bytes) = action {
-            // Write the raw sequence (e.g. OSC 52 clipboard copy) to the real terminal.
-            // Runs on the main thread, outside paint, so it won't corrupt the TUI; OSC 52
-            // is display-neutral (no cursor/screen change).
-            global_data.output_device.write(|w| {
-                let _ = w.write_all(bytes);
-            });
-            let _ = global_data.output_device.flush();
-            return Ok(EventPropagation::Propagate);
         }
         throws_with_return!({
             let state = &mut global_data.state;
@@ -1351,9 +1319,6 @@ impl App for AppMain {
                     state.bump_files_version();
                 }
                 AppSignal::OpenTerminal { .. } => {}
-                AppSignal::ForwardOscToTerminal(_) => {
-                    // Handled as early return above; unreachable here.
-                }
                 AppSignal::OpenEditor { .. } => {
                     // Handled as early return above; unreachable here.
                 }
@@ -1904,7 +1869,7 @@ impl App for AppMain {
             {
                 let mut it = surface!(stylesheet: create_stylesheet(&global_data.state.theme)?);
                 it.surface_start(SurfaceProps {
-                    pos: col(0) + row(0),
+                    pos: vp_col(0) + vp_row(0),
                     size: surface_size,
                 })?;
 
@@ -1936,7 +1901,7 @@ impl App for AppMain {
             let surface_col_count = window_size.col_width.as_usize();
             for row_idx in 0..surface_rows {
                 let abs_row: u16 = row_idx as u16;
-                bg_ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row(abs_row));
+                bg_ops += RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + vp_row(abs_row));
                 bg_ops += RenderOpCommon::ApplyColors(Some(bg_style));
                 bg_ops += RenderOpIR::PaintTextWithAttributes(
                     " ".repeat(surface_col_count).as_str().into(),
@@ -1972,9 +1937,9 @@ pub(super) fn focused_pane_id(state: &AppState) -> FlexBoxId {
     FlexBoxId::from(Id::pane(slot))
 }
 
-fn surface_size(window_size: Size) -> Size {
+fn surface_size(window_size: VPSize) -> VPSize {
     let col_count = window_size.col_width;
-    let row_count = window_size.row_height - height(1);
+    let row_count = window_size.row_height - vp_height(1);
     col_count + row_count
 }
 
@@ -1985,7 +1950,7 @@ pub(super) fn close_window(state: &mut AppState, window: Window) {
         Window::Terminal(id) => {
             if let Some(pane) = state.terminal_panes.remove(&id) {
                 let mut p = pane.lock();
-                if old == Some(window) && p.ofs_buf.terminal_mode.focus_events {
+                if old == Some(window) && p.ofs_buf.get_terminal_mode().focus_events {
                     let _ = p
                         .pty_input_tx
                         .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
@@ -2045,7 +2010,7 @@ pub(super) fn notify_terminal_focus_change(
             continue;
         };
         let p = pane.lock();
-        if p.ofs_buf.terminal_mode.focus_events {
+        if p.ofs_buf.get_terminal_mode().focus_events {
             let _ = p
                 .pty_input_tx
                 .try_send(PtyInputEvent::Write(bytes.to_vec()));
@@ -2088,7 +2053,7 @@ fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
 
 fn render_status_bar(
     pipeline: &mut RenderPipeline,
-    size: Size,
+    size: VPSize,
     state: &AppState,
     theme: &HelixTheme,
 ) {
@@ -2214,14 +2179,14 @@ fn render_status_bar(
 
     let row_idx = size.row_height.convert_to_index();
     let mut render_ops = RenderOpIRVec::new();
-    render_ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row_idx);
+    render_ops += RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + row_idx);
     render_ops += RenderOpCommon::ResetColor;
     render_ops += RenderOpCommon::SetBgColor(color_bg);
     render_ops += RenderOpIR::PaintTextWithAttributes(
         SPACER_GLYPH.repeat(size.col_width.as_usize()).into(),
         None,
     );
-    render_ops += RenderOpCommon::MoveCursorPositionAbs(col(0) + row_idx);
+    render_ops += RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + row_idx);
     render_tui_styled_texts_into(&styled_texts, &mut render_ops);
 
     // Right-aligned "dirty" flag (uncommitted staged/unstaged changes), shown in a
@@ -2261,7 +2226,7 @@ fn render_status_bar(
     // terminals keep the shortcut hints rather than being overwritten.
     if combined_width > 0 && total_width > combined_width + 2 {
         let start_col = total_width - combined_width - 1;
-        render_ops += RenderOpCommon::MoveCursorPositionAbs(col(start_col as u16) + row_idx);
+        render_ops += RenderOpCommon::MoveCursorPositionAbs(vp_col(start_col as u16) + row_idx);
         render_ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(normal_style));
         if let Some((bar, label)) = dirty {
             render_ops += RenderOpIR::PaintTextWithAttributes(bar.into(), Some(normal_style));
