@@ -493,10 +493,10 @@ mod tests {
         let mut manager = PaneManager::new();
         manager.window_stack = stack.to_vec();
         for window in stack {
-            manager.window_states.entry(window.clone()).or_default();
+            manager.window_states.entry(*window).or_default();
         }
         if let Some(first) = manager.window_stack.first() {
-            manager.focused_window = Some(first.clone());
+            manager.focused_window = Some(*first);
         }
         manager
     }

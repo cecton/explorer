@@ -322,15 +322,17 @@ mod tests {
 
     #[test]
     fn a_stale_exit_leaves_a_newer_run_alone() {
-        let mut state = AppState::default();
-        state.after_agents = Some(AfterAgents::Running {
-            command: "x".into(),
-            run: 2,
-            _group: Arc::new(Group {
-                pid: None,
-                reaped: Arc::default(),
+        let mut state = AppState {
+            after_agents: Some(AfterAgents::Running {
+                command: "x".into(),
+                run: 2,
+                _group: Arc::new(Group {
+                    pid: None,
+                    reaped: Arc::default(),
+                }),
             }),
-        });
+            ..AppState::default()
+        };
         exited(&mut state, 1);
         assert!(state.after_agents.is_some());
         exited(&mut state, 2);

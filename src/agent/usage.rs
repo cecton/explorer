@@ -375,6 +375,199 @@ pub fn save(usage: &HashMap<String, Usage>) {
     }
 }
 
+#[derive(Deserialize)]
+struct ClineReply {
+    data: ClineData,
+}
+
+#[derive(Deserialize)]
+struct ClineData {
+    limits: Vec<ClineLimit>,
+}
+
+#[derive(Deserialize)]
+struct ClineLimit {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(rename = "percentUsed")]
+    percent_used: f64,
+    /// Absent until the window has been spent once; Cline's dashboard reads it as an
+    /// ISO timestamp, but the browser's `Date` takes epoch numbers too.
+    #[serde(rename = "resetsAt")]
+    resets_at: Option<serde_json::Value>,
+}
+
+/// Epoch seconds of a Cline reset, which is an ISO timestamp or an epoch number in
+/// seconds or milliseconds.
+fn cline_reset(value: &serde_json::Value) -> Option<i64> {
+    match value {
+        serde_json::Value::String(stamp) => utc_secs(stamp),
+        serde_json::Value::Number(number) => number.as_i64().map(|epoch| {
+            if epoch > 100_000_000_000 {
+                epoch / 1000
+            } else {
+                epoch
+            }
+        }),
+        _ => None,
+    }
+}
+
+/// The usage in the answer of Cline's `users/me/plan/usage-limits` request. Cline
+/// reports a percent per window and no reset time while the window is untouched, so
+/// such a window states its percent only.
+fn parse_cline(body: &str) -> Result<Usage, String> {
+    let reply: ClineReply = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    if reply.data.limits.is_empty() {
+        return Err("no usage window in answer".to_string());
+    }
+    let mut windows = Vec::with_capacity(reply.data.limits.len());
+    for limit in reply.data.limits {
+        let Some(span) = cline_span(&limit.kind) else {
+            continue;
+        };
+        let resets_at = match &limit.resets_at {
+            Some(stamp) => {
+                Some(cline_reset(stamp).ok_or_else(|| format!("unreadable reset time {stamp}"))?)
+            }
+            None => None,
+        };
+        windows.push(UsageWindow {
+            span,
+            percent: limit.percent_used.round().clamp(0.0, 100.0) as u32,
+            resets_at,
+        });
+    }
+    if windows.is_empty() {
+        return Err("no known usage window in answer".to_string());
+    }
+    windows.sort_by_key(|window| match window.span {
+        Span::FiveHours => 0,
+        Span::Week => 1,
+        Span::Month => 2,
+    });
+    Ok(Usage { windows, key: None })
+}
+
+fn cline_span(kind: &str) -> Option<Span> {
+    match kind {
+        "five_hour" => Some(Span::FiveHours),
+        "weekly" => Some(Span::Week),
+        "monthly" => Some(Span::Month),
+        _ => None,
+    }
+}
+
+/// How much of a Cline Pass is used, from `GET <url>/users/me/plan/usage-limits`.
+pub async fn fetch_cline(url: &str, token: &str) -> Result<Usage, String> {
+    let url = format!("{}/users/me/plan/usage-limits", url.trim_end_matches('/'));
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(&url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("{url}: HTTP {}", response.status()));
+    }
+    let body = response.text().await.map_err(|e| e.to_string())?;
+    parse_cline(&body)
+}
+
+#[derive(Deserialize)]
+struct OpenRouterReply {
+    data: OpenRouterKey,
+}
+
+#[derive(Deserialize)]
+struct OpenRouterKey {
+    usage: f64,
+    limit: Option<f64>,
+    #[serde(rename = "limit_remaining")]
+    limit_remaining: Option<f64>,
+    #[serde(rename = "limit_reset")]
+    limit_reset: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct CreditsReply {
+    data: Credits,
+}
+
+#[derive(Deserialize)]
+struct Credits {
+    total_credits: f64,
+    total_usage: f64,
+}
+
+/// What an OpenRouter key reports of its own spending, from the answer of its `key`
+/// request: what it has cost, and the limit it enforces.
+fn parse_openrouter(body: &str) -> Result<Usage, String> {
+    let reply: OpenRouterReply = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    Ok(Usage {
+        windows: Vec::new(),
+        key: Some(KeyMoney {
+            spent: micros(reply.data.usage),
+            limit: reply.data.limit.map(micros),
+            remaining: reply.data.limit_remaining.map(micros),
+            resets: reply.data.limit_reset,
+            credit: None,
+        }),
+    })
+}
+
+/// What is left of the account's purchased credit, from the answer of its `credits`
+/// request.
+fn parse_credit(body: &str) -> Result<Credit, String> {
+    let reply: CreditsReply = serde_json::from_str(body).map_err(|e| e.to_string())?;
+    let total = micros(reply.data.total_credits);
+    Ok(Credit {
+        left: total.saturating_sub(micros(reply.data.total_usage)),
+        total,
+    })
+}
+
+/// The body of `GET url` with the bearer `token`, or why it failed.
+async fn get(url: &str, token: &str) -> Result<String, String> {
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(20))
+        .build()
+        .map_err(|e| e.to_string())?;
+    let response = client
+        .get(url)
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|e| e.to_string())?;
+    if !response.status().is_success() {
+        return Err(format!("{url}: HTTP {}", response.status()));
+    }
+    response.text().await.map_err(|e| e.to_string())
+}
+
+/// What an OpenRouter key has cost and where its limit stands, from `GET <url>/key`.
+/// The plain inference key answers this; no management key is needed. A key without a
+/// limit also gets what is left of the account's credit, from `GET <url>/credits`; a
+/// failure of that second request is only logged.
+pub async fn fetch_openrouter(url: &str, token: &str) -> Result<Usage, String> {
+    let base = url.trim_end_matches('/');
+    let mut usage = parse_openrouter(&get(&format!("{base}/key"), token).await?)?;
+    if usage.key.as_ref().is_some_and(|key| key.limit.is_none()) {
+        let credit = get(&format!("{base}/credits"), token)
+            .await
+            .and_then(|body| parse_credit(&body))
+            .map_err(|e| tracing::warn!("credits of '{base}' failed: {e}"));
+        if let (Ok(credit), Some(key)) = (credit, usage.key.as_mut()) {
+            key.credit = Some(credit);
+        }
+    }
+    Ok(usage)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -857,197 +1050,4 @@ mod tests {
         let usage: HashMap<String, Usage> = serde_json::from_str(stored).expect("valid store");
         assert_eq!(usage["openrouter"].key, None);
     }
-}
-
-#[derive(Deserialize)]
-struct ClineReply {
-    data: ClineData,
-}
-
-#[derive(Deserialize)]
-struct ClineData {
-    limits: Vec<ClineLimit>,
-}
-
-#[derive(Deserialize)]
-struct ClineLimit {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(rename = "percentUsed")]
-    percent_used: f64,
-    /// Absent until the window has been spent once; Cline's dashboard reads it as an
-    /// ISO timestamp, but the browser's `Date` takes epoch numbers too.
-    #[serde(rename = "resetsAt")]
-    resets_at: Option<serde_json::Value>,
-}
-
-/// Epoch seconds of a Cline reset, which is an ISO timestamp or an epoch number in
-/// seconds or milliseconds.
-fn cline_reset(value: &serde_json::Value) -> Option<i64> {
-    match value {
-        serde_json::Value::String(stamp) => utc_secs(stamp),
-        serde_json::Value::Number(number) => number.as_i64().map(|epoch| {
-            if epoch > 100_000_000_000 {
-                epoch / 1000
-            } else {
-                epoch
-            }
-        }),
-        _ => None,
-    }
-}
-
-/// The usage in the answer of Cline's `users/me/plan/usage-limits` request. Cline
-/// reports a percent per window and no reset time while the window is untouched, so
-/// such a window states its percent only.
-fn parse_cline(body: &str) -> Result<Usage, String> {
-    let reply: ClineReply = serde_json::from_str(body).map_err(|e| e.to_string())?;
-    if reply.data.limits.is_empty() {
-        return Err("no usage window in answer".to_string());
-    }
-    let mut windows = Vec::with_capacity(reply.data.limits.len());
-    for limit in reply.data.limits {
-        let Some(span) = cline_span(&limit.kind) else {
-            continue;
-        };
-        let resets_at = match &limit.resets_at {
-            Some(stamp) => {
-                Some(cline_reset(stamp).ok_or_else(|| format!("unreadable reset time {stamp}"))?)
-            }
-            None => None,
-        };
-        windows.push(UsageWindow {
-            span,
-            percent: limit.percent_used.round().clamp(0.0, 100.0) as u32,
-            resets_at,
-        });
-    }
-    if windows.is_empty() {
-        return Err("no known usage window in answer".to_string());
-    }
-    windows.sort_by_key(|window| match window.span {
-        Span::FiveHours => 0,
-        Span::Week => 1,
-        Span::Month => 2,
-    });
-    Ok(Usage { windows, key: None })
-}
-
-fn cline_span(kind: &str) -> Option<Span> {
-    match kind {
-        "five_hour" => Some(Span::FiveHours),
-        "weekly" => Some(Span::Week),
-        "monthly" => Some(Span::Month),
-        _ => None,
-    }
-}
-
-/// How much of a Cline Pass is used, from `GET <url>/users/me/plan/usage-limits`.
-pub async fn fetch_cline(url: &str, token: &str) -> Result<Usage, String> {
-    let url = format!("{}/users/me/plan/usage-limits", url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("{url}: HTTP {}", response.status()));
-    }
-    let body = response.text().await.map_err(|e| e.to_string())?;
-    parse_cline(&body)
-}
-
-#[derive(Deserialize)]
-struct OpenRouterReply {
-    data: OpenRouterKey,
-}
-
-#[derive(Deserialize)]
-struct OpenRouterKey {
-    usage: f64,
-    limit: Option<f64>,
-    #[serde(rename = "limit_remaining")]
-    limit_remaining: Option<f64>,
-    #[serde(rename = "limit_reset")]
-    limit_reset: Option<String>,
-}
-
-#[derive(Deserialize)]
-struct CreditsReply {
-    data: Credits,
-}
-
-#[derive(Deserialize)]
-struct Credits {
-    total_credits: f64,
-    total_usage: f64,
-}
-
-/// What an OpenRouter key reports of its own spending, from the answer of its `key`
-/// request: what it has cost, and the limit it enforces.
-fn parse_openrouter(body: &str) -> Result<Usage, String> {
-    let reply: OpenRouterReply = serde_json::from_str(body).map_err(|e| e.to_string())?;
-    Ok(Usage {
-        windows: Vec::new(),
-        key: Some(KeyMoney {
-            spent: micros(reply.data.usage),
-            limit: reply.data.limit.map(micros),
-            remaining: reply.data.limit_remaining.map(micros),
-            resets: reply.data.limit_reset,
-            credit: None,
-        }),
-    })
-}
-
-/// What is left of the account's purchased credit, from the answer of its `credits`
-/// request.
-fn parse_credit(body: &str) -> Result<Credit, String> {
-    let reply: CreditsReply = serde_json::from_str(body).map_err(|e| e.to_string())?;
-    let total = micros(reply.data.total_credits);
-    Ok(Credit {
-        left: total.saturating_sub(micros(reply.data.total_usage)),
-        total,
-    })
-}
-
-/// The body of `GET url` with the bearer `token`, or why it failed.
-async fn get(url: &str, token: &str) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("{url}: HTTP {}", response.status()));
-    }
-    response.text().await.map_err(|e| e.to_string())
-}
-
-/// What an OpenRouter key has cost and where its limit stands, from `GET <url>/key`.
-/// The plain inference key answers this; no management key is needed. A key without a
-/// limit also gets what is left of the account's credit, from `GET <url>/credits`; a
-/// failure of that second request is only logged.
-pub async fn fetch_openrouter(url: &str, token: &str) -> Result<Usage, String> {
-    let base = url.trim_end_matches('/');
-    let mut usage = parse_openrouter(&get(&format!("{base}/key"), token).await?)?;
-    if usage.key.as_ref().is_some_and(|key| key.limit.is_none()) {
-        let credit = get(&format!("{base}/credits"), token)
-            .await
-            .and_then(|body| parse_credit(&body))
-            .map_err(|e| tracing::warn!("credits of '{base}' failed: {e}"));
-        if let (Ok(credit), Some(key)) = (credit, usage.key.as_mut()) {
-            key.credit = Some(credit);
-        }
-    }
-    Ok(usage)
 }

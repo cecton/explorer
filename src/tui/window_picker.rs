@@ -150,69 +150,6 @@ impl TitleRow for WindowPickerComponent {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::loader::LoadedFile;
-
-    fn live_file(path: &str) -> Arc<LoadedFile> {
-        let f = LoadedFile::stub(path.into());
-        f.removed.store(false, Ordering::Relaxed);
-        f
-    }
-
-    #[test]
-    fn open_list_includes_every_window_but_pickers_in_stack_order() {
-        // index 0: live file, index 1: removed file.
-        let removed = LoadedFile::stub("gone.rs".into()); // stub() marks removed = true
-        let files = vec![live_file("src/main.rs"), removed];
-
-        // Stack front-to-back, with a duplicate terminal and the pickers.
-        let stack = vec![
-            Window::Discussion(2),
-            Window::FilePreview(FileKey(0)),
-            Window::Terminal(3),
-            Window::WindowPicker,
-            Window::ConversationTree,
-            Window::ThemePicker,
-            Window::GitLog(1),
-            Window::ModelPicker,
-            Window::CommitDiff([7; 20]),
-            Window::FilePreview(FileKey(1)), // removed -> excluded
-            Window::Terminal(3),             // duplicate -> deduped
-        ];
-
-        let results = WindowPickerComponent::open_windows_results(&files, &stack);
-        let windows: Vec<Window> = results.into_iter().map(|(w, _)| w).collect();
-        assert_eq!(
-            windows,
-            vec![
-                Window::Discussion(2),
-                Window::FilePreview(FileKey(0)),
-                Window::Terminal(3),
-                Window::ConversationTree,
-                Window::GitLog(1),
-                Window::CommitDiff([7; 20]),
-            ],
-        );
-    }
-
-    #[test]
-    fn row_accents_are_distinct_and_theme_sourced() {
-        let theme = HelixTheme::default();
-        let accents = row_accents(&theme);
-        // Never identical to the file-row (ui.text) color, nor to each other.
-        for accent in [accents.terminal, accents.agent, accents.git] {
-            assert_ne!(Some(accent), theme.ui_fg("ui.text"));
-        }
-        assert_ne!(accents.terminal, accents.agent);
-        assert_ne!(accents.terminal, accents.git);
-        assert_ne!(accents.agent, accents.git);
-        // On the default theme terminals keep the `function` scope color.
-        assert_eq!(Some(accents.terminal), theme.color_for_scope("function"));
-    }
-}
-
 /// Foreground colors of the rows that are not files, by kind of window.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RowAccents {
@@ -510,5 +447,68 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
 
             global_data.pipeline.push(ZOrder::Normal, result_ops);
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::loader::LoadedFile;
+
+    fn live_file(path: &str) -> Arc<LoadedFile> {
+        let f = LoadedFile::stub(path.into());
+        f.removed.store(false, Ordering::Relaxed);
+        f
+    }
+
+    #[test]
+    fn open_list_includes_every_window_but_pickers_in_stack_order() {
+        // index 0: live file, index 1: removed file.
+        let removed = LoadedFile::stub("gone.rs".into()); // stub() marks removed = true
+        let files = vec![live_file("src/main.rs"), removed];
+
+        // Stack front-to-back, with a duplicate terminal and the pickers.
+        let stack = vec![
+            Window::Discussion(2),
+            Window::FilePreview(FileKey(0)),
+            Window::Terminal(3),
+            Window::WindowPicker,
+            Window::ConversationTree,
+            Window::ThemePicker,
+            Window::GitLog(1),
+            Window::ModelPicker,
+            Window::CommitDiff([7; 20]),
+            Window::FilePreview(FileKey(1)), // removed -> excluded
+            Window::Terminal(3),             // duplicate -> deduped
+        ];
+
+        let results = WindowPickerComponent::open_windows_results(&files, &stack);
+        let windows: Vec<Window> = results.into_iter().map(|(w, _)| w).collect();
+        assert_eq!(
+            windows,
+            vec![
+                Window::Discussion(2),
+                Window::FilePreview(FileKey(0)),
+                Window::Terminal(3),
+                Window::ConversationTree,
+                Window::GitLog(1),
+                Window::CommitDiff([7; 20]),
+            ],
+        );
+    }
+
+    #[test]
+    fn row_accents_are_distinct_and_theme_sourced() {
+        let theme = HelixTheme::default();
+        let accents = row_accents(&theme);
+        // Never identical to the file-row (ui.text) color, nor to each other.
+        for accent in [accents.terminal, accents.agent, accents.git] {
+            assert_ne!(Some(accent), theme.ui_fg("ui.text"));
+        }
+        assert_ne!(accents.terminal, accents.agent);
+        assert_ne!(accents.terminal, accents.git);
+        assert_ne!(accents.agent, accents.git);
+        // On the default theme terminals keep the `function` scope color.
+        assert_eq!(Some(accents.terminal), theme.color_for_scope("function"));
     }
 }
