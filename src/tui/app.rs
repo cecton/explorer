@@ -89,18 +89,17 @@ pub struct AppMain {
     terminal_event_rx: mpsc::UnboundedReceiver<(usize, PtyOutputEvent)>,
     lsp_guard: Option<SubscriberGuard<crate::lsp::LspWorker>>,
     lsp_last_gen: u8,
+    /// Counts `Housekeeping` calls so the LSP health is logged only every few of them.
     lsp_health_skip: u32,
     /// Set when a `features`/`all-features`/`default-features` command dropped
     /// `lsp_guard` to kill the old rust-analyzer; the fresh one is only spawned once
     /// `health_check()` confirms the old worker thread has actually exited (see the
-    /// `AppSignal::Noop` tick handler) since resubscribing too early would silently
+    /// `AppSignal::Tick` handler) since resubscribing too early would silently
     /// rejoin the still-running old worker instead of restarting it.
     lsp_restart_pending: bool,
     watcher_guard: Option<SubscriberGuard<WatcherWorker>>,
-    /// Counts 1s Noop ticks so the status-bar dirty flag is rechecked periodically.
-    dirty_check_ticks: u64,
-    /// Counts 1s Noop ticks so the money of an OpenRouter key is polled periodically.
-    usage_poll_ticks: u64,
+    /// Local minute (since the epoch) the status-bar clock was last painted at.
+    last_clock_minute: i64,
 }
 
 impl AppMain {
@@ -125,9 +124,88 @@ impl AppMain {
             lsp_health_skip: 0,
             lsp_restart_pending: false,
             watcher_guard: None,
-            dirty_check_ticks: 0,
-            usage_poll_ticks: 0,
+            last_clock_minute: clock_minute(),
         })
+    }
+
+    /// Logs the LSP worker's health: on a change of generation, and otherwise every
+    /// [`LSP_HEALTH_LOG_EVERY`] calls so a steady state does not fill the log.
+    fn log_lsp_health(&mut self) {
+        let health = crate::lsp::health_check();
+        let generation = match &health {
+            crate::lsp::LspHealth::Running { generation, .. } => *generation,
+            crate::lsp::LspHealth::NotRunning => 0,
+        };
+        self.lsp_health_skip = self.lsp_health_skip.wrapping_add(1);
+        if generation != self.lsp_last_gen {
+            tracing::info!("LSP health: {:?}", health);
+            self.lsp_last_gen = generation;
+        }
+        match &health {
+            crate::lsp::LspHealth::Running {
+                input_receivers: 0, ..
+            } if self.lsp_health_skip.is_multiple_of(LSP_HEALTH_LOG_EVERY) => {
+                tracing::warn!("LSP health: {:?}", health);
+            }
+            crate::lsp::LspHealth::NotRunning if crate::lsp::disabled() => {
+                tracing::debug!("LSP health: disabled");
+            }
+            crate::lsp::LspHealth::NotRunning => {
+                tracing::warn!("LSP health: NotRunning");
+            }
+            _ if self.lsp_health_skip.is_multiple_of(LSP_HEALTH_LOG_EVERY) => {
+                tracing::debug!("LSP health: {:?}", health);
+            }
+            _ => {}
+        }
+    }
+
+    /// Respawns the LSP worker once the old one has exited, after a cargo features change.
+    /// Returns whether it cleared the colors of the Rust files, which needs a repaint.
+    fn restart_lsp_if_pending(&mut self, state: &AppState, main_tx: MainTx) -> bool {
+        if !self.lsp_restart_pending || crate::lsp::disabled() {
+            return false;
+        }
+        // A `features`/`all-features`/`default-features` command dropped `lsp_guard` to
+        // kill the old rust-analyzer; only resubscribe once the old worker thread has
+        // actually exited (`NotRunning`). Resubscribing while it's merely `Running` with
+        // 0 receivers would take the RRT framework's FastPath and silently rejoin the
+        // still-running old worker instead of spawning a fresh one with the new init
+        // options.
+        if !matches!(
+            crate::lsp::health_check(),
+            crate::lsp::LspHealth::NotRunning
+        ) {
+            return false;
+        }
+        for file in self.files.load().iter() {
+            if file.path.extension() == Some("rs") {
+                file.colored_lines.lock().clear();
+            }
+        }
+        match LSP_RRT.try_subscribe(lsp::LspConfig {
+            root: self.root.clone(),
+            files: Arc::clone(&self.files),
+            app_tx: main_tx,
+            cargo_features: state.cargo_features.clone(),
+        }) {
+            Ok(guard) => {
+                self.lsp_guard = Some(guard);
+                tracing::info!(
+                    "LSP worker restarted: cargo_features={:?}",
+                    state.cargo_features
+                );
+                for window in state.pane_manager.window_stack.iter() {
+                    if let Window::FilePreview(key) = window {
+                        crate::lsp::send_file_request(key.0);
+                    }
+                }
+                crate::lsp::try_drain_pending_requests();
+            }
+            Err(e) => tracing::warn!("LSP worker restart failed: {e}"),
+        }
+        self.lsp_restart_pending = false;
+        true
     }
 
     fn open_terminal(
@@ -204,12 +282,14 @@ impl AppMain {
                 scroll_offset: 0,
                 cwd: pane_cwd,
                 command: pane_command,
+                flush_pending: Arc::default(),
             }));
 
             state.terminal_panes.insert(id, Arc::clone(&pane));
 
             let notify_tx = global_data.main_thread_channel_sender.clone();
             let event_tx = self.terminal_event_tx.clone();
+            let flush_pending = Arc::clone(&pane.lock().flush_pending);
             tokio::spawn(async move {
                 let mut last_event = Instant::now();
                 let mut backoff: Option<Instant> = None;
@@ -254,11 +334,11 @@ impl AppMain {
                         _ => {}
                     }
 
-                    // Exit: always send Noop (never throttled) so the
+                    // Exit: always send Redraw (never throttled) so the
                     // terminal pane is removed from the UI immediately.
                     if is_exit {
                         let _ = notify_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                            AppSignal::Noop,
+                            AppSignal::Redraw,
                         ));
                         break;
                     }
@@ -275,7 +355,7 @@ impl AppMain {
                     let now = Instant::now();
 
                     // Throttle: once the channel has filled (backoff ==
-                    // Some), suppress all Noops as long as events keep
+                    // Some), suppress all signals as long as events keep
                     // arriving within 100ms gaps.  This threshold catches
                     // program output (≥10 events/s) while cleanly
                     // separating interactive typing (~200ms between keys).
@@ -284,6 +364,9 @@ impl AppMain {
                     // closed until the channel has room again.  A gap
                     // ≥100ms in events resets and the task tries to send.
                     if last_event.elapsed().as_millis() < 100 && backoff.is_some() {
+                        // The output is in the buffer but no signal announces it: the
+                        // 1s `Tick` repaints it.
+                        flush_pending.store(true, Ordering::Relaxed);
                         backoff = Some(now);
                         last_event = now;
                         continue;
@@ -296,8 +379,14 @@ impl AppMain {
                     match notify_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
                         AppSignal::TerminalOutput,
                     )) {
-                        Ok(()) => backoff = None,
-                        Err(_) => backoff = Some(now),
+                        Ok(()) => {
+                            flush_pending.store(false, Ordering::Relaxed);
+                            backoff = None;
+                        }
+                        Err(_) => {
+                            flush_pending.store(true, Ordering::Relaxed);
+                            backoff = Some(now);
+                        }
                     }
 
                     last_event = now;
@@ -414,19 +503,59 @@ pub(crate) fn mcp_notify(
     })
 }
 
-const SESSION_SAVE_DEBOUNCE: Duration = Duration::from_secs(2);
+type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
 
-// save_session is intentionally a synchronous fast JSON write on the main thread.
-fn maybe_save_session(state: &mut AppState, root: &Utf8Path) {
-    let Some(dirty_at) = state.session_dirty_at else {
+/// How many 5s `Housekeeping` calls apart a steady LSP health is logged: about 30s.
+const LSP_HEALTH_LOG_EVERY: u32 = 6;
+
+/// Sends `signal` every `period`, the first time at once. A stall costs one late signal,
+/// never a burst of catch-up ones; a full channel drops that period's signal.
+fn every(tx: &MainTx, period: Duration, signal: AppSignal) {
+    let tx = tx.clone();
+    tokio::spawn(async move {
+        let mut interval = tokio::time::interval(period);
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            interval.tick().await;
+            let _ = tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                signal.clone(),
+            ));
+        }
+    });
+}
+
+/// Rechecks the working-tree dirty status off the main thread (it walks the index and
+/// the worktree); the answer comes back as `DirtyStatusLoaded`.
+fn spawn_dirty_check(state: &AppState, main_tx: MainTx) {
+    let Some(repo) = state.repo.clone() else {
         return;
     };
-    if dirty_at.elapsed() < SESSION_SAVE_DEBOUNCE {
+    tokio::task::spawn_blocking(move || {
+        let result = crate::git::is_dirty(&repo);
+        send_signal!(
+            main_tx,
+            TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::DirtyStatusLoaded(result))
+        );
+    });
+}
+
+/// The local minute since the epoch: the status-bar clock shows a new text when it changes.
+fn clock_minute() -> i64 {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |elapsed| elapsed.as_secs() as i64);
+    (now + i64::from(crate::conversation::local_offset_secs(now))).div_euclid(60)
+}
+
+// save_session is intentionally a synchronous fast JSON write on the main thread.
+// The 5s `Housekeeping` period is the debounce.
+fn maybe_save_session(state: &mut AppState, root: &Utf8Path) {
+    if !state.session_dirty {
         return;
     }
     match save_session(root, state) {
         Ok(()) => {
-            state.session_dirty_at = None;
+            state.session_dirty = false;
         }
         Err(e) => tracing::warn!("Failed to save session: {e}"),
     }
@@ -506,37 +635,12 @@ impl App for AppMain {
             Err(e) => tracing::warn!("watcher failed to start: {e}"),
         }
 
-        // Global 1s refresh timer — catches any final render state that the
-        // per-task 1s debounce might miss (burst ends, no more events).
-        let timer_notify = notify_tx.clone();
-        tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_secs(1));
-            interval.tick().await;
-            loop {
-                interval.tick().await;
-                let _ = timer_notify.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                    AppSignal::Noop,
-                ));
-            }
-        });
-
-        // Run one dirty-status check immediately so the status-bar flag isn't wrong for
-        // the first few seconds before the periodic Noop-tick recheck kicks in.
-        if let Some(repo) = global_data.state.repo.clone() {
-            let main_tx = notify_tx.clone();
-            tokio::task::spawn_blocking(move || {
-                let result = crate::git::is_dirty(&repo);
-                send_signal!(
-                    main_tx,
-                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::DirtyStatusLoaded(
-                        result
-                    ))
-                );
-            });
-        }
-
-        // Show what the OpenRouter keys have spent before any turn has spent some of it.
-        poll_openrouter_usage(&global_data.state, notify_tx.clone());
+        // Each period gets its own signal. Only `Tick` may repaint, so timers that fire
+        // together never cost more than one render. The first tick of each interval is
+        // immediate: the dirty flag and the OpenRouter spending are loaded at startup.
+        every(&notify_tx, Duration::from_secs(1), AppSignal::Tick);
+        every(&notify_tx, Duration::from_secs(5), AppSignal::Housekeeping);
+        every(&notify_tx, Duration::from_secs(60), AppSignal::UsagePollDue);
 
         let stack = global_data.state.pane_manager.window_stack.clone();
         for window in stack {
@@ -1138,7 +1242,7 @@ impl App for AppMain {
             // rust-analyzer doesn't hot-reload `cargo.*` init options, so applying a
             // new feature selection means killing the current worker and respawning
             // with fresh `initializationOptions`. Dropping the guard here only starts
-            // the teardown; the actual resubscribe is deferred to the Noop tick
+            // the teardown; the actual resubscribe is deferred to the `Tick`
             // handler once `health_check()` confirms the old worker has exited (see
             // that handler for why resubscribing immediately would be racy).
             global_data.state.cargo_features = selection.clone();
@@ -1149,6 +1253,7 @@ impl App for AppMain {
         }
         throws_with_return!({
             let state = &mut global_data.state;
+            let mut propagation = EventPropagation::ConsumedRender;
             match action {
                 AppSignal::FilesChanged(batch) => {
                     tracing::info!(
@@ -1686,7 +1791,7 @@ impl App for AppMain {
                     }
                     DiscussionComponent::release_queue(state, main_tx.clone());
                     after_agents::arm(state, main_tx);
-                    self.dirty_check_ticks = 4;
+                    spawn_dirty_check(state, global_data.main_thread_channel_sender.clone());
                 }
                 AppSignal::NodeTitleReady { node, title } => {
                     state.conversations.write().set_title(node, title.clone());
@@ -1709,115 +1814,54 @@ impl App for AppMain {
                 AppSignal::DirtyStatusLoaded(result) => {
                     // Errors are transient (e.g. a momentary git-lock during a commit);
                     // leave the previous value rather than surfacing them.
-                    if let Ok(dirty) = result {
-                        state.is_dirty = *dirty;
+                    match result {
+                        Ok(dirty) if state.is_dirty != *dirty => state.is_dirty = *dirty,
+                        // Unchanged, or an error that leaves the flag as it was: no repaint.
+                        _ => propagation = EventPropagation::Consumed,
                     }
                 }
                 AppSignal::AfterAgentsExited { run } => after_agents::exited(state, *run),
-                AppSignal::Noop | AppSignal::TerminalOutput => {
+                AppSignal::Redraw | AppSignal::TerminalOutput => {}
+                AppSignal::Tick => {
+                    // A countdown shows its seconds, and a firing or reverting one
+                    // changes the status text: all repaint.
+                    let countdown = matches!(
+                        state.after_agents,
+                        Some(after_agents::AfterAgents::Countdown { .. })
+                    );
                     after_agents::tick(state, global_data.main_thread_channel_sender.clone());
-                    // Recheck the working-tree dirty status every ~5s rather than every
-                    // render, since it requires walking the index/worktree.
-                    self.dirty_check_ticks = self.dirty_check_ticks.wrapping_add(1);
-                    if self.dirty_check_ticks.is_multiple_of(5)
-                        && let Some(repo) = state.repo.clone()
-                    {
-                        let main_tx = global_data.main_thread_channel_sender.clone();
-                        tokio::task::spawn_blocking(move || {
-                            let result = crate::git::is_dirty(&repo);
-                            send_signal!(
-                                main_tx,
-                                TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                    AppSignal::DirtyStatusLoaded(result)
-                                )
-                            );
-                        });
-                    }
-                    // Poll what the OpenRouter keys have spent every minute: their
-                    // counters settle seconds after the requests that spent them. Only
-                    // the 1s Noop tick counts: a flooding pane drives this arm many
-                    // times a second and every poll is a request.
-                    if matches!(action, AppSignal::Noop) {
-                        self.usage_poll_ticks = self.usage_poll_ticks.wrapping_add(1);
-                        if self.usage_poll_ticks.is_multiple_of(60) {
-                            poll_openrouter_usage(
-                                state,
-                                global_data.main_thread_channel_sender.clone(),
-                            );
-                        }
-                    }
-                    maybe_save_session(state, &self.root);
+                    let minute = clock_minute();
+                    let minute_changed =
+                        std::mem::replace(&mut self.last_clock_minute, minute) != minute;
+                    // Panes whose output no signal announced: swap each flag, no
+                    // short-circuit, so every flag is cleared.
+                    let flushed = state.terminal_panes.values().fold(false, |any, pane| {
+                        let pending = pane.lock().flush_pending.swap(false, Ordering::Relaxed);
+                        any | pending
+                    });
                     crate::lsp::try_drain_pending_requests();
-                    let health = crate::lsp::health_check();
-                    let generation = match &health {
-                        crate::lsp::LspHealth::Running { generation, .. } => *generation,
-                        crate::lsp::LspHealth::NotRunning => 0,
-                    };
-                    self.lsp_health_skip = self.lsp_health_skip.wrapping_add(1);
-                    if generation != self.lsp_last_gen {
-                        tracing::info!("LSP health: {:?}", health);
-                        self.lsp_last_gen = generation;
+                    let restarted = self.restart_lsp_if_pending(
+                        state,
+                        global_data.main_thread_channel_sender.clone(),
+                    );
+                    if !(countdown || minute_changed || flushed || restarted) {
+                        propagation = EventPropagation::Consumed;
                     }
-                    match &health {
-                        crate::lsp::LspHealth::Running {
-                            input_receivers: 0, ..
-                        } if self.lsp_health_skip.is_multiple_of(10) => {
-                            tracing::warn!("LSP health: {:?}", health);
-                        }
-                        crate::lsp::LspHealth::NotRunning if crate::lsp::disabled() => {
-                            tracing::debug!("LSP health: disabled");
-                        }
-                        crate::lsp::LspHealth::NotRunning => {
-                            tracing::warn!("LSP health: NotRunning");
-                        }
-                        _ if self.lsp_health_skip.is_multiple_of(10) => {
-                            tracing::debug!("LSP health: {:?}", health);
-                        }
-                        _ => {}
-                    }
-
-                    // A `features`/`all-features`/`default-features` command dropped
-                    // `lsp_guard` to kill the old rust-analyzer; only resubscribe once the
-                    // old worker thread has actually exited (`NotRunning`). Resubscribing
-                    // while it's merely `Running` with 0 receivers would take the RRT
-                    // framework's FastPath and silently rejoin the still-running old
-                    // worker instead of spawning a fresh one with the new init options.
-                    if self.lsp_restart_pending
-                        && !crate::lsp::disabled()
-                        && matches!(health, crate::lsp::LspHealth::NotRunning)
-                    {
-                        for file in self.files.load().iter() {
-                            if file.path.extension() == Some("rs") {
-                                file.colored_lines.lock().clear();
-                            }
-                        }
-                        match LSP_RRT.try_subscribe(lsp::LspConfig {
-                            root: self.root.clone(),
-                            files: Arc::clone(&self.files),
-                            app_tx: global_data.main_thread_channel_sender.clone(),
-                            cargo_features: state.cargo_features.clone(),
-                        }) {
-                            Ok(guard) => {
-                                self.lsp_guard = Some(guard);
-                                tracing::info!(
-                                    "LSP worker restarted: cargo_features={:?}",
-                                    state.cargo_features
-                                );
-                                for window in state.pane_manager.window_stack.iter() {
-                                    if let Window::FilePreview(key) = window {
-                                        crate::lsp::send_file_request(key.0);
-                                    }
-                                }
-                                crate::lsp::try_drain_pending_requests();
-                            }
-                            Err(e) => tracing::warn!("LSP worker restart failed: {e}"),
-                        }
-                        self.lsp_restart_pending = false;
-                    }
+                }
+                AppSignal::Housekeeping => {
+                    maybe_save_session(state, &self.root);
+                    spawn_dirty_check(state, global_data.main_thread_channel_sender.clone());
+                    self.log_lsp_health();
+                    propagation = EventPropagation::Consumed;
+                }
+                AppSignal::UsagePollDue => {
+                    // Their counters settle seconds after the requests that spent them.
+                    poll_openrouter_usage(state, global_data.main_thread_channel_sender.clone());
+                    propagation = EventPropagation::Consumed;
                 }
             }
 
-            EventPropagation::ConsumedRender
+            propagation
         });
     }
 

@@ -1080,7 +1080,7 @@ impl LspWorker {
             let _ = self
                 .app_tx
                 .try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                    AppSignal::Noop,
+                    AppSignal::Redraw,
                 ));
         }
 

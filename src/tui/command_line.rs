@@ -1038,7 +1038,7 @@ mod tests {
         assert_eq!(state.project_aliases[2].command, "cargo test");
         set_alias(&mut state, "triple").unwrap();
         assert_eq!(state.project_aliases.len(), 2);
-        assert!(state.session_dirty_at.is_some());
+        assert!(state.session_dirty);
     }
 
     #[test]

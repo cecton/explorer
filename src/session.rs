@@ -669,6 +669,7 @@ mod tests {
             scroll_offset: 0,
             cwd,
             command,
+            flush_pending: Default::default(),
         }
     }
 

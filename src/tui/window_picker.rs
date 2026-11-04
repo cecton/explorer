@@ -63,7 +63,7 @@ impl WindowPickerComponent {
                 let _ = results_tx.try_send((current_generation, results));
                 send_signal!(
                     main_tx,
-                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::Noop)
+                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::Redraw)
                 );
             }
         });

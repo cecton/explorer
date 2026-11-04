@@ -24,6 +24,9 @@ pub struct FilePreviewComponent {
     content_row_count: usize,
 }
 
+/// How long an error or notice of the file preview's title bar stays up.
+const ERROR_SHOWN_FOR: Duration = Duration::from_secs(3);
+
 impl FilePreviewComponent {
     pub fn new(id: FlexBoxId) -> Self {
         Self {
@@ -39,9 +42,24 @@ impl FilePreviewComponent {
         }
     }
 
+    /// Repaints once the error just set has expired. The 1s `Tick` repaints only on
+    /// change, so nothing else would take the message off the title bar.
+    fn repaint_when_error_expires(&self, global_data: &GlobalData<AppState, AppSignal>) {
+        if self.error.is_none() {
+            return;
+        }
+        let main_tx = global_data.main_thread_channel_sender.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(ERROR_SHOWN_FOR).await;
+            let _ = main_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                AppSignal::Redraw,
+            ));
+        });
+    }
+
     fn title_text_render(&self, state: &AppState) -> Option<(String, bool)> {
         if let Some((msg, set_at)) = &self.error
-            && set_at.elapsed() < Duration::from_secs(3)
+            && set_at.elapsed() < ERROR_SHOWN_FOR
         {
             return Some((msg.clone(), false));
         }
@@ -399,6 +417,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                     }) => {
                         self.commit_search(&mut global_data.state, key);
                         global_data.state.preview_inputs.remove(&key);
+                        self.repaint_when_error_expires(global_data);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     InputEvent::Keyboard(KeyPress::Plain {
@@ -487,6 +506,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                     }
                 };
                 self.goto_match(&mut global_data.state, key, direction);
+                self.repaint_when_error_expires(global_data);
                 return Ok(EventPropagation::ConsumedRender);
             }
 

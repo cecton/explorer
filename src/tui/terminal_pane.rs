@@ -999,6 +999,7 @@ mod tests {
             scroll_offset: 0,
             cwd: camino::Utf8PathBuf::from("/"),
             command: None,
+            flush_pending: Default::default(),
         };
 
         let start = SelPoint::Terminal {

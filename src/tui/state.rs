@@ -23,8 +23,8 @@ use r3bl_tui::{MouseInput, OfsBufVT100, VPSize};
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::time::{Duration, Instant};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
 static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
@@ -315,6 +315,10 @@ pub struct TerminalPane {
     pub cwd: Utf8PathBuf,
     /// Command used to start the terminal process, if any.
     pub command: Option<String>,
+    /// Set by the reader task when output reached the buffer without a render signal
+    /// (the flood throttle held it back); cleared by the 1s `Tick`, which then repaints
+    /// so a flooding pane still shows its progress and its final state.
+    pub flush_pending: Arc<AtomicBool>,
 }
 
 impl Debug for TerminalPane {
@@ -431,7 +435,7 @@ pub struct AppState {
     pub input_drag: Option<Window>,
     pub terminal_grabbed: bool,
     pub text_selection: Option<TextSelection>,
-    pub session_dirty_at: Option<Instant>,
+    pub session_dirty: bool,
     /// Whether the repository has uncommitted changes (staged or unstaged),
     /// refreshed periodically by a background `git::is_dirty` check.
     pub is_dirty: bool,
@@ -458,7 +462,7 @@ impl AppState {
     }
 
     pub fn mark_session_dirty(&mut self) {
-        self.session_dirty_at = Some(Instant::now());
+        self.session_dirty = true;
     }
 
     /// The input `window` shows right now, if any.
@@ -598,7 +602,7 @@ impl AppState {
             input_drag: None,
             terminal_grabbed: false,
             text_selection: None,
-            session_dirty_at: None,
+            session_dirty: false,
             is_dirty: false,
             symbol_highlights: Vec::new(),
             next_palette_index: 0,
@@ -665,9 +669,8 @@ pub enum AppSignal {
         origin_locations: Vec<SymbolRefLocation>,
         reference_locations: Vec<SymbolRefLocation>,
     },
-    /// A terminal pane produced output and should be re-painted. Kept apart from
-    /// [`Self::Noop`] on purpose: a flooding pane drives this many times a second, and
-    /// the once-a-minute OpenRouter poll must only ever count the 1s tick.
+    /// A terminal pane produced output and should be re-painted. A flooding pane drives
+    /// this many times a second, so it does nothing but render.
     TerminalOutput,
     /// Change which Cargo features rust-analyzer analyzes. rust-analyzer doesn't
     /// hot-reload `cargo.*` settings, so applying this restarts the LSP worker
@@ -756,8 +759,18 @@ pub enum AppSignal {
         reply: String,
         work_log: Vec<String>,
     },
+    /// Repaint, nothing else.
     #[default]
-    Noop,
+    Redraw,
+    /// Every second: ticks the `after-agents` countdown, the LSP buffer and restart,
+    /// and repaints only when the clock minute changed, a countdown is active, a
+    /// terminal pane has output no signal announced or the LSP restart cleared colors.
+    Tick,
+    /// Every 5 seconds: session save, working-tree dirty check, LSP health log. Never
+    /// repaints; the results come back as their own signals.
+    Housekeeping,
+    /// Every minute: polls what the OpenRouter keys have spent. Never repaints.
+    UsagePollDue,
 }
 
 #[derive(Clone, Debug)]
