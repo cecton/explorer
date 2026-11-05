@@ -1,7 +1,5 @@
-use crate::tui::text_layout::{display_width, wrap};
-use crate::tui::{HelixTheme, RgbValue};
-use pulldown_cmark::{Alignment, Event, HeadingLevel, Options, Parser, Tag, TagEnd};
-use unicode_segmentation::UnicodeSegmentation;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 
 /// One styled run of text on a rendered line.
 #[derive(Clone)]
@@ -125,13 +123,13 @@ struct ItemCtx {
 const MAX_WORD_FLOOR: usize = 12;
 
 struct TableCtx {
-    alignments: Vec<Alignment>,
+    alignments: Vec<pulldown_cmark::Alignment>,
     rows: Vec<Vec<Vec<Span>>>,
     row: Vec<Vec<Span>>,
 }
 
 struct Renderer<'a> {
-    theme: &'a HelixTheme,
+    theme: &'a crate::tui::theme::HelixTheme,
     width: usize,
     text_fg: RgbValue,
     plain: InlineStyle,
@@ -150,26 +148,33 @@ struct Renderer<'a> {
 /// Renders markdown to styled lines fitted to `width`, colored from the theme's
 /// `markup.*` scopes. Attributes (bold, italic, …) come from the markdown element;
 /// colors come from the theme.
-pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLine> {
+pub(crate) fn render(
+    source: &str,
+    theme: &crate::tui::theme::HelixTheme,
+    width: usize,
+) -> Vec<MdLine> {
     let mut r = Renderer::new(theme, width);
-    let options =
-        Options::ENABLE_STRIKETHROUGH | Options::ENABLE_TASKLISTS | Options::ENABLE_TABLES;
-    for (event, range) in Parser::new_ext(source, options).into_offset_iter() {
+    let options = pulldown_cmark::Options::ENABLE_STRIKETHROUGH
+        | pulldown_cmark::Options::ENABLE_TASKLISTS
+        | pulldown_cmark::Options::ENABLE_TABLES;
+    for (event, range) in pulldown_cmark::Parser::new_ext(source, options).into_offset_iter() {
         let verbatim =
             |text: &str| (source.get(range.clone()) == Some(text)).then_some(range.start);
         match event {
-            Event::Start(Tag::Paragraph) => {}
-            Event::End(TagEnd::Paragraph) => {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Paragraph) => {}
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Paragraph) => {
                 r.flush_content();
                 r.push_blank();
             }
-            Event::Start(Tag::Heading { level, .. }) => r.start_heading(level),
-            Event::End(TagEnd::Heading(_)) => {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Heading { level, .. }) => {
+                r.start_heading(level)
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Heading(_)) => {
                 r.end_style();
                 r.flush_content();
                 r.push_blank();
             }
-            Event::Start(Tag::BlockQuote(_)) => {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::BlockQuote(_)) => {
                 r.start_style(InlineStyle {
                     fg: r.fg("markup.quote"),
                     ..r.plain
@@ -177,36 +182,36 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                 r.quote_fg = r.fg("markup.quote");
                 r.quote_depth += 1;
             }
-            Event::End(TagEnd::BlockQuote(_)) => {
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::BlockQuote(_)) => {
                 r.quote_depth -= 1;
                 r.end_style();
                 r.push_blank();
             }
-            Event::Start(Tag::CodeBlock(_)) => {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => {
                 r.flush_content();
                 r.code_bg = r.theme.ui_bg("ui.virtual.ruler");
             }
-            Event::End(TagEnd::CodeBlock) => {
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
                 r.code_bg = None;
                 r.push_blank();
             }
-            Event::Start(Tag::List(start)) => {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::List(start)) => {
                 r.flush_content();
                 r.lists.push(start);
             }
-            Event::End(TagEnd::List(_)) => {
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::List(_)) => {
                 r.lists.pop();
                 if r.lists.is_empty() {
                     r.push_blank();
                 }
             }
-            Event::Start(Tag::Item) => r.start_item(),
-            Event::End(TagEnd::Item) => {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Item) => r.start_item(),
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Item) => {
                 r.flush_content();
                 r.items.pop();
             }
-            Event::TaskListMarker(checked) => r.task_marker(checked),
-            Event::Start(Tag::Table(alignments)) => {
+            pulldown_cmark::Event::TaskListMarker(checked) => r.task_marker(checked),
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Table(alignments)) => {
                 r.flush_content();
                 r.table = Some(TableCtx {
                     alignments,
@@ -214,21 +219,23 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                     row: Vec::new(),
                 });
             }
-            Event::Start(Tag::TableHead) => r.start_style(InlineStyle {
-                bold: true,
-                ..r.style
-            }),
-            Event::End(TagEnd::TableHead) => {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::TableHead) => {
+                r.start_style(InlineStyle {
+                    bold: true,
+                    ..r.style
+                })
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::TableHead) => {
                 r.end_style();
                 r.end_table_row();
             }
-            Event::End(TagEnd::TableRow) => r.end_table_row(),
-            Event::End(TagEnd::TableCell) => r.end_table_cell(),
-            Event::End(TagEnd::Table) => {
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::TableRow) => r.end_table_row(),
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::TableCell) => r.end_table_cell(),
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Table) => {
                 r.flush_table();
                 r.push_blank();
             }
-            Event::Start(Tag::Emphasis) => {
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Emphasis) => {
                 let mut style = r.style;
                 if let Some(fg) = r.exact_fg("markup.italic") {
                     style.fg = fg;
@@ -236,8 +243,8 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                 style.italic = true;
                 r.start_style(style);
             }
-            Event::End(TagEnd::Emphasis) => r.end_style(),
-            Event::Start(Tag::Strong) => {
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Emphasis) => r.end_style(),
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Strong) => {
                 let mut style = r.style;
                 if let Some(fg) = r.exact_fg("markup.bold") {
                     style.fg = fg;
@@ -245,8 +252,8 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                 style.bold = true;
                 r.start_style(style);
             }
-            Event::End(TagEnd::Strong) => r.end_style(),
-            Event::Start(Tag::Strikethrough) => {
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Strong) => r.end_style(),
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Strikethrough) => {
                 let mut style = r.style;
                 if let Some(fg) = r.exact_fg("markup.strikethrough") {
                     style.fg = fg;
@@ -254,8 +261,8 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                 style.strikethrough = true;
                 r.start_style(style);
             }
-            Event::End(TagEnd::Strikethrough) => r.end_style(),
-            Event::Start(Tag::Link { .. }) => {
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Strikethrough) => r.end_style(),
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Link { .. }) => {
                 let mut style = r.style;
                 if let Some(fg) = r.exact_fg("markup.link.text") {
                     style.fg = fg;
@@ -263,13 +270,17 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                 style.underline = true;
                 r.start_style(style);
             }
-            Event::End(TagEnd::Link) => r.end_style(),
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Link) => r.end_style(),
             // The alt text of an image renders inline as plain text.
-            Event::Start(Tag::Image { .. }) => r.start_style(r.style),
-            Event::End(TagEnd::Image) => r.end_style(),
-            Event::Text(text) if r.code_bg.is_some() => r.push_code_lines(&text, verbatim(&text)),
-            Event::Text(text) => r.push_content(&text, r.style, verbatim(&text)),
-            Event::Code(text) => r.push_content(
+            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { .. }) => {
+                r.start_style(r.style)
+            }
+            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Image) => r.end_style(),
+            pulldown_cmark::Event::Text(text) if r.code_bg.is_some() => {
+                r.push_code_lines(&text, verbatim(&text))
+            }
+            pulldown_cmark::Event::Text(text) => r.push_content(&text, r.style, verbatim(&text)),
+            pulldown_cmark::Event::Code(text) => r.push_content(
                 &text,
                 InlineStyle {
                     fg: r.fg("markup.raw"),
@@ -280,9 +291,9 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                     .and_then(|code| code.find(&*text))
                     .map(|at| range.start + at),
             ),
-            Event::SoftBreak => r.push_content(" ", r.style, None),
-            Event::HardBreak => r.flush_content(),
-            Event::Rule => {
+            pulldown_cmark::Event::SoftBreak => r.push_content(" ", r.style, None),
+            pulldown_cmark::Event::HardBreak => r.flush_content(),
+            pulldown_cmark::Event::Rule => {
                 let style = InlineStyle {
                     fg: r.fg("comment"),
                     ..r.plain
@@ -293,14 +304,14 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                 });
                 r.push_blank();
             }
-            Event::InlineHtml(text) if r.table.is_some() => {
+            pulldown_cmark::Event::InlineHtml(text) if r.table.is_some() => {
                 if is_line_break_tag(&text) {
                     r.push_content(" ", r.style, None);
                 } else {
                     r.push_content(&text, r.style, verbatim(&text));
                 }
             }
-            Event::Html(text) | Event::InlineHtml(text) => {
+            pulldown_cmark::Event::Html(text) | pulldown_cmark::Event::InlineHtml(text) => {
                 let style = InlineStyle {
                     fg: r.fg("comment"),
                     ..r.plain
@@ -316,7 +327,7 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
                     });
                 }
             }
-            Event::FootnoteReference(name) => {
+            pulldown_cmark::Event::FootnoteReference(name) => {
                 let style = InlineStyle {
                     fg: r.fg("comment"),
                     ..r.plain
@@ -333,7 +344,7 @@ pub(crate) fn render(source: &str, theme: &HelixTheme, width: usize) -> Vec<MdLi
 }
 
 impl Renderer<'_> {
-    fn new(theme: &HelixTheme, width: usize) -> Renderer<'_> {
+    fn new(theme: &crate::tui::theme::HelixTheme, width: usize) -> Renderer<'_> {
         let text_fg = theme
             .ui_fg("ui.text")
             .unwrap_or(RgbValue::from_u8(170, 170, 200));
@@ -379,14 +390,14 @@ impl Renderer<'_> {
         self.style = self.stack.pop().unwrap_or(self.plain);
     }
 
-    fn start_heading(&mut self, level: HeadingLevel) {
+    fn start_heading(&mut self, level: pulldown_cmark::HeadingLevel) {
         let scope = match level {
-            HeadingLevel::H1 => "markup.heading.1",
-            HeadingLevel::H2 => "markup.heading.2",
-            HeadingLevel::H3 => "markup.heading.3",
-            HeadingLevel::H4 => "markup.heading.4",
-            HeadingLevel::H5 => "markup.heading.5",
-            HeadingLevel::H6 => "markup.heading.6",
+            pulldown_cmark::HeadingLevel::H1 => "markup.heading.1",
+            pulldown_cmark::HeadingLevel::H2 => "markup.heading.2",
+            pulldown_cmark::HeadingLevel::H3 => "markup.heading.3",
+            pulldown_cmark::HeadingLevel::H4 => "markup.heading.4",
+            pulldown_cmark::HeadingLevel::H5 => "markup.heading.5",
+            pulldown_cmark::HeadingLevel::H6 => "markup.heading.6",
         };
         self.start_style(InlineStyle {
             fg: self.fg(scope),
@@ -408,7 +419,7 @@ impl Renderer<'_> {
             fg: self.fg("markup.list"),
             ..self.plain
         };
-        let marker_width = display_width(&marker_text);
+        let marker_width = crate::tui::text_layout::display_width(&marker_text);
         self.items.push(ItemCtx {
             marker: vec![Span::of(marker_text, style)],
             marker_width,
@@ -432,7 +443,7 @@ impl Renderer<'_> {
             return;
         };
         item.marker[0] = Span::of(glyph, style);
-        item.marker_width = display_width(glyph);
+        item.marker_width = crate::tui::text_layout::display_width(glyph);
     }
 
     fn push_content(&mut self, text: &str, style: InlineStyle, src: Option<usize>) {
@@ -448,7 +459,7 @@ impl Renderer<'_> {
             ..self.plain
         };
         for (at, line) in lines_with_offsets(text) {
-            for (piece_at, piece) in wrap(line, self.width) {
+            for (piece_at, piece) in crate::tui::text_layout::wrap(line, self.width) {
                 self.lines.push(MdLine {
                     spans: vec![Span {
                         src: src.map(|start| start + at + piece_at),
@@ -601,9 +612,11 @@ impl Renderer<'_> {
                     let spans = cell.get(k).map_or(&[][..], Vec::as_slice);
                     let pad = width.saturating_sub(spans_width(spans));
                     let (left, right) = match alignment {
-                        Alignment::Right => (pad, 0),
-                        Alignment::Center => (pad / 2, pad - pad / 2),
-                        Alignment::Left | Alignment::None => (0, pad),
+                        pulldown_cmark::Alignment::Right => (pad, 0),
+                        pulldown_cmark::Alignment::Center => (pad / 2, pad - pad / 2),
+                        pulldown_cmark::Alignment::Left | pulldown_cmark::Alignment::None => {
+                            (0, pad)
+                        }
                     };
                     if left > 0 {
                         line.push(Span::of(" ".repeat(left), self.plain));
@@ -684,7 +697,10 @@ impl Renderer<'_> {
 }
 
 fn spans_width(spans: &[Span]) -> usize {
-    spans.iter().map(|s| display_width(&s.text)).sum()
+    spans
+        .iter()
+        .map(|s| crate::tui::text_layout::display_width(&s.text))
+        .sum()
 }
 
 fn is_line_break_tag(html: &str) -> bool {
@@ -704,14 +720,21 @@ fn wrap_spans(
     first_prefix: Vec<Span>,
     cont_prefix: Vec<Span>,
 ) -> Vec<Vec<Span>> {
-    let cont_width: usize = cont_prefix.iter().map(|s| display_width(&s.text)).sum();
+    use unicode_segmentation::UnicodeSegmentation;
+    let cont_width: usize = cont_prefix
+        .iter()
+        .map(|s| crate::tui::text_layout::display_width(&s.text))
+        .sum();
     let eff = width.saturating_sub(cont_width).max(1);
     let words = split_words(content);
     let mut lines: Vec<Vec<Span>> = Vec::new();
     let mut line: Vec<Span> = Vec::new();
     let mut used = 0;
     for word in &words {
-        let word_width: usize = word.iter().map(|s| display_width(&s.text)).sum();
+        let word_width: usize = word
+            .iter()
+            .map(|s| crate::tui::text_layout::display_width(&s.text))
+            .sum();
         let sep = usize::from(!line.is_empty());
         if used + sep + word_width <= eff {
             if sep == 1
@@ -735,7 +758,7 @@ fn wrap_spans(
             }
             for run in word {
                 for (at, grapheme) in run.text.grapheme_indices(true) {
-                    let w = display_width(grapheme);
+                    let w = crate::tui::text_layout::display_width(grapheme);
                     if used + w > eff && used > 0 {
                         lines.push(std::mem::take(&mut line));
                         used = 0;
@@ -777,6 +800,7 @@ fn split_words(content: &[Span]) -> Vec<Vec<Span>> {
     let mut words: Vec<Vec<Span>> = Vec::new();
     let mut word: Vec<Span> = Vec::new();
     for span in content {
+        use unicode_segmentation::UnicodeSegmentation;
         for (at, grapheme) in span.text.grapheme_indices(true) {
             if grapheme.chars().all(char::is_whitespace) {
                 if !word.is_empty() {
@@ -798,7 +822,8 @@ fn split_words(content: &[Span]) -> Vec<Vec<Span>> {
 mod tests {
     use super::*;
 
-    fn theme() -> HelixTheme {
+    fn theme() -> crate::tui::theme::HelixTheme {
+        use crate::tui::theme::HelixTheme;
         HelixTheme::default()
     }
 
@@ -909,7 +934,10 @@ mod tests {
     fn table_lines_never_exceed_the_width() {
         for width in 1..=100 {
             for line in texts(TABLE, width) {
-                assert!(display_width(&line) <= width, "{width}: {line:?}");
+                assert!(
+                    crate::tui::text_layout::display_width(&line) <= width,
+                    "{width}: {line:?}"
+                );
             }
         }
     }
@@ -1008,7 +1036,7 @@ mod tests {
         for width in [10, 40, 80, 96] {
             for line in render_md(src, width) {
                 assert!(
-                    display_width(&text(&line)) <= width,
+                    crate::tui::text_layout::display_width(&text(&line)) <= width,
                     "{width}: {:?}",
                     text(&line)
                 );

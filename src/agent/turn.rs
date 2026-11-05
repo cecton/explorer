@@ -1,23 +1,7 @@
-use super::claude_code::{self, ClaudeTarget, Invocation, Resume, RunError};
-use super::llm::{self, LlmTarget};
-use super::mcp::{McpHost, McpTools};
-use super::subagent::Subagents;
-use super::tools::ToolContext;
-use super::usage::{self, Usage};
-use super::{
-    AgentConfig, Backend, Endpoint, EndpointKind, Message, Mode, ModelSpec, agent_loop, context,
-};
-use crate::conversation::{ConversationTree, NodeId, NodeStatus, write_atomic};
-use crate::git::discard_worktree;
-use crate::tui::AppSignal;
-use camino::{Utf8Path, Utf8PathBuf};
-use parking_lot::{Mutex, RwLock};
-use r3bl_tui::TerminalWindowMainThreadSignal;
 use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::{mpsc, watch};
 
 const REPLY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the spinners advance one frame.
@@ -33,7 +17,9 @@ pub const TOOL_LINE_PREFIX: &str = "- ";
 /// Sets a sub-agent's tool calls apart in the work log of the turn that called it.
 const SUBAGENT_INDENT: &str = "  ";
 
-pub(super) type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
+pub(super) type MainTx = tokio::sync::mpsc::Sender<
+    r3bl_tui::TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+>;
 
 /// What a running turn has produced so far, read by Discussion windows at render time.
 #[derive(Default)]
@@ -62,7 +48,7 @@ pub struct LiveTurn {
     /// Claude Code session holding this turn, once the CLI has announced it.
     pub session_id: Option<String>,
     /// What the CLI last reported of the subscription's limits.
-    pub usage: Option<Usage>,
+    pub usage: Option<crate::agent::usage::Usage>,
     /// The sub-agent this turn is waiting for.
     pub subagent: Option<LiveSubagent>,
     /// What the user sent while the turn was working, waiting to join the loop at its
@@ -77,7 +63,7 @@ pub struct LiveTurn {
 pub struct LiveSubagent {
     pub index: u32,
     pub started: Instant,
-    pub live: Arc<Mutex<LiveTurn>>,
+    pub live: Arc<parking_lot::Mutex<LiveTurn>>,
 }
 
 /// The spinner character for the shared animation step `tick`.
@@ -88,12 +74,12 @@ pub fn spinner_char(tick: u8) -> char {
 /// Main-thread handle on a running turn.
 #[derive(Clone)]
 pub struct TurnHandle {
-    pub live: Arc<Mutex<LiveTurn>>,
+    pub live: Arc<parking_lot::Mutex<LiveTurn>>,
     pub started: Instant,
-    pub mode: Mode,
+    pub mode: crate::agent::Mode,
     /// HEAD when the prompt was sent: what a commit turn's commits are counted from.
     pub head_before: Option<String>,
-    cancel: Arc<watch::Sender<bool>>,
+    cancel: Arc<tokio::sync::watch::Sender<bool>>,
 }
 
 impl TurnHandle {
@@ -119,8 +105,8 @@ impl LiveTurn {
 /// the node's `prompt.md` and the transcript when it is sent.
 #[derive(Clone)]
 pub(super) struct Injector {
-    live: Arc<Mutex<LiveTurn>>,
-    node_dir: Utf8PathBuf,
+    live: Arc<parking_lot::Mutex<LiveTurn>>,
+    node_dir: camino::Utf8PathBuf,
 }
 
 impl Injector {
@@ -154,7 +140,7 @@ impl Injector {
     /// Records one as written and takes it out of the queue. It leaves the queue only
     /// here, once the model has it: a write that fails, or a task dropped mid-write,
     /// leaves the message for the window to give back.
-    pub(super) fn wrote(&self, content: &str) -> Message {
+    pub(super) fn wrote(&self, content: &str) -> crate::agent::Message {
         {
             let mut live = self.live.lock();
             if live.injected.front().map(String::as_str) == Some(content) {
@@ -166,7 +152,8 @@ impl Injector {
 
     /// Records one as sent: it joins the prompt block, `prompt.md` and the transcript,
     /// and is handed back for the loop to push onto its messages.
-    fn sent(&self, content: &str) -> Message {
+    fn sent(&self, content: &str) -> crate::agent::Message {
+        use crate::agent::Message;
         {
             let mut live = self.live.lock();
             if !live.prompt.is_empty() && !live.prompt.ends_with("\n\n") {
@@ -194,7 +181,7 @@ impl Injector {
 /// How a turn ended, applied to the node's metadata on the main thread.
 #[derive(Clone, Debug)]
 pub struct TurnOutcome {
-    pub status: NodeStatus,
+    pub status: crate::conversation::NodeStatus,
     pub error: Option<String>,
     /// Seconds the turn took, wall clock.
     pub secs: u64,
@@ -211,31 +198,31 @@ pub struct TurnOutcome {
 
 #[derive(Clone)]
 pub struct TurnRequest {
-    pub mode: Mode,
+    pub mode: crate::agent::Mode,
     /// False for a custom command sent without the mode's system prompt.
     pub system_prompt: bool,
-    pub node: NodeId,
-    pub node_dir: Utf8PathBuf,
+    pub node: crate::conversation::NodeId,
+    pub node_dir: camino::Utf8PathBuf,
     /// Directories of the ancestors to replay, root first.
-    pub ancestor_dirs: Vec<Utf8PathBuf>,
+    pub ancestor_dirs: Vec<camino::Utf8PathBuf>,
     /// HEAD when the parent's turn ended.
     pub parent_head: Option<String>,
     /// HEAD when this prompt was sent.
     pub head: Option<String>,
-    pub root: Utf8PathBuf,
+    pub root: camino::Utf8PathBuf,
     pub repo: Option<gix::ThreadSafeRepository>,
     pub prompt: String,
     /// `YYYY-MM-DD`, for the system prompt.
     pub date: String,
-    pub backend: Backend,
+    pub backend: crate::agent::Backend,
     /// The endpoint of `backend`, whose subscription this turn spends.
-    pub endpoint: Endpoint,
+    pub endpoint: crate::agent::Endpoint,
     /// The model this turn is sent to.
-    pub spec: ModelSpec,
+    pub spec: crate::agent::ModelSpec,
     /// Endpoints, roles and models the turn's sub-agents can run on.
-    pub agent: Arc<AgentConfig>,
+    pub agent: Arc<crate::agent::AgentConfig>,
     /// Model that titles and summarizes the node once its turn is done.
-    pub summary_backend: Option<Backend>,
+    pub summary_backend: Option<crate::agent::Backend>,
     /// Id of the conversation's root node, sent to OpenAI-compatible servers as the
     /// session of every request.
     pub session: String,
@@ -249,45 +236,47 @@ pub struct TurnRequest {
     /// sending `prompt`.
     pub compact: Option<String>,
     /// Directory of the parent when it is a compact node: its reply opens the context.
-    pub compacted_parent: Option<Utf8PathBuf>,
+    pub compacted_parent: Option<camino::Utf8PathBuf>,
     /// The conversation tree, for the `conversation` tool.
-    pub tree: Arc<RwLock<ConversationTree>>,
+    pub tree: Arc<parking_lot::RwLock<crate::conversation::ConversationTree>>,
     /// The MCP servers of the repository; the turn takes the tools of those running
     /// when it starts.
-    pub mcp: Arc<McpHost>,
+    pub mcp: Arc<crate::agent::mcp::McpHost>,
 }
 
 /// The text to send for `request`: what the turn asks, preceded by the notes Explorer
 /// adds — the state of the repository, the summary of a compacted parent, and what
 /// moved since the parent's turn. Reads files and runs git.
 fn message_to_send(request: &TurnRequest) -> String {
-    let environment = Some(context::environment_note(
+    use crate::agent::Mode;
+    let environment = Some(crate::agent::context::environment_note(
         &request.root,
         request.head.as_deref(),
         &request.date,
     ));
     let summary = request.compacted_parent.as_ref().map(|dir| {
         let (_, summary) = crate::conversation::read_prompt_and_reply(dir);
-        context::compaction_note(&summary)
+        crate::agent::context::compaction_note(&summary)
     });
     let moved = moved_note(
         &request.root,
         request.parent_head.as_deref(),
         request.head.as_deref(),
     );
-    let workspace = (request.mode == Mode::Feedback).then(|| context::WORKSPACE_NOTE.to_string());
+    let workspace =
+        (request.mode == Mode::Feedback).then(|| crate::agent::context::WORKSPACE_NOTE.to_string());
     let ask = match &request.compact {
-        Some(instructions) => context::compact_request(instructions),
+        Some(instructions) => crate::agent::context::compact_request(instructions),
         None => request.prompt.clone(),
     };
-    context::with_notes(&[environment, summary, moved, workspace], &ask)
+    crate::agent::context::with_notes(&[environment, summary, moved, workspace], &ask)
 }
 
 /// Collects a turn's output: live reply and work log for the UI, `reply.md`,
 /// `activity.md` and `transcript.jsonl` on disk.
 pub struct Recorder {
-    pub(super) live: Arc<Mutex<LiveTurn>>,
-    node_dir: Utf8PathBuf,
+    pub(super) live: Arc<parking_lot::Mutex<LiveTurn>>,
+    node_dir: camino::Utf8PathBuf,
     main_tx: MainTx,
     /// The recorder of the turn that called this sub-agent, which logs its tool calls
     /// too.
@@ -302,13 +291,13 @@ pub struct Recorder {
 
 /// Where a sub-agent's tool calls are copied: the work log of the calling turn.
 struct Caller {
-    live: Arc<Mutex<LiveTurn>>,
-    node_dir: Utf8PathBuf,
+    live: Arc<parking_lot::Mutex<LiveTurn>>,
+    node_dir: camino::Utf8PathBuf,
 }
 
 /// Appends one message to the `transcript.jsonl` of `dir`, which is what a child node
 /// replays.
-fn append_transcript(dir: &Utf8Path, message: &Message) {
+fn append_transcript(dir: &camino::Utf8Path, message: &crate::agent::Message) {
     let appended = serde_json::to_string(message)
         .map_err(std::io::Error::other)
         .and_then(|line| {
@@ -324,7 +313,7 @@ fn append_transcript(dir: &Utf8Path, message: &Message) {
 }
 
 /// Appends one entry to a work log and to the `activity.md` of `dir`.
-fn append_work_log(dir: &Utf8Path, live: &Mutex<LiveTurn>, entry: String) {
+fn append_work_log(dir: &camino::Utf8Path, live: &parking_lot::Mutex<LiveTurn>, entry: String) {
     let appended = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
@@ -337,7 +326,11 @@ fn append_work_log(dir: &Utf8Path, live: &Mutex<LiveTurn>, entry: String) {
 }
 
 impl Recorder {
-    fn new(live: Arc<Mutex<LiveTurn>>, node_dir: Utf8PathBuf, main_tx: MainTx) -> Self {
+    fn new(
+        live: Arc<parking_lot::Mutex<LiveTurn>>,
+        node_dir: camino::Utf8PathBuf,
+        main_tx: MainTx,
+    ) -> Self {
         Self {
             live,
             node_dir,
@@ -351,7 +344,7 @@ impl Recorder {
 
     /// The recorder of a sub-agent run kept in `dir`, whose tool calls also go to this
     /// turn's work log.
-    pub(super) fn subagent(&self, dir: Utf8PathBuf) -> Self {
+    pub(super) fn subagent(&self, dir: camino::Utf8PathBuf) -> Self {
         Self {
             caller: Some(Caller {
                 live: Arc::clone(&self.live),
@@ -365,17 +358,19 @@ impl Recorder {
         self.main_tx.clone()
     }
 
-    pub(super) async fn send(&self, signal: AppSignal) {
+    pub(super) async fn send(&self, signal: crate::tui::state::AppSignal) {
         let _ = self
             .main_tx
-            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
+            .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
+                signal,
+            ))
             .await;
     }
 
     pub(super) fn flush_reply(&mut self) {
         self.last_flush = Instant::now();
         let reply = self.live.lock().reply.clone();
-        if let Err(e) = write_atomic(&self.node_dir.join("reply.md"), &reply) {
+        if let Err(e) = crate::conversation::write_atomic(&self.node_dir.join("reply.md"), &reply) {
             tracing::warn!("failed to write reply.md: {e}");
         }
     }
@@ -422,6 +417,7 @@ impl Recorder {
     /// joins the transcript as an assistant message without tool calls, so a replay
     /// continues from it instead of repeating it. A second call records nothing.
     pub fn flush_partial_answer(&mut self) {
+        use crate::agent::Message;
         let text = {
             let live = self.live.lock();
             let start = self.answer_start.min(live.reply.len());
@@ -465,7 +461,7 @@ impl Recorder {
     }
 
     /// Appends one message to `transcript.jsonl`.
-    pub fn message(&mut self, message: &Message) {
+    pub fn message(&mut self, message: &crate::agent::Message) {
         append_transcript(&self.node_dir, message);
     }
 
@@ -499,7 +495,7 @@ impl Recorder {
         self.live.lock().session_id = Some(session_id);
     }
 
-    pub fn usage(&mut self, usage: Usage) {
+    pub fn usage(&mut self, usage: crate::agent::usage::Usage) {
         self.live.lock().usage = Some(usage);
     }
 }
@@ -509,33 +505,41 @@ impl Recorder {
 /// answer now. Called after every turn, and for an OpenRouter key at startup and every
 /// minute between turns, since its counter settles seconds after the requests that
 /// spent it.
-pub fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx: MainTx) {
+pub fn report_usage(
+    endpoint: crate::agent::Endpoint,
+    reported: Option<crate::agent::usage::Usage>,
+    main_tx: MainTx,
+) {
+    use crate::agent::EndpointKind;
+    use crate::tui::state::AppSignal;
     tokio::spawn(async move {
         let usage = match &endpoint.kind {
             EndpointKind::ClaudeCode { .. } => reported,
-            EndpointKind::OpenCodeGo { url, token } => usage::fetch(url, token)
+            EndpointKind::OpenCodeGo { url, token } => crate::agent::usage::fetch(url, token)
                 .await
                 .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
                 .ok(),
-            EndpointKind::KimiCode { url, token } => usage::fetch_kimi(url, token)
+            EndpointKind::KimiCode { url, token } => crate::agent::usage::fetch_kimi(url, token)
                 .await
                 .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
                 .ok(),
-            EndpointKind::Cline { url, token } => usage::fetch_cline(url, token)
+            EndpointKind::Cline { url, token } => crate::agent::usage::fetch_cline(url, token)
                 .await
                 .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
                 .ok(),
-            EndpointKind::OpenRouter { url, token } => usage::fetch_openrouter(url, token)
-                .await
-                .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
-                .ok(),
+            EndpointKind::OpenRouter { url, token } => {
+                crate::agent::usage::fetch_openrouter(url, token)
+                    .await
+                    .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
+                    .ok()
+            }
             EndpointKind::OpenAi { .. } => None,
         };
         let Some(usage) = usage else {
             return;
         };
         let _ = main_tx
-            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+            .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
                 AppSignal::UsageFetched {
                     endpoint: endpoint.name,
                     usage,
@@ -548,8 +552,11 @@ pub fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx: MainTx
 /// Starts the turn of a node already created on disk and returns its handle. The
 /// outcome arrives as `AppSignal::TurnFinished`.
 pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
-    let live = Arc::new(Mutex::new(LiveTurn::default()));
-    let (cancel_tx, mut cancel_rx) = watch::channel(false);
+    use crate::agent::Mode;
+    use crate::conversation::NodeStatus;
+    use crate::tui::state::AppSignal;
+    let live = Arc::new(parking_lot::Mutex::new(LiveTurn::default()));
+    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
     let handle = TurnHandle {
         live: Arc::clone(&live),
         started: Instant::now(),
@@ -643,7 +650,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             session_id,
         };
         let _ = main_tx
-            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+            .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
                 AppSignal::TurnFinished {
                     node: request.node.clone(),
                     outcome,
@@ -673,6 +680,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
 }
 
 async fn run(request: &TurnRequest, recorder: &mut Recorder) -> Result<(), String> {
+    use crate::agent::Backend;
     let mcp = request.mcp.snapshot().await;
     match &request.backend {
         Backend::OpenAi(target) => {
@@ -693,24 +701,29 @@ async fn uncommitted(request: &TurnRequest) -> Result<Option<String>, String> {
 
 /// The parent session a turn forks. Only feedback turns fork: a fork replays the parent's
 /// earlier user messages, which carry the feedback-turn workspace note.
-fn fork_source(mode: Mode, parent_session: Option<&str>) -> Option<&str> {
+fn fork_source(mode: crate::agent::Mode, parent_session: Option<&str>) -> Option<&str> {
+    use crate::agent::Mode;
     parent_session.filter(|_| mode == Mode::Feedback)
 }
 
 async fn run_claude_code(
     request: &TurnRequest,
-    mcp: &McpTools,
-    target: &ClaudeTarget,
+    mcp: &crate::agent::mcp::McpTools,
+    target: &crate::agent::claude_code::ClaudeTarget,
     recorder: &mut Recorder,
 ) -> Result<(), String> {
+    use crate::agent::Message;
+    use crate::agent::Mode;
+    use crate::agent::claude_code::Resume;
+    use crate::agent::claude_code::RunError;
     let (system, message, preamble) = {
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
-            let system = context::claude_system_prompt(
+            let system = crate::agent::context::claude_system_prompt(
                 request.system_prompt.then_some(request.mode),
                 request.agent.review_rounds,
             );
-            let preamble = context::handover_preamble(&request.ancestor_dirs);
+            let preamble = crate::agent::context::handover_preamble(&request.ancestor_dirs);
             (system, message_to_send(&request), preamble)
         })
         .await
@@ -722,7 +735,7 @@ async fn run_claude_code(
     // from reading each other's work. When the session is gone, a fresh one opens with
     // the ancestors as plain text.
     if let Some(continue_session) = &request.continue_session {
-        let run = claude_code::run(
+        let run = crate::agent::claude_code::run(
             &invocation(
                 request,
                 mcp,
@@ -741,7 +754,7 @@ async fn run_claude_code(
                     Some(preamble) => format!("{preamble}\n\n{message}"),
                     None => message,
                 };
-                claude_code::run(
+                crate::agent::claude_code::run(
                     &invocation(request, mcp, target, &system, &opening, Resume::Fresh),
                     recorder,
                 )
@@ -756,7 +769,7 @@ async fn run_claude_code(
         // no parent, starts a fresh session that opens with the ancestors as plain text.
         let forked = match fork_source(request.mode, request.parent_session.as_deref()) {
             Some(session) => {
-                match claude_code::run(
+                match crate::agent::claude_code::run(
                     &invocation(
                         request,
                         mcp,
@@ -781,7 +794,7 @@ async fn run_claude_code(
                 Some(preamble) => format!("{preamble}\n\n{message}"),
                 None => message,
             };
-            claude_code::run(
+            crate::agent::claude_code::run(
                 &invocation(request, mcp, target, &system, &opening, Resume::Fresh),
                 recorder,
             )
@@ -799,10 +812,11 @@ async fn run_claude_code(
         let Some(session) = recorder.live.lock().session_id.clone() else {
             break;
         };
-        let Message::User { content: nudge, .. } = context::commit_nudge(&status) else {
+        let Message::User { content: nudge, .. } = crate::agent::context::commit_nudge(&status)
+        else {
             break;
         };
-        claude_code::run(
+        crate::agent::claude_code::run(
             &invocation(
                 request,
                 mcp,
@@ -821,12 +835,13 @@ async fn run_claude_code(
 
 fn invocation<'a>(
     request: &'a TurnRequest,
-    mcp: &'a McpTools,
-    target: &'a ClaudeTarget,
+    mcp: &'a crate::agent::mcp::McpTools,
+    target: &'a crate::agent::claude_code::ClaudeTarget,
     system: &'a str,
     prompt: &'a str,
-    resume: Resume<'a>,
-) -> Invocation<'a> {
+    resume: crate::agent::claude_code::Resume<'a>,
+) -> crate::agent::claude_code::Invocation<'a> {
+    use crate::agent::claude_code::Invocation;
     Invocation {
         target,
         root: &request.root,
@@ -837,7 +852,8 @@ fn invocation<'a>(
     }
 }
 
-fn run_error_text(error: RunError) -> String {
+fn run_error_text(error: crate::agent::claude_code::RunError) -> String {
+    use crate::agent::claude_code::RunError;
     match error {
         RunError::SessionGone => "the Claude Code session of this turn is gone".to_string(),
         RunError::Failed(error) => error,
@@ -846,15 +862,20 @@ fn run_error_text(error: RunError) -> String {
 
 async fn run_own_loop(
     request: &TurnRequest,
-    mcp: &McpTools,
-    target: &LlmTarget,
-    spec: &ModelSpec,
+    mcp: &crate::agent::mcp::McpTools,
+    target: &crate::agent::llm::LlmTarget,
+    spec: &crate::agent::ModelSpec,
     recorder: &mut Recorder,
 ) -> Result<(), String> {
+    use crate::agent::Message;
+    use crate::agent::Mode;
+    use crate::agent::agent_loop::Limits;
+    use crate::agent::subagent::Subagents;
+    use crate::agent::tools::ToolContext;
     let (system, mut messages) = {
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
-            let system = context::system_prompt(
+            let system = crate::agent::context::system_prompt(
                 request.system_prompt.then_some(request.mode),
                 request.agent.review_rounds,
                 &request.root,
@@ -862,10 +883,10 @@ async fn run_own_loop(
             let mut messages: Vec<Message> = request
                 .ancestor_dirs
                 .iter()
-                .flat_map(|dir| context::ancestor_messages(dir))
+                .flat_map(|dir| crate::agent::context::ancestor_messages(dir))
                 .collect();
             if request.mode == Mode::Commit {
-                context::strip_workspace_note(&mut messages);
+                crate::agent::context::strip_workspace_note(&mut messages);
             }
             messages.push(Message::User {
                 content: message_to_send(&request),
@@ -882,7 +903,7 @@ async fn run_own_loop(
     if request.compact.is_some() {
         // A compact turn is a single answer, without tools.
         recorder.begin_answer();
-        let response = match llm::stream_chat(
+        let response = match crate::agent::llm::stream_chat(
             target,
             &request.session,
             &system,
@@ -928,11 +949,11 @@ async fn run_own_loop(
         background: Arc::default(),
         mcp: mcp.clone(),
     };
-    let limits = agent_loop::Limits {
+    let limits = Limits {
         budget: None,
         repeat_limit: request.agent.repeat_limit,
     };
-    agent_loop::run(
+    crate::agent::agent_loop::run(
         &tool_context,
         target,
         &request.session,
@@ -951,10 +972,10 @@ async fn run_own_loop(
         let Some(status) = uncommitted(request).await? else {
             break;
         };
-        let nudge = context::commit_nudge(&status);
+        let nudge = crate::agent::context::commit_nudge(&status);
         recorder.message(&nudge);
         messages.push(nudge);
-        agent_loop::run(
+        crate::agent::agent_loop::run(
             &tool_context,
             target,
             &request.session,
@@ -970,7 +991,7 @@ async fn run_own_loop(
 
 /// The commits a commit turn made; what it left uncommitted is discarded.
 fn close_commit_turn(
-    root: &Utf8Path,
+    root: &camino::Utf8Path,
     node: &str,
     head_before: Option<&str>,
     head_after: Option<&str>,
@@ -983,9 +1004,9 @@ fn close_commit_turn(
 }
 
 /// Discards what the turn left uncommitted; the tree was clean when the turn started.
-fn discard_turn_work(root: &Utf8Path) -> bool {
+fn discard_turn_work(root: &camino::Utf8Path) -> bool {
     match crate::git::status_short(root) {
-        Ok(status) if !status.trim().is_empty() => discard_worktree(root)
+        Ok(status) if !status.trim().is_empty() => crate::git::discard_worktree(root)
             .map_err(|e| tracing::warn!("cannot reset the tree after the turn: {e}"))
             .is_ok(),
         Ok(_) => false,
@@ -998,7 +1019,7 @@ fn discard_turn_work(root: &Utf8Path) -> bool {
 
 /// The repository-moved note, when HEAD is no longer where the parent's turn left it.
 pub(super) fn moved_note(
-    root: &Utf8Path,
+    root: &camino::Utf8Path,
     parent_head: Option<&str>,
     head: Option<&str>,
 ) -> Option<String> {
@@ -1006,8 +1027,13 @@ pub(super) fn moved_note(
     if parent_head == head {
         return None;
     }
-    let commits = crate::git::log_oneline(root, parent_head, head, context::NOTE_MAX_COMMITS + 1);
-    Some(context::repository_moved_note(&commits))
+    let commits = crate::git::log_oneline(
+        root,
+        parent_head,
+        head,
+        crate::agent::context::NOTE_MAX_COMMITS + 1,
+    );
+    Some(crate::agent::context::repository_moved_note(&commits))
 }
 
 /// Points to `/compact` when an endpoint refuses a request for being too long.
@@ -1065,27 +1091,30 @@ pub(super) fn parse_title_and_summary(answer: &str) -> Option<(String, String)> 
 
 /// One answer without tools from the summary model.
 pub(super) async fn complete(
-    backend: &Backend,
+    backend: &crate::agent::Backend,
     session: &str,
     system: &str,
     user: &str,
 ) -> Result<String, String> {
+    use crate::agent::Backend;
     match backend {
-        Backend::OpenAi(target) => llm::complete(target, session, system, user).await,
-        Backend::ClaudeCode(target) => claude_code::complete(target, system, user).await,
+        Backend::OpenAi(target) => crate::agent::llm::complete(target, session, system, user).await,
+        Backend::ClaudeCode(target) => {
+            crate::agent::claude_code::complete(target, system, user).await
+        }
     }
 }
 
 /// Writes the title and summary of a node from its prompt, reply and commits.
 #[allow(clippy::too_many_arguments)]
 pub async fn retitle(
-    node: &NodeId,
-    node_dir: &Utf8Path,
+    node: &crate::conversation::NodeId,
+    node_dir: &camino::Utf8Path,
     session: &str,
-    root: &Utf8Path,
+    root: &camino::Utf8Path,
     head_before: Option<String>,
     head_after: Option<String>,
-    backend: &Backend,
+    backend: &crate::agent::Backend,
     main_tx: &MainTx,
 ) {
     let root = root.to_path_buf();
@@ -1103,14 +1132,22 @@ pub async fn retitle(
 /// Replaces `title.md` and `summary.md` of a finished node with what the model makes of
 /// its turn.
 async fn title_and_summarize(
-    node: &NodeId,
-    node_dir: &Utf8Path,
+    node: &crate::conversation::NodeId,
+    node_dir: &camino::Utf8Path,
     session: &str,
-    backend: &Backend,
+    backend: &crate::agent::Backend,
     input: &str,
     main_tx: &MainTx,
 ) {
-    let answer = match complete(backend, session, context::TITLE_SUMMARY_PROMPT, input).await {
+    use crate::tui::state::AppSignal;
+    let answer = match complete(
+        backend,
+        session,
+        crate::agent::context::TITLE_SUMMARY_PROMPT,
+        input,
+    )
+    .await
+    {
         Ok(answer) => answer,
         Err(e) => {
             tracing::warn!("title generation failed: {e}");
@@ -1121,7 +1158,7 @@ async fn title_and_summarize(
         tracing::warn!("title generation returned no title");
         return;
     };
-    if let Err(e) = write_atomic(&node_dir.join("title.md"), &title) {
+    if let Err(e) = crate::conversation::write_atomic(&node_dir.join("title.md"), &title) {
         tracing::warn!("failed to write title.md: {e}");
     }
     let signal = AppSignal::NodeTitleReady {
@@ -1129,12 +1166,14 @@ async fn title_and_summarize(
         title,
     };
     let _ = main_tx
-        .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
+        .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
+            signal,
+        ))
         .await;
     if summary.is_empty() {
         return;
     }
-    if let Err(e) = write_atomic(&node_dir.join("summary.md"), &summary) {
+    if let Err(e) = crate::conversation::write_atomic(&node_dir.join("summary.md"), &summary) {
         tracing::warn!("failed to write summary.md: {e}");
     }
     let signal = AppSignal::NodeSummaryReady {
@@ -1142,7 +1181,9 @@ async fn title_and_summarize(
         summary,
     };
     let _ = main_tx
-        .send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
+        .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
+            signal,
+        ))
         .await;
 }
 
@@ -1160,10 +1201,10 @@ mod tests {
 
     #[test]
     fn a_turn_closes_only_when_idle_and_settled() {
-        let live = Arc::new(Mutex::new(LiveTurn::default()));
+        let live = Arc::new(parking_lot::Mutex::new(LiveTurn::default()));
         let injector = Injector {
             live: Arc::clone(&live),
-            node_dir: Utf8PathBuf::new(),
+            node_dir: camino::Utf8PathBuf::new(),
         };
         assert!(!injector.close_if_idle(false));
         assert!(!live.lock().closed);
@@ -1178,8 +1219,8 @@ mod tests {
     #[test]
     fn a_message_leaves_the_queue_only_once_it_is_written() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
-        let live = Arc::new(Mutex::new(LiveTurn::default()));
+        let dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let live = Arc::new(parking_lot::Mutex::new(LiveTurn::default()));
         let injector = Injector {
             live: Arc::clone(&live),
             node_dir: dir,
@@ -1196,10 +1237,10 @@ mod tests {
 
     #[test]
     fn a_dead_stdin_closes_the_turn_whatever_waits() {
-        let live = Arc::new(Mutex::new(LiveTurn::default()));
+        let live = Arc::new(parking_lot::Mutex::new(LiveTurn::default()));
         let injector = Injector {
             live: Arc::clone(&live),
-            node_dir: Utf8PathBuf::new(),
+            node_dir: camino::Utf8PathBuf::new(),
         };
         // A message still waiting must not keep the turn open to more: the CLI is gone.
         live.lock().injected.push_back("unsent".to_string());
@@ -1210,9 +1251,9 @@ mod tests {
     #[test]
     fn an_injected_message_joins_the_prompt_block_and_the_transcript() {
         let tmp = tempfile::tempdir().unwrap();
-        let dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         std::fs::write(dir.join("prompt.md"), "the first prompt").unwrap();
-        let live = Arc::new(Mutex::new(LiveTurn {
+        let live = Arc::new(parking_lot::Mutex::new(LiveTurn {
             prompt: "the first prompt".to_string(),
             ..Default::default()
         }));
@@ -1240,6 +1281,7 @@ mod tests {
 
     #[test]
     fn a_cancel_with_content_stays_cancelled() {
+        use crate::conversation::NodeStatus;
         let (status, error) = crate::conversation::cut_short_outcome("a partial answer", &[]);
         assert_eq!(status, NodeStatus::Cancelled);
         assert_eq!(error, None);
@@ -1251,7 +1293,7 @@ mod tests {
         assert_eq!(error.as_deref(), Some(crate::conversation::CANCELLED_ERROR));
     }
 
-    fn git(root: &Utf8Path, args: &[&str]) -> String {
+    fn git(root: &camino::Utf8Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .current_dir(root)
             .args(args)
@@ -1261,9 +1303,9 @@ mod tests {
         String::from_utf8(output.stdout).unwrap().trim().to_string()
     }
 
-    fn temp_repo() -> (tempfile::TempDir, Utf8PathBuf) {
+    fn temp_repo() -> (tempfile::TempDir, camino::Utf8PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         git(&root, &["init", "-q"]);
         git(&root, &["config", "user.name", "test"]);
         git(&root, &["config", "user.email", "test@example.com"]);
@@ -1271,7 +1313,7 @@ mod tests {
         (tmp, root)
     }
 
-    fn commit(root: &Utf8Path, file: &str, content: &str, message: &str) -> String {
+    fn commit(root: &camino::Utf8Path, file: &str, content: &str, message: &str) -> String {
         std::fs::write(root.join(file), content).unwrap();
         git(root, &["add", "-A"]);
         git(root, &["commit", "-q", "-m", message]);
@@ -1280,6 +1322,7 @@ mod tests {
 
     #[test]
     fn only_feedback_turns_fork_the_parent_session() {
+        use crate::agent::Mode;
         assert_eq!(fork_source(Mode::Feedback, Some("abc")), Some("abc"));
         assert_eq!(fork_source(Mode::Commit, Some("abc")), None);
         assert_eq!(fork_source(Mode::Feedback, None), None);
@@ -1289,8 +1332,8 @@ mod tests {
     #[test]
     fn cache_hits_are_those_of_the_first_request() {
         let tmp = tempfile::tempdir().unwrap();
-        let node_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
-        let (main_tx, _main_rx) = mpsc::channel(8);
+        let node_dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let live = Arc::default();
         let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
 
@@ -1302,8 +1345,8 @@ mod tests {
     #[test]
     fn text_of_an_answer_that_calls_tools_moves_to_the_work_log() {
         let tmp = tempfile::tempdir().unwrap();
-        let node_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
-        let (main_tx, _main_rx) = mpsc::channel(8);
+        let node_dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let mut recorder = Recorder::new(Arc::default(), node_dir.clone(), main_tx);
 
         recorder.begin_answer();
@@ -1335,10 +1378,10 @@ mod tests {
     #[test]
     fn a_sub_agent_logs_its_tool_calls_in_the_work_log_of_its_caller_too() {
         let tmp = tempfile::tempdir().unwrap();
-        let node_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let node_dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let agent_dir = node_dir.join("agents/1");
         std::fs::create_dir_all(&agent_dir).unwrap();
-        let (main_tx, _main_rx) = mpsc::channel(8);
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let mut recorder = Recorder::new(Arc::default(), node_dir.clone(), main_tx);
         recorder.tool_call("agent reviewer: Review".to_string());
         let mut child = recorder.subagent(agent_dir.clone());
@@ -1351,7 +1394,8 @@ mod tests {
         child.text("Looks fine.");
         child.flush_reply();
 
-        let read = |dir: &Utf8Path, name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
+        let read =
+            |dir: &camino::Utf8Path, name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
         assert_eq!(read(&agent_dir, "activity.md"), "Reading.\n- read a.txt\n");
         assert_eq!(read(&agent_dir, "reply.md"), "Looks fine.");
         assert_eq!(
@@ -1364,8 +1408,8 @@ mod tests {
     #[test]
     fn thinking_of_tool_calling_answers_is_dropped_and_the_last_one_kept() {
         let tmp = tempfile::tempdir().unwrap();
-        let (main_tx, _main_rx) = mpsc::channel(8);
-        let node_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
+        let node_dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let mut recorder = Recorder::new(Arc::default(), node_dir, main_tx);
 
         recorder.begin_answer();
@@ -1388,8 +1432,8 @@ mod tests {
     #[test]
     fn the_running_log_hides_the_dropped_rounds() {
         let tmp = tempfile::tempdir().unwrap();
-        let (main_tx, _main_rx) = mpsc::channel(8);
-        let node_dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
+        let node_dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let mut recorder = Recorder::new(Arc::default(), node_dir, main_tx);
 
         // First tool-calling round
@@ -1517,6 +1561,7 @@ mod tests {
 
     #[test]
     fn a_commit_turn_cut_short_keeps_its_commits() {
+        use crate::conversation::NodeStatus;
         let (_tmp, root) = temp_repo();
         let before = commit(&root, "a.txt", "1", "init");
         let made = commit(&root, "a.txt", "2", "feat: one");

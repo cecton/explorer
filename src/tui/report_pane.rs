@@ -1,6 +1,5 @@
-use crate::tui::pane_component::pane_slot;
-use crate::tui::text_layout::{display_width, truncate};
-use crate::tui::*;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 
 const SCROLL_STEP: isize = 3;
 
@@ -16,14 +15,19 @@ impl ReportComponent {
         Self { id }
     }
 
-    fn active_report(&self, state: &AppState) -> Option<usize> {
-        match state.pane_manager.window_stack.get(pane_slot(self.id)?)? {
+    fn active_report(&self, state: &crate::tui::state::AppState) -> Option<usize> {
+        use crate::tui::pane_manager::Window;
+        match state
+            .pane_manager
+            .window_stack
+            .get(crate::tui::pane_component::pane_slot(self.id)?)?
+        {
             Window::Report(id) => Some(*id),
             _ => None,
         }
     }
 
-    pub(crate) fn title(state: &AppState, id: usize) -> String {
+    pub(crate) fn title(state: &crate::tui::state::AppState, id: usize) -> String {
         state
             .reports
             .get(&id)
@@ -33,7 +37,13 @@ impl ReportComponent {
 
     /// Shows `markdown` in the report window already open, or in a new one when there is
     /// none, and focuses it. The report is not saved: it lives as long as its window.
-    pub(crate) fn show(state: &mut AppState, title: String, markdown: String) -> usize {
+    pub(crate) fn show(
+        state: &mut crate::tui::state::AppState,
+        title: String,
+        markdown: String,
+    ) -> usize {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::ReportState;
         let existing = state
             .pane_manager
             .window_stack
@@ -63,25 +73,25 @@ impl ReportComponent {
     }
 }
 
-impl TitleRow for ReportComponent {
+impl crate::tui::title_row::TitleRow for ReportComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        state: &mut AppState,
+        state: &mut crate::tui::state::AppState,
     ) -> usize {
         let Some(id) = self.active_report(state) else {
             return 0;
         };
         let title = Self::title(state, id);
         let theme = &state.theme;
-        render_pane_title(ops, pane_box, &title, false, theme, focused);
+        crate::tui::title_row::render_pane_title(ops, pane_box, &title, false, theme, focused);
         1
     }
 }
 
-impl Component<AppState, AppSignal> for ReportComponent {
+impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for ReportComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -90,10 +100,11 @@ impl Component<AppState, AppSignal> for ReportComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::pane_manager::Window;
         throws_with_return!({
             let Some(id) = self.active_report(&global_data.state) else {
                 return Ok(EventPropagation::Propagate);
@@ -148,11 +159,12 @@ impl Component<AppState, AppSignal> for ReportComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
+        use crate::tui::pane_manager::Window;
         throws!({
             let Some(id) = self.active_report(&global_data.state) else {
                 return Ok(());
@@ -185,7 +197,7 @@ impl Component<AppState, AppSignal> for ReportComponent {
                 ops += RenderOpIR::PaintTextWithAttributes(" ".repeat(width).into(), Some(blank));
             }
 
-            let lines = markdown::render(&report.markdown, &state.theme, width);
+            let lines = crate::tui::markdown::render(&report.markdown, &state.theme, width);
             state.pane_manager.set_window_page_size(&window, rows);
             state
                 .pane_manager
@@ -208,8 +220,8 @@ impl Component<AppState, AppSignal> for ReportComponent {
                     if x >= width {
                         break;
                     }
-                    let text = if x + display_width(&span.text) > width {
-                        truncate(&span.text, width - x)
+                    let text = if x + crate::tui::text_layout::display_width(&span.text) > width {
+                        crate::tui::text_layout::truncate(&span.text, width - x)
                     } else {
                         span.text.clone()
                     };
@@ -220,7 +232,7 @@ impl Component<AppState, AppSignal> for ReportComponent {
                     );
                     ops += RenderOpCommon::ApplyColors(Some(style));
                     ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                    x += display_width(&span.text);
+                    x += crate::tui::text_layout::display_width(&span.text);
                 }
             }
             global_data.pipeline.push(ZOrder::Normal, ops);
@@ -228,11 +240,18 @@ impl Component<AppState, AppSignal> for ReportComponent {
     }
 }
 
-fn page_size(state: &AppState, window: &Window) -> usize {
+fn page_size(
+    state: &crate::tui::state::AppState,
+    window: &crate::tui::pane_manager::Window,
+) -> usize {
     state.pane_manager.window_page_size(window).max(1)
 }
 
-fn scroll_by(state: &mut AppState, window: &Window, delta: isize) {
+fn scroll_by(
+    state: &mut crate::tui::state::AppState,
+    window: &crate::tui::pane_manager::Window,
+    delta: isize,
+) {
     let current = state.pane_manager.window_scroll(window) as isize;
     let target = (current + delta).max(0) as usize;
     state.pane_manager.set_window_scroll(window, target);
@@ -244,17 +263,21 @@ mod tests {
     use super::*;
     use tokio::sync::mpsc;
 
-    fn empty_state() -> AppState {
+    fn empty_state() -> crate::tui::state::AppState {
+        use crate::keymap::Keymap;
+        use crate::tui::state::AppState;
+        use crate::tui::theme::HelixTheme;
         AppState::new(
             std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             camino::Utf8PathBuf::from("/tmp/nowhere"),
             HelixTheme::default(),
-            crate::keymap::Keymap::default(),
+            Keymap::default(),
         )
     }
 
     #[test]
     fn a_report_gets_its_own_window_and_is_replaced_in_place() {
+        use crate::tui::pane_manager::Window;
         let mut state = empty_state();
         let first = ReportComponent::show(
             &mut state,
@@ -301,13 +324,16 @@ mod tests {
     /// A report is not part of the conversation, so the session never carries one.
     #[test]
     fn a_report_is_never_saved_in_the_session() {
+        use crate::session::Session;
         let mut state = empty_state();
         ReportComponent::show(&mut state, "t".to_string(), "m".to_string());
-        let session = crate::session::Session::from_state(&state);
+        let session = Session::from_state(&state);
         assert!(session.panes.is_empty(), "{:?}", session.panes.len());
     }
 
-    fn global_data_with_a_report(state: AppState) -> GlobalData<AppState, AppSignal> {
+    fn global_data_with_a_report(
+        state: crate::tui::state::AppState,
+    ) -> GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal> {
         let (main_tx, _) = mpsc::channel(8);
         let size = vp_width(80) + vp_height(24);
         GlobalData::try_to_create_instance(
@@ -327,6 +353,8 @@ mod tests {
     /// A report is read and gone: closing its window leaves nothing in `AppState`.
     #[test]
     fn esc_closes_the_window_and_drops_the_report() {
+        use crate::tui::app::Id;
+        use crate::tui::pane_manager::Window;
         let mut state = empty_state();
         let id = ReportComponent::show(&mut state, "t".to_string(), "m".to_string());
         let mut global_data = global_data_with_a_report(state);

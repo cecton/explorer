@@ -1,15 +1,16 @@
-use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
-
 pub(crate) fn display_width(text: &str) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
     if text.is_ascii() {
         return text.len();
     }
-    text.graphemes(true).map(UnicodeWidthStr::width).sum()
+    text.graphemes(true)
+        .map(unicode_width::UnicodeWidthStr::width)
+        .sum()
 }
 
 /// Cuts `text` to at most `width` display columns, on a grapheme boundary.
 pub(crate) fn truncate(text: &str, width: usize) -> String {
+    use unicode_segmentation::UnicodeSegmentation;
     if text.is_ascii() {
         let mut end = width.min(text.len());
         // CRLF is one grapheme cluster, two columns: never cut between the two bytes.
@@ -39,6 +40,7 @@ pub(crate) fn wrap(text: &str, width: usize) -> Vec<(usize, String)> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let mut base = 0;
+    use unicode_segmentation::UnicodeSegmentation;
     for paragraph in text.split('\n') {
         let mut line = String::new();
         let mut start = base;
@@ -127,6 +129,7 @@ mod tests {
         ];
         for sample in samples {
             assert_eq!(display_width(sample), gc(sample), "{sample:?}");
+            use unicode_segmentation::UnicodeSegmentation;
             for grapheme in sample.graphemes(true) {
                 assert_eq!(display_width(grapheme), gc(grapheme), "{grapheme:?}");
             }

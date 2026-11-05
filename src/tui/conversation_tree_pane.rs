@@ -1,14 +1,8 @@
-use crate::agent::turn::spinner_char;
-use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
-use crate::tui::state::{PendingTurn, RowTarget};
-use crate::tui::text_layout::{display_width, truncate, wrap};
-use crate::tui::*;
-use nucleo::pattern::{Atom, AtomKind, CaseMatching, Normalization, Pattern};
-use nucleo::{Config, Matcher, Utf32Str};
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::cmp::Ordering;
 use std::collections::HashSet;
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 
 const GUTTER_GAP: &str = "   ";
 const SCROLL_STEP: usize = 3;
@@ -33,7 +27,7 @@ pub(crate) enum Branch {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct TreeRow {
-    pub target: RowTarget,
+    pub target: crate::tui::state::RowTarget,
     /// One entry per level: whether the fork above still has branches below this row.
     pub rails: Vec<bool>,
     pub fold: Fold,
@@ -41,7 +35,13 @@ pub(crate) struct TreeRow {
 }
 
 impl TreeRow {
-    fn node(id: &NodeId, rails: Vec<bool>, fold: Fold, branch: Branch) -> Self {
+    fn node(
+        id: &crate::conversation::NodeId,
+        rails: Vec<bool>,
+        fold: Fold,
+        branch: Branch,
+    ) -> Self {
+        use crate::tui::state::RowTarget;
         Self {
             target: RowTarget::Node(id.clone()),
             rails,
@@ -55,7 +55,10 @@ impl TreeRow {
 /// conversation. A thread, the straight run of single replies below a root or a
 /// branch, folds into its head; the fork ending it stays visible. A root's descendants
 /// sit one level below it; after that, indentation grows only below a fork.
-pub(crate) fn layout_rows(tree: &ConversationTree, expanded: &HashSet<NodeId>) -> Vec<TreeRow> {
+pub(crate) fn layout_rows(
+    tree: &crate::conversation::ConversationTree,
+    expanded: &HashSet<crate::conversation::NodeId>,
+) -> Vec<TreeRow> {
     let mut rows = Vec::new();
     let mut rails = Vec::new();
     for root in tree.roots() {
@@ -67,9 +70,12 @@ pub(crate) fn layout_rows(tree: &ConversationTree, expanded: &HashSet<NodeId>) -
 /// The straight run below `head`: the single replies that fold into it, then the fork
 /// ending the run, if any. Both are empty when `head` is itself a fork.
 fn thread_below<'a>(
-    tree: &'a ConversationTree,
-    head: &NodeId,
-) -> (Vec<&'a NodeId>, Option<&'a NodeId>) {
+    tree: &'a crate::conversation::ConversationTree,
+    head: &crate::conversation::NodeId,
+) -> (
+    Vec<&'a crate::conversation::NodeId>,
+    Option<&'a crate::conversation::NodeId>,
+) {
     let mut hidden = Vec::new();
     let mut current = tree.node(head);
     while let Some([only]) = current.map(|node| node.children.as_slice()) {
@@ -84,13 +90,20 @@ fn thread_below<'a>(
 }
 
 /// Last of the replies folded into the thread head `head`: where `Right` lands.
-pub(crate) fn thread_end(tree: &ConversationTree, head: &NodeId) -> Option<NodeId> {
+pub(crate) fn thread_end(
+    tree: &crate::conversation::ConversationTree,
+    head: &crate::conversation::NodeId,
+) -> Option<crate::conversation::NodeId> {
     thread_below(tree, head).0.last().map(|id| (*id).clone())
 }
 
 /// The nodes on the way to `node`, itself included, that can hold a fold: forks and
 /// thread heads.
-pub(crate) fn folds_on_the_way(tree: &ConversationTree, node: &NodeId) -> Vec<NodeId> {
+pub(crate) fn folds_on_the_way(
+    tree: &crate::conversation::ConversationTree,
+    node: &crate::conversation::NodeId,
+) -> Vec<crate::conversation::NodeId> {
+    use crate::conversation::NodeId;
     let is_fork = |id: &NodeId| tree.node(id).is_some_and(|node| node.children.len() > 1);
     tree.lineage(node)
         .into_iter()
@@ -110,9 +123,9 @@ fn fold_of(foldable: bool, expanded: bool) -> Fold {
 }
 
 fn push_thread(
-    tree: &ConversationTree,
-    expanded: &HashSet<NodeId>,
-    head: &NodeId,
+    tree: &crate::conversation::ConversationTree,
+    expanded: &HashSet<crate::conversation::NodeId>,
+    head: &crate::conversation::NodeId,
     branch: Branch,
     rails: &mut Vec<bool>,
     rows: &mut Vec<TreeRow>,
@@ -157,9 +170,9 @@ fn push_thread(
 }
 
 fn push_branches(
-    tree: &ConversationTree,
-    expanded: &HashSet<NodeId>,
-    fork: &Node,
+    tree: &crate::conversation::ConversationTree,
+    expanded: &HashSet<crate::conversation::NodeId>,
+    fork: &crate::conversation::Node,
     rails: &mut Vec<bool>,
     rows: &mut Vec<TreeRow>,
 ) {
@@ -182,13 +195,13 @@ type Ranges = Vec<(usize, usize)>;
 /// A node the filter kept, with what matched in its title and in its summary.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct FilterMatch {
-    pub node: NodeId,
+    pub node: crate::conversation::NodeId,
     pub title: Ranges,
     pub summary: Ranges,
 }
 
 /// The summary shown under a node's title, when it says something else.
-fn shown_summary(node: &Node) -> Option<&str> {
+fn shown_summary(node: &crate::conversation::Node) -> Option<&str> {
     node.summary
         .as_deref()
         .filter(|summary| *summary != node.display_title())
@@ -196,14 +209,17 @@ fn shown_summary(node: &Node) -> Option<&str> {
 
 /// The nodes holding every word of `query` in their title or their summary, in any
 /// order: best match first, then newest first.
-pub(crate) fn filter_nodes(tree: &ConversationTree, query: &str) -> Vec<FilterMatch> {
-    let pattern = Pattern::new(
+pub(crate) fn filter_nodes(
+    tree: &crate::conversation::ConversationTree,
+    query: &str,
+) -> Vec<FilterMatch> {
+    let pattern = nucleo::pattern::Pattern::new(
         query,
-        CaseMatching::Smart,
-        Normalization::Smart,
-        AtomKind::Substring,
+        nucleo::pattern::CaseMatching::Smart,
+        nucleo::pattern::Normalization::Smart,
+        nucleo::pattern::AtomKind::Substring,
     );
-    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
     let mut chars = Vec::new();
     let mut scored: Vec<(u32, FilterMatch)> = tree
         .nodes()
@@ -218,7 +234,7 @@ pub(crate) fn filter_nodes(tree: &ConversationTree, query: &str) -> Vec<FilterMa
             chars.extend(text.chars());
             // Nucleo misses a substring that ends a non-ASCII haystack.
             chars.push('\n');
-            let score = pattern.score(Utf32Str::Unicode(&chars), &mut matcher)?;
+            let score = pattern.score(nucleo::Utf32Str::Unicode(&chars), &mut matcher)?;
             let mut indices = Vec::new();
             for atom in &pattern.atoms {
                 push_occurrences(atom, &chars, &mut matcher, &mut indices);
@@ -242,12 +258,17 @@ pub(crate) fn filter_nodes(tree: &ConversationTree, query: &str) -> Vec<FilterMa
 
 /// Every place `atom` matches in `chars`, as char indices: an atom alone reports only
 /// the first one.
-fn push_occurrences(atom: &Atom, chars: &[char], matcher: &mut Matcher, indices: &mut Vec<u32>) {
+fn push_occurrences(
+    atom: &nucleo::pattern::Atom,
+    chars: &[char],
+    matcher: &mut nucleo::Matcher,
+    indices: &mut Vec<u32>,
+) {
     let mut from = 0;
     let mut found = Vec::new();
     while from < chars.len() {
         found.clear();
-        let rest = Utf32Str::Unicode(&chars[from..]);
+        let rest = nucleo::Utf32Str::Unicode(&chars[from..]);
         if atom.indices(rest, matcher, &mut found).is_none() {
             break;
         }
@@ -330,9 +351,11 @@ struct Line {
     text: String,
 }
 
-fn state_marker(meta: &Metadata, spinner_tick: u8) -> Option<char> {
+fn state_marker(meta: &crate::conversation::Metadata, spinner_tick: u8) -> Option<char> {
+    use crate::conversation::NodeStatus;
+    use crate::conversation::NodeType;
     match (meta.status, meta.node_type) {
-        (Some(NodeStatus::Running), _) => Some(spinner_char(spinner_tick)),
+        (Some(NodeStatus::Running), _) => Some(crate::agent::turn::spinner_char(spinner_tick)),
         (Some(NodeStatus::Failed), _) => Some('✗'),
         (_, Some(NodeType::Compact)) => Some('≡'),
         _ => None,
@@ -343,7 +366,11 @@ fn state_marker(meta: &Metadata, spinner_tick: u8) -> Option<char> {
 /// will follow. An entry whose anchor row is not shown (folded away, or a root prompt
 /// whose window shows no node yet) is left out: the queue is not part of the tree, so
 /// it cannot invent a row for a node that is not on screen.
-pub(crate) fn with_queued(rows: Vec<TreeRow>, queue: &[PendingTurn]) -> Vec<TreeRow> {
+pub(crate) fn with_queued(
+    rows: Vec<TreeRow>,
+    queue: &[crate::tui::state::PendingTurn],
+) -> Vec<TreeRow> {
+    use crate::tui::state::RowTarget;
     let mut extra: Vec<Vec<TreeRow>> = vec![Vec::new(); rows.len()];
     for (position, entry) in queue.iter().enumerate() {
         let Some(parent) = &entry.parent else {
@@ -379,9 +406,10 @@ pub(crate) fn with_queued(rows: Vec<TreeRow>, queue: &[PendingTurn]) -> Vec<Tree
 /// after the node's row and one level below it.
 pub(crate) fn with_agents(
     rows: Vec<TreeRow>,
-    tree: &ConversationTree,
-    shown: &HashSet<NodeId>,
+    tree: &crate::conversation::ConversationTree,
+    shown: &HashSet<crate::conversation::NodeId>,
 ) -> Vec<TreeRow> {
+    use crate::tui::state::RowTarget;
     if shown.is_empty() {
         return rows;
     }
@@ -431,7 +459,8 @@ fn queue_glyph(position: usize) -> char {
 }
 
 /// What a provisional row shows: the first line of the prompt its window holds.
-fn queued_text(state: &AppState, row: &TreeRow) -> String {
+fn queued_text(state: &crate::tui::state::AppState, row: &TreeRow) -> String {
+    use crate::tui::state::RowTarget;
     let RowTarget::Queued { window, .. } = &row.target else {
         return String::new();
     };
@@ -496,7 +525,7 @@ fn row_continuation_prefix(row: &TreeRow, hangs: bool) -> String {
 
 /// `hash +N` of a node's commits, tip first: the walk a click on it opens. The
 /// metadata stores them oldest first.
-fn commit_label(node: &Node) -> Option<String> {
+fn commit_label(node: &crate::conversation::Node) -> Option<String> {
     let tip = node.meta.commits.last()?;
     let short: String = tip.chars().take(7).collect();
     Some(match node.meta.commits.len() {
@@ -515,7 +544,7 @@ pub struct ConversationTreeComponent {
     /// `Some` only on a head line whose node has commits.
     label_zones: Vec<Option<(usize, usize)>>,
     /// Selection as of the last render; a change re-anchors the scroll onto it.
-    shown_selection: Option<RowTarget>,
+    shown_selection: Option<crate::tui::state::RowTarget>,
     /// Time and row of the last click, to recognize a double click.
     last_click: Option<(Instant, usize)>,
 }
@@ -523,10 +552,16 @@ pub struct ConversationTreeComponent {
 impl ConversationTreeComponent {
     fn handle_input(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::discussion_pane::DiscussionComponent;
+        use crate::tui::git_log_pane::GitLogPaneComponent;
+        use crate::tui::model_picker::ModelPickerComponent;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::ModelPickerPurpose;
+        use crate::tui::state::RowTarget;
         let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;
         let window = Window::ConversationTree;
@@ -875,10 +910,13 @@ impl ConversationTreeComponent {
 
     /// Asks the summary model again for an untitled node the cursor just landed on.
     fn retitle_selected(
-        state: &mut AppState,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-        id: NodeId,
+        state: &mut crate::tui::state::AppState,
+        main_tx: tokio::sync::mpsc::Sender<
+            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+        >,
+        id: crate::conversation::NodeId,
     ) {
+        use crate::tui::state::AppSignal;
         let Some(backend) = state
             .agent
             .summary_model
@@ -944,7 +982,7 @@ impl ConversationTreeComponent {
         }
     }
 
-    pub(crate) fn title(state: &AppState) -> String {
+    pub(crate) fn title(state: &crate::tui::state::AppState) -> String {
         // The tree is where a conversation starts, so it is where the repository says
         // whether one can: its title carries that instead of a status-bar segment.
         let name = if state.trusted {
@@ -961,7 +999,11 @@ impl ConversationTreeComponent {
 
     /// The row `selected` sits on. Without one, the newest root of the tree, or the
     /// best match of a filter.
-    fn selected_index(rows: &[TreeRow], selected: Option<&RowTarget>, filtering: bool) -> usize {
+    fn selected_index(
+        rows: &[TreeRow],
+        selected: Option<&crate::tui::state::RowTarget>,
+        filtering: bool,
+    ) -> usize {
         selected
             .and_then(|target| rows.iter().position(|row| &row.target == target))
             .or_else(|| {
@@ -974,7 +1016,7 @@ impl ConversationTreeComponent {
 
     /// The rows the pane shows: the tree, plus a provisional row per queued prompt; or
     /// the matches of the filter, flat.
-    fn rows(state: &AppState) -> Vec<TreeRow> {
+    fn rows(state: &crate::tui::state::AppState) -> Vec<TreeRow> {
         let tree = state.conversations.read();
         if state.tree_view.filtering() {
             return flat_rows(&filter_nodes(&tree, state.tree_view.query.text()));
@@ -990,7 +1032,7 @@ impl ConversationTreeComponent {
     }
 
     /// Selects `target` for the unfiltered tree, opening the folds that hide its node.
-    fn reveal(state: &mut AppState, target: RowTarget) {
+    fn reveal(state: &mut crate::tui::state::AppState, target: crate::tui::state::RowTarget) {
         if let Some(id) = target.node() {
             let folds = folds_on_the_way(&state.conversations.read(), id);
             state
@@ -1001,14 +1043,18 @@ impl ConversationTreeComponent {
         state.tree_view.selected = Some(target);
     }
 
-    fn select(state: &mut AppState, rows: &[TreeRow], index: usize) {
+    fn select(state: &mut crate::tui::state::AppState, rows: &[TreeRow], index: usize) {
         if let Some(row) = rows.get(index.min(rows.len().saturating_sub(1))) {
             state.tree_view.selected = Some(row.target.clone());
         }
     }
 
     /// Nearest ancestor that can be folded: the fork or root a branch hangs from.
-    fn foldable_ancestor(rows: &[TreeRow], tree: &ConversationTree, id: &NodeId) -> Option<usize> {
+    fn foldable_ancestor(
+        rows: &[TreeRow],
+        tree: &crate::conversation::ConversationTree,
+        id: &crate::conversation::NodeId,
+    ) -> Option<usize> {
         let mut current = tree.node(id)?.parent.clone();
         while let Some(ancestor) = current {
             if let Some(index) = rows
@@ -1023,10 +1069,13 @@ impl ConversationTreeComponent {
     }
 
     fn open_commits(
-        state: &mut AppState,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-        id: &NodeId,
+        state: &mut crate::tui::state::AppState,
+        main_tx: tokio::sync::mpsc::Sender<
+            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+        >,
+        id: &crate::conversation::NodeId,
     ) {
+        use crate::tui::git_log_pane::GitLogPaneComponent;
         let commits: Vec<[u8; 20]> = state
             .conversations
             .read()
@@ -1045,7 +1094,8 @@ impl ConversationTreeComponent {
         }
     }
 
-    fn delete_selected(state: &mut AppState, rows: &[TreeRow], index: usize) {
+    fn delete_selected(state: &mut crate::tui::state::AppState, rows: &[TreeRow], index: usize) {
+        use crate::tui::pane_manager::Window;
         let Some(id) = rows.get(index).and_then(|row| row.target.node().cloned()) else {
             return;
         };
@@ -1096,17 +1146,24 @@ impl ConversationTreeComponent {
     }
 }
 
-impl TitleRow for ConversationTreeComponent {
+impl crate::tui::title_row::TitleRow for ConversationTreeComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        state: &mut AppState,
+        state: &mut crate::tui::state::AppState,
     ) -> usize {
         if !state.tree_view.search_active {
             let title = Self::title(state);
-            render_pane_title(ops, pane_box, &title, false, &state.theme, focused);
+            crate::tui::title_row::render_pane_title(
+                ops,
+                pane_box,
+                &title,
+                false,
+                &state.theme,
+                focused,
+            );
             return 1;
         }
         let origin = pane_box.style_adjusted_bounds.origin_pos;
@@ -1115,10 +1172,13 @@ impl TitleRow for ConversationTreeComponent {
             .bounds_size
             .col_width
             .as_u16();
-        let (bg_rgb, fg_rgb) = title_bar_colors(focused, &state.theme);
+        let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(focused, &state.theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
-        let color_selection = TuiColor::from(title_selection_bg(focused, &state.theme));
+        let color_selection = TuiColor::from(crate::tui::title_row::title_selection_bg(
+            focused,
+            &state.theme,
+        ));
         let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
         *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
         *ops += RenderOpCommon::SetBgColor(color_bg);
@@ -1141,7 +1201,13 @@ impl TitleRow for ConversationTreeComponent {
 }
 
 /// Whether an untitled finished node has something to describe and no retitle is running.
-fn needs_retitle(id: &NodeId, node: &Node, has_reply: bool, retitling: &HashSet<NodeId>) -> bool {
+fn needs_retitle(
+    id: &crate::conversation::NodeId,
+    node: &crate::conversation::Node,
+    has_reply: bool,
+    retitling: &HashSet<crate::conversation::NodeId>,
+) -> bool {
+    use crate::conversation::NodeStatus;
     node.title.is_none()
         && node.meta.status != Some(NodeStatus::Running)
         && (node.meta.status == Some(NodeStatus::Done)
@@ -1150,7 +1216,9 @@ fn needs_retitle(id: &NodeId, node: &Node, has_reply: bool, retitling: &HashSet<
         && !retitling.contains(id)
 }
 
-impl Component<AppState, AppSignal> for ConversationTreeComponent {
+impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
+    for ConversationTreeComponent
+{
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -1159,10 +1227,11 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         input_event: InputEvent,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::state::RowTarget;
         let before = global_data.state.tree_view.selected.clone();
         let propagation = self.handle_input(global_data, input_event, has_focus)?;
         let state = &mut global_data.state;
@@ -1177,11 +1246,15 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
+        use crate::conversation::NodeStatus;
+        use crate::conversation::NodeType;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::RowTarget;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -1197,7 +1270,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             let was_at_scroll_max = state.pane_manager.window_at_scroll_max(&window);
             state.pane_manager.set_window_page_size(&window, total_rows);
 
-            let tree_handle = state.conversations.clone();
+            let tree_handle = std::sync::Arc::clone(&state.conversations);
             let tree = tree_handle.read();
             let filtering = state.tree_view.filtering();
             let matches = if filtering {
@@ -1223,8 +1296,12 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             state.tree_view.selected = selected_target.clone();
 
             let theme = &state.theme;
-            let pane_bg = theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
-            let selected_bg = theme.ui_bg("ui.selection").unwrap_or(DEFAULT_SELECTION_BG);
+            let pane_bg = theme
+                .ui_bg("ui.background")
+                .unwrap_or(crate::tui::title_row::DEFAULT_BG);
+            let selected_bg = theme
+                .ui_bg("ui.selection")
+                .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG);
             let text_fg = theme
                 .ui_fg("ui.text")
                 .unwrap_or(RgbValue::from_u8(170, 170, 200));
@@ -1243,7 +1320,9 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             let running_fg = theme
                 .color_for_scope("diff.delta")
                 .unwrap_or(RgbValue::from_u8(250, 200, 90));
-            let error_fg = theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG);
+            let error_fg = theme
+                .ui_fg("error")
+                .unwrap_or(crate::tui::title_row::DEFAULT_ERROR_FG);
             let favorite_fg = theme
                 .ui_fg("ui.cursor.match")
                 .unwrap_or(RgbValue::from_u8(255, 200, 60));
@@ -1285,7 +1364,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 .iter()
                 .filter_map(|row| row.target.node())
                 .filter_map(|id| tree.node(id))
-                .map(|node| display_width(&node.created_display))
+                .map(|node| crate::tui::text_layout::display_width(&node.created_display))
                 .max()
                 .unwrap_or(0)
                 + GUTTER_GAP.len();
@@ -1294,7 +1373,8 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
             let mut selected_span = (0, 0);
             for (row_idx, row) in rows.iter().enumerate() {
                 let Some(id) = row.target.node() else {
-                    let prefix_width = gutter_width + display_width(&row_prefix(row));
+                    let prefix_width =
+                        gutter_width + crate::tui::text_layout::display_width(&row_prefix(row));
                     let width = pane_width.saturating_sub(prefix_width).max(1);
                     let text = match &row.target {
                         RowTarget::Agent { node, index } => tree
@@ -1308,7 +1388,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         row: row_idx,
                         kind: LineKind::Head,
                         offset: 0,
-                        text: truncate(&text, width),
+                        text: crate::tui::text_layout::truncate(&text, width),
                     });
                     if row_idx == selected {
                         selected_span = (start, lines.len());
@@ -1318,22 +1398,26 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                 let Some(node) = tree.node(id) else {
                     continue;
                 };
-                let prefix_width = gutter_width + display_width(&row_prefix(row));
-                let label_width = commit_label(node).map_or(0, |label| display_width(&label) + 1);
+                let prefix_width =
+                    gutter_width + crate::tui::text_layout::display_width(&row_prefix(row));
+                let label_width = commit_label(node).map_or(0, |label| {
+                    crate::tui::text_layout::display_width(&label) + 1
+                });
                 let text_width = pane_width.saturating_sub(prefix_width + label_width).max(1);
                 if row_idx != selected {
                     lines.push(Line {
                         row: row_idx,
                         kind: LineKind::Head,
                         offset: 0,
-                        text: truncate(node.display_title(), text_width),
+                        text: crate::tui::text_layout::truncate(node.display_title(), text_width),
                     });
                     continue;
                 }
                 let start = lines.len();
-                for (i, (offset, text)) in wrap(node.display_title(), text_width)
-                    .into_iter()
-                    .enumerate()
+                for (i, (offset, text)) in
+                    crate::tui::text_layout::wrap(node.display_title(), text_width)
+                        .into_iter()
+                        .enumerate()
                 {
                     lines.push(Line {
                         row: row_idx,
@@ -1347,7 +1431,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                     });
                 }
                 if let Some(summary) = shown_summary(node) {
-                    for (offset, text) in wrap(summary, text_width) {
+                    for (offset, text) in crate::tui::text_layout::wrap(summary, text_width) {
                         lines.push(Line {
                             row: row_idx,
                             kind: LineKind::Summary,
@@ -1417,8 +1501,9 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
                     };
                 let (rail_prefix, fold_text) = row_prefix_parts(row_info);
-                let fold_column = gutter_width + display_width(&rail_prefix);
-                let text_column = fold_column + display_width(fold_text);
+                let fold_column =
+                    gutter_width + crate::tui::text_layout::display_width(&rail_prefix);
+                let text_column = fold_column + crate::tui::text_layout::display_width(fold_text);
 
                 // A queued prompt or a sub-agent run is not a node: nothing to arm, fold
                 // or label.
@@ -1503,7 +1588,7 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         );
                         *ops += RenderOpCommon::ApplyColors(Some(style));
                         *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                        column += display_width(text);
+                        column += crate::tui::text_layout::display_width(text);
                     }
                 };
 
@@ -1527,10 +1612,11 @@ impl Component<AppState, AppSignal> for ConversationTreeComponent {
                         }
                         paint_text(&mut render_ops, type_fg);
                         if let Some(label) = commit_label(node) {
-                            let column = pane_width.saturating_sub(display_width(&label));
+                            let column = pane_width
+                                .saturating_sub(crate::tui::text_layout::display_width(&label));
                             paint(&mut render_ops, column, &label, hash_fg);
                             let slot = self.label_zones.last_mut().expect("pushed above");
-                            *slot = Some((column, display_width(&label)));
+                            *slot = Some((column, crate::tui::text_layout::display_width(&label)));
                         }
                     }
                     LineKind::TitleRest | LineKind::Summary => {
@@ -1566,11 +1652,14 @@ mod tests {
 
     #[test]
     fn the_title_says_the_repository_is_untrusted() {
+        use crate::keymap::Keymap;
+        use crate::tui::state::AppState;
+        use crate::tui::theme::HelixTheme;
         let mut state = AppState::new(
             std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
             camino::Utf8PathBuf::from("/tmp"),
             HelixTheme::default(),
-            crate::keymap::Keymap::default(),
+            Keymap::default(),
         );
         assert_eq!(
             ConversationTreeComponent::title(&state),
@@ -1586,7 +1675,8 @@ mod tests {
         );
     }
 
-    fn tree_with(paths: &[&str]) -> (tempfile::TempDir, ConversationTree) {
+    fn tree_with(paths: &[&str]) -> (tempfile::TempDir, crate::conversation::ConversationTree) {
+        use crate::conversation::ConversationTree;
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         for path in paths {
@@ -1598,6 +1688,8 @@ mod tests {
 
     #[test]
     fn only_finished_untitled_nodes_with_something_to_describe_are_retitled() {
+        use crate::conversation::NodeId;
+        use crate::conversation::NodeStatus;
         let (_tmp, tree) = tree_with(&["a1"]);
         let id = NodeId::new("a1");
         let mut node = tree.node(&id).unwrap().clone();
@@ -1643,7 +1735,8 @@ mod tests {
         rows.iter().map(row_prefix).collect()
     }
 
-    fn ids(names: &[&str]) -> HashSet<NodeId> {
+    fn ids(names: &[&str]) -> HashSet<crate::conversation::NodeId> {
+        use crate::conversation::NodeId;
         names.iter().map(|name| NodeId::new(name)).collect()
     }
 
@@ -1659,6 +1752,8 @@ mod tests {
 
     #[test]
     fn the_newest_root_is_selected_when_nothing_is() {
+        use crate::conversation::NodeId;
+        use crate::tui::state::RowTarget;
         let (_tmp, tree) = tree_with(&["a1/a2", "b1/b2"]);
         let rows = layout_rows(&tree, &ids(&["a1", "b1"]));
         assert_eq!(
@@ -1672,7 +1767,10 @@ mod tests {
         );
     }
 
-    fn described_tree(nodes: &[(&str, &str, &str)]) -> (tempfile::TempDir, ConversationTree) {
+    fn described_tree(
+        nodes: &[(&str, &str, &str)],
+    ) -> (tempfile::TempDir, crate::conversation::ConversationTree) {
+        use crate::conversation::ConversationTree;
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         for (path, title, summary) in nodes {
@@ -1744,6 +1842,7 @@ mod tests {
 
     #[test]
     fn matches_are_byte_ranges_of_the_title_and_of_the_summary() {
+        use crate::conversation::NodeId;
         let (_tmp, tree) =
             described_tree(&[("a1", "Café queue", "Le café: the queue, then the café")]);
         let matches = filter_nodes(&tree, "café queue");
@@ -1903,7 +2002,7 @@ mod tests {
     fn label_zone_hit_test_is_pane_relative() {
         let pane_width = 120;
         let label = "abc1234 +2";
-        let width = display_width(label);
+        let width = crate::tui::text_layout::display_width(label);
         let column = pane_width - width;
         let zone = (column, width);
         let inside = |col: usize| (zone.0..zone.0 + zone.1).contains(&col);
@@ -1980,6 +2079,9 @@ mod tests {
 
     #[test]
     fn a_queued_prompt_gets_a_row_below_the_node_it_will_follow() {
+        use crate::conversation::NodeId;
+        use crate::tui::state::PendingTurn;
+        use crate::tui::state::RowTarget;
         let (_tmp, tree) = tree_with(&["a1/a2", "b1"]);
         let rows = layout_rows(&tree, &ids(&["a1"]));
         let entry = |window: usize, parent: &str| PendingTurn {
@@ -2025,6 +2127,8 @@ mod tests {
 
     #[test]
     fn sub_agent_runs_hang_from_their_node_only_when_shown() {
+        use crate::conversation::NodeId;
+        use crate::tui::state::RowTarget;
         let (_tmp, tree) = tree_with(&["a1/a2", "a1/agents/1", "a1/agents/2", "b1/agents/1"]);
         let agent = |index| RowTarget::Agent {
             node: NodeId::new("a1"),
@@ -2070,6 +2174,8 @@ mod tests {
 
     #[test]
     fn a_queued_prompt_whose_anchor_is_folded_away_has_no_row() {
+        use crate::conversation::NodeId;
+        use crate::tui::state::PendingTurn;
         let (_tmp, tree) = tree_with(&["a1/a2"]);
         let rows = layout_rows(&tree, &HashSet::new());
         assert_eq!(rows.len(), 1, "a2 is folded into a1");
@@ -2092,6 +2198,7 @@ mod tests {
 
     #[test]
     fn thread_end_is_the_last_reply_before_a_leaf_or_a_fork() {
+        use crate::conversation::NodeId;
         let (_tmp, tree) = tree_with(&["a1/a2/a3", "b1/b2/b3/c4", "b1/b2/b3/d4", "e1"]);
         let end = |head: &str| thread_end(&tree, &NodeId::new(head));
         assert_eq!(end("a1"), Some(NodeId::new("a3")));
@@ -2102,6 +2209,7 @@ mod tests {
 
     #[test]
     fn folds_on_the_way_are_the_forks_and_thread_heads() {
+        use crate::conversation::NodeId;
         let (_tmp, tree) = tree_with(&["a1/a2/a3/b4/b5", "a1/a2/a3/c4"]);
         let folds = folds_on_the_way(&tree, &NodeId::new("b5"));
         let names: Vec<&str> = folds.iter().map(NodeId::as_str).collect();

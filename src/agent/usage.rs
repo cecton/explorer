@@ -1,12 +1,10 @@
-use camino::Utf8PathBuf;
-use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::time::Duration;
 
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /// The stretch of time one limit of a subscription covers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Span {
     FiveHours,
@@ -15,7 +13,7 @@ pub enum Span {
 }
 
 /// How much of one limit is used, and when it starts over.
-#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct UsageWindow {
     pub span: Span,
     pub percent: u32,
@@ -24,7 +22,7 @@ pub struct UsageWindow {
 }
 
 /// What a subscription reports of its limits, shortest window first.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Usage {
     pub windows: Vec<UsageWindow>,
     /// What an OpenRouter key reports of its own spending; `None` for a subscription.
@@ -34,7 +32,7 @@ pub struct Usage {
 
 /// What an OpenRouter key reports of its own spending. Money is in micro-dollars
 /// (10⁻⁶ USD), the finest unit the API reports, kept integral.
-#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct KeyMoney {
     /// Total credit spent on the key, whatever the window of its limit.
     pub spent: u64,
@@ -53,7 +51,7 @@ pub struct KeyMoney {
 
 /// What is left of the account's purchased credit: `left` of `total`, the purchases
 /// that paid for it. Micro-dollars like [`KeyMoney`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Credit {
     pub left: u64,
     pub total: u64,
@@ -179,19 +177,19 @@ fn micros(usd: f64) -> u64 {
     (usd * 1_000_000.0).round() as u64
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct GoReply {
     usage: GoUsage,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct GoUsage {
     rolling: Option<GoWindow>,
     weekly: Option<GoWindow>,
     monthly: Option<GoWindow>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct GoWindow {
     percent: u32,
     #[serde(rename = "resetsAt")]
@@ -263,19 +261,19 @@ pub async fn fetch(url: &str, token: &str) -> Result<Usage, String> {
     parse_go(&body)
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct KimiReply {
     usages: KimiUsages,
 }
 
-#[derive(Deserialize, Default)]
+#[derive(serde::Deserialize, Default)]
 struct KimiUsages {
     limit_5h: Option<KimiWindow>,
     limit_7d: Option<KimiWindow>,
     limit_month_total: Option<KimiWindow>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct KimiWindow {
     used_ratio: f64,
     reset_time: String,
@@ -334,9 +332,10 @@ pub async fn fetch_kimi(url: &str, token: &str) -> Result<Usage, String> {
 
 /// `<data_dir>/usage.json`: a subscription is the same in every repository, so its
 /// last known usage is not part of a repository's session.
-fn store_path() -> Option<Utf8PathBuf> {
-    directories::ProjectDirs::from("", "", "explorer")
-        .and_then(|dirs| Utf8PathBuf::from_path_buf(dirs.data_dir().join("usage.json")).ok())
+fn store_path() -> Option<camino::Utf8PathBuf> {
+    directories::ProjectDirs::from("", "", "explorer").and_then(|dirs| {
+        camino::Utf8PathBuf::from_path_buf(dirs.data_dir().join("usage.json")).ok()
+    })
 }
 
 /// The last known usage of each endpoint, by endpoint name. A missing or unreadable
@@ -375,17 +374,17 @@ pub fn save(usage: &HashMap<String, Usage>) {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct ClineReply {
     data: ClineData,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct ClineData {
     limits: Vec<ClineLimit>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct ClineLimit {
     #[serde(rename = "type")]
     kind: String,
@@ -478,12 +477,12 @@ pub async fn fetch_cline(url: &str, token: &str) -> Result<Usage, String> {
     parse_cline(&body)
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct OpenRouterReply {
     data: OpenRouterKey,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct OpenRouterKey {
     usage: f64,
     limit: Option<f64>,
@@ -493,12 +492,12 @@ struct OpenRouterKey {
     limit_reset: Option<String>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct CreditsReply {
     data: Credits,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct Credits {
     total_credits: f64,
     total_usage: f64,

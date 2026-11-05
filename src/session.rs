@@ -1,30 +1,15 @@
-use crate::agent::mcp::McpServerDecl;
-use crate::config::Alias;
-use crate::conversation::NodeId;
-use crate::loader::{LoadedFile, file_key_for_path, path_for_file_key};
-use crate::tui::AppState;
-use crate::tui::DiscussionState;
-use crate::tui::GitLogWindowState;
-use crate::tui::InputLine;
-use crate::tui::LogSource;
-use crate::tui::NodeHighlights;
-use crate::tui::pane_manager::{PaneSize, Window, WindowState};
-use crate::tui::{RgbValue, SYMBOL_PALETTE, SymbolHighlightGroup};
-use camino::{Utf8Path, Utf8PathBuf};
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 pub const SESSION_VERSION: u32 = 4;
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     #[serde(default)]
     pub version: u32,
     #[serde(default)]
-    pub repo_root: Utf8PathBuf,
+    pub repo_root: camino::Utf8PathBuf,
     #[serde(default)]
     pub panes: Vec<PaneEntry>,
     #[serde(default)]
@@ -45,13 +30,13 @@ pub struct Session {
     pub conversation_query: String,
     /// Highlights in the prompts and replies of conversation nodes, by node id.
     #[serde(default)]
-    pub discussion_highlights: HashMap<String, NodeHighlights>,
+    pub discussion_highlights: HashMap<String, crate::tui::state::NodeHighlights>,
     /// MCP servers of this repository, started with Explorer.
     #[serde(default)]
-    pub mcp_servers: Vec<McpServerDecl>,
+    pub mcp_servers: Vec<crate::agent::mcp::McpServerDecl>,
     /// Aliases of this repository.
     #[serde(default)]
-    pub aliases: Vec<Alias>,
+    pub aliases: Vec<crate::config::Alias>,
     /// The user allowed agent turns in this repository. No turn runs without it.
     #[serde(default)]
     pub trusted: bool,
@@ -61,7 +46,7 @@ pub struct Session {
 /// they go stale the moment a file changes outside the app — so restore re-queries
 /// rust-analyzer via `origin_path`/`origin_line`/`origin_char`/`origin_word`, the
 /// same (file, line, col) stable lookup key used for the live rebuild-on-edit path.
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct SessionSymbolGroup {
     pub origin_path: String,
     pub origin_line: u32,
@@ -71,7 +56,7 @@ pub struct SessionSymbolGroup {
     pub color: [u8; 3],
 }
 
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind")]
 pub enum PaneEntry {
     #[serde(rename = "file_preview")]
@@ -84,7 +69,7 @@ pub enum PaneEntry {
     #[serde(rename = "terminal")]
     Terminal {
         command: Option<String>,
-        cwd: Utf8PathBuf,
+        cwd: camino::Utf8PathBuf,
         is_command_pane: bool,
         pane_size: SerializablePaneSize,
     },
@@ -92,7 +77,7 @@ pub enum PaneEntry {
     #[serde(rename = "git_log")]
     GitLog {
         id: usize,
-        source: LogSource,
+        source: crate::tui::state::LogSource,
         query: String,
         scroll: usize,
         pane_size: SerializablePaneSize,
@@ -120,7 +105,7 @@ pub enum PaneEntry {
     },
 }
 
-#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SerializablePaneSize {
     Full,
@@ -132,12 +117,13 @@ pub enum SerializablePaneSize {
 #[derive(Clone, Debug)]
 pub struct TerminalRestoreInfo {
     pub command: Option<String>,
-    pub cwd: Utf8PathBuf,
+    pub cwd: camino::Utf8PathBuf,
     pub is_command_pane: bool,
 }
 
-impl From<PaneSize> for SerializablePaneSize {
-    fn from(value: PaneSize) -> Self {
+impl From<crate::tui::pane_manager::PaneSize> for SerializablePaneSize {
+    fn from(value: crate::tui::pane_manager::PaneSize) -> Self {
+        use crate::tui::pane_manager::PaneSize;
         match value {
             PaneSize::Full => Self::Full,
             PaneSize::Half => Self::Half,
@@ -147,7 +133,7 @@ impl From<PaneSize> for SerializablePaneSize {
     }
 }
 
-impl From<SerializablePaneSize> for PaneSize {
+impl From<SerializablePaneSize> for crate::tui::pane_manager::PaneSize {
     fn from(value: SerializablePaneSize) -> Self {
         match value {
             SerializablePaneSize::Full => Self::Full,
@@ -159,7 +145,7 @@ impl From<SerializablePaneSize> for PaneSize {
 }
 
 impl Session {
-    pub fn from_state(state: &AppState) -> Self {
+    pub fn from_state(state: &crate::tui::state::AppState) -> Self {
         let snapshot = state.files.load();
         let panes: Vec<PaneEntry> = state
             .pane_manager
@@ -170,7 +156,7 @@ impl Session {
 
         let mut highlight_ranges = HashMap::new();
         for (key, ranges) in &state.highlight_ranges {
-            if let Some(path) = path_for_file_key(&snapshot, *key)
+            if let Some(path) = crate::loader::path_for_file_key(&snapshot, *key)
                 && let Ok(rel) = path.strip_prefix(&state.root)
             {
                 highlight_ranges.insert(rel.to_string(), ranges.clone());
@@ -181,7 +167,7 @@ impl Session {
             .symbol_highlights
             .iter()
             .filter_map(|group| {
-                let path = path_for_file_key(&snapshot, group.origin_file)?;
+                let path = crate::loader::path_for_file_key(&snapshot, group.origin_file)?;
                 let rel = path.strip_prefix(&state.root).ok()?;
                 Some(SessionSymbolGroup {
                     origin_path: rel.to_string(),
@@ -225,11 +211,20 @@ impl Session {
         }
     }
 
-    pub fn apply(self, state: &mut AppState) {
-        let canon = |p: &Utf8Path| -> Utf8PathBuf {
+    pub fn apply(self, state: &mut crate::tui::state::AppState) {
+        use crate::conversation::NodeId;
+        use crate::loader::LoadedFile;
+        use crate::tui::input_line::InputLine;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::pane_manager::WindowState;
+        use crate::tui::state::DiscussionState;
+        use crate::tui::state::GitLogWindowState;
+        use crate::tui::state::SymbolHighlightGroup;
+        use crate::tui::theme::HelixTheme;
+        let canon = |p: &camino::Utf8Path| -> camino::Utf8PathBuf {
             std::fs::canonicalize(p)
                 .ok()
-                .and_then(|c| Utf8PathBuf::from_path_buf(c).ok())
+                .and_then(|c| camino::Utf8PathBuf::from_path_buf(c).ok())
                 .unwrap_or_else(|| p.to_owned())
         };
         if canon(&self.repo_root) != canon(&state.root) {
@@ -239,18 +234,18 @@ impl Session {
         state.cargo_features = self.cargo_features.clone();
 
         if let Some(name) = &self.theme
-            && let Some(theme) = crate::tui::HelixTheme::from_name(name)
+            && let Some(theme) = HelixTheme::from_name(name)
         {
             state.theme = theme.clone();
             state.saved_theme = theme;
         }
 
-        let mut missing_paths: Vec<Utf8PathBuf> = Vec::new();
+        let mut missing_paths: Vec<camino::Utf8PathBuf> = Vec::new();
         let snapshot_before = state.files.load();
         for entry in &self.panes {
             if let PaneEntry::FilePreview { path, .. } = entry {
                 let abs = state.root.join(path);
-                if file_key_for_path(&snapshot_before, &abs).is_none() {
+                if crate::loader::file_key_for_path(&snapshot_before, &abs).is_none() {
                     missing_paths.push(abs);
                 }
             }
@@ -277,7 +272,7 @@ impl Session {
                     pane_size,
                 } => {
                     let abs = state.root.join(&path);
-                    if let Some(key) = file_key_for_path(&snapshot_after, &abs) {
+                    if let Some(key) = crate::loader::file_key_for_path(&snapshot_after, &abs) {
                         snapshot_after[key.0]
                             .needs_full_load
                             .store(true, Ordering::Relaxed);
@@ -438,7 +433,7 @@ impl Session {
         state.highlight_ranges.clear();
         for (rel, ranges) in self.highlight_ranges {
             let abs = state.root.join(&rel);
-            if let Some(key) = file_key_for_path(&snapshot, &abs) {
+            if let Some(key) = crate::loader::file_key_for_path(&snapshot, &abs) {
                 state.highlight_ranges.insert(key, ranges);
             }
         }
@@ -449,7 +444,7 @@ impl Session {
         state.symbol_highlights.clear();
         for entry in self.symbol_highlights {
             let abs = state.root.join(&entry.origin_path);
-            if let Some(origin_file) = file_key_for_path(&snapshot, &abs) {
+            if let Some(origin_file) = crate::loader::file_key_for_path(&snapshot, &abs) {
                 state.symbol_highlights.push(SymbolHighlightGroup {
                     qualified_name: entry.qualified_name,
                     origin_file,
@@ -458,21 +453,27 @@ impl Session {
                     origin_word: entry.origin_word,
                     origin_byte_start: None,
                     origin_byte_end: None,
-                    color: RgbValue::from_u8(entry.color[0], entry.color[1], entry.color[2]),
+                    color: r3bl_tui::RgbValue::from_u8(
+                        entry.color[0],
+                        entry.color[1],
+                        entry.color[2],
+                    ),
                     locations: Vec::new(),
                     needs_rebuild: true,
                 });
             }
         }
-        state.next_palette_index = state.symbol_highlights.len() % SYMBOL_PALETTE.len();
+        state.next_palette_index =
+            state.symbol_highlights.len() % crate::tui::state::SYMBOL_PALETTE.len();
     }
 }
 
 fn pane_entry_from_window(
-    window: &Window,
-    files: &[Arc<LoadedFile>],
-    state: &AppState,
+    window: &crate::tui::pane_manager::Window,
+    files: &[Arc<crate::loader::LoadedFile>],
+    state: &crate::tui::state::AppState,
 ) -> Option<PaneEntry> {
+    use crate::tui::pane_manager::Window;
     let root = &state.root;
     let window_state = state
         .pane_manager
@@ -482,7 +483,7 @@ fn pane_entry_from_window(
         .unwrap_or_default();
     match window {
         Window::FilePreview(key) => {
-            let path = path_for_file_key(files, *key)?;
+            let path = crate::loader::path_for_file_key(files, *key)?;
             let rel = path.strip_prefix(root).ok()?;
             Some(PaneEntry::FilePreview {
                 path: rel.to_string(),
@@ -526,7 +527,7 @@ fn pane_entry_from_window(
         Window::Terminal(id) => {
             // Editor terminals save as FilePreview so restore brings back the preview.
             if let Some(file_key) = state.terminal_to_preview.get(id)
-                && let Some(path) = path_for_file_key(files, *file_key)
+                && let Some(path) = crate::loader::path_for_file_key(files, *file_key)
                 && let Ok(rel) = path.strip_prefix(root)
             {
                 return Some(PaneEntry::FilePreview {
@@ -566,7 +567,7 @@ impl std::fmt::Display for SessionError {
 
 impl std::error::Error for SessionError {}
 
-pub fn load_session(repo_root: &Utf8Path) -> Option<Session> {
+pub fn load_session(repo_root: &camino::Utf8Path) -> Option<Session> {
     let path = session_file_path(repo_root)?;
     let content = match std::fs::read_to_string(&path) {
         Ok(c) => c,
@@ -594,7 +595,10 @@ pub fn load_session(repo_root: &Utf8Path) -> Option<Session> {
     Some(session)
 }
 
-pub fn save_session(repo_root: &Utf8Path, state: &AppState) -> Result<(), SessionError> {
+pub fn save_session(
+    repo_root: &camino::Utf8Path,
+    state: &crate::tui::state::AppState,
+) -> Result<(), SessionError> {
     let path = session_file_path(repo_root).ok_or_else(|| {
         SessionError::Io(std::io::Error::other("could not determine session path"))
     })?;
@@ -603,25 +607,26 @@ pub fn save_session(repo_root: &Utf8Path, state: &AppState) -> Result<(), Sessio
     }
     let session = Session::from_state(state);
     let content = serde_json::to_string_pretty(&session).map_err(SessionError::Serialize)?;
-    let tmp_path: Utf8PathBuf = format!("{}.tmp", path.as_str()).into();
+    let tmp_path: camino::Utf8PathBuf = format!("{}.tmp", path.as_str()).into();
     std::fs::write(&tmp_path, content).map_err(SessionError::Io)?;
     std::fs::rename(&tmp_path, &path).map_err(SessionError::Io)
 }
 
-pub fn session_dir() -> Option<Utf8PathBuf> {
+pub fn session_dir() -> Option<camino::Utf8PathBuf> {
     directories::ProjectDirs::from("", "", "explorer")
-        .and_then(|dirs| Utf8PathBuf::from_path_buf(dirs.data_dir().join("sessions")).ok())
+        .and_then(|dirs| camino::Utf8PathBuf::from_path_buf(dirs.data_dir().join("sessions")).ok())
 }
 
 /// Stable 16-hex identifier of a repository, derived from its canonical root path.
-pub fn repo_hash(repo_root: &Utf8Path) -> Option<String> {
+pub fn repo_hash(repo_root: &camino::Utf8Path) -> Option<String> {
+    use sha2::Digest;
     let canonical = std::fs::canonicalize(repo_root).ok()?;
-    let canonical = Utf8PathBuf::from_path_buf(canonical).ok()?;
-    let hash = Sha256::digest(canonical.as_str().as_bytes());
+    let canonical = camino::Utf8PathBuf::from_path_buf(canonical).ok()?;
+    let hash = sha2::Sha256::digest(canonical.as_str().as_bytes());
     Some(hex::encode(&hash[..8]))
 }
 
-pub fn session_file_path(repo_root: &Utf8Path) -> Option<Utf8PathBuf> {
+pub fn session_file_path(repo_root: &camino::Utf8Path) -> Option<camino::Utf8PathBuf> {
     let dir = session_dir()?;
     let prefix = repo_hash(repo_root)?;
     Some(dir.join(format!("{prefix}.json")))
@@ -632,9 +637,9 @@ mod tests {
     use super::*;
     use crate::keymap::Keymap;
     use crate::loader::FileKey;
-    use crate::tui::HelixTheme;
-    use crate::tui::TerminalPane;
     use crate::tui::pane_manager::{PaneSize, Window, WindowState};
+    use crate::tui::state::TerminalPane;
+    use crate::tui::theme::HelixTheme;
     use arc_swap::ArcSwap;
     use camino::Utf8PathBuf;
     use parking_lot::Mutex;
@@ -649,7 +654,9 @@ mod tests {
         (dir, root)
     }
 
-    fn empty_state(root: Utf8PathBuf) -> AppState {
+    fn empty_state(root: Utf8PathBuf) -> crate::tui::state::AppState {
+        use crate::loader::LoadedFile;
+        use crate::tui::state::AppState;
         let files = Arc::new(ArcSwap::from_pointee(Vec::<Arc<LoadedFile>>::new()));
         AppState::new(files, root, HelixTheme::default(), Keymap::default())
     }
@@ -675,6 +682,7 @@ mod tests {
 
     #[test]
     fn session_serialization_round_trip() {
+        use crate::lsp::CargoFeatureSelection;
         let session = Session {
             version: SESSION_VERSION,
             repo_root: Utf8PathBuf::from("/tmp/repo"),
@@ -704,7 +712,7 @@ mod tests {
                 qualified_name: "crate::lib::add_numbers".to_string(),
                 color: [255, 100, 100],
             }],
-            cargo_features: crate::lsp::CargoFeatureSelection::Explicit {
+            cargo_features: CargoFeatureSelection::Explicit {
                 no_default_features: true,
                 features: vec!["foo".to_string()],
             },
@@ -739,6 +747,8 @@ mod tests {
 
     #[test]
     fn session_from_state_preserves_window_stack_order() {
+        use crate::loader::LoadedFile;
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
 
         let file_path = root.join("src/main.rs");
@@ -809,6 +819,7 @@ mod tests {
 
     #[test]
     fn session_apply_creates_stubs_and_restores_highlights() {
+        use crate::lsp::CargoFeatureSelection;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
 
@@ -826,7 +837,7 @@ mod tests {
                 m
             },
             symbol_highlights: Vec::new(),
-            cargo_features: crate::lsp::CargoFeatureSelection::default(),
+            cargo_features: CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
             conversation_query: String::new(),
@@ -859,6 +870,9 @@ mod tests {
 
     #[test]
     fn session_apply_batches_stubs_so_multiple_missing_files_get_distinct_keys() {
+        use crate::loader::LoadedFile;
+        use crate::lsp::CargoFeatureSelection;
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
 
         // Create one real file so we have a non-empty files list.
@@ -889,7 +903,7 @@ mod tests {
             ],
             highlight_ranges: HashMap::new(),
             symbol_highlights: Vec::new(),
-            cargo_features: crate::lsp::CargoFeatureSelection::default(),
+            cargo_features: CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
             conversation_query: String::new(),
@@ -924,6 +938,7 @@ mod tests {
 
     #[test]
     fn session_apply_stores_terminal_restore_infos() {
+        use crate::lsp::CargoFeatureSelection;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
 
@@ -938,7 +953,7 @@ mod tests {
             }],
             highlight_ranges: HashMap::new(),
             symbol_highlights: Vec::new(),
-            cargo_features: crate::lsp::CargoFeatureSelection::default(),
+            cargo_features: CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
             conversation_query: String::new(),
@@ -959,6 +974,7 @@ mod tests {
 
     #[test]
     fn session_apply_skips_when_repo_root_mismatches() {
+        use crate::lsp::CargoFeatureSelection;
         let (_dir_a, root_a) = temp_root();
         let (_dir_b, root_b) = temp_root();
         let mut state = empty_state(root_b.clone());
@@ -973,7 +989,7 @@ mod tests {
             }],
             highlight_ranges: HashMap::new(),
             symbol_highlights: Vec::new(),
-            cargo_features: crate::lsp::CargoFeatureSelection::default(),
+            cargo_features: CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
             conversation_query: String::new(),
@@ -997,6 +1013,9 @@ mod tests {
 
     #[test]
     fn session_apply_restores_symbol_groups() {
+        use crate::loader::LoadedFile;
+        use crate::lsp::CargoFeatureSelection;
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
 
         let file_path = root.join("src/util.rs");
@@ -1041,7 +1060,7 @@ mod tests {
                     color: [100, 200, 255],
                 },
             ],
-            cargo_features: crate::lsp::CargoFeatureSelection::default(),
+            cargo_features: CargoFeatureSelection::default(),
             theme: None,
             conversation_expanded: Vec::new(),
             conversation_query: String::new(),
@@ -1059,7 +1078,7 @@ mod tests {
         assert_eq!(group.origin_line, 0);
         assert_eq!(group.origin_char, 3);
         assert_eq!(group.origin_word.as_deref(), Some("add_numbers"));
-        assert_eq!(group.color, RgbValue::from_u8(255, 100, 100));
+        assert_eq!(group.color, r3bl_tui::RgbValue::from_u8(255, 100, 100));
         assert!(group.needs_rebuild);
         assert!(group.locations.is_empty());
         assert!(group.origin_byte_start.is_none());
@@ -1070,6 +1089,7 @@ mod tests {
 
     #[test]
     fn conversation_tree_pane_round_trips_with_expanded_set() {
+        use crate::conversation::NodeId;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
         state.pane_manager.window_stack = vec![Window::ConversationTree];
@@ -1114,6 +1134,7 @@ mod tests {
 
     #[test]
     fn aliases_round_trip_through_session() {
+        use crate::config::Alias;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
         let alias = Alias {
@@ -1161,6 +1182,7 @@ mod tests {
 
     #[test]
     fn mcp_servers_round_trip_through_session() {
+        use crate::agent::mcp::McpServerDecl;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
         let egui = McpServerDecl {
@@ -1179,6 +1201,8 @@ mod tests {
 
     #[test]
     fn discussion_highlights_round_trip_through_session() {
+        use crate::conversation::NodeId;
+        use crate::tui::state::NodeHighlights;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
         let node = NodeId::new("2026-10-05T14-32-07Z");
@@ -1245,6 +1269,9 @@ mod tests {
 
     #[test]
     fn git_log_pane_round_trips_with_branch_and_query() {
+        use crate::tui::input_line::InputLine;
+        use crate::tui::state::GitLogWindowState;
+        use crate::tui::state::LogSource;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
         state.pane_manager.window_stack = vec![Window::GitLog(7)];
@@ -1309,6 +1336,8 @@ mod tests {
 
     #[test]
     fn save_session_writes_a_file() {
+        use crate::loader::LoadedFile;
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
 
         let file_path = root.join("src/main.rs");

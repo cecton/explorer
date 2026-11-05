@@ -1,17 +1,14 @@
-use crate::agent::EndpointKind;
-use crate::tui::*;
-use nucleo::Matcher;
-use nucleo::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo::{Config, Utf32Str};
-use tokio::sync::mpsc;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 
 pub struct ModelPickerComponent {
     id: FlexBoxId,
-    picker: FuzzyPicker,
+    picker: crate::tui::fuzzy_picker::FuzzyPicker,
 }
 
 impl ModelPickerComponent {
     pub fn new(id: FlexBoxId) -> Self {
+        use crate::tui::fuzzy_picker::FuzzyPicker;
         Self {
             id,
             picker: FuzzyPicker::new(),
@@ -21,10 +18,14 @@ impl ModelPickerComponent {
     /// Opens the picker for `purpose`, preselecting the model in use, and retries the
     /// model lists that failed to load.
     pub(crate) fn open(
-        state: &mut AppState,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-        purpose: ModelPickerPurpose,
+        state: &mut crate::tui::state::AppState,
+        main_tx: tokio::sync::mpsc::Sender<
+            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+        >,
+        purpose: crate::tui::state::ModelPickerPurpose,
     ) {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::ModelPickerPurpose;
         // The model of a window whose turn is running is settled for the whole turn:
         // the turn already runs on it, and the node records the model it ran on. Once
         // the turn is over the reasoning on disk resumes on whatever is picked here.
@@ -65,7 +66,11 @@ impl ModelPickerComponent {
     }
 
     /// Closes the picker and gives the focus back to the window it was opened from.
-    fn close(state: &mut AppState) -> Option<ModelPickerPurpose> {
+    fn close(
+        state: &mut crate::tui::state::AppState,
+    ) -> Option<crate::tui::state::ModelPickerPurpose> {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::ModelPickerPurpose;
         state.pane_manager.remove_window(&Window::ModelPicker);
         state.model_picker.reset();
         let purpose = state.model_picker_purpose.take();
@@ -87,8 +92,12 @@ impl ModelPickerComponent {
 /// OpenAI-compatible server, taken from the configuration for the `claude` CLI.
 pub(crate) fn fetch_models(
     endpoint: &crate::agent::Endpoint,
-    main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+    main_tx: tokio::sync::mpsc::Sender<
+        TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+    >,
 ) {
+    use crate::agent::EndpointKind;
+    use crate::tui::state::AppSignal;
     let name = endpoint.name.clone();
     let kind = endpoint.kind.clone();
     tokio::spawn(async move {
@@ -116,20 +125,27 @@ pub(crate) fn fetch_models(
 }
 
 /// Fuzzy-matches `query` against every model spec; an empty query lists them all.
-pub(crate) fn run_model_match(query: &str, state: &AppState) -> Vec<(usize, Vec<u32>)> {
-    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+pub(crate) fn run_model_match(
+    query: &str,
+    state: &crate::tui::state::AppState,
+) -> Vec<(usize, Vec<u32>)> {
+    let pattern = nucleo::pattern::Pattern::parse(
+        query,
+        nucleo::pattern::CaseMatching::Smart,
+        nucleo::pattern::Normalization::Smart,
+    );
     let specs = &state.models.specs;
     if pattern.atoms.is_empty() {
         return (0..specs.len()).map(|idx| (idx, Vec::new())).collect();
     }
-    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
     let mut buf = Vec::new();
     let mut scored: Vec<(usize, u32, Vec<u32>)> = specs
         .iter()
         .enumerate()
         .filter_map(|(idx, spec)| {
             let text = spec.to_string();
-            let haystack = Utf32Str::new(&text, &mut buf);
+            let haystack = nucleo::Utf32Str::new(&text, &mut buf);
             let mut indices = Vec::new();
             pattern
                 .indices(haystack, &mut matcher, &mut indices)
@@ -147,13 +163,13 @@ pub(crate) fn run_model_match(query: &str, state: &AppState) -> Vec<(usize, Vec<
         .collect()
 }
 
-impl TitleRow for ModelPickerComponent {
+impl crate::tui::title_row::TitleRow for ModelPickerComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        state: &mut AppState,
+        state: &mut crate::tui::state::AppState,
     ) -> usize {
         let origin = pane_box.style_adjusted_bounds.origin_pos;
         let width = pane_box
@@ -174,10 +190,13 @@ impl TitleRow for ModelPickerComponent {
             .query
             .height(None, prompt, width, max_rows);
 
-        let (bg_rgb, fg_rgb) = title_bar_colors(focused, &state.theme);
+        let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(focused, &state.theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
-        let color_selection = TuiColor::from(title_selection_bg(focused, &state.theme));
+        let color_selection = TuiColor::from(crate::tui::title_row::title_selection_bg(
+            focused,
+            &state.theme,
+        ));
         let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
         let query = &mut state.model_picker.query;
 
@@ -206,7 +225,7 @@ impl TitleRow for ModelPickerComponent {
     }
 }
 
-impl Component<AppState, AppSignal> for ModelPickerComponent {
+impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for ModelPickerComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -215,10 +234,13 @@ impl Component<AppState, AppSignal> for ModelPickerComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::discussion_pane::DiscussionComponent;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::ModelPickerPurpose;
         let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;
         match &input_event {
@@ -276,11 +298,12 @@ impl Component<AppState, AppSignal> for ModelPickerComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
+        use crate::tui::pane_manager::Window;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;

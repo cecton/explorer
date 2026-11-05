@@ -1,28 +1,25 @@
-use crate::loader::{FileKey, LoadedFile};
-use crate::tui::*;
-use camino::Utf8PathBuf;
-use nucleo::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo::{Config, Matcher, Utf32Str};
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::mpsc;
 
-pub(crate) type PickerResultMsg = (u64, Vec<(Window, Vec<u32>)>);
+pub(crate) type PickerResultMsg = (u64, Vec<(crate::tui::pane_manager::Window, Vec<u32>)>);
 
 pub struct WindowPickerComponent {
     id: FlexBoxId,
-    picker: FuzzyPicker,
+    picker: crate::tui::fuzzy_picker::FuzzyPicker,
     generation: Arc<AtomicU64>,
-    results_tx: mpsc::Sender<PickerResultMsg>,
+    results_tx: tokio::sync::mpsc::Sender<PickerResultMsg>,
 }
 
 impl WindowPickerComponent {
     pub(crate) fn new(
         id: FlexBoxId,
-        results_tx: mpsc::Sender<PickerResultMsg>,
+        results_tx: tokio::sync::mpsc::Sender<PickerResultMsg>,
         generation: Arc<AtomicU64>,
     ) -> Self {
+        use crate::tui::fuzzy_picker::FuzzyPicker;
         Self {
             id,
             picker: FuzzyPicker::new(),
@@ -33,8 +30,10 @@ impl WindowPickerComponent {
 
     fn on_query_changed(
         &self,
-        state: &AppState,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+        state: &crate::tui::state::AppState,
+        main_tx: tokio::sync::mpsc::Sender<
+            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+        >,
     ) {
         Self::spawn_match(
             state,
@@ -45,11 +44,14 @@ impl WindowPickerComponent {
     }
 
     pub(crate) fn spawn_match(
-        state: &AppState,
+        state: &crate::tui::state::AppState,
         generation: Arc<AtomicU64>,
-        results_tx: mpsc::Sender<PickerResultMsg>,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+        results_tx: tokio::sync::mpsc::Sender<PickerResultMsg>,
+        main_tx: tokio::sync::mpsc::Sender<
+            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+        >,
     ) {
+        use crate::tui::state::AppSignal;
         let query = state.window_picker.query.text().to_string();
         let files = Arc::clone(&state.files);
         let root = state.root.clone();
@@ -70,9 +72,10 @@ impl WindowPickerComponent {
     }
 
     pub(crate) fn open_windows_results(
-        files: &[Arc<LoadedFile>],
-        window_stack: &[Window],
-    ) -> Vec<(Window, Vec<u32>)> {
+        files: &[Arc<crate::loader::LoadedFile>],
+        window_stack: &[crate::tui::pane_manager::Window],
+    ) -> Vec<(crate::tui::pane_manager::Window, Vec<u32>)> {
+        use crate::tui::pane_manager::Window;
         let mut seen: HashSet<Window> = HashSet::new();
         let mut results = Vec::new();
         for window in window_stack {
@@ -94,13 +97,13 @@ impl WindowPickerComponent {
     }
 }
 
-impl TitleRow for WindowPickerComponent {
+impl crate::tui::title_row::TitleRow for WindowPickerComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        state: &mut AppState,
+        state: &mut crate::tui::state::AppState,
     ) -> usize {
         let origin = pane_box.style_adjusted_bounds.origin_pos;
         let width = pane_box
@@ -117,10 +120,13 @@ impl TitleRow for WindowPickerComponent {
         .max(1);
         let height = state.window_picker.query.height(None, "", width, max_rows);
 
-        let (bg_rgb, fg_rgb) = title_bar_colors(focused, &state.theme);
+        let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(focused, &state.theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
-        let color_selection = TuiColor::from(title_selection_bg(focused, &state.theme));
+        let color_selection = TuiColor::from(crate::tui::title_row::title_selection_bg(
+            focused,
+            &state.theme,
+        ));
         let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
         let query = &mut state.window_picker.query;
 
@@ -161,13 +167,13 @@ struct RowAccents {
 /// Accent colors for terminal, agent and git rows in the picker.
 ///
 /// Pulls vivid, theme-defined syntax colors (preferring `function`) via
-/// [`HelixTheme::color_for_scope`], which walks each scope's fallback chain and
+/// [`crate::tui::theme::HelixTheme::color_for_scope`], which walks each scope's fallback chain and
 /// always resolves to a real color. Keeps the candidates that differ from
 /// `ui.text` and from each other, so these rows are never identical to file rows
 /// or to another kind; the default blue, green and mauve stand in for what the
 /// theme lacks. `constant` is intentionally excluded — it maps to the same color
 /// the picker uses for fuzzy-match highlights.
-fn row_accents(theme: &HelixTheme) -> RowAccents {
+fn row_accents(theme: &crate::tui::theme::HelixTheme) -> RowAccents {
     let text = theme.ui_fg("ui.text");
     let defaults = [
         RgbValue::from_u8(137, 180, 250),
@@ -194,17 +200,23 @@ fn row_accents(theme: &HelixTheme) -> RowAccents {
 
 fn run_file_name_match(
     query: &str,
-    files: &[Arc<LoadedFile>],
-    root: &Utf8PathBuf,
-    window_stack: &[Window],
-) -> Vec<(Window, Vec<u32>)> {
-    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+    files: &[Arc<crate::loader::LoadedFile>],
+    root: &camino::Utf8PathBuf,
+    window_stack: &[crate::tui::pane_manager::Window],
+) -> Vec<(crate::tui::pane_manager::Window, Vec<u32>)> {
+    use crate::loader::FileKey;
+    use crate::tui::pane_manager::Window;
+    let pattern = nucleo::pattern::Pattern::parse(
+        query,
+        nucleo::pattern::CaseMatching::Smart,
+        nucleo::pattern::Normalization::Smart,
+    );
 
     if pattern.atoms.is_empty() {
         return WindowPickerComponent::open_windows_results(files, window_stack);
     }
 
-    let mut matcher = Matcher::new(Config::DEFAULT.match_paths());
+    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT.match_paths());
     let mut buf = Vec::new();
     let mut scored: Vec<(FileKey, u32, Vec<u32>)> = files
         .iter()
@@ -212,7 +224,7 @@ fn run_file_name_match(
         .filter(|(_, f)| !f.removed.load(Ordering::Relaxed))
         .filter_map(|(i, file)| {
             let rel = file.path.strip_prefix(root).unwrap_or(&file.path);
-            let haystack = Utf32Str::new(rel.as_str(), &mut buf);
+            let haystack = nucleo::Utf32Str::new(rel.as_str(), &mut buf);
             let mut indices = Vec::new();
             pattern
                 .indices(haystack, &mut matcher, &mut indices)
@@ -230,7 +242,9 @@ fn run_file_name_match(
         .collect()
 }
 
-impl Component<AppState, AppSignal> for WindowPickerComponent {
+impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
+    for WindowPickerComponent
+{
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -239,10 +253,11 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::pane_manager::Window;
         match &input_event {
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Esc),
@@ -359,11 +374,17 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
+        use crate::tui::commit_diff_pane::CommitDiffPaneComponent;
+        use crate::tui::conversation_tree_pane::ConversationTreeComponent;
+        use crate::tui::discussion_pane::DiscussionComponent;
+        use crate::tui::git_log_pane::GitLogPaneComponent;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::report_pane::ReportComponent;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -421,10 +442,7 @@ impl Component<AppState, AppSignal> for WindowPickerComponent {
                     Window::Discussion(id) => {
                         (DiscussionComponent::title(state, *id), Some(accents.agent))
                     }
-                    Window::Report(id) => (
-                        crate::tui::report_pane::ReportComponent::title(state, *id),
-                        None,
-                    ),
+                    Window::Report(id) => (ReportComponent::title(state, *id), None),
                     Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => {
                         (String::new(), None)
                     }
@@ -463,6 +481,8 @@ mod tests {
 
     #[test]
     fn open_list_includes_every_window_but_pickers_in_stack_order() {
+        use crate::loader::FileKey;
+        use crate::tui::pane_manager::Window;
         // index 0: live file, index 1: removed file.
         let removed = LoadedFile::stub("gone.rs".into()); // stub() marks removed = true
         let files = vec![live_file("src/main.rs"), removed];
@@ -499,6 +519,7 @@ mod tests {
 
     #[test]
     fn row_accents_are_distinct_and_theme_sourced() {
+        use crate::tui::theme::HelixTheme;
         let theme = HelixTheme::default();
         let accents = row_accents(&theme);
         // Never identical to the file-row (ui.text) color, nor to each other.

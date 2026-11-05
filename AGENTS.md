@@ -121,8 +121,8 @@ cargo run --release
 # Format (required before every commit)
 cargo fmt
 
-# Lint (skips vendored r3bl dependencies)
-cargo clippy --no-deps
+# Lint (skips vendored r3bl dependencies; --all-targets covers the tests too)
+cargo clippy --no-deps --all-targets
 
 # Check without producing a binary
 cargo check
@@ -178,7 +178,7 @@ cargo test <module>::<test_name>
 
 1. Run `cargo fmt` — no exceptions. Commits must have formatted code.
 2. Run `cargo build` (or `cargo check`) to confirm there are no compile errors.
-3. Run `cargo clippy --no-deps` and address any warnings before merging.
+3. Run `cargo clippy --no-deps --all-targets` and address any warnings before merging. Without `--all-targets` the test modules are never linted, so a dead import there goes unnoticed.
 
 ---
 
@@ -240,10 +240,17 @@ Planned feature areas and their likely dependencies:
 
 ### Imports
 
-- Group `use` statements: standard library first, then external crates, then local modules.
-- Prefer importing the type directly over aliasing (`use camino::Utf8PathBuf` not `use camino::Utf8PathBuf as UtfBuf`).
-- Glob imports are fine when they reduce boilerplate for large, stable external APIs (e.g. `use r3bl_tui::*;` in a module that re-exports to its children).
-- Function-scoped `use` is fine for rarely-used imports — no need to hoist them to module level.
+A name is imported as close as possible to where it is used, never listed at the top of a file. This keeps the dependency visible in the code that has it, and out of sight elsewhere.
+
+- **At module level** (function signatures, `impl` headers, struct and enum fields, type aliases, constants, statics), `use` is not available: spell the path out in full. `crate::…` for this crate, `<crate>::…` for a dependency. The three exceptions, which may stay at the top of a file, are `use std::…`, `use core::…`/`use alloc::…` and `use r3bl_tui::*;`.
+- **Inside a function or a block**, `use` freely, at the start of the narrowest block that needs the names. A trait's methods need the trait in scope: import it in the function that calls them, e.g. `use std::io::Write;`.
+- **Types are imported, functions are not.** A type of this crate (a struct, enum, trait, type alias or union) is imported inside the body that names it and written short from there on — `Endpoint`, `EndpointKind`, `NodeStatus`, including in a struct literal, a pattern or an associated call. An enum is a type like any other: import it and write `Window::FilePreview`, not the full path. Write the variant alone (`FilePreview`) only where the body imports two enums that share it; there the pair `Mode::Commit` / `NodeType::Commit` is what tells them apart. Never import a single variant (`use crate::git::RefKind::Branch;`): import the enum and write `RefKind::Branch`, which cannot be confused with another enum's `Branch`. A function, method or constant keeps its `crate::…::` prefix at the call site: that is where the dependency on a module has to stay visible, and where one grep for `crate::tui::app::` still finds it. So `crate::tui::state::AppState` may appear in a signature and `AppState` in the body right below it: that difference is the rule, not an accident.
+- **Always spell paths from `crate::`**, never `super::` or `self::`, so one grep finds every dependency on a module. The exception is `use super::*;` in a `#[cfg(test)]` module.
+- **`r3bl_tui` is the one glob**, in tui code and in `keymap.rs`, because it is the UI's shared vocabulary: `GlobalData`, `InputEvent`, `FlexBox`, `RenderOpCommon`, the `throws!` family and `new_style!` appear in nearly every signature. Mark each of those lines `#[allow(clippy::wildcard_imports)]`. It brings `HashMap`/`HashSet` with it, aliased to the Fx hashers: a module that wants the std ones keeps its `use std::collections::{HashMap, HashSet};`.
+- **Never a glob otherwise**, including `use Window::*` for enum variants: a misspelled variant would bind instead of failing to compile.
+- **No re-exports.** Each item has one canonical path; `crate::tui::state::AppState`, never `crate::tui::AppState`.
+- **Call this crate's trait methods by full path** with an explicit receiver: `crate::tui::title_row::TitleRow::render_title_row(&mut pane, …)`. Do the same for r3bl's `Component` when a parent dispatches to a child. std and other external traits keep method syntax: `Arc::clone(&x)`, never `x.clone()` on a shared pointer.
+- `cargo xtask check-imports` enforces the module-level rule, the `super::` rule, the allowed globs, the full-path variant inside a body and the single-variant import. `clippy::wildcard_imports` and `clippy::clone_on_ref_ptr` are warnings in `src/main.rs`.
 
 ### Paths
 

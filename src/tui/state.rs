@@ -1,37 +1,16 @@
-use crate::agent::mcp::{McpHost, McpServerDecl};
-use crate::agent::turn::{TurnHandle, TurnOutcome};
-use crate::agent::usage::Usage;
-use crate::agent::{AgentConfig, Effort, ModelSpec};
-use crate::config::Alias;
-use crate::conversation::{ConversationTree, NodeId};
-use crate::git::{DiffLine, GitRef, LogHistory};
-use crate::keymap::Keymap;
-use crate::loader::{FileKey, LoadedFile};
-use crate::session::TerminalRestoreInfo;
-use crate::tui::RgbValue;
-use crate::tui::after_agents::AfterAgents;
-use crate::tui::command_line::CommandLine;
-use crate::tui::input_line::InputLine;
-use crate::tui::pane_manager::{DocPart, PaneManager, TextSelection, Window};
-use crate::tui::theme::HelixTheme;
-use crate::watcher::BatchedWatchEvent;
-use arc_swap::ArcSwap;
-use camino::Utf8PathBuf;
-use parking_lot::{Mutex, RwLock};
-use r3bl_tui::core::pty::{ControlledChildTerminationHandle, PtyInputEvent};
-use r3bl_tui::{MouseInput, OfsBufVT100, VPSize};
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::sync::mpsc;
 
 static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct FuzzyPickerState<T> {
-    pub query: InputLine,
+    pub query: crate::tui::input_line::InputLine,
     pub results: Vec<(T, Vec<u32>)>,
     pub selected: Option<T>,
 }
@@ -40,6 +19,7 @@ pub struct FuzzyPickerState<T> {
 // picker's fields (`InputLine`, `Vec`, `Option`) are all `Default` for any `T`.
 impl<T> Default for FuzzyPickerState<T> {
     fn default() -> Self {
+        use crate::tui::input_line::InputLine;
         Self {
             query: InputLine::new(),
             results: Vec::new(),
@@ -80,10 +60,10 @@ pub enum LogSource {
 
 #[derive(Clone, Default)]
 pub struct GitLogWindowState {
-    pub entries: Option<Arc<LogHistory>>,
+    pub entries: Option<Arc<crate::git::LogHistory>>,
     pub error: Option<String>,
     pub selected: usize,
-    pub query: InputLine,
+    pub query: crate::tui::input_line::InputLine,
     /// Whether the `/` input is open in the title bar.
     pub search_active: bool,
     /// Some = query active: (entry index, nucleo match positions), relevance order.
@@ -99,18 +79,18 @@ pub struct GitLogWindowState {
 pub struct TreeViewState {
     pub selected: Option<RowTarget>,
     /// Roots and forks whose children are shown; everything else is collapsed.
-    pub expanded: HashSet<NodeId>,
+    pub expanded: HashSet<crate::conversation::NodeId>,
     /// Nodes whose sub-agent runs are listed under them. Never saved: they are hidden
     /// at startup.
-    pub shown_agents: HashSet<NodeId>,
+    pub shown_agents: HashSet<crate::conversation::NodeId>,
     /// Node a first `d` marked for deletion; a second one on it deletes.
-    pub armed_delete: Option<NodeId>,
+    pub armed_delete: Option<crate::conversation::NodeId>,
     /// False until the startup load of the tree has finished.
     pub loaded: bool,
     /// Last failure to report in the status bar, cleared by the next key.
     pub notice: Option<String>,
     /// The `/` filter: while it holds a word, the window lists the matching nodes flat.
-    pub query: InputLine,
+    pub query: crate::tui::input_line::InputLine,
     /// Whether the `/` input is open in the title bar.
     pub search_active: bool,
     /// Row selected when `/` was opened, given back when the filter matches nothing.
@@ -118,7 +98,7 @@ pub struct TreeViewState {
     /// MCP servers added from the command line whose start is still to be reported.
     pub announced_starts: HashSet<String>,
     /// Nodes whose title and summary are being asked again after the cursor landed on them.
-    pub retitling: HashSet<NodeId>,
+    pub retitling: HashSet<crate::conversation::NodeId>,
 }
 
 impl TreeViewState {
@@ -131,7 +111,7 @@ impl TreeViewState {
 #[derive(Clone, Default)]
 pub struct DiscussionState {
     /// Node shown; `None` for a new conversation whose first prompt is not sent yet.
-    pub node: Option<NodeId>,
+    pub node: Option<crate::conversation::NodeId>,
     /// Sub-agent run of `node` shown instead of the node itself, read-only.
     pub agent: Option<u32>,
     pub prompt: String,
@@ -148,9 +128,9 @@ pub struct DiscussionState {
     /// False until the node's prompt and reply have been read from disk.
     pub loaded: bool,
     /// The next prompt, as typed so far.
-    pub draft: InputLine,
+    pub draft: crate::tui::input_line::InputLine,
     /// Model the next prompt is sent to.
-    pub model: Option<ModelSpec>,
+    pub model: Option<crate::agent::ModelSpec>,
     /// Why the last send was refused; cleared by the next edit.
     pub notice: Option<String>,
 }
@@ -168,17 +148,17 @@ pub struct ReportState {
 pub struct PendingTurn {
     pub window: usize,
     /// Node the window showed when the prompt was queued.
-    pub parent: Option<NodeId>,
+    pub parent: Option<crate::conversation::NodeId>,
 }
 
 /// What a Conversation Tree row points at: a node, a sub-agent run of a node, or a
 /// queued prompt whose node does not exist yet.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowTarget {
-    Node(NodeId),
+    Node(crate::conversation::NodeId),
     /// Sub-agent run `index` of `node`.
     Agent {
-        node: NodeId,
+        node: crate::conversation::NodeId,
         index: u32,
     },
     /// A prompt waiting in the queue, by the window that holds it. `position` is its
@@ -191,7 +171,7 @@ pub enum RowTarget {
 
 impl RowTarget {
     /// The node this row shows, when it has one.
-    pub fn node(&self) -> Option<&NodeId> {
+    pub fn node(&self) -> Option<&crate::conversation::NodeId> {
         match self {
             Self::Node(id) => Some(id),
             Self::Agent { .. } | Self::Queued { .. } => None,
@@ -221,7 +201,8 @@ impl DiscussionState {
 }
 
 impl NodeHighlights {
-    pub fn part(&self, part: DocPart) -> &[(usize, usize)] {
+    pub fn part(&self, part: crate::tui::pane_manager::DocPart) -> &[(usize, usize)] {
+        use crate::tui::pane_manager::DocPart;
         match part {
             DocPart::Prompt => &self.prompt,
             DocPart::Reply => &self.reply,
@@ -230,7 +211,11 @@ impl NodeHighlights {
     }
 
     /// The ranges of `part`; the work log and thinking have none, highlights cover the prompt and reply.
-    pub fn part_mut(&mut self, part: DocPart) -> Option<&mut Vec<(usize, usize)>> {
+    pub fn part_mut(
+        &mut self,
+        part: crate::tui::pane_manager::DocPart,
+    ) -> Option<&mut Vec<(usize, usize)>> {
+        use crate::tui::pane_manager::DocPart;
         match part {
             DocPart::Prompt => Some(&mut self.prompt),
             DocPart::Reply => Some(&mut self.reply),
@@ -249,7 +234,7 @@ pub enum ModelPickerPurpose {
     /// The next prompt of a Discussion window.
     Window(usize),
     /// A new sibling of this node, running the same prompt with the picked model.
-    Duplicate(NodeId),
+    Duplicate(crate::conversation::NodeId),
 }
 
 /// Models offered by the Model Picker.
@@ -258,16 +243,18 @@ pub struct ModelCatalog {
     /// Result of the last `/models` fetch of each endpoint, by endpoint name.
     pub lists: HashMap<String, Result<Vec<String>, String>>,
     /// Every `endpoint × model × effort` combination, in display order.
-    pub specs: Vec<ModelSpec>,
+    pub specs: Vec<crate::agent::ModelSpec>,
 }
 
 impl ModelCatalog {
     pub fn set_list(
         &mut self,
-        agent: &AgentConfig,
+        agent: &crate::agent::AgentConfig,
         endpoint: &str,
         result: Result<Vec<String>, String>,
     ) {
+        use crate::agent::Effort;
+        use crate::agent::ModelSpec;
         self.lists.insert(endpoint.to_string(), result);
         self.specs.clear();
         for endpoint in &agent.endpoints {
@@ -300,14 +287,14 @@ impl ModelCatalog {
 
 #[derive(Clone, Default)]
 pub struct CommitDiffState {
-    pub lines: Option<Arc<Vec<DiffLine>>>,
+    pub lines: Option<Arc<Vec<crate::git::DiffLine>>>,
     pub error: Option<String>,
 }
 
 pub struct TerminalPane {
     pub ofs_buf: OfsBufVT100,
     pub title: Option<String>,
-    pub pty_input_tx: Arc<mpsc::Sender<PtyInputEvent>>,
+    pub pty_input_tx: Arc<tokio::sync::mpsc::Sender<PtyInputEvent>>,
     pub child_killer: Option<ControlledChildTerminationHandle>,
     pub last_size: VPSize,
     /// True when this pane was opened via `!<cmd>` rather than as an interactive shell.
@@ -323,7 +310,7 @@ pub struct TerminalPane {
     /// 0 means showing the current buffer (bottom); >0 shows scrollback history.
     pub scroll_offset: usize,
     /// Working directory of the terminal process.
-    pub cwd: Utf8PathBuf,
+    pub cwd: camino::Utf8PathBuf,
     /// Command used to start the terminal process, if any.
     pub command: Option<String>,
     /// Set by the reader task when output reached the buffer without a render signal
@@ -356,31 +343,31 @@ impl Debug for TerminalPane {
 
 #[derive(Clone, Default)]
 pub struct AppState {
-    pub files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
+    pub files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
     pub files_version: u64,
-    pub root: Utf8PathBuf,
+    pub root: camino::Utf8PathBuf,
     /// Shared git repository handle, opened once at startup and cheaply cloned
     /// for each background git operation instead of re-opening `root` every
     /// time. `None` only if opening fails (e.g. permissions) — git.rs call
     /// sites already handle this gracefully via `Result<_, String>`.
     pub repo: Option<gix::ThreadSafeRepository>,
     /// Pane stack, sizes, layout, and focus state.
-    pub pane_manager: PaneManager,
+    pub pane_manager: crate::tui::pane_manager::PaneManager,
     /// Last known surface size used for on-demand layout recomputation.
     pub last_surface_size: VPSize,
     /// Per-file highlight ranges (1-indexed, inclusive).
-    pub highlight_ranges: HashMap<FileKey, Vec<(usize, usize)>>,
+    pub highlight_ranges: HashMap<crate::loader::FileKey, Vec<(usize, usize)>>,
     pub leader_active: bool,
-    pub window_picker: FuzzyPickerState<Window>,
+    pub window_picker: FuzzyPickerState<crate::tui::pane_manager::Window>,
     pub theme_picker: FuzzyPickerState<String>,
-    pub theme: HelixTheme,
-    pub saved_theme: HelixTheme,
+    pub theme: crate::tui::theme::HelixTheme,
+    pub saved_theme: crate::tui::theme::HelixTheme,
     /// Terminal panes keyed by their unique ID.
-    pub terminal_panes: HashMap<usize, Arc<Mutex<TerminalPane>>>,
+    pub terminal_panes: HashMap<usize, Arc<parking_lot::Mutex<TerminalPane>>>,
     /// Next available terminal pane ID.
     pub next_terminal_id: usize,
     /// Terminal windows restored from the session that still need a PTY spawned.
-    pub pending_terminals: HashMap<usize, TerminalRestoreInfo>,
+    pub pending_terminals: HashMap<usize, crate::session::TerminalRestoreInfo>,
     /// Git log windows keyed by their unique ID.
     pub git_logs: HashMap<usize, GitLogWindowState>,
     /// Next available git log window ID.
@@ -395,59 +382,59 @@ pub struct AppState {
     /// Commit-diff windows restored from the session that still need a diff loaded.
     pub pending_diffs: Vec<[u8; 20]>,
     /// Maps editor terminal IDs back to the FileKey they should restore on exit.
-    pub terminal_to_preview: HashMap<usize, FileKey>,
+    pub terminal_to_preview: HashMap<usize, crate::loader::FileKey>,
     /// Agent conversation tree, shared with the background task that loads it.
-    pub conversations: Arc<RwLock<ConversationTree>>,
+    pub conversations: Arc<parking_lot::RwLock<crate::conversation::ConversationTree>>,
     pub tree_view: TreeViewState,
     /// Discussion windows keyed by their unique ID.
     pub discussions: HashMap<usize, DiscussionState>,
     /// Next available discussion window ID.
     pub next_discussion_id: usize,
     /// Highlights of the nodes shown in Discussion windows, by node.
-    pub discussion_highlights: HashMap<NodeId, NodeHighlights>,
+    pub discussion_highlights: HashMap<crate::conversation::NodeId, NodeHighlights>,
     /// Endpoints, tokens and agent settings from `config.kdl` and `auth.kdl`.
-    pub agent: Arc<AgentConfig>,
+    pub agent: Arc<crate::agent::AgentConfig>,
     pub models: ModelCatalog,
     /// Last known usage of the spending behind each endpoint, by endpoint name; kept
     /// in `<data_dir>/usage.json`.
-    pub usage: HashMap<String, Usage>,
+    pub usage: HashMap<String, crate::agent::usage::Usage>,
     /// MCP servers of the repository, as saved in its session.
-    pub mcp_servers: Vec<McpServerDecl>,
+    pub mcp_servers: Vec<crate::agent::mcp::McpServerDecl>,
     /// The running MCP servers, shared with the turns.
-    pub mcp: Arc<McpHost>,
+    pub mcp: Arc<crate::agent::mcp::McpHost>,
     /// Markdown shown in the report windows, by window id. In memory only: a report is not
     /// saved, and leaves nothing behind when its window closes.
     pub reports: HashMap<usize, ReportState>,
     /// Next available report window ID.
     pub next_report_id: usize,
     /// Model last picked during this run, offered to new conversations.
-    pub last_picked_model: Option<ModelSpec>,
+    pub last_picked_model: Option<crate::agent::ModelSpec>,
     /// Model Picker entries are indexes into `models.specs`.
     pub model_picker: FuzzyPickerState<usize>,
     /// What the open Model Picker is choosing a model for.
     pub model_picker_purpose: Option<ModelPickerPurpose>,
     /// Turns in progress, by node.
-    pub running_turns: HashMap<NodeId, TurnHandle>,
+    pub running_turns: HashMap<crate::conversation::NodeId, crate::agent::turn::TurnHandle>,
     /// Animation step shared by every spinner on screen; advanced by `TurnTick`.
     pub spinner_tick: u8,
     /// Prompts waiting for their turn, next to start first. Never saved with the session.
     pub queued_turns: Vec<PendingTurn>,
     /// The `after-agents` command, in memory only; replacing or clearing it kills a running one.
-    pub after_agents: Option<AfterAgents>,
+    pub after_agents: Option<crate::tui::after_agents::AfterAgents>,
     pub after_agents_grace: Duration,
     /// Aliases from `config.kdl`.
-    pub config_aliases: Vec<Alias>,
+    pub config_aliases: Vec<crate::config::Alias>,
     /// Aliases of this repository, saved in its session; they win over the config's.
-    pub project_aliases: Vec<Alias>,
+    pub project_aliases: Vec<crate::config::Alias>,
     /// The user allowed agent turns in this repository, saved in its session. Until it is
     /// set, every turn is refused.
     pub trusted: bool,
     pub next_after_agents_run: u64,
     pub mouse_drag_active: bool,
     /// Window whose input holds the mouse selection in progress.
-    pub input_drag: Option<Window>,
+    pub input_drag: Option<crate::tui::pane_manager::Window>,
     pub terminal_grabbed: bool,
-    pub text_selection: Option<TextSelection>,
+    pub text_selection: Option<crate::tui::pane_manager::TextSelection>,
     pub session_dirty: bool,
     /// Whether the repository has uncommitted changes (staged or unstaged),
     /// refreshed periodically by a background `git::is_dirty` check.
@@ -456,13 +443,13 @@ pub struct AppState {
     pub next_palette_index: usize,
     /// Per-file regex search (vim-style `/` `?` `n` `N`). Transient — never persisted to the
     /// session file, mirroring `text_selection`.
-    pub search: HashMap<FileKey, PreviewSearch>,
+    pub search: HashMap<crate::loader::FileKey, PreviewSearch>,
     /// The input open in a file preview's title bar, by file. Transient like `search`.
-    pub preview_inputs: HashMap<FileKey, PreviewInput>,
+    pub preview_inputs: HashMap<crate::loader::FileKey, PreviewInput>,
     /// The `<leader>:` command line, open over the status bar. Transient.
-    pub command_line: Option<CommandLine>,
+    pub command_line: Option<crate::tui::command_line::CommandLine>,
     /// Configurable top-level (leader + global) key bindings.
-    pub keymap: Keymap,
+    pub keymap: crate::keymap::Keymap,
     /// Which Cargo features rust-analyzer analyzes; set via `features`/`all-features`/
     /// `default-features` on the global command line, persisted per-project in the
     /// session file.
@@ -479,7 +466,11 @@ impl AppState {
     }
 
     /// The input `window` shows right now, if any.
-    pub fn open_input(&mut self, window: &Window) -> Option<&mut InputLine> {
+    pub fn open_input(
+        &mut self,
+        window: &crate::tui::pane_manager::Window,
+    ) -> Option<&mut crate::tui::input_line::InputLine> {
+        use crate::tui::pane_manager::Window;
         match window {
             Window::Discussion(id) => self
                 .discussions
@@ -514,7 +505,11 @@ impl AppState {
 
     /// Hands a mouse event to the input of `window`: true when the input took it. A
     /// selection it starts holds the mouse until the button is released.
-    pub fn input_mouse(&mut self, window: Window, mouse: &MouseInput) -> bool {
+    pub fn input_mouse(
+        &mut self,
+        window: crate::tui::pane_manager::Window,
+        mouse: &MouseInput,
+    ) -> bool {
         let Some(input) = self.open_input(&window) else {
             return false;
         };
@@ -553,11 +548,16 @@ impl AppState {
 
 impl AppState {
     pub fn new(
-        files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
-        root: Utf8PathBuf,
-        theme: HelixTheme,
-        keymap: Keymap,
+        files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
+        root: camino::Utf8PathBuf,
+        theme: crate::tui::theme::HelixTheme,
+        keymap: crate::keymap::Keymap,
     ) -> Self {
+        use crate::agent::mcp::McpHost;
+        use crate::lsp::CargoFeatureSelection;
+        use crate::tui::pane_manager::PaneManager;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::theme::HelixTheme;
         let saved_theme = theme.clone();
         let mut pane_manager = PaneManager::new();
         pane_manager.push_window(Window::WindowPicker);
@@ -624,7 +624,7 @@ impl AppState {
             preview_inputs: HashMap::new(),
             command_line: None,
             keymap,
-            cargo_features: crate::lsp::CargoFeatureSelection::default(),
+            cargo_features: CargoFeatureSelection::default(),
         };
 
         let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
@@ -660,18 +660,18 @@ impl Display for AppState {
 #[derive(Default, Clone, Debug)]
 #[non_exhaustive]
 pub enum AppSignal {
-    FilesChanged(Arc<BatchedWatchEvent>),
+    FilesChanged(Arc<crate::watcher::BatchedWatchEvent>),
     /// Open a terminal pane. `cmd = None` means an interactive shell; `cmd = Some(s)` runs
     /// `/bin/sh -c s`. `cwd` is the working directory for the child process.
     OpenTerminal {
         cmd: Option<String>,
-        cwd: Utf8PathBuf,
+        cwd: camino::Utf8PathBuf,
     },
     /// Open an embedded editor terminal that replaces the FilePreview in-place.
     OpenEditor {
         cmd: String,
-        cwd: Utf8PathBuf,
-        file_key: FileKey,
+        cwd: camino::Utf8PathBuf,
+        file_key: crate::loader::FileKey,
     },
     SymbolHighlightResult {
         qualified_name: String,
@@ -693,14 +693,14 @@ pub enum AppSignal {
     /// Result of an async `git::load_log` run for git log window `id`.
     GitLogLoaded {
         id: usize,
-        result: Result<Arc<LogHistory>, String>,
+        result: Result<Arc<crate::git::LogHistory>, String>,
     },
     /// Result of an async `git::load_refs` run (branch picker list).
-    GitRefsLoaded(Result<Arc<Vec<GitRef>>, String>),
+    GitRefsLoaded(Result<Arc<Vec<crate::git::GitRef>>, String>),
     /// Result of an async `git::load_commit_diff` run for `id`.
     CommitDiffLoaded {
         id: [u8; 20],
-        result: Result<Arc<Vec<DiffLine>>, String>,
+        result: Result<Arc<Vec<crate::git::DiffLine>>, String>,
     },
     /// Result of an async `git::is_dirty` check.
     DirtyStatusLoaded(Result<bool, String>),
@@ -719,18 +719,18 @@ pub enum AppSignal {
     /// spent some of it ended, or as just polled for an OpenRouter key.
     UsageFetched {
         endpoint: String,
-        usage: Usage,
+        usage: crate::agent::usage::Usage,
     },
     /// The shared spinner advances one frame (`SPINNER_INTERVAL`); renders only while
     /// a turn runs.
     TurnTick,
     /// The turn of `node` started a sub-agent, already recorded in the tree.
     SubagentStarted {
-        node: NodeId,
+        node: crate::conversation::NodeId,
     },
     /// Sub-agent run `index` of `node` ended; its outcome is in the tree.
     SubagentFinished {
-        node: NodeId,
+        node: crate::conversation::NodeId,
         index: u32,
     },
     /// The MCP server `name` started, failed or is starting again.
@@ -743,33 +743,33 @@ pub enum AppSignal {
     },
     /// The turn of `node` ended.
     TurnFinished {
-        node: NodeId,
-        outcome: TurnOutcome,
+        node: crate::conversation::NodeId,
+        outcome: crate::agent::turn::TurnOutcome,
     },
     /// `title.md` of `node` was written.
     NodeTitleReady {
-        node: NodeId,
+        node: crate::conversation::NodeId,
         title: String,
     },
     /// The new attempt at the title and summary of `node` ended, whatever its outcome.
     NodeRetitleEnded {
-        node: NodeId,
+        node: crate::conversation::NodeId,
     },
     /// `title.md` of sub-agent run `index` of `node` was written.
     AgentTitleReady {
-        node: NodeId,
+        node: crate::conversation::NodeId,
         index: u32,
         title: String,
     },
     /// `summary.md` of `node` was written.
     NodeSummaryReady {
-        node: NodeId,
+        node: crate::conversation::NodeId,
         summary: String,
     },
     /// Prompt and reply of `node`, read from disk for discussion window `window_id`.
     NodeContentLoaded {
         window_id: usize,
-        node: NodeId,
+        node: crate::conversation::NodeId,
         prompt: String,
         reply: String,
         work_log: Vec<String>,
@@ -790,7 +790,7 @@ pub enum AppSignal {
 
 #[derive(Clone, Debug)]
 pub struct SymbolRefLocation {
-    pub file_key: FileKey,
+    pub file_key: crate::loader::FileKey,
     pub start_byte: usize,
     pub end_byte: usize,
 }
@@ -798,7 +798,7 @@ pub struct SymbolRefLocation {
 #[derive(Clone, Debug)]
 pub struct SymbolHighlightGroup {
     pub qualified_name: String,
-    pub origin_file: FileKey,
+    pub origin_file: crate::loader::FileKey,
     pub origin_line: u32,
     pub origin_char: u32,
     /// Word originally clicked, re-sent on rebuild so the PlainText-hover
@@ -821,17 +821,17 @@ pub enum SearchDirection {
 #[derive(Clone)]
 pub enum PreviewInput {
     /// Prefilled with the file's active pattern; the direction is the key that opened it.
-    Search(InputLine, SearchDirection),
+    Search(crate::tui::input_line::InputLine, SearchDirection),
 }
 
 impl PreviewInput {
-    pub fn line(&self) -> &InputLine {
+    pub fn line(&self) -> &crate::tui::input_line::InputLine {
         match self {
             Self::Search(line, _) => line,
         }
     }
 
-    pub fn line_mut(&mut self) -> &mut InputLine {
+    pub fn line_mut(&mut self) -> &mut crate::tui::input_line::InputLine {
         match self {
             Self::Search(line, _) => line,
         }

@@ -1,13 +1,3 @@
-use super::{Effort, Message, ToolCall};
-use futures_util::StreamExt;
-use genai::adapter::AdapterKind;
-use genai::chat::{
-    ChatMessage, ChatOptions, ChatRequest, ChatStreamEvent, ContentPart, MessageContent,
-    ReasoningEffort, Tool, ToolResponse,
-};
-use genai::resolver::{AuthData, Endpoint};
-use genai::{Client, ModelIden, ServiceTarget};
-use serde_json::{Value, json};
 use std::sync::OnceLock;
 use std::time::Duration;
 
@@ -17,7 +7,7 @@ pub struct LlmTarget {
     pub url: String,
     pub token: String,
     pub model: String,
-    pub effort: Effort,
+    pub effort: crate::agent::Effort,
 }
 
 /// A tool as advertised to the model.
@@ -32,7 +22,7 @@ pub struct ToolSpec {
 #[derive(Debug, Default)]
 pub struct LlmResponse {
     pub text: String,
-    pub tool_calls: Vec<ToolCall>,
+    pub tool_calls: Vec<crate::agent::ToolCall>,
     /// Tool calls left out of `tool_calls` because they arrived without a name.
     pub dropped_calls: usize,
     pub tokens_in: Option<u64>,
@@ -47,20 +37,20 @@ const READ_TIMEOUT: Duration = Duration::from_secs(120);
 const MAX_ATTEMPTS: u32 = 4;
 const BACKOFF_CAP: Duration = Duration::from_secs(30);
 
-fn client() -> &'static Client {
-    static CLIENT: OnceLock<Client> = OnceLock::new();
+fn client() -> &'static genai::Client {
+    static CLIENT: OnceLock<genai::Client> = OnceLock::new();
     // No total timeout, so a long answer that keeps streaming is never cut.
     CLIENT.get_or_init(|| web_client(Some(READ_TIMEOUT)))
 }
 
 /// A complete answer arrives only once it is ready, so it gets no read timeout.
-fn complete_client() -> &'static Client {
-    static CLIENT: OnceLock<Client> = OnceLock::new();
+fn complete_client() -> &'static genai::Client {
+    static CLIENT: OnceLock<genai::Client> = OnceLock::new();
     CLIENT.get_or_init(|| web_client(None))
 }
 
-fn web_client(read_timeout: Option<Duration>) -> Client {
-    Client::builder()
+fn web_client(read_timeout: Option<Duration>) -> genai::Client {
+    genai::Client::builder()
         .with_web_config(genai::WebConfig {
             connect_timeout: Some(CONNECT_TIMEOUT),
             read_timeout,
@@ -69,69 +59,77 @@ fn web_client(read_timeout: Option<Duration>) -> Client {
         .build()
 }
 
-fn service_target(target: &LlmTarget) -> ServiceTarget {
+fn service_target(target: &LlmTarget) -> genai::ServiceTarget {
     // The adapter joins `chat/completions` onto this URL, which needs the final slash.
     let url = format!("{}/", target.url.trim_end_matches('/'));
-    ServiceTarget {
-        endpoint: Endpoint::from_owned(url),
-        auth: AuthData::from_single(target.token.clone()),
-        model: ModelIden::new(AdapterKind::OpenAI, target.model.as_str()),
+    genai::ServiceTarget {
+        endpoint: genai::resolver::Endpoint::from_owned(url),
+        auth: genai::resolver::AuthData::from_single(target.token.clone()),
+        model: genai::ModelIden::new(genai::adapter::AdapterKind::OpenAI, target.model.as_str()),
     }
 }
 
-fn chat_options(effort: Effort, session: &str) -> ChatOptions {
+fn chat_options(effort: crate::agent::Effort, session: &str) -> genai::chat::ChatOptions {
+    use crate::agent::Effort;
     // opencode rejects requests without a session id; other servers ignore the header.
-    let options = ChatOptions::default()
+    let options = genai::chat::ChatOptions::default()
         .with_capture_usage(true)
         .with_capture_content(true)
         .with_capture_tool_calls(true)
         .with_extra_headers([("x-opencode-session", session)]);
     match effort {
         Effort::Default => options,
-        Effort::Low => options.with_reasoning_effort(ReasoningEffort::Low),
-        Effort::Medium => options.with_reasoning_effort(ReasoningEffort::Medium),
-        Effort::High => options.with_reasoning_effort(ReasoningEffort::High),
+        Effort::Low => options.with_reasoning_effort(genai::chat::ReasoningEffort::Low),
+        Effort::Medium => options.with_reasoning_effort(genai::chat::ReasoningEffort::Medium),
+        Effort::High => options.with_reasoning_effort(genai::chat::ReasoningEffort::High),
     }
 }
 
-fn to_genai(message: &Message) -> ChatMessage {
+fn to_genai(message: &crate::agent::Message) -> genai::chat::ChatMessage {
+    use crate::agent::Message;
     match message {
-        Message::User { content, .. } => ChatMessage::user(content.as_str()),
+        Message::User { content, .. } => genai::chat::ChatMessage::user(content.as_str()),
         Message::Assistant {
             content,
             tool_calls,
         } => {
-            let mut parts: Vec<ContentPart> = Vec::with_capacity(tool_calls.len() + 1);
+            let mut parts: Vec<genai::chat::ContentPart> = Vec::with_capacity(tool_calls.len() + 1);
             if !content.is_empty() {
-                parts.push(ContentPart::Text(content.clone()));
+                parts.push(genai::chat::ContentPart::Text(content.clone()));
             }
             for call in tool_calls {
-                parts.push(ContentPart::ToolCall(genai::chat::ToolCall {
+                parts.push(genai::chat::ContentPart::ToolCall(genai::chat::ToolCall {
                     call_id: call.id.clone(),
                     fn_name: call.name.clone(),
                     fn_arguments: call.arguments.clone(),
                     thought_signatures: None,
                 }));
             }
-            ChatMessage::assistant(MessageContent::from_parts(parts))
+            genai::chat::ChatMessage::assistant(genai::chat::MessageContent::from_parts(parts))
         }
         Message::Tool {
             call_id,
             name,
             content,
-        } => ChatMessage::from(
-            ToolResponse::new(call_id.as_str(), content.as_str()).with_fn_name(name.as_str()),
+        } => genai::chat::ChatMessage::from(
+            genai::chat::ToolResponse::new(call_id.as_str(), content.as_str())
+                .with_fn_name(name.as_str()),
         ),
     }
 }
 
-fn request(system: &str, messages: &[Message], tools: &[ToolSpec]) -> ChatRequest {
-    let request = ChatRequest::new(messages.iter().map(to_genai).collect()).with_system(system);
+fn request(
+    system: &str,
+    messages: &[crate::agent::Message],
+    tools: &[ToolSpec],
+) -> genai::chat::ChatRequest {
+    let request =
+        genai::chat::ChatRequest::new(messages.iter().map(to_genai).collect()).with_system(system);
     if tools.is_empty() {
         return request;
     }
     request.with_tools(tools.iter().map(|tool| {
-        Tool::new(tool.name.as_str())
+        genai::chat::Tool::new(tool.name.as_str())
             .with_description(tool.description.as_str())
             .with_schema(tool.schema.clone())
     }))
@@ -159,7 +157,7 @@ pub async fn stream_chat(
     target: &LlmTarget,
     session: &str,
     system: &str,
-    messages: &[Message],
+    messages: &[crate::agent::Message],
     tools: &[ToolSpec],
     mut on_chunk: impl FnMut(bool, &str),
 ) -> Result<LlmResponse, String> {
@@ -196,11 +194,12 @@ async fn attempt_chat(
     target: &LlmTarget,
     session: &str,
     system: &str,
-    messages: &[Message],
+    messages: &[crate::agent::Message],
     tools: &[ToolSpec],
     streamed: &mut bool,
     on_chunk: &mut impl FnMut(bool, &str),
 ) -> Result<LlmResponse, genai::Error> {
+    use futures_util::StreamExt;
     let options = chat_options(target.effort, session);
     let mut stream = client()
         .exec_chat_stream(
@@ -214,16 +213,16 @@ async fn attempt_chat(
     let mut response = LlmResponse::default();
     while let Some(event) = stream.next().await {
         match event? {
-            ChatStreamEvent::Chunk(chunk) => {
+            genai::chat::ChatStreamEvent::Chunk(chunk) => {
                 *streamed = true;
                 on_chunk(false, &chunk.content);
                 response.text.push_str(&chunk.content);
             }
-            ChatStreamEvent::ReasoningChunk(chunk) => {
+            genai::chat::ChatStreamEvent::ReasoningChunk(chunk) => {
                 *streamed = true;
                 on_chunk(true, &chunk.content);
             }
-            ChatStreamEvent::End(end) => {
+            genai::chat::ChatStreamEvent::End(end) => {
                 let usage = end.captured_usage.as_ref();
                 response.tokens_in = usage
                     .and_then(|usage| usage.prompt_tokens)
@@ -244,7 +243,8 @@ async fn attempt_chat(
 /// The calls with a name, and how many were left out. A provider that splits a call
 /// across chunks can hand over one with no name; replayed in the transcript it makes
 /// the next request a 400.
-fn named_calls(calls: Vec<genai::chat::ToolCall>) -> (Vec<ToolCall>, usize) {
+fn named_calls(calls: Vec<genai::chat::ToolCall>) -> (Vec<crate::agent::ToolCall>, usize) {
+    use crate::agent::ToolCall;
     let received = calls.len();
     let named: Vec<ToolCall> = calls
         .into_iter()
@@ -309,10 +309,10 @@ fn jitter() -> f64 {
 }
 
 /// genai hands over unparsable arguments as a string, `""` for a call without any.
-fn tool_arguments(arguments: Value) -> Value {
+fn tool_arguments(arguments: serde_json::Value) -> serde_json::Value {
     match arguments {
-        Value::Null => json!({}),
-        Value::String(text) if text.trim().is_empty() => json!({}),
+        serde_json::Value::Null => serde_json::json!({}),
+        serde_json::Value::String(text) if text.trim().is_empty() => serde_json::json!({}),
         other => other,
     }
 }
@@ -324,6 +324,7 @@ pub async fn complete(
     system: &str,
     user: &str,
 ) -> Result<String, String> {
+    use crate::agent::Message;
     let options = chat_options(target.effort, session);
     let messages = [Message::User {
         content: user.to_string(),
@@ -349,10 +350,19 @@ mod tests {
 
     #[test]
     fn calls_without_arguments_get_an_empty_object() {
-        assert_eq!(tool_arguments(json!("")), json!({}));
-        assert_eq!(tool_arguments(Value::Null), json!({}));
-        assert_eq!(tool_arguments(json!({"id": 4})), json!({"id": 4}));
-        assert_eq!(tool_arguments(json!("{oops")), json!("{oops"));
+        assert_eq!(tool_arguments(serde_json::json!("")), serde_json::json!({}));
+        assert_eq!(
+            tool_arguments(serde_json::Value::Null),
+            serde_json::json!({})
+        );
+        assert_eq!(
+            tool_arguments(serde_json::json!({"id": 4})),
+            serde_json::json!({"id": 4})
+        );
+        assert_eq!(
+            tool_arguments(serde_json::json!("{oops")),
+            serde_json::json!("{oops")
+        );
     }
 
     #[test]
@@ -360,7 +370,7 @@ mod tests {
         let call = |name: &str| genai::chat::ToolCall {
             call_id: "c".into(),
             fn_name: name.into(),
-            fn_arguments: json!({}),
+            fn_arguments: serde_json::json!({}),
             thought_signatures: None,
         };
         let (kept, dropped) = named_calls(vec![call("read"), call(""), call(" \t"), call("grep")]);
@@ -390,7 +400,7 @@ mod tests {
 
     fn stream_error(error: impl Into<genai::BoxError>) -> genai::Error {
         genai::Error::WebStream {
-            model_iden: ModelIden::new(AdapterKind::OpenAI, "m"),
+            model_iden: genai::ModelIden::new(genai::adapter::AdapterKind::OpenAI, "m"),
             cause: String::new(),
             error: error.into(),
         }
@@ -417,7 +427,7 @@ mod tests {
     fn a_request_that_cannot_be_built_is_not_retried() {
         let error = reqwest::Client::new().get("not a url").build().unwrap_err();
         let failed = genai::Error::WebModelCall {
-            model_iden: ModelIden::new(AdapterKind::OpenAI, "m"),
+            model_iden: genai::ModelIden::new(genai::adapter::AdapterKind::OpenAI, "m"),
             webc_error: genai::webc::Error::Reqwest(error),
         };
         assert!(!is_transient(&failed));

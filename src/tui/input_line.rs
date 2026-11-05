@@ -1,7 +1,6 @@
-use crate::loader::{drag_range, word_bounds};
-use crate::tui::*;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::time::{Duration, Instant};
-use unicode_segmentation::UnicodeSegmentation;
 
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
@@ -54,6 +53,7 @@ struct VisualRow {
 /// Splits `text` into screen rows of at most `capacity` graphemes. A row that is exactly
 /// full is followed by another one, possibly empty, where the cursor can sit.
 fn visual_rows(text: &str, capacity: usize) -> Vec<VisualRow> {
+    use unicode_segmentation::UnicodeSegmentation;
     let capacity = capacity.max(1);
     let mut rows = Vec::new();
     let mut offset = 0;
@@ -100,6 +100,7 @@ impl InputLine {
 
     /// Replaces the text and puts the cursor at its end.
     pub fn set_text(&mut self, text: impl Into<String>) {
+        use unicode_segmentation::UnicodeSegmentation;
         self.text = text.into();
         self.cursor = self.text.graphemes(true).count();
         self.selection = None;
@@ -133,6 +134,7 @@ impl InputLine {
                 row.start + column.min(row.len.saturating_sub(1)),
             ),
             None => {
+                use unicode_segmentation::UnicodeSegmentation;
                 let end = self.text.graphemes(true).count();
                 (end, end)
             }
@@ -148,7 +150,7 @@ impl InputLine {
         self.cursor = cursor;
         let anchor = grapheme_byte_offset(&self.text, pointed);
         let word = if anchor < self.text.len() {
-            word_bounds(&self.text, anchor)
+            crate::loader::word_bounds(&self.text, anchor)
         } else {
             (anchor, anchor)
         };
@@ -172,7 +174,7 @@ impl InputLine {
         };
         let cursor = grapheme_byte_offset(&self.text, pointed);
         let range = if cursor < self.text.len() {
-            drag_range(&self.text, selection.anchor, selection.word, cursor)
+            crate::loader::drag_range(&self.text, selection.anchor, selection.word, cursor)
         } else {
             (selection.word.0, self.text.len())
         };
@@ -260,6 +262,7 @@ impl InputLine {
     }
 
     pub fn handle_key(&mut self, input_event: &InputEvent) -> bool {
+        use unicode_segmentation::UnicodeSegmentation;
         let grapheme_count = self.text.graphemes(true).count();
         self.cursor = self.cursor.min(grapheme_count);
 
@@ -459,6 +462,7 @@ impl InputLine {
                 true
             }
             InputEvent::BracketedPaste(text) => {
+                use unicode_segmentation::UnicodeSegmentation;
                 if text.is_empty() {
                     return false;
                 }
@@ -524,6 +528,7 @@ impl InputLine {
     }
 
     fn backspace_grapheme(&mut self) -> bool {
+        use unicode_segmentation::UnicodeSegmentation;
         if self.cursor == 0 {
             return false;
         }
@@ -541,6 +546,7 @@ impl InputLine {
     }
 
     fn delete_grapheme(&mut self) -> bool {
+        use unicode_segmentation::UnicodeSegmentation;
         let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         if self.cursor >= graphemes.len() {
             return false;
@@ -585,6 +591,7 @@ impl InputLine {
     }
 
     fn kill_word_backward(&mut self) -> bool {
+        use unicode_segmentation::UnicodeSegmentation;
         let word_start = self.prev_word_start();
         if word_start >= self.cursor {
             return false;
@@ -626,6 +633,7 @@ impl InputLine {
     }
 
     fn prev_word_start(&self) -> usize {
+        use unicode_segmentation::UnicodeSegmentation;
         let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         let count = graphemes.len();
         if count == 0 || self.cursor == 0 {
@@ -648,6 +656,7 @@ impl InputLine {
     }
 
     fn next_word_start(&self) -> usize {
+        use unicode_segmentation::UnicodeSegmentation;
         let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         let count = graphemes.len();
         if count == 0 {
@@ -670,6 +679,7 @@ impl InputLine {
     }
 
     fn next_word_end(&self) -> usize {
+        use unicode_segmentation::UnicodeSegmentation;
         let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         let count = graphemes.len();
         if count == 0 {
@@ -692,6 +702,7 @@ impl InputLine {
     }
 
     fn kill_word_forward(&mut self) -> bool {
+        use unicode_segmentation::UnicodeSegmentation;
         let word_end = self.next_word_end();
         if word_end <= self.cursor || word_end == 0 {
             return false;
@@ -720,6 +731,7 @@ impl InputLine {
         width: u16,
         max_rows: usize,
     ) -> usize {
+        use unicode_segmentation::UnicodeSegmentation;
         let capacity = (width as usize).saturating_sub(prompt.graphemes(true).count());
         let shown = format!("{}{}", self.text, placeholder.unwrap_or_default());
         visual_rows(&shown, capacity).len().min(max_rows).max(1)
@@ -742,6 +754,7 @@ impl InputLine {
         focused: bool,
         colors: (TuiColor, TuiColor, TuiColor),
     ) {
+        use unicode_segmentation::UnicodeSegmentation;
         let prompt_width = prompt.graphemes(true).count();
         let capacity = (width as usize).saturating_sub(prompt_width).max(1);
         let (color_bg, color_text, color_selection) = colors;
@@ -766,6 +779,7 @@ impl InputLine {
         let cursor = self.cursor.min(typed);
         let selected = self.selection.map_or(0..0, |selection| {
             let index = |byte| {
+                use unicode_segmentation::UnicodeSegmentation;
                 self.text
                     .grapheme_indices(true)
                     .take_while(|(at, _)| *at < byte)
@@ -845,6 +859,7 @@ impl InputLine {
 }
 
 fn grapheme_byte_offset(text: &str, grapheme_idx: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
     text.grapheme_indices(true)
         .nth(grapheme_idx)
         .map(|(byte, _)| byte)

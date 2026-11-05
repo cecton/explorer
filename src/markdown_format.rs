@@ -1,17 +1,13 @@
 //! The markdown formatter behind `fmt-md`, the `format_markdown` tool and commit turns.
 
-use camino::{Utf8Path, Utf8PathBuf};
-use dprint_core::configuration::NewLineKind;
-use dprint_plugin_markdown::configuration::{Configuration, ConfigurationBuilder, TextWrap};
-
 /// Directories (relative to the repository root) whose markdown is not ours to format.
 const EXCLUDED: [&str; 3] = ["vendor", "target", "tests/fixtures"];
 
-fn configuration() -> Configuration {
+fn configuration() -> dprint_plugin_markdown::configuration::Configuration {
     // Maintain keeps the author's line breaks; Auto keeps a file's own CRLF or LF endings.
-    ConfigurationBuilder::new()
-        .text_wrap(TextWrap::Maintain)
-        .new_line_kind(NewLineKind::Auto)
+    dprint_plugin_markdown::configuration::ConfigurationBuilder::new()
+        .text_wrap(dprint_plugin_markdown::configuration::TextWrap::Maintain)
+        .new_line_kind(dprint_core::configuration::NewLineKind::Auto)
         .build()
 }
 
@@ -23,15 +19,15 @@ pub fn format_markdown(text: &str) -> Result<String, String> {
 }
 
 /// Whether a repository-relative path is a markdown file the formatter owns.
-pub fn is_formatted(relative: &Utf8Path) -> bool {
+pub fn is_formatted(relative: &camino::Utf8Path) -> bool {
     relative.as_str().ends_with(".md") && !EXCLUDED.iter().any(|dir| relative.starts_with(dir))
 }
 
 /// Replaces each directory with the files git lists under it; other paths are kept.
 pub fn expand_directories(
-    root: &Utf8Path,
-    relatives: Vec<Utf8PathBuf>,
-) -> Result<Vec<Utf8PathBuf>, String> {
+    root: &camino::Utf8Path,
+    relatives: Vec<camino::Utf8PathBuf>,
+) -> Result<Vec<camino::Utf8PathBuf>, String> {
     let mut expanded = Vec::new();
     for relative in relatives {
         if root.join(&relative).is_dir() {
@@ -45,10 +41,10 @@ pub fn expand_directories(
 
 /// Formats the files in place and returns the paths rewritten; a read error writes nothing.
 pub fn format_files(
-    root: &Utf8Path,
-    relatives: &[Utf8PathBuf],
-) -> Result<Vec<Utf8PathBuf>, String> {
-    let mut rewrites: Vec<(&Utf8PathBuf, Utf8PathBuf, String)> = Vec::new();
+    root: &camino::Utf8Path,
+    relatives: &[camino::Utf8PathBuf],
+) -> Result<Vec<camino::Utf8PathBuf>, String> {
+    let mut rewrites: Vec<(&camino::Utf8PathBuf, camino::Utf8PathBuf, String)> = Vec::new();
     for relative in relatives {
         if !is_formatted(relative) || rewrites.iter().any(|(listed, _, _)| *listed == relative) {
             continue;
@@ -72,7 +68,11 @@ pub fn format_files(
 const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 /// Amends the markdown a commit turn committed into HEAD; skipped while the tree is dirty.
-pub fn format_committed(root: &Utf8Path, before: Option<&str>, after: Option<&str>) -> bool {
+pub fn format_committed(
+    root: &camino::Utf8Path,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> bool {
     let Some(after) = after else {
         return false;
     };
@@ -136,24 +136,26 @@ mod tests {
 
     #[test]
     fn owns_markdown_outside_the_excluded_directories() {
-        assert!(is_formatted(Utf8Path::new("README.md")));
-        assert!(is_formatted(Utf8Path::new("prompts/commit.md")));
-        assert!(!is_formatted(Utf8Path::new("src/main.rs")));
-        assert!(!is_formatted(Utf8Path::new("vendor/x/README.md")));
-        assert!(!is_formatted(Utf8Path::new("target/doc/a.md")));
-        assert!(!is_formatted(Utf8Path::new("tests/fixtures/jqwik/a.md")));
+        assert!(is_formatted(camino::Utf8Path::new("README.md")));
+        assert!(is_formatted(camino::Utf8Path::new("prompts/commit.md")));
+        assert!(!is_formatted(camino::Utf8Path::new("src/main.rs")));
+        assert!(!is_formatted(camino::Utf8Path::new("vendor/x/README.md")));
+        assert!(!is_formatted(camino::Utf8Path::new("target/doc/a.md")));
+        assert!(!is_formatted(camino::Utf8Path::new(
+            "tests/fixtures/jqwik/a.md"
+        )));
     }
 
     #[test]
     fn formats_files_in_place_and_reports_the_changed_ones() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
         std::fs::write(root.join("a.md"), "|a|b|\n|-|-|\n|1|2|\n").unwrap();
         std::fs::write(root.join("b.md"), "fine\n").unwrap();
         std::fs::write(root.join("c.txt"), "|a|b|\n|-|-|\n").unwrap();
-        let relatives = ["a.md", "b.md", "c.txt"].map(Utf8PathBuf::from);
+        let relatives = ["a.md", "b.md", "c.txt"].map(camino::Utf8PathBuf::from);
         let changed = format_files(root, &relatives).unwrap();
-        assert_eq!(changed, [Utf8PathBuf::from("a.md")]);
+        assert_eq!(changed, [camino::Utf8PathBuf::from("a.md")]);
         assert_eq!(
             std::fs::read_to_string(root.join("a.md")).unwrap(),
             "| a | b |\n| - | - |\n| 1 | 2 |\n"
@@ -164,19 +166,19 @@ mod tests {
         );
         assert!(format_files(root, &relatives).unwrap().is_empty());
         std::fs::write(root.join("a.md"), "|a|b|\n|-|-|\n").unwrap();
-        let twice = ["a.md", "a.md"].map(Utf8PathBuf::from);
+        let twice = ["a.md", "a.md"].map(camino::Utf8PathBuf::from);
         assert_eq!(
             format_files(root, &twice).unwrap(),
-            [Utf8PathBuf::from("a.md")]
+            [camino::Utf8PathBuf::from("a.md")]
         );
     }
 
     #[test]
     fn writes_nothing_when_a_listed_file_is_missing() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
         std::fs::write(root.join("a.md"), "|a|b|\n|-|-|\n").unwrap();
-        let relatives = ["a.md", "missing.md"].map(Utf8PathBuf::from);
+        let relatives = ["a.md", "missing.md"].map(camino::Utf8PathBuf::from);
         assert!(format_files(root, &relatives).is_err());
         assert_eq!(
             std::fs::read_to_string(root.join("a.md")).unwrap(),
@@ -187,21 +189,21 @@ mod tests {
     #[test]
     fn lists_and_formats_untracked_files_with_non_ascii_names() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
         git(root, &["init", "-q"]);
         std::fs::write(root.join("café.md"), "|a|b|\n|-|-|\n").unwrap();
         let changes = crate::git::working_tree_changes(root).unwrap();
-        assert_eq!(changes, [Utf8PathBuf::from("café.md")]);
+        assert_eq!(changes, [camino::Utf8PathBuf::from("café.md")]);
         assert_eq!(
             format_files(root, &changes).unwrap(),
-            [Utf8PathBuf::from("café.md")]
+            [camino::Utf8PathBuf::from("café.md")]
         );
     }
 
     #[test]
     fn a_directory_expands_to_its_markdown_without_ignored_or_excluded_files() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
         git(root, &["init", "-q"]);
         for dir in ["docs/deep", "vendor", "build"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
@@ -217,37 +219,37 @@ mod tests {
             std::fs::write(root.join(file), table).unwrap();
         }
         std::fs::write(root.join(".gitignore"), "build/\n").unwrap();
-        let from_root = expand_directories(root, vec![Utf8PathBuf::from("")]).unwrap();
+        let from_root = expand_directories(root, vec![camino::Utf8PathBuf::from("")]).unwrap();
         let mut changed = format_files(root, &from_root).unwrap();
         changed.sort();
         assert_eq!(
             changed,
-            ["docs/a.md", "docs/deep/b.md", "top.md"].map(Utf8PathBuf::from)
+            ["docs/a.md", "docs/deep/b.md", "top.md"].map(camino::Utf8PathBuf::from)
         );
         std::fs::write(root.join("docs/a.md"), table).unwrap();
-        let from_docs = expand_directories(root, vec![Utf8PathBuf::from("docs")]).unwrap();
+        let from_docs = expand_directories(root, vec![camino::Utf8PathBuf::from("docs")]).unwrap();
         assert_eq!(
             format_files(root, &from_docs).unwrap(),
-            [Utf8PathBuf::from("docs/a.md")]
+            [camino::Utf8PathBuf::from("docs/a.md")]
         );
     }
 
     #[test]
     fn a_directory_name_with_glob_characters_is_taken_literally() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
         git(root, &["init", "-q"]);
         std::fs::create_dir_all(root.join("a[1]")).unwrap();
         std::fs::create_dir_all(root.join("a1")).unwrap();
         std::fs::write(root.join("a[1]/x.md"), "|a|b|\n|-|-|\n").unwrap();
         std::fs::write(root.join("a1/y.md"), "|a|b|\n|-|-|\n").unwrap();
         assert_eq!(
-            expand_directories(root, vec![Utf8PathBuf::from("a[1]")]).unwrap(),
-            [Utf8PathBuf::from("a[1]/x.md")]
+            expand_directories(root, vec![camino::Utf8PathBuf::from("a[1]")]).unwrap(),
+            [camino::Utf8PathBuf::from("a[1]/x.md")]
         );
     }
 
-    fn git(root: &Utf8Path, args: &[&str]) -> String {
+    fn git(root: &camino::Utf8Path, args: &[&str]) -> String {
         let output = std::process::Command::new("git")
             .current_dir(root)
             .args(args)
@@ -260,7 +262,7 @@ mod tests {
     #[test]
     fn formats_what_a_turn_committed_into_its_newest_commit() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
         git(root, &["init", "-q"]);
         git(root, &["config", "user.name", "t"]);
         git(root, &["config", "user.email", "t@t"]);
@@ -285,7 +287,7 @@ mod tests {
     #[test]
     fn formats_the_first_commit_of_a_repository_without_commits() {
         let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8Path::from_path(tmp.path()).unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
         git(root, &["init", "-q"]);
         git(root, &["config", "user.name", "t"]);
         git(root, &["config", "user.email", "t@t"]);

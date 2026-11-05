@@ -1,5 +1,3 @@
-use super::{Message, Mode};
-use camino::Utf8Path;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 const FEEDBACK_PROMPT: &str = include_str!("../../prompts/feedback.md");
@@ -22,18 +20,22 @@ pub const NOTE_MAX_COMMITS: usize = 20;
 /// Without a `mode`, the mode instructions are left out. `review_rounds` is the most
 /// review rounds of each commit, from the configuration. It holds nothing that changes
 /// between turns: see [`environment_note`].
-pub fn system_prompt(mode: Option<Mode>, review_rounds: u32, root: &Utf8Path) -> String {
+pub fn system_prompt(
+    mode: Option<crate::agent::Mode>,
+    review_rounds: u32,
+    root: &camino::Utf8Path,
+) -> String {
     let lead = mode.map(|mode| mode_prompt(mode, review_rounds));
     with_project(lead.as_deref(), root)
 }
 
 /// The system prompt of a sub-agent: its role's prompt instead of a mode's, and the
 /// project's own instructions.
-pub fn subagent_system_prompt(role: &str, root: &Utf8Path) -> String {
+pub fn subagent_system_prompt(role: &str, root: &camino::Utf8Path) -> String {
     with_project(Some(role.trim_end()), root)
 }
 
-fn with_project(lead: Option<&str>, root: &Utf8Path) -> String {
+fn with_project(lead: Option<&str>, root: &camino::Utf8Path) -> String {
     let mut out = String::new();
     if let Some(lead) = lead {
         out.push_str(lead);
@@ -49,12 +51,13 @@ fn with_project(lead: Option<&str>, root: &Utf8Path) -> String {
 
 /// What is appended to Claude Code's own system prompt: it loads the project's
 /// instructions itself, so only the mode instructions are added.
-pub fn claude_system_prompt(mode: Option<Mode>, review_rounds: u32) -> String {
+pub fn claude_system_prompt(mode: Option<crate::agent::Mode>, review_rounds: u32) -> String {
     mode.map(|mode| mode_prompt(mode, review_rounds))
         .unwrap_or_default()
 }
 
-fn mode_prompt(mode: Mode, review_rounds: u32) -> String {
+fn mode_prompt(mode: crate::agent::Mode, review_rounds: u32) -> String {
+    use crate::agent::Mode;
     match mode {
         Mode::Feedback => FEEDBACK_PROMPT.trim_end().to_string(),
         Mode::Commit => COMMIT_PROMPT
@@ -66,7 +69,7 @@ fn mode_prompt(mode: Mode, review_rounds: u32) -> String {
 /// The state of the repository when the prompt was sent. It belongs to the message,
 /// not to the system prompt: HEAD moves on every commit, and anything that changes
 /// ahead of the replayed ancestors throws away the endpoint's prefix cache.
-pub fn environment_note(root: &Utf8Path, head: Option<&str>, date: &str) -> String {
+pub fn environment_note(root: &camino::Utf8Path, head: Option<&str>, date: &str) -> String {
     let head = match head {
         Some(head) => head.to_string(),
         None => "none yet (no commit)".to_string(),
@@ -106,7 +109,8 @@ fn hhmm(secs: i64, offset: i32) -> String {
 }
 
 /// The messages `transcript.jsonl` of a node holds, or `None` without a usable one.
-fn read_transcript(dir: &Utf8Path) -> Option<Vec<Message>> {
+fn read_transcript(dir: &camino::Utf8Path) -> Option<Vec<crate::agent::Message>> {
+    use crate::agent::Message;
     let text = std::fs::read_to_string(dir.join("transcript.jsonl")).ok()?;
     let messages: Vec<Message> = text
         .lines()
@@ -120,9 +124,10 @@ fn read_transcript(dir: &Utf8Path) -> Option<Vec<Message>> {
 /// What an ancestor contributes to the context: its exact transcript, or, when it has
 /// none, its prompt and reply as plain text. A transcript cut inside a round is
 /// repaired, so replaying it is a valid sequence.
-pub fn ancestor_messages(dir: &Utf8Path) -> Vec<Message> {
+pub fn ancestor_messages(dir: &camino::Utf8Path) -> Vec<crate::agent::Message> {
+    use crate::agent::Message;
     if let Some(mut messages) = read_transcript(dir) {
-        super::agent_loop::repair_tail(&mut messages);
+        crate::agent::agent_loop::repair_tail(&mut messages);
         return messages;
     }
     let (prompt, reply) = crate::conversation::read_prompt_and_reply(dir);
@@ -176,7 +181,8 @@ keep a change in the git history — you can only present a change to the user.]
 
 /// Removes the feedback note from replayed user messages, so a commit turn never reads
 /// the feedback turns before it as instructions to itself.
-pub fn strip_workspace_note(messages: &mut [Message]) {
+pub fn strip_workspace_note(messages: &mut [crate::agent::Message]) {
+    use crate::agent::Message;
     let note = format!("{WORKSPACE_NOTE}\n\n");
     for message in messages {
         if let Message::User { content, .. } = message
@@ -269,7 +275,8 @@ pub fn with_notes(notes: &[Option<String>], prompt: &str) -> String {
 
 /// Hidden message sent when a commit turn stops while the working tree is still dirty.
 /// `status` is the output of `git status --short`.
-pub fn commit_nudge(status: &str) -> Message {
+pub fn commit_nudge(status: &str) -> crate::agent::Message {
+    use crate::agent::Message;
     Message::User {
         content: format!(
             "The working tree still has uncommitted changes:\n\n{}\n\nCommit them now.",
@@ -292,6 +299,7 @@ mod tests {
 
     #[test]
     fn ancestor_with_transcript_is_replayed_exactly() {
+        use crate::agent::Message;
         let (_tmp, dir) = temp_dir();
         std::fs::write(dir.join("prompt.md"), "ignored").unwrap();
         std::fs::write(
@@ -317,6 +325,7 @@ mod tests {
 
     #[test]
     fn ancestor_without_transcript_falls_back_to_prompt_and_reply() {
+        use crate::agent::Message;
         let (_tmp, dir) = temp_dir();
         std::fs::write(dir.join("prompt.md"), "question").unwrap();
         std::fs::write(dir.join("reply.md"), "answer").unwrap();
@@ -407,6 +416,7 @@ mod tests {
 
     #[test]
     fn system_prompt_holds_no_state_of_the_repository() {
+        use crate::agent::Mode;
         let (_tmp, root) = temp_dir();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
         let prompt = system_prompt(Some(Mode::Feedback), 3, &root);
@@ -430,6 +440,7 @@ mod tests {
 
     #[test]
     fn commit_prompt_states_the_configured_review_rounds() {
+        use crate::agent::Mode;
         let (_tmp, root) = temp_dir();
         let commit = system_prompt(Some(Mode::Commit), 7, &root);
         assert!(commit.contains("At most 7 review rounds"));
@@ -465,6 +476,7 @@ mod tests {
 
     #[test]
     fn strip_workspace_note_leaves_the_other_notes_and_the_prompt() {
+        use crate::agent::Message;
         let environment = Some("[Note from Explorer: env]".to_string());
         let workspace = Some(WORKSPACE_NOTE.to_string());
         let mut messages = vec![
@@ -501,6 +513,7 @@ mod tests {
 
     #[test]
     fn commit_nudge_is_marked_as_injected() {
+        use crate::agent::Message;
         let Message::User { content, injected } = commit_nudge(" M a.txt\n?? b.txt\n") else {
             panic!("a nudge is a user message");
         };
@@ -510,6 +523,7 @@ mod tests {
 
     #[test]
     fn claude_prompt_has_the_mode_but_not_project_instructions() {
+        use crate::agent::Mode;
         let (_tmp, root) = temp_dir();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
         let prompt = claude_system_prompt(Some(Mode::Commit), 3);

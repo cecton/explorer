@@ -1,51 +1,23 @@
-mod after_agents;
-mod app;
-mod command_line;
-mod commit_diff_pane;
-mod conversation_tree_pane;
+pub(crate) mod after_agents;
+pub(crate) mod app;
+pub(crate) mod command_line;
+pub(crate) mod commit_diff_pane;
+pub(crate) mod conversation_tree_pane;
 pub(crate) mod discussion_pane;
-mod fuzzy_picker;
+pub(crate) mod fuzzy_picker;
 pub(crate) mod git_log_pane;
-mod input_line;
-mod markdown;
+pub(crate) mod input_line;
+pub(crate) mod markdown;
 pub(crate) mod model_picker;
-mod pane_component;
+pub(crate) mod pane_component;
 pub(crate) mod pane_manager;
-mod panes_renderer;
-mod preview;
+pub(crate) mod panes_renderer;
+pub(crate) mod preview;
 pub(crate) mod report_pane;
-mod state;
-mod terminal_pane;
-mod text_layout;
-mod theme;
-mod theme_picker;
-mod title_row;
-mod window_picker;
-
-pub use app::{build_state, run};
-pub use input_line::InputLine;
-pub use r3bl_tui::core::ansi::RgbValue;
-pub use state::{
-    AppSignal, AppState, DiscussionState, GitLogWindowState, LogSource, NodeHighlights,
-    PreviewSearch, RowTarget, SEARCH_CURRENT, SEARCH_CURRENT_FG, SEARCH_MATCH, SEARCH_MATCH_FG,
-    SYMBOL_PALETTE, SearchDirection, SymbolHighlightGroup, SymbolRefLocation, TerminalPane,
-};
-pub use theme::HelixTheme;
-
-use self::app::*;
-use self::command_line::*;
-use self::commit_diff_pane::*;
-use self::conversation_tree_pane::*;
-use self::discussion_pane::*;
-use self::fuzzy_picker::*;
-use self::git_log_pane::*;
-use self::model_picker::*;
-use self::window_picker::*;
-
-use self::pane_manager::*;
-use self::preview::*;
-use self::state::*;
-use self::terminal_pane::*;
-use self::theme_picker::*;
-use self::title_row::*;
-use r3bl_tui::*;
+pub(crate) mod state;
+pub(crate) mod terminal_pane;
+pub(crate) mod text_layout;
+pub(crate) mod theme;
+pub(crate) mod theme_picker;
+pub(crate) mod title_row;
+pub(crate) mod window_picker;

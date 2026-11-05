@@ -1,10 +1,6 @@
-use crate::loader::IGNORED_DIRS;
-use camino::{Utf8Path, Utf8PathBuf};
-use regex::Regex;
 use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
-use unicode_general_category::{GeneralCategory, get_general_category};
 
 /// Directories of fetched dependencies: a repository does not own their bytes, and a
 /// package's own Unicode tables would bury what the repository says.
@@ -115,7 +111,7 @@ impl Kind {
 /// One thing worth reading in one file, at one line.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Finding {
-    pub path: Utf8PathBuf,
+    pub path: camino::Utf8PathBuf,
     pub line: usize,
     pub kind: Kind,
     /// The line around the finding, with anything invisible written as an escape.
@@ -144,7 +140,7 @@ pub struct Report {
     pub unreadable: usize,
     pub findings: Vec<Finding>,
     /// Canonical root, for the rendered report.
-    pub root: Utf8PathBuf,
+    pub root: camino::Utf8PathBuf,
 }
 
 impl Report {
@@ -261,11 +257,11 @@ fn code_span(text: &str) -> String {
 
 /// Scans every text file of the repository at `root`, and reports the symlinks that
 /// resolve outside it. Reads files and canonicalizes paths; never follows a symlink.
-pub fn scan(root: &Utf8Path) -> Report {
+pub fn scan(root: &camino::Utf8Path) -> Report {
     let walk = walk(root);
     let canonical_root = std::fs::canonicalize(root)
         .ok()
-        .and_then(|path| Utf8PathBuf::from_path_buf(path).ok())
+        .and_then(|path| camino::Utf8PathBuf::from_path_buf(path).ok())
         .unwrap_or_else(|| root.to_owned());
     let mut report = Report {
         root: canonical_root.clone(),
@@ -279,7 +275,7 @@ pub fn scan(root: &Utf8Path) -> Report {
         let Ok(target) = std::fs::canonicalize(path) else {
             continue;
         };
-        let Ok(target) = Utf8PathBuf::from_path_buf(target) else {
+        let Ok(target) = camino::Utf8PathBuf::from_path_buf(target) else {
             continue;
         };
         if target.starts_with(&canonical_root) {
@@ -324,7 +320,7 @@ struct Walk {
     unreadable: usize,
 }
 
-fn walk(root: &Utf8Path) -> Walk {
+fn walk(root: &camino::Utf8Path) -> Walk {
     let mut walk = Walk {
         files: Vec::new(),
         symlinks: Vec::new(),
@@ -363,10 +359,10 @@ fn walk(root: &Utf8Path) -> Walk {
 }
 
 fn is_pruned(name: &str) -> bool {
-    IGNORED_DIRS.contains(&name) || DEPENDENCY_DIRS.contains(&name)
+    crate::loader::IGNORED_DIRS.contains(&name) || DEPENDENCY_DIRS.contains(&name)
 }
 
-fn scan_file(root: &Utf8Path, path: &Path, report: &mut Report) {
+fn scan_file(root: &camino::Utf8Path, path: &Path, report: &mut Report) {
     let relative = relative_of(root, path);
     let Ok(bytes) = std::fs::read(path) else {
         report.unreadable += 1;
@@ -400,13 +396,13 @@ fn scan_file(root: &Utf8Path, path: &Path, report: &mut Report) {
     }
 }
 
-fn relative_of(root: &Utf8Path, path: &Path) -> Utf8PathBuf {
+fn relative_of(root: &camino::Utf8Path, path: &Path) -> camino::Utf8PathBuf {
     let relative = path.strip_prefix(root).unwrap_or(path);
-    Utf8PathBuf::from_path_buf(relative.to_path_buf())
-        .unwrap_or_else(|path| Utf8PathBuf::from(path.to_string_lossy().into_owned()))
+    camino::Utf8PathBuf::from_path_buf(relative.to_path_buf())
+        .unwrap_or_else(|path| camino::Utf8PathBuf::from(path.to_string_lossy().into_owned()))
 }
 
-fn scan_text(path: &Utf8Path, text: &str, report: &mut Report) {
+fn scan_text(path: &camino::Utf8Path, text: &str, report: &mut Report) {
     // A file may end its lines with CRLF or with CR alone, as classic Mac tools write
     // them: a terminator is not the kind of byte that returns to the start of a line.
     let normalized = if text.contains('\n') {
@@ -431,7 +427,7 @@ fn line_of(bytes: &[u8], at: usize) -> usize {
         + 1
 }
 
-fn scan_line(path: &Utf8Path, number: usize, line: &str, out: &mut Vec<Finding>) {
+fn scan_line(path: &camino::Utf8Path, number: usize, line: &str, out: &mut Vec<Finding>) {
     let mut push = |kind: Kind, at: usize, width: usize, excerpt: String| {
         out.push(Finding {
             path: path.to_owned(),
@@ -576,9 +572,9 @@ fn classify(ch: char) -> Class {
         0x0600..=0x0605 | 0x06DD | 0x070F | 0x0890..=0x0891 | 0x08E2 | 0x110BD | 0x110CD => {
             Class::None
         }
-        _ => match get_general_category(ch) {
-            GeneralCategory::Control => Class::Control,
-            GeneralCategory::Format => Class::Invisible,
+        _ => match unicode_general_category::get_general_category(ch) {
+            unicode_general_category::GeneralCategory::Control => Class::Control,
+            unicode_general_category::GeneralCategory::Format => Class::Invisible,
             _ => Class::None,
         },
     }
@@ -633,7 +629,7 @@ fn tag_payloads(line: &str) -> Vec<(usize, String)> {
 }
 
 struct Prose {
-    regex: Regex,
+    regex: regex::Regex,
 }
 
 /// Prose that reads as an instruction to an agent. The patterns are deliberately tight:
@@ -652,7 +648,7 @@ fn prose() -> &'static [Prose] {
             r"<\|[a-z_]*\|>|<\|(?:system|im_start|im_end|endoftext)\|?>|<\|?(?:system|im_start|im_end|endoftext)\|>",
         ]
         .into_iter()
-        .filter_map(|pattern| Regex::new(pattern).ok().map(|regex| Prose { regex }))
+        .filter_map(|pattern| regex::Regex::new(pattern).ok().map(|regex| Prose { regex }))
         .collect()
     })
 }
@@ -697,12 +693,12 @@ fn push_escaped(out: &mut String, ch: char) {
     // Format stays out of the exclusions: the only ones `classify` lets through are drawn.
     let visible = classify(ch) == Class::None
         && !matches!(
-            get_general_category(ch),
-            GeneralCategory::Control
-                | GeneralCategory::Surrogate
-                | GeneralCategory::Unassigned
-                | GeneralCategory::LineSeparator
-                | GeneralCategory::ParagraphSeparator
+            unicode_general_category::get_general_category(ch),
+            unicode_general_category::GeneralCategory::Control
+                | unicode_general_category::GeneralCategory::Surrogate
+                | unicode_general_category::GeneralCategory::Unassigned
+                | unicode_general_category::GeneralCategory::LineSeparator
+                | unicode_general_category::GeneralCategory::ParagraphSeparator
         );
     if visible {
         out.push(ch);
@@ -732,7 +728,7 @@ fn ceil_boundary(text: &str, mut at: usize) -> usize {
 
 /// Writes a path with the control bytes of a hostile file name escaped, so that a report
 /// printed to a terminal cannot be rewritten by the name it quotes.
-fn escaped(path: &Utf8Path) -> String {
+fn escaped(path: &camino::Utf8Path) -> String {
     let mut out = String::with_capacity(path.as_str().len());
     for ch in path.as_str().chars() {
         push_escaped(&mut out, ch);
@@ -751,7 +747,7 @@ mod tests {
         (dir, root)
     }
 
-    fn write(root: &Utf8Path, name: &str, bytes: impl AsRef<[u8]>) {
+    fn write(root: &camino::Utf8Path, name: &str, bytes: impl AsRef<[u8]>) {
         let path = root.join(name);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).unwrap();
@@ -1127,7 +1123,7 @@ mod tests {
     /// is reported is the prose. The PNG carries raw escapes of its own and is binary.
     #[test]
     fn the_jqwik_payload_is_review_and_never_danger() {
-        let root = Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/jqwik");
+        let root = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/jqwik");
         let report = scan(&root);
         assert_eq!(
             report.count(Severity::Danger),

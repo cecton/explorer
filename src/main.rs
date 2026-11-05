@@ -1,5 +1,6 @@
-use arc_swap::ArcSwap;
-use camino::Utf8PathBuf;
+#![warn(clippy::wildcard_imports)]
+#![warn(clippy::clone_on_ref_ptr)]
+
 use std::sync::Arc;
 
 mod agent;
@@ -16,10 +17,8 @@ mod session;
 mod tui;
 mod watcher;
 
-use loader::{LoadedFile, find_git_root, walk_repo_files};
-
 /// The `fmt-md` subcommand: prints the paths it rewrote and returns the exit code.
-fn fmt_md(root: &camino::Utf8Path, paths: &[Utf8PathBuf]) -> i32 {
+fn fmt_md(root: &camino::Utf8Path, paths: &[camino::Utf8PathBuf]) -> i32 {
     let relatives = if paths.is_empty() {
         git::working_tree_changes(root)
     } else {
@@ -29,7 +28,7 @@ fn fmt_md(root: &camino::Utf8Path, paths: &[Utf8PathBuf]) -> i32 {
                 let absolute = std::env::current_dir()
                     .map_err(|e| e.to_string())
                     .map(|cwd| cwd.join(path))?;
-                let absolute = Utf8PathBuf::from_path_buf(absolute)
+                let absolute = camino::Utf8PathBuf::from_path_buf(absolute)
                     .map_err(|p| format!("{} is not valid UTF-8", p.display()))?;
                 // Lexically resolves `..`, so a path leaving the repository is refused.
                 let resolved = agent::tools::resolve(root, absolute.as_str())
@@ -85,7 +84,7 @@ async fn main() {
             .init();
     }
 
-    let root = Utf8PathBuf::from_path_buf(find_git_root())
+    let root = camino::Utf8PathBuf::from_path_buf(loader::find_git_root())
         .expect("repository root path is not valid UTF-8");
 
     if args.scan {
@@ -106,12 +105,12 @@ async fn main() {
         std::process::exit(fmt_md(&root, paths));
     }
 
-    let files: Vec<Arc<LoadedFile>> = walk_repo_files(&root)
+    let files: Vec<Arc<loader::LoadedFile>> = loader::walk_repo_files(&root)
         .into_iter()
-        .filter_map(LoadedFile::load)
+        .filter_map(loader::LoadedFile::load)
         .collect();
 
-    let files = Arc::new(ArcSwap::from_pointee(files));
+    let files = Arc::new(arc_swap::ArcSwap::from_pointee(files));
 
     let config = match config::Config::load() {
         Ok(c) => c,
@@ -133,17 +132,17 @@ async fn main() {
     };
 
     let theme_name = args.theme.clone().or(config_theme).unwrap_or_else(|| {
-        tui::HelixTheme::theme_names()
+        tui::theme::HelixTheme::theme_names()
             .next()
             .unwrap_or("catppuccin_mocha")
             .to_string()
     });
 
-    let theme = if let Some(t) = tui::HelixTheme::from_name(&theme_name) {
+    let theme = if let Some(t) = tui::theme::HelixTheme::from_name(&theme_name) {
         t
     } else {
         eprintln!("unknown theme '{theme_name}', using default");
-        tui::HelixTheme::default()
+        tui::theme::HelixTheme::default()
     };
 
     let mut keymap = keymap::Keymap::default();
@@ -153,7 +152,7 @@ async fn main() {
     }
 
     let mut initial_state =
-        tui::build_state(Arc::clone(&files), root.clone(), theme.clone(), keymap);
+        tui::app::build_state(Arc::clone(&files), root.clone(), theme.clone(), keymap);
     initial_state.after_agents_grace = std::time::Duration::from_secs(after_agents.grace_seconds);
     initial_state.config_aliases = aliases;
     initial_state.agent = Arc::new(config::resolve_agent(
@@ -186,7 +185,7 @@ async fn main() {
         initial_state.saved_theme = theme;
     }
 
-    tui::run(initial_state, files, root)
+    crate::tui::app::run(initial_state, files, root)
         .await
         .expect("TUI error");
 }

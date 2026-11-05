@@ -1,5 +1,5 @@
-use crate::tui::RgbValue;
-use serde_json::Value;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::collections::HashMap;
 
 include!("../../themes/themes.rs");
@@ -18,7 +18,7 @@ pub struct Style {
 
 struct RawTheme {
     palette: HashMap<String, RgbValue>,
-    styles: Vec<(String, Value)>,
+    styles: Vec<(String, serde_json::Value)>,
     inherits: Option<String>,
 }
 
@@ -136,7 +136,7 @@ fn collect_chain(name: &str, toml_str: &str) -> Vec<RawTheme> {
 }
 
 fn parse_theme(toml_str: &str) -> RawTheme {
-    let root: Value = match toml::from_str(toml_str) {
+    let root: serde_json::Value = match toml::from_str(toml_str) {
         Ok(v) => v,
         Err(_) => {
             return RawTheme {
@@ -171,7 +171,7 @@ fn parse_theme(toml_str: &str) -> RawTheme {
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    let mut styles: Vec<(String, Value)> = Vec::new();
+    let mut styles: Vec<(String, serde_json::Value)> = Vec::new();
     for (key, val) in table {
         if key == "palette" || key == "inherits" {
             continue;
@@ -186,9 +186,9 @@ fn parse_theme(toml_str: &str) -> RawTheme {
     }
 }
 
-fn resolve_style(val: &Value, palette: &HashMap<&str, RgbValue>) -> Option<Style> {
+fn resolve_style(val: &serde_json::Value, palette: &HashMap<&str, RgbValue>) -> Option<Style> {
     match val {
-        Value::String(s) => {
+        serde_json::Value::String(s) => {
             if let Some(rgb) = parse_hex_color(s) {
                 return Some(Style {
                     fg: Some(rgb),
@@ -200,7 +200,7 @@ fn resolve_style(val: &Value, palette: &HashMap<&str, RgbValue>) -> Option<Style
                 bg: None,
             })
         }
-        Value::Object(obj) => {
+        serde_json::Value::Object(obj) => {
             let fg = obj
                 .get("fg")
                 .and_then(|v| v.as_str())

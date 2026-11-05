@@ -1,27 +1,8 @@
-use crate::agent::mcp::{McpStatus, Notify};
-use crate::agent::turn::{SPINNER, SPINNER_INTERVAL};
-use crate::keymap::Action;
-use crate::loader::LoadedFile;
-use crate::lsp::{self, LSP_RRT};
-use crate::session::save_session;
-use crate::tui::pane_component::PaneComponent;
-use crate::tui::panes_renderer::PanesRenderer;
-use crate::tui::text_layout::display_width;
-use crate::tui::*;
-use crate::watcher::{WATCHER_RRT, WatcherWorker};
-use arc_swap::ArcSwap;
-use camino::{Utf8Path, Utf8PathBuf};
-use parking_lot::Mutex;
-use r3bl_tui::OscPtyEvent;
-use r3bl_tui::SubscriberGuard;
-use r3bl_tui::core::pty::{
-    DefaultPtySessionConfig, PtyInputEvent, PtyOutputEvent, PtySessionBuilder,
-    PtySessionConfigOption,
-};
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
-use tokio::sync::mpsc;
 
 #[repr(u8)]
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -81,14 +62,18 @@ impl From<Id> for FlexBoxId {
 }
 
 pub struct AppMain {
-    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
-    root: Utf8PathBuf,
-    picker_results_tx: mpsc::Sender<PickerResultMsg>,
-    picker_results_rx: mpsc::Receiver<PickerResultMsg>,
+    files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
+    root: camino::Utf8PathBuf,
+    picker_results_tx: tokio::sync::mpsc::Sender<crate::tui::window_picker::PickerResultMsg>,
+    picker_results_rx: tokio::sync::mpsc::Receiver<crate::tui::window_picker::PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
-    exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
-    terminal_event_tx: mpsc::UnboundedSender<(usize, PtyOutputEvent)>,
-    terminal_event_rx: mpsc::UnboundedReceiver<(usize, PtyOutputEvent)>,
+    exit_tx: Arc<
+        OnceLock<
+            tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>>,
+        >,
+    >,
+    terminal_event_tx: tokio::sync::mpsc::UnboundedSender<(usize, PtyOutputEvent)>,
+    terminal_event_rx: tokio::sync::mpsc::UnboundedReceiver<(usize, PtyOutputEvent)>,
     lsp_guard: Option<SubscriberGuard<crate::lsp::LspWorker>>,
     lsp_last_gen: u8,
     /// Counts `Housekeeping` calls so the LSP health is logged only every few of them.
@@ -99,19 +84,25 @@ pub struct AppMain {
     /// `AppSignal::Tick` handler) since resubscribing too early would silently
     /// rejoin the still-running old worker instead of restarting it.
     lsp_restart_pending: bool,
-    watcher_guard: Option<SubscriberGuard<WatcherWorker>>,
+    watcher_guard: Option<SubscriberGuard<crate::watcher::WatcherWorker>>,
     /// Local minute (since the epoch) the status-bar clock was last painted at.
     last_clock_minute: i64,
 }
 
 impl AppMain {
     fn new_boxed(
-        files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
-        root: Utf8PathBuf,
-        exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>>,
-    ) -> BoxedSafeApp<AppState, AppSignal> {
-        let (picker_results_tx, picker_results_rx) = mpsc::channel(32);
-        let (terminal_event_tx, terminal_event_rx) = mpsc::unbounded_channel();
+        files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
+        root: camino::Utf8PathBuf,
+        exit_tx: Arc<
+            OnceLock<
+                tokio::sync::mpsc::Sender<
+                    TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+                >,
+            >,
+        >,
+    ) -> BoxedSafeApp<crate::tui::state::AppState, crate::tui::state::AppSignal> {
+        let (picker_results_tx, picker_results_rx) = tokio::sync::mpsc::channel(32);
+        let (terminal_event_tx, terminal_event_rx) = tokio::sync::mpsc::unbounded_channel();
         Box::new(Self {
             files,
             root,
@@ -133,10 +124,11 @@ impl AppMain {
     /// Logs the LSP worker's health: on a change of generation, and otherwise every
     /// [`LSP_HEALTH_LOG_EVERY`] calls so a steady state does not fill the log.
     fn log_lsp_health(&mut self) {
+        use crate::lsp::LspHealth;
         let health = crate::lsp::health_check();
         let generation = match &health {
-            crate::lsp::LspHealth::Running { generation, .. } => *generation,
-            crate::lsp::LspHealth::NotRunning => 0,
+            LspHealth::Running { generation, .. } => *generation,
+            LspHealth::NotRunning => 0,
         };
         self.lsp_health_skip = self.lsp_health_skip.wrapping_add(1);
         if generation != self.lsp_last_gen {
@@ -144,15 +136,15 @@ impl AppMain {
             self.lsp_last_gen = generation;
         }
         match &health {
-            crate::lsp::LspHealth::Running {
+            LspHealth::Running {
                 input_receivers: 0, ..
             } if self.lsp_health_skip.is_multiple_of(LSP_HEALTH_LOG_EVERY) => {
                 tracing::warn!("LSP health: {:?}", health);
             }
-            crate::lsp::LspHealth::NotRunning if crate::lsp::disabled() => {
+            LspHealth::NotRunning if crate::lsp::disabled() => {
                 tracing::debug!("LSP health: disabled");
             }
-            crate::lsp::LspHealth::NotRunning => {
+            LspHealth::NotRunning => {
                 tracing::warn!("LSP health: NotRunning");
             }
             _ if self.lsp_health_skip.is_multiple_of(LSP_HEALTH_LOG_EVERY) => {
@@ -164,7 +156,14 @@ impl AppMain {
 
     /// Respawns the LSP worker once the old one has exited, after a cargo features change.
     /// Returns whether it cleared the colors of the Rust files, which needs a repaint.
-    fn restart_lsp_if_pending(&mut self, state: &AppState, main_tx: MainTx) -> bool {
+    fn restart_lsp_if_pending(
+        &mut self,
+        state: &crate::tui::state::AppState,
+        main_tx: MainTx,
+    ) -> bool {
+        use crate::lsp::LspConfig;
+        use crate::lsp::LspHealth;
+        use crate::tui::pane_manager::Window;
         if !self.lsp_restart_pending || crate::lsp::disabled() {
             return false;
         }
@@ -174,10 +173,7 @@ impl AppMain {
         // 0 receivers would take the RRT framework's FastPath and silently rejoin the
         // still-running old worker instead of spawning a fresh one with the new init
         // options.
-        if !matches!(
-            crate::lsp::health_check(),
-            crate::lsp::LspHealth::NotRunning
-        ) {
+        if !matches!(crate::lsp::health_check(), LspHealth::NotRunning) {
             return false;
         }
         for file in self.files.load().iter() {
@@ -185,7 +181,7 @@ impl AppMain {
                 file.colored_lines.lock().clear();
             }
         }
-        match LSP_RRT.try_subscribe(lsp::LspConfig {
+        match crate::lsp::LSP_RRT.try_subscribe(LspConfig {
             root: self.root.clone(),
             files: Arc::clone(&self.files),
             app_tx: main_tx,
@@ -212,13 +208,16 @@ impl AppMain {
 
     fn open_terminal(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         cmd: Option<String>,
-        cwd: Option<Utf8PathBuf>,
-        pane_size: Option<PaneSize>,
+        cwd: Option<camino::Utf8PathBuf>,
+        pane_size: Option<crate::tui::pane_manager::PaneSize>,
         id: Option<usize>,
-        replace_window: Option<Window>,
+        replace_window: Option<crate::tui::pane_manager::Window>,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::AppSignal;
+        use crate::tui::state::TerminalPane;
         throws_with_return!({
             let state = &mut global_data.state;
             let restore = id.is_some();
@@ -271,7 +270,7 @@ impl AppMain {
             });
             let pane_cwd = cwd.clone().unwrap_or_else(|| self.root.clone());
             let pane_command = if is_command_pane { cmd.clone() } else { None };
-            let pane = Arc::new(Mutex::new(TerminalPane {
+            let pane = Arc::new(parking_lot::Mutex::new(TerminalPane {
                 ofs_buf,
                 title: initial_title,
                 pty_input_tx,
@@ -441,7 +440,8 @@ fn is_buffer_empty(ofs_buf: &r3bl_tui::OfsBufVT100) -> bool {
     })
 }
 
-fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
+fn poll_terminal_output(app: &mut AppMain, state: &mut crate::tui::state::AppState) {
+    use crate::tui::pane_manager::Window;
     while let Ok((id, event)) = app.terminal_event_rx.try_recv() {
         if let PtyOutputEvent::Exit(status) = event {
             let exit_code = Some(status.exit_code());
@@ -490,8 +490,11 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut AppState) {
 
 /// Tells the main thread that the status of an MCP server changed.
 pub(crate) fn mcp_notify(
-    main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-) -> Notify {
+    main_tx: tokio::sync::mpsc::Sender<
+        TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+    >,
+) -> crate::agent::mcp::Notify {
+    use crate::tui::state::AppSignal;
     Arc::new(move |name| {
         let main_tx = main_tx.clone();
         let name = name.to_string();
@@ -505,14 +508,15 @@ pub(crate) fn mcp_notify(
     })
 }
 
-type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
+type MainTx =
+    tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>>;
 
 /// How many 5s `Housekeeping` calls apart a steady LSP health is logged: about 30s.
 const LSP_HEALTH_LOG_EVERY: u32 = 6;
 
 /// Sends `signal` every `period`, the first time at once. A stall costs one late signal,
 /// never a burst of catch-up ones; a full channel drops that period's signal.
-fn every(tx: &MainTx, period: Duration, signal: AppSignal) {
+fn every(tx: &MainTx, period: Duration, signal: crate::tui::state::AppSignal) {
     let tx = tx.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(period);
@@ -528,7 +532,8 @@ fn every(tx: &MainTx, period: Duration, signal: AppSignal) {
 
 /// Rechecks the working-tree dirty status off the main thread (it walks the index and
 /// the worktree); the answer comes back as `DirtyStatusLoaded`.
-fn spawn_dirty_check(state: &AppState, main_tx: MainTx) {
+fn spawn_dirty_check(state: &crate::tui::state::AppState, main_tx: MainTx) {
+    use crate::tui::state::AppSignal;
     let Some(repo) = state.repo.clone() else {
         return;
     };
@@ -551,11 +556,11 @@ fn clock_minute() -> i64 {
 
 // save_session is intentionally a synchronous fast JSON write on the main thread.
 // The 5s `Housekeeping` period is the debounce.
-fn maybe_save_session(state: &mut AppState, root: &Utf8Path) {
+fn maybe_save_session(state: &mut crate::tui::state::AppState, root: &camino::Utf8Path) {
     if !state.session_dirty {
         return;
     }
-    match save_session(root, state) {
+    match crate::session::save_session(root, state) {
         Ok(()) => {
             state.session_dirty = false;
         }
@@ -564,15 +569,16 @@ fn maybe_save_session(state: &mut AppState, root: &Utf8Path) {
 }
 
 impl App for AppMain {
-    type S = AppState;
-    type AS = AppSignal;
+    type S = crate::tui::state::AppState;
+    type AS = crate::tui::state::AppSignal;
 
     fn app_init_components(
         &mut self,
         component_registry_map: &mut ComponentRegistryMap<Self::S, Self::AS>,
         has_focus: &mut HasFocus,
     ) {
-        for slot in 0..MAX_PANES {
+        use crate::tui::pane_component::PaneComponent;
+        for slot in 0..crate::tui::pane_manager::MAX_PANES {
             let pane_id = FlexBoxId::from(Id::pane(slot));
             if let ContainsResult::DoesNotContain =
                 ComponentRegistry::contains(component_registry_map, pane_id)
@@ -595,7 +601,17 @@ impl App for AppMain {
         }
     }
 
-    fn app_start_background_services(&mut self, global_data: &mut GlobalData<AppState, AppSignal>) {
+    fn app_start_background_services(
+        &mut self,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+    ) {
+        use crate::conversation::ConversationTree;
+        use crate::lsp::LspConfig;
+        use crate::tui::git_log_pane::GitLogPaneComponent;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::AppSignal;
+        use crate::tui::state::CommitDiffState;
+        use crate::watcher::WatcherConfig;
         let notify_tx = global_data.main_thread_channel_sender.clone();
 
         // Publish the channel sender so the SIGTERM handler can request a clean exit.
@@ -603,10 +619,10 @@ impl App for AppMain {
         let files = Arc::clone(&self.files);
         let root = self.root.clone();
 
-        if lsp::disabled() {
+        if crate::lsp::disabled() {
             tracing::info!("LSP worker disabled (EXPLORER_NO_LSP)");
         } else {
-            match LSP_RRT.try_subscribe(lsp::LspConfig {
+            match crate::lsp::LSP_RRT.try_subscribe(LspConfig {
                 root: root.clone(),
                 files: Arc::clone(&files),
                 app_tx: notify_tx.clone(),
@@ -625,7 +641,7 @@ impl App for AppMain {
             global_data.state.mcp.start(decl, Arc::clone(&notify));
         }
 
-        match WATCHER_RRT.try_subscribe(crate::watcher::WatcherConfig {
+        match crate::watcher::WATCHER_RRT.try_subscribe(WatcherConfig {
             root,
             app_tx: notify_tx.clone(),
             files: Arc::clone(&files),
@@ -644,7 +660,11 @@ impl App for AppMain {
         every(&notify_tx, Duration::from_secs(1), AppSignal::Tick);
         every(&notify_tx, Duration::from_secs(5), AppSignal::Housekeeping);
         every(&notify_tx, Duration::from_secs(60), AppSignal::UsagePollDue);
-        every(&notify_tx, SPINNER_INTERVAL, AppSignal::TurnTick);
+        every(
+            &notify_tx,
+            crate::agent::turn::SPINNER_INTERVAL,
+            AppSignal::TurnTick,
+        );
 
         let stack = global_data.state.pane_manager.window_stack.clone();
         for window in stack {
@@ -719,19 +739,14 @@ impl App for AppMain {
                 .get(&id)
                 .map(|win| win.source.clone())
                 .unwrap_or_default();
-            crate::tui::git_log_pane::GitLogPaneComponent::reload_log(
-                global_data.state.repo.clone(),
-                main_tx,
-                id,
-                &source,
-            );
+            GitLogPaneComponent::reload_log(global_data.state.repo.clone(), main_tx, id, &source);
         }
 
         if let Some(dir) = crate::conversation::conversations_dir(&global_data.state.root) {
             let tree = Arc::clone(&global_data.state.conversations);
             let main_tx = notify_tx.clone();
             tokio::task::spawn_blocking(move || {
-                *tree.write() = crate::conversation::ConversationTree::load(&dir);
+                *tree.write() = ConversationTree::load(&dir);
                 send_signal!(
                     main_tx,
                     TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::ConversationsLoaded)
@@ -755,15 +770,29 @@ impl App for AppMain {
     fn app_handle_input_event(
         &mut self,
         input_event: InputEvent,
-        global_data: &mut GlobalData<AppState, AppSignal>,
-        component_registry_map: &mut ComponentRegistryMap<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        component_registry_map: &mut ComponentRegistryMap<
+            crate::tui::state::AppState,
+            crate::tui::state::AppSignal,
+        >,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::keymap::Action;
+        use crate::tui::command_line::CommandLine;
+        use crate::tui::git_log_pane::GitLogPaneComponent;
+        use crate::tui::model_picker::ModelPickerComponent;
+        use crate::tui::pane_manager::ResizeDelta;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::GitLogWindowState;
+        use crate::tui::state::LogSource;
+        use crate::tui::state::ModelPickerPurpose;
+        use crate::tui::state::RowTarget;
+        use crate::tui::theme::HelixTheme;
         sync_has_focus(&global_data.state, has_focus);
         let surface_size = surface_size(global_data.window_size);
         global_data.state.last_surface_size = surface_size;
 
-        if after_agents::cancel_on_input(&mut global_data.state, &input_event) {
+        if crate::tui::after_agents::cancel_on_input(&mut global_data.state, &input_event) {
             return Ok(EventPropagation::ConsumedRender);
         }
 
@@ -787,7 +816,12 @@ impl App for AppMain {
                 .state
                 .command_line
                 .as_ref()
-                .map(|command_line| palette_entries(command_line.input.text(), &global_data.state))
+                .map(|command_line| {
+                    crate::tui::command_line::palette_entries(
+                        command_line.input.text(),
+                        &global_data.state,
+                    )
+                })
                 .unwrap_or_default();
             match &input_event {
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -819,7 +853,7 @@ impl App for AppMain {
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Enter),
                 }) => {
-                    run_command_line(global_data);
+                    crate::tui::command_line::run_command_line(global_data);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -976,7 +1010,7 @@ impl App for AppMain {
                     state.pane_manager.focused_window = Some(window);
                     notify_terminal_focus_change(state, old, Some(window));
                     let main_tx = global_data.main_thread_channel_sender.clone();
-                    crate::tui::git_log_pane::GitLogPaneComponent::reload_log(
+                    GitLogPaneComponent::reload_log(
                         state.repo.clone(),
                         main_tx,
                         id,
@@ -1217,11 +1251,26 @@ impl App for AppMain {
 
     fn app_handle_signal(
         &mut self,
-        action: &AppSignal,
-        global_data: &mut GlobalData<AppState, AppSignal>,
-        _component_registry_map: &mut ComponentRegistryMap<AppState, AppSignal>,
+        action: &crate::tui::state::AppSignal,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        _component_registry_map: &mut ComponentRegistryMap<
+            crate::tui::state::AppState,
+            crate::tui::state::AppSignal,
+        >,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::agent::mcp::McpStatus;
+        use crate::conversation::NodeStatus;
+        use crate::loader::FileKey;
+        use crate::loader::LoadedFile;
+        use crate::tui::after_agents::AfterAgents;
+        use crate::tui::discussion_pane::DiscussionComponent;
+        use crate::tui::git_log_pane::GitLogPaneComponent;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::AppSignal;
+        use crate::tui::state::SymbolHighlightGroup;
+        use crate::tui::state::SymbolRefLocation;
+        use crate::tui::window_picker::WindowPickerComponent;
         sync_has_focus(&global_data.state, _has_focus);
 
         if let AppSignal::OpenTerminal { cmd, cwd } = action {
@@ -1271,7 +1320,7 @@ impl App for AppMain {
                     // Index path -> position once. A rescan (post-overflow)
                     // batch can carry hundreds of thousands of paths; a linear
                     // `snapshot.iter().find()` per path would be quadratic.
-                    let index: std::collections::HashMap<&Utf8Path, usize> = snapshot
+                    let index: std::collections::HashMap<&camino::Utf8Path, usize> = snapshot
                         .iter()
                         .enumerate()
                         .map(|(i, f)| (f.path.as_path(), i))
@@ -1407,7 +1456,7 @@ impl App for AppMain {
                                 );
                             }
                         } else {
-                            let stale_paths: Vec<&Utf8Path> = batch
+                            let stale_paths: Vec<&camino::Utf8Path> = batch
                                 .modified
                                 .iter()
                                 .map(|p| p.as_path())
@@ -1515,23 +1564,20 @@ impl App for AppMain {
                             })
                             .unwrap_or(start);
                         state.next_palette_index = (color_idx + 1) % palette.len();
-                        let mut locations: Vec<crate::tui::state::SymbolRefLocation> =
-                            origin_locations.clone();
+                        let mut locations: Vec<SymbolRefLocation> = origin_locations.clone();
                         locations.extend(reference_locations.iter().cloned());
-                        state
-                            .symbol_highlights
-                            .push(crate::tui::state::SymbolHighlightGroup {
-                                qualified_name: qualified_name.clone(),
-                                origin_file: crate::loader::FileKey(origin_file_idx),
-                                origin_line,
-                                origin_char,
-                                origin_word,
-                                origin_byte_start: origin.as_ref().map(|l| l.start_byte),
-                                origin_byte_end: origin.as_ref().map(|l| l.end_byte),
-                                color: crate::tui::state::SYMBOL_PALETTE[color_idx],
-                                locations,
-                                needs_rebuild: false,
-                            });
+                        state.symbol_highlights.push(SymbolHighlightGroup {
+                            qualified_name: qualified_name.clone(),
+                            origin_file: FileKey(origin_file_idx),
+                            origin_line,
+                            origin_char,
+                            origin_word,
+                            origin_byte_start: origin.as_ref().map(|l| l.start_byte),
+                            origin_byte_end: origin.as_ref().map(|l| l.end_byte),
+                            color: crate::tui::state::SYMBOL_PALETTE[color_idx],
+                            locations,
+                            needs_rebuild: false,
+                        });
                         // Dedup: remove any previous group with the same qualified_name.
                         let qn = qualified_name;
                         let mut i = 0;
@@ -1549,7 +1595,7 @@ impl App for AppMain {
                     if let Some(win) = state.git_logs.get_mut(id) {
                         match result {
                             Ok(entries) => {
-                                win.entries = Some(entries.clone());
+                                win.entries = Some(std::sync::Arc::clone(entries));
                                 win.error = None;
                                 let count = win
                                     .entries
@@ -1573,7 +1619,7 @@ impl App for AppMain {
                         .map(|(id, win)| (*id, win.source.clone()))
                         .collect::<Vec<_>>()
                     {
-                        crate::tui::git_log_pane::GitLogPaneComponent::reload_log(
+                        GitLogPaneComponent::reload_log(
                             state.repo.clone(),
                             main_tx.clone(),
                             id,
@@ -1594,7 +1640,7 @@ impl App for AppMain {
                 }
                 AppSignal::GitRefsLoaded(result) => {
                     if let Ok(refs) = result {
-                        state.git_refs = Some(refs.clone());
+                        state.git_refs = Some(std::sync::Arc::clone(refs));
                     }
                     let picking: Vec<usize> = state
                         .git_logs
@@ -1603,8 +1649,7 @@ impl App for AppMain {
                         .map(|(id, _)| *id)
                         .collect();
                     for id in picking {
-                        crate::tui::git_log_pane::GitLogPaneComponent::
-                            refresh_branch_results_for_window(state, id);
+                        GitLogPaneComponent::refresh_branch_results_for_window(state, id);
                     }
                 }
                 AppSignal::CommitDiffLoaded { id, result } => {
@@ -1617,7 +1662,7 @@ impl App for AppMain {
                         let entry = state.commit_diffs.entry(*id).or_default();
                         match result {
                             Ok(lines) => {
-                                entry.lines = Some(lines.clone());
+                                entry.lines = Some(std::sync::Arc::clone(lines));
                                 entry.error = None;
                             }
                             Err(e) => entry.error = Some(e.clone()),
@@ -1713,7 +1758,8 @@ impl App for AppMain {
                     crate::agent::usage::save(&state.usage);
                 }
                 AppSignal::TurnTick => {
-                    state.spinner_tick = (state.spinner_tick + 1) % SPINNER.len() as u8;
+                    state.spinner_tick =
+                        (state.spinner_tick + 1) % crate::agent::turn::SPINNER.len() as u8;
                     if state.running_turns.is_empty() {
                         propagation = EventPropagation::Consumed;
                     }
@@ -1755,7 +1801,7 @@ impl App for AppMain {
                             {
                                 discussion.reply.clone_from(&reply);
                                 discussion.work_log.clone_from(&work_log);
-                                if outcome.status == crate::conversation::NodeStatus::Done {
+                                if outcome.status == NodeStatus::Done {
                                     discussion.thinking.clear();
                                     state
                                         .pane_manager
@@ -1791,7 +1837,7 @@ impl App for AppMain {
                     // A cancel cuts its sub-agent short, without the signal of its end.
                     DiscussionComponent::reload_agent_windows(state, main_tx.clone(), node, None);
                     for (id, win) in &state.git_logs {
-                        crate::tui::git_log_pane::GitLogPaneComponent::reload_log(
+                        GitLogPaneComponent::reload_log(
                             state.repo.clone(),
                             main_tx.clone(),
                             *id,
@@ -1799,7 +1845,7 @@ impl App for AppMain {
                         );
                     }
                     DiscussionComponent::release_queue(state, main_tx.clone());
-                    after_agents::arm(state, main_tx);
+                    crate::tui::after_agents::arm(state, main_tx);
                     spawn_dirty_check(state, global_data.main_thread_channel_sender.clone());
                 }
                 AppSignal::NodeTitleReady { node, title } => {
@@ -1829,16 +1875,19 @@ impl App for AppMain {
                         _ => propagation = EventPropagation::Consumed,
                     }
                 }
-                AppSignal::AfterAgentsExited { run } => after_agents::exited(state, *run),
+                AppSignal::AfterAgentsExited { run } => {
+                    crate::tui::after_agents::exited(state, *run)
+                }
                 AppSignal::Redraw | AppSignal::TerminalOutput => {}
                 AppSignal::Tick => {
                     // A countdown shows its seconds, and a firing or reverting one
                     // changes the status text: all repaint.
-                    let countdown = matches!(
-                        state.after_agents,
-                        Some(after_agents::AfterAgents::Countdown { .. })
+                    let countdown =
+                        matches!(state.after_agents, Some(AfterAgents::Countdown { .. }));
+                    crate::tui::after_agents::tick(
+                        state,
+                        global_data.main_thread_channel_sender.clone(),
                     );
-                    after_agents::tick(state, global_data.main_thread_channel_sender.clone());
                     let minute = clock_minute();
                     let minute_changed =
                         std::mem::replace(&mut self.last_clock_minute, minute) != minute;
@@ -1876,10 +1925,14 @@ impl App for AppMain {
 
     fn app_render(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
-        component_registry_map: &mut ComponentRegistryMap<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        component_registry_map: &mut ComponentRegistryMap<
+            crate::tui::state::AppState,
+            crate::tui::state::AppSignal,
+        >,
         has_focus: &mut HasFocus,
     ) -> CommonResult {
+        use crate::tui::panes_renderer::PanesRenderer;
         sync_has_focus(&global_data.state, has_focus);
 
         let mut best_generation = 0u64;
@@ -1946,7 +1999,7 @@ impl App for AppMain {
                 .state
                 .theme
                 .ui_bg("ui.background")
-                .unwrap_or(DEFAULT_BG);
+                .unwrap_or(crate::tui::title_row::DEFAULT_BG);
             let bg = TuiColor::from(bg_rgb);
             let bg_style = new_style!(color_bg: {bg});
             let mut bg_ops = RenderOpIRVec::new();
@@ -1967,7 +2020,11 @@ impl App for AppMain {
             pipeline = fill_pipeline;
 
             if global_data.state.command_line.is_some() {
-                render_command_line(&mut pipeline, window_size, &mut global_data.state);
+                crate::tui::command_line::render_command_line(
+                    &mut pipeline,
+                    window_size,
+                    &mut global_data.state,
+                );
             } else {
                 render_status_bar(
                     &mut pipeline,
@@ -1983,7 +2040,7 @@ impl App for AppMain {
 }
 
 /// Returns the `FlexBoxId` for the pane slot that corresponds to the focused window.
-pub(super) fn focused_pane_id(state: &AppState) -> FlexBoxId {
+pub(super) fn focused_pane_id(state: &crate::tui::state::AppState) -> FlexBoxId {
     let Some(slot) = state.pane_manager.focused_slot() else {
         return FlexBoxId::from(Id::Pane0);
     };
@@ -1997,7 +2054,11 @@ fn surface_size(window_size: VPSize) -> VPSize {
 }
 
 /// Closes `window` for good: kills a terminal's process and drops the window's state.
-pub(super) fn close_window(state: &mut AppState, window: Window) {
+pub(super) fn close_window(
+    state: &mut crate::tui::state::AppState,
+    window: crate::tui::pane_manager::Window,
+) {
+    use crate::tui::pane_manager::Window;
     let old = state.pane_manager.focused_window;
     match window {
         Window::Terminal(id) => {
@@ -2041,17 +2102,19 @@ pub(super) fn close_window(state: &mut AppState, window: Window) {
     state.mark_session_dirty();
 }
 
-pub(super) fn sync_terminal_grabbed(state: &mut AppState) {
+pub(super) fn sync_terminal_grabbed(state: &mut crate::tui::state::AppState) {
+    use crate::tui::pane_manager::Window;
     if !matches!(state.pane_manager.focused_window, Some(Window::Terminal(_))) {
         state.terminal_grabbed = false;
     }
 }
 
 pub(super) fn notify_terminal_focus_change(
-    state: &AppState,
-    old: Option<Window>,
-    new: Option<Window>,
+    state: &crate::tui::state::AppState,
+    old: Option<crate::tui::pane_manager::Window>,
+    new: Option<crate::tui::pane_manager::Window>,
 ) {
+    use crate::tui::pane_manager::Window;
     if old == new {
         return;
     }
@@ -2071,12 +2134,14 @@ pub(super) fn notify_terminal_focus_change(
     }
 }
 
-fn sync_has_focus(state: &AppState, has_focus: &mut HasFocus) {
+fn sync_has_focus(state: &crate::tui::state::AppState, has_focus: &mut HasFocus) {
     has_focus.set_id(focused_pane_id(state));
 }
 
-fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
-    let bg = theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
+fn create_stylesheet(theme: &crate::tui::theme::HelixTheme) -> CommonResult<TuiStylesheet> {
+    let bg = theme
+        .ui_bg("ui.background")
+        .unwrap_or(crate::tui::title_row::DEFAULT_BG);
     throws_with_return!({
         let mut styles = tui_stylesheet! {
             new_style!(
@@ -2084,7 +2149,7 @@ fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
                 color_bg: {TuiColor::from(bg)}
             )
         };
-        for col_idx in 0..MAX_PANES {
+        for col_idx in 0..crate::tui::pane_manager::MAX_PANES {
             let id = FlexBoxId::new(100 + col_idx as u8);
             styles.add_style(new_style!(
                 id: {id}
@@ -2092,7 +2157,7 @@ fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
                 color_bg: {TuiColor::from(bg)}
             ))?;
         }
-        for slot in 0..MAX_PANES {
+        for slot in 0..crate::tui::pane_manager::MAX_PANES {
             let id = Id::pane(slot);
             styles.add_style(new_style!(
                 id: {id}
@@ -2107,15 +2172,17 @@ fn create_stylesheet(theme: &HelixTheme) -> CommonResult<TuiStylesheet> {
 fn render_status_bar(
     pipeline: &mut RenderPipeline,
     size: VPSize,
-    state: &AppState,
-    theme: &HelixTheme,
+    state: &crate::tui::state::AppState,
+    theme: &crate::tui::theme::HelixTheme,
 ) {
+    use crate::keymap::Action;
+    use crate::tui::pane_manager::Window;
     let bg_rgb = theme
         .ui_bg("ui.statusline")
-        .unwrap_or(DEFAULT_STATUSLINE_BG);
+        .unwrap_or(crate::tui::title_row::DEFAULT_STATUSLINE_BG);
     let fg_rgb = theme
         .ui_fg("ui.statusline")
-        .unwrap_or(DEFAULT_STATUSLINE_FG);
+        .unwrap_or(crate::tui::title_row::DEFAULT_STATUSLINE_FG);
     let color_bg = TuiColor::from(bg_rgb);
     let color_fg = TuiColor::from(fg_rgb);
 
@@ -2245,8 +2312,16 @@ fn render_status_bar(
     // Right-aligned "dirty" flag (uncommitted staged/unstaged changes), shown in a
     // bright error-like theme color, followed by the usage of the spending behind the
     // focused conversation's endpoint. The flag reflects `state.is_dirty` unconditionally.
-    let error_fg = TuiColor::from(theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG));
-    let warning_fg = TuiColor::from(theme.ui_fg("warning").unwrap_or(DEFAULT_WARNING_FG));
+    let error_fg = TuiColor::from(
+        theme
+            .ui_fg("error")
+            .unwrap_or(crate::tui::title_row::DEFAULT_ERROR_FG),
+    );
+    let warning_fg = TuiColor::from(
+        theme
+            .ui_fg("warning")
+            .unwrap_or(crate::tui::title_row::DEFAULT_WARNING_FG),
+    );
     let dirty_style = new_style!(bold color_fg: {error_fg} color_bg: {color_bg});
     let warning_style = new_style!(color_fg: {warning_fg} color_bg: {color_bg});
     let error_style = new_style!(color_fg: {error_fg} color_bg: {color_bg});
@@ -2255,14 +2330,14 @@ fn render_status_bar(
     let after_agents = state
         .after_agents
         .as_ref()
-        .map(|after| after_agents::status_text(after, Instant::now()));
+        .map(|after| crate::tui::after_agents::status_text(after, Instant::now()));
     let clock = {
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map_or(0, |elapsed| elapsed.as_secs() as i64);
         clock_text(now, crate::conversation::local_offset_secs(now))
     };
-    let width_of = display_width;
+    let width_of = crate::tui::text_layout::display_width;
     let dirty_width = dirty.map_or(0, |(bar, label)| width_of(bar) + width_of(label));
     let usage_width: usize = usage.iter().map(|(text, _)| width_of(text)).sum();
     let after_width = after_agents.as_ref().map_or(0, |(text, _)| width_of(text));
@@ -2323,7 +2398,9 @@ const USAGE_ERROR_PERCENT: u32 = 90;
 /// endpoint of the Conversation Tree's selected node or sub-agent run (for a queued
 /// row, the model of the window holding the prompt), the selected row of the Model
 /// Picker.
-fn focused_endpoint(state: &AppState) -> Option<String> {
+fn focused_endpoint(state: &crate::tui::state::AppState) -> Option<String> {
+    use crate::tui::pane_manager::Window;
+    use crate::tui::state::RowTarget;
     let window_endpoint =
         |id: &usize| Some(state.discussions.get(id)?.model.as_ref()?.endpoint.clone());
     match state.pane_manager.focused_window.as_ref()? {
@@ -2352,7 +2429,8 @@ fn focused_endpoint(state: &AppState) -> Option<String> {
 
 /// The status-bar entry for the spending behind the focused window's endpoint;
 /// empty when that endpoint reports no usage or its usage is not known yet.
-fn focused_usage(state: &AppState) -> Vec<(String, Option<u32>)> {
+fn focused_usage(state: &crate::tui::state::AppState) -> Vec<(String, Option<u32>)> {
+    use crate::agent::EndpointKind;
     let entry = || {
         let endpoint = focused_endpoint(state)?;
         let kind = &state.agent.endpoint(&endpoint)?.kind;
@@ -2360,7 +2438,7 @@ fn focused_usage(state: &AppState) -> Vec<(String, Option<u32>)> {
         let usage = state.usage.get(&endpoint)?;
         // An OpenRouter key states money and its limit, not the percents and reset
         // times of a subscription.
-        if matches!(kind, crate::agent::EndpointKind::OpenRouter { .. }) {
+        if matches!(kind, EndpointKind::OpenRouter { .. }) {
             return Some(usage.money_pieces(label));
         }
         let now = std::time::SystemTime::now()
@@ -2375,17 +2453,20 @@ fn focused_usage(state: &AppState) -> Vec<(String, Option<u32>)> {
 /// seconds after the requests that spent it, so the display is polled at startup and
 /// between turns, not only when a turn ends.
 fn poll_openrouter_usage(
-    state: &AppState,
-    main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+    state: &crate::tui::state::AppState,
+    main_tx: tokio::sync::mpsc::Sender<
+        TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+    >,
 ) {
+    use crate::agent::EndpointKind;
     for endpoint in &state.agent.endpoints {
-        if matches!(endpoint.kind, crate::agent::EndpointKind::OpenRouter { .. }) {
+        if matches!(endpoint.kind, EndpointKind::OpenRouter { .. }) {
             crate::agent::turn::report_usage(endpoint.clone(), None, main_tx.clone());
         }
     }
 }
 
-fn model_picker_hint(state: &AppState) -> String {
+fn model_picker_hint(state: &crate::tui::state::AppState) -> String {
     let errors = state.models.errors();
     if !errors.is_empty() {
         return errors.join("  ");
@@ -2398,7 +2479,7 @@ fn model_picker_hint(state: &AppState) -> String {
 
 /// A message that must not be cut off by the regular hints: a failure, or a pending
 /// delete confirmation.
-fn conversation_tree_alert(state: &AppState) -> Option<String> {
+fn conversation_tree_alert(state: &crate::tui::state::AppState) -> Option<String> {
     if let Some(notice) = &state.tree_view.notice {
         return Some(notice.clone());
     }
@@ -2410,21 +2491,25 @@ fn conversation_tree_alert(state: &AppState) -> Option<String> {
 }
 
 pub fn build_state(
-    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
-    root: Utf8PathBuf,
+    files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
+    root: camino::Utf8PathBuf,
     theme: crate::tui::theme::HelixTheme,
     keymap: crate::keymap::Keymap,
-) -> AppState {
+) -> crate::tui::state::AppState {
+    use crate::tui::state::AppState;
     AppState::new(files, root, theme, keymap)
 }
 
 pub async fn run(
-    initial_state: AppState,
-    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
-    root: Utf8PathBuf,
+    initial_state: crate::tui::state::AppState,
+    files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
+    root: camino::Utf8PathBuf,
 ) -> CommonResult<()> {
-    let exit_tx: Arc<OnceLock<mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>> =
-        Arc::new(OnceLock::new());
+    use crate::agent::Mode;
+    use crate::tui::state::AppSignal;
+    let exit_tx: Arc<
+        OnceLock<tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>,
+    > = Arc::new(OnceLock::new());
     let exit_message: Arc<OnceLock<&'static str>> = Arc::new(OnceLock::new());
 
     // Send Exit to the TUI event loop on SIGTERM/SIGINT/SIGHUP so RawMode::end() runs cleanly.
@@ -2479,12 +2564,12 @@ pub async fn run(
         handle.cancel();
         let reply = handle.live.lock().reply.clone();
         let commits = match handle.mode {
-            crate::agent::Mode::Commit => crate::git::commits_since(
+            Mode::Commit => crate::git::commits_since(
                 &global_data.state.root,
                 handle.head_before.as_deref(),
                 head_now.as_deref(),
             ),
-            crate::agent::Mode::Feedback => Vec::new(),
+            Mode::Feedback => Vec::new(),
         };
         let (status, error) = crate::conversation::cut_short_outcome(&reply, &commits);
         let mut tree = global_data.state.conversations.write();
@@ -2510,7 +2595,7 @@ pub async fn run(
     }
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
-    if let Err(e) = save_session(&global_data.state.root, &global_data.state) {
+    if let Err(e) = crate::session::save_session(&global_data.state.root, &global_data.state) {
         tracing::warn!("Failed to save session on exit: {e}");
     }
 

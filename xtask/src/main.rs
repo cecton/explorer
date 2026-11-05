@@ -1,3 +1,4 @@
+mod check_imports;
 mod update_themes;
 
 use std::process::Command;
@@ -8,6 +9,7 @@ enum Opt {
     Start(Start),
     Watch(xtask_watch::Watch),
     UpdateThemes,
+    CheckImports,
 }
 
 #[derive(clap::Args)]
@@ -55,5 +57,6 @@ fn main() -> Result<()> {
             }
         }
         Opt::UpdateThemes => update_themes::run(),
+        Opt::CheckImports => check_imports::run(),
     }
 }

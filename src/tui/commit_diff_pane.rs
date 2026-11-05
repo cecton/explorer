@@ -1,7 +1,5 @@
-use crate::git::{DiffKind, short_id};
-use crate::tui::pane_component::pane_slot;
-use crate::tui::text_layout::display_width;
-use crate::tui::*;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 
 const SCROLL_STEP: usize = 3;
 
@@ -14,15 +12,16 @@ impl CommitDiffPaneComponent {
         Self { id }
     }
 
-    fn active_commit(&self, state: &AppState) -> Option<[u8; 20]> {
-        let slot = pane_slot(self.id)?;
+    fn active_commit(&self, state: &crate::tui::state::AppState) -> Option<[u8; 20]> {
+        use crate::tui::pane_manager::Window;
+        let slot = crate::tui::pane_component::pane_slot(self.id)?;
         match state.pane_manager.window_stack.get(slot)? {
             Window::CommitDiff(id) => Some(*id),
             _ => None,
         }
     }
 
-    fn commit_summary(state: &AppState, id: [u8; 20]) -> Option<String> {
+    fn commit_summary(state: &crate::tui::state::AppState, id: [u8; 20]) -> Option<String> {
         state
             .git_logs
             .values()
@@ -32,15 +31,16 @@ impl CommitDiffPaneComponent {
             .map(|entry| entry.summary.clone())
     }
 
-    pub(crate) fn title(state: &AppState, id: [u8; 20]) -> String {
-        let short = short_id(&id);
+    pub(crate) fn title(state: &crate::tui::state::AppState, id: [u8; 20]) -> String {
+        let short = crate::git::short_id(&id);
         match Self::commit_summary(state, id) {
             Some(summary) => format!("commit {short} {summary}"),
             None => format!("commit {short}"),
         }
     }
 
-    fn kind_color(theme: &HelixTheme, kind: DiffKind) -> RgbValue {
+    fn kind_color(theme: &crate::tui::theme::HelixTheme, kind: crate::git::DiffKind) -> RgbValue {
+        use crate::git::DiffKind;
         let fallback = |r: u8, g: u8, b: u8| RgbValue::from_u8(r, g, b);
         match kind {
             DiffKind::FileHeader => theme
@@ -63,19 +63,19 @@ impl CommitDiffPaneComponent {
     }
 }
 
-impl TitleRow for CommitDiffPaneComponent {
+impl crate::tui::title_row::TitleRow for CommitDiffPaneComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        state: &mut AppState,
+        state: &mut crate::tui::state::AppState,
     ) -> usize {
         let theme = &state.theme;
         let Some(id) = self.active_commit(state) else {
             return 0;
         };
-        render_pane_title(
+        crate::tui::title_row::render_pane_title(
             ops,
             pane_box,
             &Self::title(state, id),
@@ -87,7 +87,9 @@ impl TitleRow for CommitDiffPaneComponent {
     }
 }
 
-impl Component<AppState, AppSignal> for CommitDiffPaneComponent {
+impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
+    for CommitDiffPaneComponent
+{
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -96,10 +98,11 @@ impl Component<AppState, AppSignal> for CommitDiffPaneComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::pane_manager::Window;
         throws_with_return!({
             let Some(id) = self.active_commit(&global_data.state) else {
                 return Ok(EventPropagation::Propagate);
@@ -207,11 +210,12 @@ impl Component<AppState, AppSignal> for CommitDiffPaneComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
+        use crate::tui::pane_manager::Window;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -236,7 +240,10 @@ impl Component<AppState, AppSignal> for CommitDiffPaneComponent {
             state.pane_manager.clamp_scroll(&window);
             let scroll = state.pane_manager.window_scroll(&window);
 
-            let pane_bg = state.theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
+            let pane_bg = state
+                .theme
+                .ui_bg("ui.background")
+                .unwrap_or(crate::tui::title_row::DEFAULT_BG);
             let bg = TuiColor::from(pane_bg);
             let bg_style = new_style!(color_bg: {bg});
 
@@ -332,7 +339,7 @@ fn paint_centered(
     fg: RgbValue,
     pane_bg: RgbValue,
 ) {
-    let text_width = display_width(text);
+    let text_width = crate::tui::text_layout::display_width(text);
     let pad = pane_width.saturating_sub(text_width) / 2;
     let padded = format!("{:pad$}{}", "", text, pad = pad);
     let style = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(pane_bg)});

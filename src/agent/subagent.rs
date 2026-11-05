@@ -1,19 +1,3 @@
-use super::claude_code::{self, ClaudeTarget, Invocation, Resume, RunError};
-use super::commands::split_metadata;
-use super::llm::{LlmTarget, ToolSpec};
-use super::tools::ToolContext;
-use super::turn::{self, LiveSubagent, MainTx, Recorder};
-use super::usage::Usage;
-use super::{
-    AgentConfig, Backend, Endpoint, EndpointKind, Message, Mode, ModelSpec, ToolCall, agent_loop,
-    context,
-};
-use crate::conversation::{self, ConversationTree, Metadata, NodeId, NodeStatus, NodeType};
-use crate::tui::AppSignal;
-use camino::{Utf8Path, Utf8PathBuf};
-use parking_lot::RwLock;
-use r3bl_tui::TerminalWindowMainThreadSignal;
-use serde_json::{Value, json};
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
@@ -40,7 +24,7 @@ pub struct Role {
     /// When to call it, as the `agent` tool tells the model.
     pub description: String,
     /// Model the role runs on, ahead of the `subagent-model` setting.
-    pub model: Option<ModelSpec>,
+    pub model: Option<crate::agent::ModelSpec>,
     /// Wall-clock budget of one run, from the role's `budget-minutes`.
     pub budget: Option<Duration>,
     /// The role's system prompt.
@@ -52,7 +36,8 @@ impl Role {
     /// lines, with a `description`, an optional `model` and `budget-minutes`, then the
     /// system prompt.
     pub fn parse(name: &str, text: &str) -> Result<Self, String> {
-        let (metadata, prompt) = split_metadata(text);
+        use crate::agent::ModelSpec;
+        let (metadata, prompt) = crate::agent::commands::split_metadata(text);
         let prompt = prompt.trim();
         if prompt.is_empty() {
             return Err("it has no prompt".to_string());
@@ -102,21 +87,22 @@ impl Role {
 /// What a turn lends to the sub-agents it calls.
 #[derive(Clone)]
 pub struct Subagents {
-    pub config: Arc<AgentConfig>,
+    pub config: Arc<crate::agent::AgentConfig>,
     /// Mode of the calling turn: the sub-agents of a feedback turn must not commit
     /// either.
-    pub mode: Mode,
+    pub mode: crate::agent::Mode,
     /// `YYYY-MM-DD`, for the repository note.
     pub date: String,
     pub repo: Option<gix::ThreadSafeRepository>,
     /// Model of the calling turn, for the sub-agents nothing else assigns one to.
-    pub spec: ModelSpec,
+    pub spec: crate::agent::ModelSpec,
 }
 
 /// The `agent` tool as advertised to the model, with the roles it offers.
-pub fn spec(roles: &[Role]) -> ToolSpec {
+pub fn spec(roles: &[Role]) -> crate::agent::llm::ToolSpec {
+    use crate::agent::llm::ToolSpec;
     let mut description = DESCRIPTION.to_string();
-    let mut properties = json!({
+    let mut properties = serde_json::json!({
         "description": {"type": "string", "description": "A short title of the task, 3 to 5 words"},
         "prompt": {"type": "string", "description": "The task, complete on its own"},
         "agent_id": {"type": "string", "description": "Id of an earlier sub-agent to continue, from the first line of its result"}
@@ -129,7 +115,7 @@ pub fn spec(roles: &[Role]) -> ToolSpec {
             description.push_str(&format!("- {}: {}\n", role.name, role.description));
         }
         let names: Vec<&str> = roles.iter().map(|role| role.name.as_str()).collect();
-        properties["role"] = json!({
+        properties["role"] = serde_json::json!({
             "type": "string",
             "enum": names,
             "description": "Role of a new sub-agent; a continued one keeps its own"
@@ -138,7 +124,7 @@ pub fn spec(roles: &[Role]) -> ToolSpec {
     ToolSpec {
         name: TOOL.to_string(),
         description,
-        schema: json!({
+        schema: serde_json::json!({
             "type": "object",
             "properties": properties,
             "required": ["description", "prompt"]
@@ -147,13 +133,13 @@ pub fn spec(roles: &[Role]) -> ToolSpec {
 }
 
 /// The work-log line of a call: `agent reviewer: Review the commits`.
-pub fn describe(args: &Value) -> String {
+pub fn describe(args: &serde_json::Value) -> String {
     let description = args
         .get("description")
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .and_then(|text| text.lines().next())
         .unwrap_or("");
-    match args.get("role").and_then(Value::as_str) {
+    match args.get("role").and_then(serde_json::Value::as_str) {
         Some(role) => format!("{TOOL} {role}: {description}"),
         None => format!("{TOOL}: {description}"),
     }
@@ -162,11 +148,11 @@ pub fn describe(args: &Value) -> String {
 /// A sub-agent run, recorded and ready to start.
 struct Launch {
     index: u32,
-    dir: Utf8PathBuf,
-    backend: Backend,
-    endpoint: Endpoint,
+    dir: camino::Utf8PathBuf,
+    backend: crate::agent::Backend,
+    endpoint: crate::agent::Endpoint,
     /// Model of this run, named in the notes of a retry.
-    spec: ModelSpec,
+    spec: crate::agent::ModelSpec,
     /// The role's name, for the retry's metadata.
     role: Option<String>,
     /// The role's prompt, or the default one.
@@ -179,7 +165,7 @@ struct Launch {
     /// The task, preceded by the notes Explorer adds.
     message: String,
     /// Directories of the runs this one continues, oldest first.
-    chain: Vec<Utf8PathBuf>,
+    chain: Vec<camino::Utf8PathBuf>,
     /// Session of OpenAI-compatible requests: the id of the first run of the chain.
     session: String,
     /// Claude Code session of the run this one continues, unless a commit caller resumes
@@ -187,16 +173,16 @@ struct Launch {
     claude_session: Option<String>,
     /// Mode of the calling turn: a commit caller replays its chain without the feedback
     /// note.
-    mode: Mode,
+    mode: crate::agent::Mode,
     /// Model to rerun on when this one fails: the caller's, for a fresh run on an
     /// OpenAI-compatible endpoint. `claude` has no such failures to recover from, and
     /// a continued run keeps its own model.
-    fallback: Option<ModelSpec>,
+    fallback: Option<crate::agent::ModelSpec>,
 }
 
-fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .ok_or_else(|| format!("missing string argument `{key}`"))
 }
 
@@ -206,7 +192,7 @@ fn now_secs() -> i64 {
         .map_or(0, |elapsed| elapsed.as_secs() as i64)
 }
 
-fn find_role<'a>(config: &'a AgentConfig, name: &str) -> Result<&'a Role, String> {
+fn find_role<'a>(config: &'a crate::agent::AgentConfig, name: &str) -> Result<&'a Role, String> {
     config
         .roles
         .iter()
@@ -217,7 +203,13 @@ fn find_role<'a>(config: &'a AgentConfig, name: &str) -> Result<&'a Role, String
 /// Whether a resumed run may fork the Claude Code session of `chain`. A fork replays the
 /// chain's messages, and a run under a feedback node opened with the feedback note: a
 /// commit caller only forks a chain run under commit nodes.
-fn forkable(tree: &ConversationTree, mode: Mode, chain: &[(NodeId, u32)]) -> bool {
+fn forkable(
+    tree: &crate::conversation::ConversationTree,
+    mode: crate::agent::Mode,
+    chain: &[(crate::conversation::NodeId, u32)],
+) -> bool {
+    use crate::agent::Mode;
+    use crate::conversation::NodeType;
     mode == Mode::Feedback
         || chain.iter().all(|(node, _)| {
             tree.node(node)
@@ -228,16 +220,20 @@ fn forkable(tree: &ConversationTree, mode: Mode, chain: &[(NodeId, u32)]) -> boo
 /// Resolves a call into a run: its role, model and message. The run is recorded under
 /// `node` when this returns. Reads files and runs git.
 fn prepare(
-    tree: &RwLock<ConversationTree>,
-    root: &Utf8Path,
-    node: &NodeId,
+    tree: &parking_lot::RwLock<crate::conversation::ConversationTree>,
+    root: &camino::Utf8Path,
+    node: &crate::conversation::NodeId,
     subagents: &Subagents,
-    args: &Value,
+    args: &serde_json::Value,
 ) -> Result<Launch, String> {
+    use crate::agent::EndpointKind;
+    use crate::agent::Mode;
+    use crate::conversation::Metadata;
+    use crate::conversation::NodeStatus;
     let config = &subagents.config;
     let description = str_arg(args, "description")?;
     let prompt = str_arg(args, "prompt")?;
-    let resumed = match args.get("agent_id").and_then(Value::as_str) {
+    let resumed = match args.get("agent_id").and_then(serde_json::Value::as_str) {
         Some(id) => Some(tree.read().resumable_agent(node, id)?),
         None => None,
     };
@@ -265,7 +261,7 @@ fn prepare(
         None => {
             let role = args
                 .get("role")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .map(|name| find_role(config, name))
                 .transpose()?;
             let spec = role
@@ -299,16 +295,17 @@ fn prepare(
     };
 
     let head = subagents.repo.as_ref().and_then(crate::git::head_id);
-    let environment = Some(context::environment_note(
+    let environment = Some(crate::agent::context::environment_note(
         root,
         head.as_deref(),
         &subagents.date,
     ));
-    let moved = source
-        .as_ref()
-        .and_then(|(meta, _)| turn::moved_note(root, meta.head_after.as_deref(), head.as_deref()));
-    let workspace = (subagents.mode == Mode::Feedback).then(|| context::WORKSPACE_NOTE.to_string());
-    let message = context::with_notes(&[environment, moved, workspace], prompt);
+    let moved = source.as_ref().and_then(|(meta, _)| {
+        crate::agent::turn::moved_note(root, meta.head_after.as_deref(), head.as_deref())
+    });
+    let workspace = (subagents.mode == Mode::Feedback)
+        .then(|| crate::agent::context::WORKSPACE_NOTE.to_string());
+    let message = crate::agent::context::with_notes(&[environment, moved, workspace], prompt);
 
     let meta = Metadata {
         endpoint: Some(spec.endpoint.clone()),
@@ -320,7 +317,7 @@ fn prepare(
         description: Some(description.to_string()),
         resumed_from: resumed
             .as_ref()
-            .map(|(source, index)| conversation::agent_id(source, *index)),
+            .map(|(source, index)| crate::conversation::agent_id(source, *index)),
         ..Default::default()
     };
     let mut tree = tree.write();
@@ -332,8 +329,8 @@ fn prepare(
         .ok_or("the new sub-agent has no directory")?;
     let chain = source.map(|(_, chain)| chain).unwrap_or_default();
     let session = match chain.first() {
-        Some((first, first_index)) => conversation::agent_id(first, *first_index),
-        None => conversation::agent_id(node, index),
+        Some((first, first_index)) => crate::conversation::agent_id(first, *first_index),
+        None => crate::conversation::agent_id(node, index),
     };
     let claude_session = resumed
         .as_ref()
@@ -347,7 +344,7 @@ fn prepare(
         spec: spec.clone(),
         role: role.map(|role| role.name.clone()),
         system: role
-            .map_or(context::SUBAGENT_PROMPT, |role| &role.prompt)
+            .map_or(crate::agent::context::SUBAGENT_PROMPT, |role| &role.prompt)
             .to_string(),
         budget: role.and_then(|role| role.budget),
         prompt: prompt.to_string(),
@@ -368,12 +365,14 @@ fn prepare(
 /// entries; whatever streamed before a failure stays in the record's `reply.md` and
 /// `transcript.jsonl`.
 async fn execute(
-    context: &ToolContext,
+    context: &crate::agent::tools::ToolContext,
     subagents: &Subagents,
-    recorder: &mut Recorder,
+    recorder: &mut crate::agent::turn::Recorder,
     launch: &Launch,
-    backend: &Backend,
+    backend: &crate::agent::Backend,
 ) -> Outcome {
+    use crate::agent::Backend;
+    use crate::agent::turn::LiveSubagent;
     let mut child = recorder.subagent(launch.dir.clone());
     let started = Instant::now();
     recorder.live.lock().subagent = Some(LiveSubagent {
@@ -387,7 +386,7 @@ async fn execute(
         Some(budget) => format!(
             "{}\n\n{}",
             launch.system.trim_end(),
-            context::budget_note(budget)
+            crate::agent::context::budget_note(budget)
         ),
         None => launch.system.clone(),
     };
@@ -433,15 +432,15 @@ async fn execute(
 /// record's metadata keeps.
 struct Outcome {
     index: u32,
-    spec: ModelSpec,
-    endpoint: Endpoint,
+    spec: crate::agent::ModelSpec,
+    endpoint: crate::agent::Endpoint,
     result: Result<(), String>,
     reply: String,
     secs: u64,
     tokens_in: Option<u64>,
     cached_in: Option<u64>,
     session_id: Option<String>,
-    usage: Option<Usage>,
+    usage: Option<crate::agent::usage::Usage>,
 }
 
 impl Outcome {
@@ -451,7 +450,8 @@ impl Outcome {
     }
 
     /// The status the record ends with.
-    fn status(&self) -> NodeStatus {
+    fn status(&self) -> crate::conversation::NodeStatus {
+        use crate::conversation::NodeStatus;
         match &self.result {
             Err(_) => NodeStatus::Failed,
             Ok(()) => NodeStatus::Done,
@@ -464,11 +464,13 @@ impl Outcome {
 /// tree, like `prepare` does; the backend resolution happens on the caller's side,
 /// where `config` lives.
 async fn prepare_retry(
-    context: &ToolContext,
+    context: &crate::agent::tools::ToolContext,
     launch: &Launch,
-    spec: &ModelSpec,
-    config: &AgentConfig,
+    spec: &crate::agent::ModelSpec,
+    config: &crate::agent::AgentConfig,
 ) -> Result<Launch, String> {
+    use crate::conversation::Metadata;
+    use crate::conversation::NodeStatus;
     let (endpoint, backend) = (
         config.endpoint(&spec.endpoint).cloned(),
         config.backend(spec),
@@ -521,7 +523,7 @@ async fn prepare_retry(
         description: launch.description.clone(),
         message,
         chain: Vec::new(),
-        session: conversation::agent_id(&context.node, index),
+        session: crate::conversation::agent_id(&context.node, index),
         claude_session: None,
         mode: launch.mode,
         fallback: None,
@@ -532,11 +534,12 @@ async fn prepare_retry(
 /// result for the model: the id of the run, then the sub-agent's final answer. A
 /// failure is returned as text, never raised.
 pub async fn run(
-    context: &ToolContext,
+    context: &crate::agent::tools::ToolContext,
     subagents: &Subagents,
-    call: &ToolCall,
-    recorder: &mut Recorder,
+    call: &crate::agent::ToolCall,
+    recorder: &mut crate::agent::turn::Recorder,
 ) -> String {
+    use crate::tui::state::AppSignal;
     let launch = {
         let tree = Arc::clone(&context.tree);
         let root = context.root.clone();
@@ -619,13 +622,13 @@ pub async fn run(
             .await
         }
     }
-    turn::report_usage(
+    crate::agent::turn::report_usage(
         outcome.endpoint.clone(),
         outcome.usage.clone(),
         recorder.main_tx(),
     );
 
-    let id = conversation::agent_id(&context.node, outcome.index);
+    let id = crate::conversation::agent_id(&context.node, outcome.index);
     let over_budget = match launch.budget {
         Some(budget) if outcome.secs >= budget.as_secs() => format!(
             "[Note from Explorer: the sub-agent hit its {}m time budget; its answer \
@@ -656,13 +659,14 @@ pub async fn run(
 /// Closes the record of `outcome`: its final status, error, size of its requests and
 /// session on disk, and a `SubagentFinished` for the tree and open windows.
 async fn conclude(
-    context: &ToolContext,
+    context: &crate::agent::tools::ToolContext,
     subagents: &Subagents,
     repo: Option<&gix::ThreadSafeRepository>,
     outcome: &Outcome,
-    recorder: &mut Recorder,
+    recorder: &mut crate::agent::turn::Recorder,
 ) {
-    let id = conversation::agent_id(&context.node, outcome.index);
+    use crate::tui::state::AppSignal;
+    let id = crate::conversation::agent_id(&context.node, outcome.index);
     let updated = context
         .tree
         .write()
@@ -690,12 +694,18 @@ async fn conclude(
 /// Asks the summary model what the finished run came to, and writes its answer as the
 /// run's `title.md`. Detached: the caller is waiting on the run's answer, which the
 /// title does not belong to.
-fn title_run(context: &ToolContext, subagents: &Subagents, outcome: &Outcome, main_tx: MainTx) {
+fn title_run(
+    context: &crate::agent::tools::ToolContext,
+    subagents: &Subagents,
+    outcome: &Outcome,
+    main_tx: crate::agent::turn::MainTx,
+) {
+    use crate::tui::state::AppSignal;
     let Some(backend) = title_backend(subagents, outcome) else {
         return;
     };
     let (node, index) = (context.node.clone(), outcome.index);
-    let session = conversation::agent_id(&node, index);
+    let session = crate::conversation::agent_id(&node, index);
     let dir = match context.tree.read().agent_dir(&node, index) {
         Some(dir) => dir,
         None => return,
@@ -704,10 +714,10 @@ fn title_run(context: &ToolContext, subagents: &Subagents, outcome: &Outcome, ma
     tokio::spawn(async move {
         let task = std::fs::read_to_string(dir.join("prompt.md")).unwrap_or_default();
         let input = run_title_input(&task, &reply);
-        let answer = match turn::complete(
+        let answer = match crate::agent::turn::complete(
             &backend,
             &session,
-            context::SUBAGENT_TITLE_PROMPT,
+            crate::agent::context::SUBAGENT_TITLE_PROMPT,
             &input,
         )
         .await
@@ -718,15 +728,15 @@ fn title_run(context: &ToolContext, subagents: &Subagents, outcome: &Outcome, ma
                 return;
             }
         };
-        let Some((title, _)) = turn::parse_title_and_summary(&answer) else {
+        let Some((title, _)) = crate::agent::turn::parse_title_and_summary(&answer) else {
             tracing::warn!("title generation for sub-agent {session} returned no title");
             return;
         };
-        if let Err(e) = conversation::write_atomic(&dir.join("title.md"), &title) {
+        if let Err(e) = crate::conversation::write_atomic(&dir.join("title.md"), &title) {
             tracing::warn!("failed to write the title of sub-agent {session}: {e}");
         }
         let _ = main_tx
-            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+            .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
                 AppSignal::AgentTitleReady { node, index, title },
             ))
             .await;
@@ -735,8 +745,8 @@ fn title_run(context: &ToolContext, subagents: &Subagents, outcome: &Outcome, ma
 
 /// The backend that titles a finished run, or `None` when the run has nothing to
 /// describe or no summary model is configured.
-fn title_backend(subagents: &Subagents, outcome: &Outcome) -> Option<Backend> {
-    if !conversation::has_content(&outcome.reply) {
+fn title_backend(subagents: &Subagents, outcome: &Outcome) -> Option<crate::agent::Backend> {
+    if !crate::conversation::has_content(&outcome.reply) {
         return None;
     }
     subagents
@@ -749,7 +759,11 @@ fn title_backend(subagents: &Subagents, outcome: &Outcome) -> Option<Backend> {
 /// What the summary model reads for one run: the task and the end of its answer. The
 /// task says what was asked; the end of the answer is where the run's verdict is.
 fn run_title_input(task: &str, reply: &str) -> String {
-    let reply = match reply.char_indices().rev().nth(turn::REPLY_MAX_CHARS - 1) {
+    let reply = match reply
+        .char_indices()
+        .rev()
+        .nth(crate::agent::turn::REPLY_MAX_CHARS - 1)
+    {
         Some((start, _)) => &reply[start..],
         None => reply,
     };
@@ -774,14 +788,18 @@ fn retry_note(launch: &Launch, first_error: &str) -> Option<String> {
 }
 
 async fn run_own_loop(
-    context: &ToolContext,
+    context: &crate::agent::tools::ToolContext,
     subagents: &Subagents,
     launch: &Launch,
-    target: &LlmTarget,
+    target: &crate::agent::llm::LlmTarget,
     system: &str,
     started: Instant,
-    recorder: &mut Recorder,
+    recorder: &mut crate::agent::turn::Recorder,
 ) -> Result<(), String> {
+    use crate::agent::Message;
+    use crate::agent::Mode;
+    use crate::agent::agent_loop::Limits;
+    use crate::agent::tools::ToolContext;
     let (system, mut messages) = {
         let lead = system.to_string();
         let root = context.root.clone();
@@ -790,12 +808,15 @@ async fn run_own_loop(
         tokio::task::spawn_blocking(move || {
             let mut messages: Vec<Message> = chain
                 .iter()
-                .flat_map(|dir| context::ancestor_messages(dir))
+                .flat_map(|dir| crate::agent::context::ancestor_messages(dir))
                 .collect();
             if mode == Mode::Commit {
-                context::strip_workspace_note(&mut messages);
+                crate::agent::context::strip_workspace_note(&mut messages);
             }
-            (context::subagent_system_prompt(&lead, &root), messages)
+            (
+                crate::agent::context::subagent_system_prompt(&lead, &root),
+                messages,
+            )
         })
         .await
         .map_err(|e| e.to_string())?
@@ -814,14 +835,14 @@ async fn run_own_loop(
         background: Arc::clone(&context.background),
         mcp: context.mcp.clone(),
     };
-    agent_loop::run(
+    crate::agent::agent_loop::run(
         &tool_context,
         target,
         &launch.session,
         &system,
         &mut messages,
         recorder,
-        agent_loop::Limits {
+        Limits {
             budget: launch.budget.map(|budget| (started, budget)),
             repeat_limit: subagents.config.repeat_limit,
         },
@@ -830,12 +851,15 @@ async fn run_own_loop(
 }
 
 async fn run_claude_code(
-    context: &ToolContext,
+    context: &crate::agent::tools::ToolContext,
     launch: &Launch,
-    target: &ClaudeTarget,
+    target: &crate::agent::claude_code::ClaudeTarget,
     system: &str,
-    recorder: &mut Recorder,
+    recorder: &mut crate::agent::turn::Recorder,
 ) -> Result<(), String> {
+    use crate::agent::claude_code::Invocation;
+    use crate::agent::claude_code::Resume;
+    use crate::agent::claude_code::RunError;
     let invocation = |prompt, resume| Invocation {
         target,
         root: &context.root,
@@ -847,7 +871,7 @@ async fn run_claude_code(
     // Fork the session of the run continued; when it is gone, start a fresh one that
     // opens with the earlier runs as plain text.
     if let Some(session) = launch.claude_session.as_deref() {
-        match claude_code::run(
+        match crate::agent::claude_code::run(
             &invocation(&launch.message, Resume::Fork(session)),
             recorder,
         )
@@ -860,7 +884,7 @@ async fn run_claude_code(
     }
     let preamble = {
         let chain = launch.chain.clone();
-        tokio::task::spawn_blocking(move || context::handover_preamble(&chain))
+        tokio::task::spawn_blocking(move || crate::agent::context::handover_preamble(&chain))
             .await
             .map_err(|e| e.to_string())?
     };
@@ -868,7 +892,7 @@ async fn run_claude_code(
         Some(preamble) => format!("{preamble}\n\n{}", launch.message),
         None => launch.message.clone(),
     };
-    claude_code::run(&invocation(&opening, Resume::Fresh), recorder)
+    crate::agent::claude_code::run(&invocation(&opening, Resume::Fresh), recorder)
         .await
         .map_err(|error| match error {
             RunError::SessionGone => "the Claude Code session to continue is gone".to_string(),
@@ -924,20 +948,28 @@ mod tests {
         let with_role = spec(&[reviewer]);
         assert_eq!(
             with_role.schema["properties"]["role"]["enum"],
-            json!(["reviewer"])
+            serde_json::json!(["reviewer"])
         );
         assert!(with_role.description.ends_with("- reviewer: Reviews\n"));
     }
 
     #[test]
     fn a_call_is_described_by_its_role_and_title() {
-        let call = json!({"role": "reviewer", "description": "Review it\nsecond line"});
+        let call = serde_json::json!({"role": "reviewer", "description": "Review it\nsecond line"});
         assert_eq!(describe(&call), "agent reviewer: Review it");
-        assert_eq!(describe(&json!({"description": "Fix"})), "agent: Fix");
+        assert_eq!(
+            describe(&serde_json::json!({"description": "Fix"})),
+            "agent: Fix"
+        );
     }
 
     #[test]
     fn only_a_finished_run_with_something_to_describe_and_a_summary_model_is_titled() {
+        use crate::agent::AgentConfig;
+        use crate::agent::Endpoint;
+        use crate::agent::EndpointKind;
+        use crate::agent::Mode;
+        use crate::agent::ModelSpec;
         let config = |summary: Option<ModelSpec>| Subagents {
             config: Arc::new(AgentConfig {
                 endpoints: vec![Endpoint {
@@ -953,11 +985,11 @@ mod tests {
             mode: Mode::Commit,
             date: "2026-11-01".to_string(),
             repo: None,
-            spec: ModelSpec::parse("router/x/low").unwrap(),
+            spec: crate::agent::ModelSpec::parse("router/x/low").unwrap(),
         };
         let outcome = |result: Result<(), String>, reply: &str| Outcome {
             index: 1,
-            spec: ModelSpec::parse("router/x/low").unwrap(),
+            spec: crate::agent::ModelSpec::parse("router/x/low").unwrap(),
             endpoint: Endpoint {
                 name: "router".to_string(),
                 kind: EndpointKind::OpenAi {
@@ -973,7 +1005,7 @@ mod tests {
             session_id: None,
             usage: None,
         };
-        let summary = Some(ModelSpec::parse("router/x/low").unwrap());
+        let summary = Some(crate::agent::ModelSpec::parse("router/x/low").unwrap());
 
         // A finished run with an answer, and a summary model to ask.
         assert!(title_backend(&config(summary.clone()), &outcome(Ok(()), "done")).is_some());
@@ -991,7 +1023,7 @@ mod tests {
         // No summary model, nothing asked.
         assert!(title_backend(&config(None), &outcome(Ok(()), "done")).is_none());
         // An endpoint without a token resolves to no backend.
-        let unknown = Some(ModelSpec::parse("gone/x/low").unwrap());
+        let unknown = Some(crate::agent::ModelSpec::parse("gone/x/low").unwrap());
         assert!(title_backend(&config(unknown), &outcome(Ok(()), "done")).is_none());
     }
 
@@ -1005,9 +1037,12 @@ mod tests {
         ));
         assert!(input.len() < 20_000);
         // The cap counts characters, and never splices one, as the node path's does.
-        let multibyte = "é".repeat(turn::REPLY_MAX_CHARS + 10);
+        let multibyte = "é".repeat(crate::agent::turn::REPLY_MAX_CHARS + 10);
         let input = run_title_input("Task", &multibyte);
-        assert_eq!(input.matches('é').count(), turn::REPLY_MAX_CHARS);
+        assert_eq!(
+            input.matches('é').count(),
+            crate::agent::turn::REPLY_MAX_CHARS
+        );
         assert_eq!(
             run_title_input("Task", "Short."),
             "<task>\nTask\n</task>\n\n<reply>\nShort.\n</reply>\n\n\
@@ -1017,8 +1052,13 @@ mod tests {
 
     #[test]
     fn a_commit_caller_forks_only_a_chain_under_commit_nodes() {
+        use crate::agent::Mode;
+        use crate::conversation::ConversationTree;
+        use crate::conversation::Metadata;
+        use crate::conversation::NodeId;
+        use crate::conversation::NodeType;
         let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let mut tree = ConversationTree::load(&root);
         let mut node = |parent: Option<&NodeId>, secs, node_type| {
             let meta = Metadata {

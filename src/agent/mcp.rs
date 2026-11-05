@@ -1,18 +1,8 @@
-use super::llm::ToolSpec;
-use super::tools::truncate_middle;
-use camino::{Utf8Path, Utf8PathBuf};
-use parking_lot::Mutex;
-use serde::{Deserialize, Serialize};
-use serde_json::{Map, Value, json};
 use std::collections::{BTreeMap, HashMap};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::{oneshot, watch};
-use tokio::task::JoinHandle;
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const CALL_TIMEOUT: Duration = Duration::from_secs(120);
@@ -27,7 +17,7 @@ const SEPARATOR: &str = "__";
 const MAX_TOOL_NAME: usize = 64;
 
 /// An MCP server of the repository, as saved in its session.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct McpServerDecl {
     pub name: String,
     pub program: String,
@@ -38,22 +28,22 @@ pub struct McpServerDecl {
 pub struct McpTool {
     pub name: String,
     pub description: String,
-    pub schema: Value,
+    pub schema: serde_json::Value,
 }
 
 impl McpTool {
-    fn parse(tool: &Value) -> Option<Self> {
+    fn parse(tool: &serde_json::Value) -> Option<Self> {
         Some(Self {
             name: tool.get("name")?.as_str()?.to_string(),
             description: tool
                 .get("description")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .unwrap_or_default()
                 .to_string(),
             schema: tool
                 .get("inputSchema")
                 .cloned()
-                .unwrap_or_else(|| json!({"type": "object"})),
+                .unwrap_or_else(|| serde_json::json!({"type": "object"})),
         })
     }
 }
@@ -85,15 +75,15 @@ pub type Notify = Arc<dyn Fn(&str) + Send + Sync>;
 /// The MCP servers of the repository, running for as long as Explorer does.
 #[derive(Default)]
 pub struct McpHost {
-    root: Utf8PathBuf,
-    servers: Mutex<BTreeMap<String, Arc<Server>>>,
+    root: camino::Utf8PathBuf,
+    servers: parking_lot::Mutex<BTreeMap<String, Arc<Server>>>,
 }
 
 impl McpHost {
-    pub fn new(root: Utf8PathBuf) -> Self {
+    pub fn new(root: camino::Utf8PathBuf) -> Self {
         Self {
             root,
-            servers: Mutex::default(),
+            servers: parking_lot::Mutex::default(),
         }
     }
 
@@ -102,7 +92,7 @@ impl McpHost {
         let server = Arc::new(Server {
             decl: decl.clone(),
             root: self.root.clone(),
-            phase: watch::Sender::new(Phase::Starting),
+            phase: tokio::sync::watch::Sender::new(Phase::Starting),
             notify,
             restarting: tokio::sync::Mutex::new(()),
         });
@@ -159,7 +149,12 @@ impl McpHost {
         }
     }
 
-    async fn call(&self, server: &str, tool: &str, arguments: Value) -> Result<String, String> {
+    async fn call(
+        &self,
+        server: &str,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
         let found = self.servers.lock().get(server).cloned();
         let server = found.ok_or_else(|| format!("the MCP server {server} was removed"))?;
         server.call(tool, arguments).await
@@ -186,7 +181,8 @@ impl McpTools {
         name.starts_with(TOOL_PREFIX)
     }
 
-    pub fn specs(&self) -> Vec<ToolSpec> {
+    pub fn specs(&self) -> Vec<crate::agent::llm::ToolSpec> {
+        use crate::agent::llm::ToolSpec;
         self.servers
             .iter()
             .flat_map(|server| {
@@ -200,7 +196,7 @@ impl McpTools {
     }
 
     /// Runs the tool `name`, `mcp__<server>__<tool>`. A failure is returned as `Err`.
-    pub async fn call(&self, name: &str, arguments: Value) -> Result<String, String> {
+    pub async fn call(&self, name: &str, arguments: serde_json::Value) -> Result<String, String> {
         // Matched against each server's name: one ending with `_` defeats a split on `__`.
         let offered = self.servers.iter().find_map(|offered| {
             let tool = name
@@ -224,15 +220,15 @@ impl McpTools {
         if self.servers.is_empty() {
             return None;
         }
-        let servers: Map<String, Value> = self
+        let servers: serde_json::Map<String, serde_json::Value> = self
             .servers
             .iter()
             .map(|server| {
-                let config = json!({"command": server.decl.program, "args": []});
+                let config = serde_json::json!({"command": server.decl.program, "args": []});
                 (server.decl.name.clone(), config)
             })
             .collect();
-        Some(json!({ "mcpServers": servers }).to_string())
+        Some(serde_json::json!({ "mcpServers": servers }).to_string())
     }
 }
 
@@ -249,8 +245,8 @@ enum Phase {
 
 struct Server {
     decl: McpServerDecl,
-    root: Utf8PathBuf,
-    phase: watch::Sender<Phase>,
+    root: camino::Utf8PathBuf,
+    phase: tokio::sync::watch::Sender<Phase>,
     notify: Notify,
     restarting: tokio::sync::Mutex<()>,
 }
@@ -306,7 +302,11 @@ impl Server {
         }
     }
 
-    async fn call(self: &Arc<Self>, tool: &str, arguments: Value) -> Result<String, String> {
+    async fn call(
+        self: &Arc<Self>,
+        tool: &str,
+        arguments: serde_json::Value,
+    ) -> Result<String, String> {
         let client = match &*self.phase.borrow() {
             Phase::Ready { client, .. } if client.alive() => Some(Arc::clone(client)),
             _ => None,
@@ -314,7 +314,7 @@ impl Server {
         let Some(client) = client else {
             return Err(self.restart(None).await);
         };
-        let params = json!({"name": tool, "arguments": arguments});
+        let params = serde_json::json!({"name": tool, "arguments": arguments});
         match client.request("tools/call", params, CALL_TIMEOUT).await {
             Ok(result) => format_result(&result),
             Err(Failure::Exited) => Err(self.restart(Some(client)).await),
@@ -399,17 +399,19 @@ impl Failure {
     }
 }
 
-type Waiters = Mutex<HashMap<u64, oneshot::Sender<Result<Value, String>>>>;
+type Waiters = parking_lot::Mutex<
+    HashMap<u64, tokio::sync::oneshot::Sender<Result<serde_json::Value, String>>>,
+>;
 
 /// A running MCP server process, spoken to over its standard input and output.
 struct Client {
     pid: Option<u32>,
-    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+    stdin: Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
     waiters: Arc<Waiters>,
     alive: Arc<AtomicBool>,
     next_id: AtomicU64,
-    reader: JoinHandle<()>,
-    _child: Child,
+    reader: tokio::task::JoinHandle<()>,
+    _child: tokio::process::Child,
 }
 
 impl Drop for Client {
@@ -439,7 +441,7 @@ impl Drop for Waiting<'_> {
 
 impl Client {
     /// Spawns `program` in `root`, goes through the handshake and lists its tools.
-    async fn start(program: &str, root: &Utf8Path) -> Result<(Self, Vec<McpTool>), String> {
+    async fn start(program: &str, root: &camino::Utf8Path) -> Result<(Self, Vec<McpTool>), String> {
         let mut child = tokio::process::Command::new(program)
             .current_dir(root)
             .stdin(Stdio::piped())
@@ -475,7 +477,7 @@ impl Client {
     }
 
     async fn handshake(&self) -> Result<Vec<McpTool>, String> {
-        let initialize = json!({
+        let initialize = serde_json::json!({
             "protocolVersion": PROTOCOL_VERSION,
             "capabilities": {},
             "clientInfo": {"name": "explorer", "version": env!("CARGO_PKG_VERSION")}
@@ -483,7 +485,8 @@ impl Client {
         self.request("initialize", initialize, START_TIMEOUT)
             .await
             .map_err(|failure| failure.text("initialize"))?;
-        let initialized = json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
+        let initialized =
+            serde_json::json!({"jsonrpc": "2.0", "method": "notifications/initialized"});
         if !matches!(write_message(&self.stdin, initialized).await, Ok(Ok(()))) {
             return Err(Failure::Exited.text("initialize"));
         }
@@ -491,18 +494,18 @@ impl Client {
         let mut cursor: Option<String> = None;
         loop {
             let params = match &cursor {
-                Some(cursor) => json!({ "cursor": cursor }),
-                None => json!({}),
+                Some(cursor) => serde_json::json!({ "cursor": cursor }),
+                None => serde_json::json!({}),
             };
             let page = self
                 .request("tools/list", params, START_TIMEOUT)
                 .await
                 .map_err(|failure| failure.text("tools/list"))?;
-            let listed = page.get("tools").and_then(Value::as_array);
+            let listed = page.get("tools").and_then(serde_json::Value::as_array);
             tools.extend(listed.into_iter().flatten().filter_map(McpTool::parse));
             cursor = page
                 .get("nextCursor")
-                .and_then(Value::as_str)
+                .and_then(serde_json::Value::as_str)
                 .map(str::to_string);
             if cursor.is_none() {
                 return Ok(tools);
@@ -517,11 +520,11 @@ impl Client {
     async fn request(
         &self,
         method: &str,
-        params: Value,
+        params: serde_json::Value,
         timeout: Duration,
-    ) -> Result<Value, Failure> {
+    ) -> Result<serde_json::Value, Failure> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-        let (reply_tx, reply_rx) = oneshot::channel();
+        let (reply_tx, reply_rx) = tokio::sync::oneshot::channel();
         self.waiters.lock().insert(id, reply_tx);
         let _waiting = Waiting {
             waiters: &self.waiters,
@@ -531,7 +534,8 @@ impl Client {
         if !self.alive() {
             return Err(Failure::Exited);
         }
-        let message = json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
+        let message =
+            serde_json::json!({"jsonrpc": "2.0", "id": id, "method": method, "params": params});
         // A server that stops reading its input must not hang the call past its timeout.
         let exchange = async {
             if !matches!(write_message(&self.stdin, message).await, Ok(Ok(()))) {
@@ -551,9 +555,10 @@ impl Client {
 /// Writes `message` as one line in a task of its own: a call dropped midway would leave
 /// half a line on the pipe, and the next message glued to it.
 fn write_message(
-    stdin: &Arc<tokio::sync::Mutex<ChildStdin>>,
-    message: Value,
-) -> JoinHandle<std::io::Result<()>> {
+    stdin: &Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
+    message: serde_json::Value,
+) -> tokio::task::JoinHandle<std::io::Result<()>> {
+    use tokio::io::AsyncWriteExt;
     let mut line = message.to_string();
     line.push('\n');
     let stdin = Arc::clone(stdin);
@@ -567,23 +572,27 @@ fn write_message(
 /// Hands each reply to the request waiting for it and answers the server's own
 /// requests; marks the client dead once the server's output closes.
 async fn read_messages(
-    stdout: ChildStdout,
-    stdin: Arc<tokio::sync::Mutex<ChildStdin>>,
+    stdout: tokio::process::ChildStdout,
+    stdin: Arc<tokio::sync::Mutex<tokio::process::ChildStdin>>,
     waiters: Arc<Waiters>,
     alive: Arc<AtomicBool>,
 ) {
+    use tokio::io::AsyncBufReadExt;
     // Split on bytes: a stray line that is not UTF-8 must not end the reader as `lines` would.
-    let mut lines = BufReader::new(stdout).split(b'\n');
+    let mut lines = tokio::io::BufReader::new(stdout).split(b'\n');
     while let Ok(Some(line)) = lines.next_segment().await {
-        let Ok(message) = serde_json::from_slice::<Value>(&line) else {
+        let Ok(message) = serde_json::from_slice::<serde_json::Value>(&line) else {
             continue;
         };
         let id = message.get("id").cloned();
-        match (message.get("method").and_then(Value::as_str), id) {
+        match (
+            message.get("method").and_then(serde_json::Value::as_str),
+            id,
+        ) {
             (Some(method), Some(id)) => {
                 let answer = match method {
-                    "ping" => json!({"jsonrpc": "2.0", "id": id, "result": {}}),
-                    _ => json!({
+                    "ping" => serde_json::json!({"jsonrpc": "2.0", "id": id, "result": {}}),
+                    _ => serde_json::json!({
                         "jsonrpc": "2.0",
                         "id": id,
                         "error": {"code": -32601, "message": format!("{method} is not supported")}
@@ -596,15 +605,18 @@ async fn read_messages(
             (None, id) => {
                 let waiter = id
                     .as_ref()
-                    .and_then(Value::as_u64)
+                    .and_then(serde_json::Value::as_u64)
                     .and_then(|id| waiters.lock().remove(&id));
                 if let Some(waiter) = waiter {
                     let reply = match message.get("error") {
                         Some(error) => Err(error
                             .get("message")
-                            .and_then(Value::as_str)
+                            .and_then(serde_json::Value::as_str)
                             .map_or_else(|| error.to_string(), str::to_string)),
-                        None => Ok(message.get("result").cloned().unwrap_or(Value::Null)),
+                        None => Ok(message
+                            .get("result")
+                            .cloned()
+                            .unwrap_or(serde_json::Value::Null)),
                     };
                     let _ = waiter.send(reply);
                 }
@@ -617,33 +629,38 @@ async fn read_messages(
 
 /// The text the model gets from a `tools/call` result: its text blocks, or else its
 /// structured content; an `isError` result is an `Err`.
-fn format_result(result: &Value) -> Result<String, String> {
-    let blocks = result.get("content").and_then(Value::as_array);
+fn format_result(result: &serde_json::Value) -> Result<String, String> {
+    let blocks = result.get("content").and_then(serde_json::Value::as_array);
     let mut parts: Vec<String> = blocks
         .into_iter()
         .flatten()
-        .map(|block| match block.get("type").and_then(Value::as_str) {
-            Some("text") => block
-                .get("text")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string(),
-            kind => {
-                let kind = block.get("mimeType").and_then(Value::as_str).or(kind);
-                format!("[{} omitted]", kind.unwrap_or("content"))
-            }
-        })
+        .map(
+            |block| match block.get("type").and_then(serde_json::Value::as_str) {
+                Some("text") => block
+                    .get("text")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string(),
+                kind => {
+                    let kind = block
+                        .get("mimeType")
+                        .and_then(serde_json::Value::as_str)
+                        .or(kind);
+                    format!("[{} omitted]", kind.unwrap_or("content"))
+                }
+            },
+        )
         .collect();
     if parts.is_empty()
         && let Some(structured) = result.get("structuredContent")
     {
         parts.push(structured.to_string());
     }
-    let mut text = truncate_middle(&parts.join("\n"), MAX_OUTPUT_BYTES);
+    let mut text = crate::agent::tools::truncate_middle(&parts.join("\n"), MAX_OUTPUT_BYTES);
     if text.is_empty() {
         text.push_str("(no output)");
     }
-    if result.get("isError").and_then(Value::as_bool) == Some(true) {
+    if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
         Err(text)
     } else {
         Ok(text)
@@ -695,7 +712,7 @@ done
     }
 
     fn host(tmp: &tempfile::TempDir) -> Arc<McpHost> {
-        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         Arc::new(McpHost::new(root))
     }
 
@@ -729,22 +746,28 @@ done
         assert_eq!(host.status("fake"), Some(McpStatus::Ready(4)));
         assert!(matches!(host.status("missing"), Some(McpStatus::Failed(_))));
         assert_eq!(
-            tools.call("mcp__fake__echo", json!({})).await,
+            tools.call("mcp__fake__echo", serde_json::json!({})).await,
             Ok("hi".into())
         );
         assert_eq!(
-            tools.call("mcp__fake__broken", json!({})).await,
+            tools.call("mcp__fake__broken", serde_json::json!({})).await,
             Err("not attached".into())
         );
         assert_eq!(
-            tools.call("mcp__fake__nope", json!({})).await,
+            tools.call("mcp__fake__nope", serde_json::json!({})).await,
             Err("unknown tool: mcp__fake__nope".into())
         );
-        assert!(tools.call("mcp__fake__echo", json!("{oops")).await.is_err());
-        let config: Value = serde_json::from_str(&tools.claude_config().unwrap()).unwrap();
+        assert!(
+            tools
+                .call("mcp__fake__echo", serde_json::json!("{oops"))
+                .await
+                .is_err()
+        );
+        let config: serde_json::Value =
+            serde_json::from_str(&tools.claude_config().unwrap()).unwrap();
         assert_eq!(
             config,
-            json!({"mcpServers": {"fake": {"command": decl.program, "args": []}}})
+            serde_json::json!({"mcpServers": {"fake": {"command": decl.program, "args": []}}})
         );
     }
 
@@ -756,7 +779,7 @@ done
         host.start(&decl, no_notify());
         let tools = host.snapshot().await;
         assert_eq!(
-            tools.call("mcp__fake___echo", json!({})).await,
+            tools.call("mcp__fake___echo", serde_json::json!({})).await,
             Ok("hi".into())
         );
     }
@@ -769,12 +792,12 @@ done
         let tools = host.snapshot().await;
         let cancelled = tokio::time::timeout(
             Duration::from_millis(100),
-            tools.call("mcp__fake__slow", json!({})),
+            tools.call("mcp__fake__slow", serde_json::json!({})),
         )
         .await;
         assert!(cancelled.is_err());
         assert_eq!(
-            tools.call("mcp__fake__echo", json!({})).await,
+            tools.call("mcp__fake__echo", serde_json::json!({})).await,
             Ok("hi".into())
         );
     }
@@ -792,10 +815,13 @@ done
             }),
         );
         let tools = host.snapshot().await;
-        let died = tools.call("mcp__fake__die", json!({})).await.unwrap_err();
+        let died = tools
+            .call("mcp__fake__die", serde_json::json!({}))
+            .await
+            .unwrap_err();
         assert!(died.contains("was restarted"), "{died}");
         assert_eq!(
-            tools.call("mcp__fake__echo", json!({})).await,
+            tools.call("mcp__fake__echo", serde_json::json!({})).await,
             Ok("hi".into())
         );
         // Started, then restarting and restarted.
@@ -803,12 +829,12 @@ done
         let held = host.servers.lock().get("fake").cloned().unwrap();
         host.remove("fake");
         assert_eq!(
-            tools.call("mcp__fake__echo", json!({})).await,
+            tools.call("mcp__fake__echo", serde_json::json!({})).await,
             Err("the MCP server fake was removed".into())
         );
         // A call that still holds the server never starts it again.
         assert_eq!(
-            held.call("echo", json!({})).await,
+            held.call("echo", serde_json::json!({})).await,
             Err("the MCP server fake was removed".into())
         );
         assert_eq!(changes.load(Ordering::SeqCst), 3);
@@ -821,7 +847,8 @@ done
         host.start(&decl, no_notify());
         let tools = host.snapshot().await;
         std::fs::write(tmp.path().join("slow-start"), "").unwrap();
-        let call = tokio::spawn(async move { tools.call("mcp__fake__die", json!({})).await });
+        let call =
+            tokio::spawn(async move { tools.call("mcp__fake__die", serde_json::json!({})).await });
         let restarting = async {
             while host.status("fake") != Some(McpStatus::Starting) {
                 tokio::time::sleep(Duration::from_millis(10)).await;
@@ -877,7 +904,7 @@ done
 
     #[test]
     fn results_keep_text_and_stand_in_for_the_rest() {
-        let result = json!({"content": [
+        let result = serde_json::json!({"content": [
             {"type": "text", "text": "tree"},
             {"type": "image", "data": "iVBOR", "mimeType": "image/png"},
             {"type": "audio", "data": "x"}
@@ -886,10 +913,14 @@ done
             format_result(&result),
             Ok("tree\n[image/png omitted]\n[audio omitted]".into())
         );
-        let structured = json!({"content": [], "structuredContent": {"state": "idle"}});
+        let structured = serde_json::json!({"content": [], "structuredContent": {"state": "idle"}});
         assert_eq!(format_result(&structured), Ok(r#"{"state":"idle"}"#.into()));
-        assert_eq!(format_result(&json!({})), Ok("(no output)".into()));
-        let failed = json!({"content": [{"type": "text", "text": "no app"}], "isError": true});
+        assert_eq!(
+            format_result(&serde_json::json!({})),
+            Ok("(no output)".into())
+        );
+        let failed =
+            serde_json::json!({"content": [{"type": "text", "text": "no app"}], "isError": true});
         assert_eq!(format_result(&failed), Err("no app".into()));
     }
 
@@ -903,7 +934,7 @@ done
     #[test]
     fn long_results_are_cut_in_the_middle() {
         let text = "a".repeat(MAX_OUTPUT_BYTES) + &"b".repeat(MAX_OUTPUT_BYTES);
-        let result = json!({"content": [{"type": "text", "text": text}]});
+        let result = serde_json::json!({"content": [{"type": "text", "text": text}]});
         let cut = format_result(&result).unwrap();
         assert!(cut.len() < MAX_OUTPUT_BYTES + 100);
         assert!(cut.starts_with('a') && cut.ends_with('b'));

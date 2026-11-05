@@ -1,8 +1,6 @@
-use tracing_core::LevelFilter;
-
 pub struct Args {
     pub log_file: Option<String>,
-    pub log_level: LevelFilter,
+    pub log_level: tracing_core::LevelFilter,
     pub theme: Option<String>,
     /// Scan the repository, print the report and exit, without starting the UI.
     pub scan: bool,
@@ -31,14 +29,14 @@ pub fn parse_args() -> Args {
         .opt_value_from_str("--log-level")
         .expect("invalid --log-level");
     let log_level = match log_level.as_deref() {
-        Some("error") => LevelFilter::ERROR,
-        Some("warn") => LevelFilter::WARN,
-        Some("info") => LevelFilter::INFO,
-        Some("debug") | None => LevelFilter::DEBUG,
-        Some("trace") => LevelFilter::TRACE,
+        Some("error") => tracing_core::LevelFilter::ERROR,
+        Some("warn") => tracing_core::LevelFilter::WARN,
+        Some("info") => tracing_core::LevelFilter::INFO,
+        Some("debug") | None => tracing_core::LevelFilter::DEBUG,
+        Some("trace") => tracing_core::LevelFilter::TRACE,
         Some(other) => {
             eprintln!("unknown log level '{other}', defaulting to debug");
-            LevelFilter::DEBUG
+            tracing_core::LevelFilter::DEBUG
         }
     };
     let theme: Option<String> = args.opt_value_from_str("--theme").expect("invalid --theme");

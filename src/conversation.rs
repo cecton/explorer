@@ -1,5 +1,3 @@
-use crate::agent::ModelSpec;
-use camino::{Utf8Path, Utf8PathBuf};
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -226,7 +224,8 @@ impl Metadata {
     }
 
     /// The model the turn ran on, when the metadata names one completely.
-    pub fn model_spec(&self) -> Option<ModelSpec> {
+    pub fn model_spec(&self) -> Option<crate::agent::ModelSpec> {
+        use crate::agent::ModelSpec;
         ModelSpec::from_parts(
             self.endpoint.as_deref()?,
             self.model.as_deref()?,
@@ -281,7 +280,7 @@ pub fn agent_id(node: &NodeId, index: u32) -> String {
 
 /// Reads the metadata of a node or a sub-agent run; one left running by a previous
 /// instance of Explorer is marked interrupted on disk.
-fn read_meta(dir: &Utf8Path) -> Metadata {
+fn read_meta(dir: &camino::Utf8Path) -> Metadata {
     let mut meta = std::fs::read_to_string(dir.join("metadata.md"))
         .map(|text| Metadata::parse(&text))
         .unwrap_or_default();
@@ -296,7 +295,7 @@ fn read_meta(dir: &Utf8Path) -> Metadata {
 }
 
 /// The sub-agent runs recorded under a node's directory, oldest first.
-fn read_agents(node_dir: &Utf8Path) -> Vec<AgentRecord> {
+fn read_agents(node_dir: &camino::Utf8Path) -> Vec<AgentRecord> {
     let Ok(entries) = std::fs::read_dir(node_dir.join(AGENTS_DIR)) else {
         return Vec::new();
     };
@@ -304,7 +303,7 @@ fn read_agents(node_dir: &Utf8Path) -> Vec<AgentRecord> {
         .flatten()
         .filter_map(|entry| {
             let index: u32 = entry.file_name().to_str()?.parse().ok()?;
-            let dir = Utf8PathBuf::from_path_buf(entry.path()).ok()?;
+            let dir = camino::Utf8PathBuf::from_path_buf(entry.path()).ok()?;
             let title = std::fs::read_to_string(dir.join("title.md"))
                 .ok()
                 .map(|text| single_line(&text))
@@ -344,7 +343,12 @@ impl Node {
             .unwrap_or("(no prompt)")
     }
 
-    fn read(dir: &Utf8Path, id: &NodeId, parent: Option<NodeId>, children: Vec<NodeId>) -> Self {
+    fn read(
+        dir: &camino::Utf8Path,
+        id: &NodeId,
+        parent: Option<NodeId>,
+        children: Vec<NodeId>,
+    ) -> Self {
         let read_trimmed = |name: &str| {
             std::fs::read_to_string(dir.join(name))
                 .ok()
@@ -380,12 +384,12 @@ impl Node {
 /// Where a node's turn finds its context: what to replay and what its parent left.
 #[derive(Debug, PartialEq, Eq)]
 pub struct TurnContext {
-    pub node_dir: Utf8PathBuf,
+    pub node_dir: camino::Utf8PathBuf,
     /// Directories of the ancestors to replay, oldest first. Starts after the nearest
     /// compact ancestor, whose summary stands in for everything before it.
-    pub ancestor_dirs: Vec<Utf8PathBuf>,
+    pub ancestor_dirs: Vec<camino::Utf8PathBuf>,
     /// Directory of the parent when it is a compact node.
-    pub compacted_parent: Option<Utf8PathBuf>,
+    pub compacted_parent: Option<camino::Utf8PathBuf>,
     /// HEAD when the parent's turn ended.
     pub parent_head: Option<String>,
     /// Claude Code session of the parent, when it ran there and is not a compact node.
@@ -396,14 +400,14 @@ pub struct TurnContext {
 /// only; prompts, replies and transcripts stay on disk.
 #[derive(Clone, Debug, Default)]
 pub struct ConversationTree {
-    dir: Utf8PathBuf,
+    dir: camino::Utf8PathBuf,
     nodes: HashMap<NodeId, Node>,
     /// Oldest first.
     roots: Vec<NodeId>,
 }
 
 impl ConversationTree {
-    pub fn load(dir: &Utf8Path) -> Self {
+    pub fn load(dir: &camino::Utf8Path) -> Self {
         let mut tree = Self {
             dir: dir.to_owned(),
             nodes: HashMap::new(),
@@ -413,7 +417,7 @@ impl ConversationTree {
         tree
     }
 
-    fn load_children(&mut self, dir: &Utf8Path, parent: Option<&NodeId>) -> Vec<NodeId> {
+    fn load_children(&mut self, dir: &camino::Utf8Path, parent: Option<&NodeId>) -> Vec<NodeId> {
         let Ok(entries) = std::fs::read_dir(dir) else {
             return Vec::new();
         };
@@ -452,7 +456,7 @@ impl ConversationTree {
     }
 
     /// Directory of `id`: the tree root joined with every ancestor's name.
-    pub fn node_dir(&self, id: &NodeId) -> Option<Utf8PathBuf> {
+    pub fn node_dir(&self, id: &NodeId) -> Option<camino::Utf8PathBuf> {
         let mut chain = vec![id];
         let mut current = self.nodes.get(id)?;
         while let Some(parent) = current.parent.as_ref() {
@@ -575,7 +579,7 @@ impl ConversationTree {
     }
 
     /// Directory of sub-agent run `index` of `node`.
-    pub fn agent_dir(&self, node: &NodeId, index: u32) -> Option<Utf8PathBuf> {
+    pub fn agent_dir(&self, node: &NodeId, index: u32) -> Option<camino::Utf8PathBuf> {
         self.agent(node, index)?;
         Some(
             self.node_dir(node)?
@@ -643,7 +647,7 @@ impl ConversationTree {
     /// records as failed instead; one with a reply stays cancelled. A run cut short
     /// never got to record its duration, so its `created` stamp stands in for one.
     pub fn cancel_running_agents(&mut self, node: &NodeId, now_secs: i64) {
-        let running: Vec<(u32, Utf8PathBuf)> =
+        let running: Vec<(u32, camino::Utf8PathBuf)> =
             self.nodes.get(node).map_or_else(Vec::new, |owner| {
                 owner
                     .agents
@@ -773,7 +777,7 @@ impl ConversationTree {
 }
 
 /// A node's `prompt.md` and `reply.md`; a missing file reads as empty text.
-pub fn read_prompt_and_reply(dir: &Utf8Path) -> (String, String) {
+pub fn read_prompt_and_reply(dir: &camino::Utf8Path) -> (String, String) {
     let read = |name: &str| std::fs::read_to_string(dir.join(name)).unwrap_or_default();
     (read("prompt.md"), read("reply.md"))
 }
@@ -796,18 +800,18 @@ pub fn cut_short_outcome(reply: &str, commits: &[String]) -> (NodeStatus, Option
 }
 
 /// A node's `input.md`: its prompt as typed, kept only when a slash command expanded it.
-pub fn read_typed_input(dir: &Utf8Path) -> Option<String> {
+pub fn read_typed_input(dir: &camino::Utf8Path) -> Option<String> {
     std::fs::read_to_string(dir.join("input.md")).ok()
 }
 
 /// What the user typed for a node: its `input.md`, or `prompt.md` when it was sent as
 /// typed. This is the text to give back for editing.
-pub fn read_input(dir: &Utf8Path) -> String {
+pub fn read_input(dir: &camino::Utf8Path) -> String {
     read_typed_input(dir).unwrap_or_else(|| read_prompt_and_reply(dir).0)
 }
 
 /// The lines of a node's `activity.md`, the work log of its turn; empty without one.
-pub fn read_work_log(dir: &Utf8Path) -> Vec<String> {
+pub fn read_work_log(dir: &camino::Utf8Path) -> Vec<String> {
     std::fs::read_to_string(dir.join("activity.md"))
         .unwrap_or_default()
         .lines()
@@ -966,8 +970,8 @@ fn utc_stamp(secs: i64) -> String {
     )
 }
 
-pub fn write_atomic(path: &Utf8Path, content: &str) -> std::io::Result<()> {
-    let tmp: Utf8PathBuf = format!("{path}.tmp").into();
+pub fn write_atomic(path: &camino::Utf8Path, content: &str) -> std::io::Result<()> {
+    let tmp: camino::Utf8PathBuf = format!("{path}.tmp").into();
     std::fs::write(&tmp, content)?;
     std::fs::rename(&tmp, path)
 }
@@ -987,10 +991,10 @@ pub(crate) fn local_offset_secs(time_secs: i64) -> i32 {
 }
 
 /// `<data_dir>/conversations/<repo-hash>/` for the repository at `repo_root`.
-pub fn conversations_dir(repo_root: &Utf8Path) -> Option<Utf8PathBuf> {
+pub fn conversations_dir(repo_root: &camino::Utf8Path) -> Option<camino::Utf8PathBuf> {
     let hash = crate::session::repo_hash(repo_root)?;
     directories::ProjectDirs::from("", "", "explorer").and_then(|dirs| {
-        Utf8PathBuf::from_path_buf(dirs.data_dir().join("conversations").join(hash)).ok()
+        camino::Utf8PathBuf::from_path_buf(dirs.data_dir().join("conversations").join(hash)).ok()
     })
 }
 
@@ -998,16 +1002,16 @@ pub fn conversations_dir(repo_root: &Utf8Path) -> Option<Utf8PathBuf> {
 mod tests {
     use super::*;
 
-    fn write_node(dir: &Utf8Path, files: &[(&str, &str)]) {
+    fn write_node(dir: &camino::Utf8Path, files: &[(&str, &str)]) {
         std::fs::create_dir_all(dir).unwrap();
         for (name, content) in files {
             std::fs::write(dir.join(name), content).unwrap();
         }
     }
 
-    fn temp_root() -> (tempfile::TempDir, Utf8PathBuf) {
+    fn temp_root() -> (tempfile::TempDir, camino::Utf8PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         (tmp, root)
     }
 

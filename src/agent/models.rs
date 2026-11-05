@@ -1,12 +1,11 @@
-use serde::Deserialize;
 use std::time::Duration;
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct ModelList {
     data: Vec<ModelEntry>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct ModelEntry {
     id: String,
 }
@@ -33,13 +32,13 @@ pub async fn fetch(url: &str, token: &str) -> Result<Vec<String>, String> {
     Ok(ids)
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct Recommended {
     #[serde(rename = "clinePass", default)]
     cline_pass: Vec<RecommendedModel>,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct RecommendedModel {
     id: String,
 }

@@ -1,29 +1,3 @@
-use crate::loader::LoadedFile;
-use crate::tui::AppSignal;
-use crate::tui::SymbolRefLocation;
-use arc_swap::ArcSwap;
-use camino::Utf8PathBuf;
-use lsp_types::notification::{DidOpenTextDocument, Initialized, Notification};
-use lsp_types::request::{
-    Initialize, Request, SemanticTokensFullRequest, SemanticTokensRangeRequest,
-};
-use lsp_types::{
-    ClientCapabilities, DidOpenTextDocumentParams, HoverContents, HoverParams, InitializeParams,
-    InitializeResult, InitializedParams, Location, PartialResultParams, Position, Range,
-    ReferenceContext, ReferenceParams, SemanticToken, SemanticTokens,
-    SemanticTokensClientCapabilities, SemanticTokensClientCapabilitiesRequests,
-    SemanticTokensFullOptions, SemanticTokensParams, SemanticTokensRangeParams,
-    TextDocumentClientCapabilities, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TokenFormat, Uri, WorkDoneProgressParams, WorkspaceFolder,
-};
-use r3bl_tui::core::ThreadState;
-use r3bl_tui::{
-    Continuation, RRT, RRTEvent, RRTSoftwareInterrupt, RRTWorker, RestartPolicy,
-    TerminalWindowMainThreadSignal,
-};
-use rustix::event::{PollFd, PollFlags, poll as rpoll};
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::fmt::Debug;
 use std::io::{BufRead, BufReader, Read, Write};
@@ -32,7 +6,6 @@ use std::process::{Child, ChildStdin, ChildStdout, Command, Stdio};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, OnceLock};
 use std::time::Instant;
-use tokio::sync::mpsc as tokio_mpsc;
 
 #[derive(Clone, Debug)]
 pub enum LspInput {
@@ -57,31 +30,31 @@ const RANGE_THRESHOLD: usize = 100;
 /// Timeout for blocking stdout poll. Keeps the loop responsive to request_rx.
 const READ_TIMEOUT: std::time::Duration = std::time::Duration::from_millis(50);
 
-#[derive(Serialize)]
-struct RpcRequest<P: Serialize> {
+#[derive(serde::Serialize)]
+struct RpcRequest<P: serde::Serialize> {
     jsonrpc: &'static str,
     id: u64,
     method: &'static str,
     params: P,
 }
 
-#[derive(Serialize)]
-struct RpcNotification<P: Serialize> {
+#[derive(serde::Serialize)]
+struct RpcNotification<P: serde::Serialize> {
     jsonrpc: &'static str,
     method: &'static str,
     params: P,
 }
 
-#[derive(Deserialize)]
+#[derive(serde::Deserialize)]
 struct RpcResponse {
-    id: Option<Value>,
+    id: Option<serde_json::Value>,
     method: Option<String>,
-    result: Option<Value>,
+    result: Option<serde_json::Value>,
     /// Payload of server-initiated requests/notifications (e.g.
     /// `experimental/serverStatus`). Only `result` is set for responses to
     /// our own requests, so this defaults to `None` there.
     #[serde(default)]
-    params: Option<Value>,
+    params: Option<serde_json::Value>,
 }
 
 // ── Interrupt ─────────────────────────────────────────────────────────────────
@@ -89,13 +62,13 @@ struct RpcResponse {
 #[derive(Debug)]
 pub struct LspInterrupt;
 
-impl RRTSoftwareInterrupt for LspInterrupt {
+impl r3bl_tui::RRTSoftwareInterrupt for LspInterrupt {
     fn trigger_software_interrupt(&self) {}
 }
 
 // ── RRT singleton ─────────────────────────────────────────────────────────────
 
-pub static LSP_RRT: RRT<LspWorker> = RRT::new();
+pub static LSP_RRT: r3bl_tui::RRT<LspWorker> = r3bl_tui::RRT::new();
 
 // ── Shared config set before first subscribe ──────────────────────────────────
 
@@ -103,7 +76,7 @@ pub static LSP_RRT: RRT<LspWorker> = RRT::new();
 /// `all-features` / `default-features` command line commands; changing it requires
 /// restarting the rust-analyzer process since these are initialization-time-only
 /// settings (rust-analyzer doesn't hot-reload `cargo.*` via `didChangeConfiguration`).
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CargoFeatureSelection {
     #[default]
     Default,
@@ -116,9 +89,11 @@ pub enum CargoFeatureSelection {
 
 #[derive(Clone)]
 pub struct LspConfig {
-    pub root: Utf8PathBuf,
-    pub files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
-    pub app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+    pub root: camino::Utf8PathBuf,
+    pub files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
+    pub app_tx: tokio::sync::mpsc::Sender<
+        r3bl_tui::TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+    >,
     pub cargo_features: CargoFeatureSelection,
 }
 
@@ -134,7 +109,7 @@ impl Debug for LspConfig {
 /// Builds the `initializationOptions` value sent to rust-analyzer for a given
 /// [`CargoFeatureSelection`]. `Default` omits the `cargo` key entirely so
 /// rust-analyzer falls back to its own default (default-features-only) behavior.
-fn cargo_initialization_options(selection: &CargoFeatureSelection) -> Option<Value> {
+fn cargo_initialization_options(selection: &CargoFeatureSelection) -> Option<serde_json::Value> {
     match selection {
         CargoFeatureSelection::Default => None,
         CargoFeatureSelection::All => Some(serde_json::json!({
@@ -181,8 +156,10 @@ pub struct LspWorker {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     input_receiver: tokio::sync::broadcast::Receiver<LspInput>,
-    app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
+    app_tx: tokio::sync::mpsc::Sender<
+        r3bl_tui::TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+    >,
+    files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
     req_state: TokenRequestState,
     warmup_queue: VecDeque<usize>,
     /// Timestamp of the last warmup file actually sent. Warmup yields to
@@ -226,7 +203,7 @@ impl Debug for LspWorker {
     }
 }
 
-impl RRTWorker for LspWorker {
+impl r3bl_tui::RRTWorker for LspWorker {
     type Config = LspConfig;
     type Input = LspInput;
     type Output = ();
@@ -236,6 +213,8 @@ impl RRTWorker for LspWorker {
         config: Self::Config,
         input_receiver: tokio::sync::broadcast::Receiver<Self::Input>,
     ) -> miette::Result<(Self, Self::Interrupt)> {
+        use lsp_types::notification::Notification;
+        use lsp_types::request::Request;
         let app_tx = config.app_tx.clone();
 
         let mut child = Command::new("rust-analyzer")
@@ -250,7 +229,7 @@ impl RRTWorker for LspWorker {
         let mut reader = BufReader::new(stdout);
 
         let root = &config.root;
-        let root_uri: Uri = format!("file://{root}").parse().expect("valid root URI");
+        let root_uri: lsp_types::Uri = format!("file://{root}").parse().expect("valid root URI");
         let pid = std::process::id();
 
         let initialization_options = cargo_initialization_options(&config.cargo_features);
@@ -258,19 +237,19 @@ impl RRTWorker for LspWorker {
         let init_req = RpcRequest {
             jsonrpc: "2.0",
             id: 0,
-            method: Initialize::METHOD,
-            params: InitializeParams {
+            method: lsp_types::request::Initialize::METHOD,
+            params: lsp_types::InitializeParams {
                 process_id: Some(pid),
-                capabilities: ClientCapabilities {
-                    text_document: Some(TextDocumentClientCapabilities {
-                        semantic_tokens: Some(SemanticTokensClientCapabilities {
-                            requests: SemanticTokensClientCapabilitiesRequests {
-                                full: Some(SemanticTokensFullOptions::Bool(true)),
+                capabilities: lsp_types::ClientCapabilities {
+                    text_document: Some(lsp_types::TextDocumentClientCapabilities {
+                        semantic_tokens: Some(lsp_types::SemanticTokensClientCapabilities {
+                            requests: lsp_types::SemanticTokensClientCapabilitiesRequests {
+                                full: Some(lsp_types::SemanticTokensFullOptions::Bool(true)),
                                 range: Some(true),
                             },
                             token_types: vec![],
                             token_modifiers: vec![],
-                            formats: vec![TokenFormat::RELATIVE],
+                            formats: vec![lsp_types::TokenFormat::RELATIVE],
                             multiline_token_support: Some(false),
                             overlapping_token_support: Some(false),
                             ..Default::default()
@@ -287,7 +266,7 @@ impl RRTWorker for LspWorker {
                     })),
                     ..Default::default()
                 },
-                workspace_folders: Some(vec![WorkspaceFolder {
+                workspace_folders: Some(vec![lsp_types::WorkspaceFolder {
                     uri: root_uri.clone(),
                     name: "root".to_string(),
                 }]),
@@ -307,7 +286,7 @@ impl RRTWorker for LspWorker {
                 return Err(miette::miette!("LSP init handshake failed"));
             };
             if msg.id.as_ref().and_then(|v| v.as_u64()) == Some(0) {
-                let result: InitializeResult =
+                let result: lsp_types::InitializeResult =
                     match msg.result.and_then(|v| serde_json::from_value(v).ok()) {
                         Some(r) => r,
                         None => {
@@ -357,8 +336,8 @@ impl RRTWorker for LspWorker {
 
         let notify_init = RpcNotification {
             jsonrpc: "2.0",
-            method: Initialized::METHOD,
-            params: InitializedParams {},
+            method: lsp_types::notification::Initialized::METHOD,
+            params: lsp_types::InitializedParams {},
         };
         if send_msg(&mut stdin, &notify_init).is_err() {
             let _ = child.kill();
@@ -404,14 +383,14 @@ impl RRTWorker for LspWorker {
         ))
     }
 
-    fn restart_policy() -> RestartPolicy {
-        RestartPolicy::default()
+    fn restart_policy() -> r3bl_tui::RestartPolicy {
+        r3bl_tui::RestartPolicy::default()
     }
 
     fn block_until_ready_then_dispatch(
         &mut self,
-        _sender: &tokio::sync::broadcast::Sender<RRTEvent<Self::Output>>,
-    ) -> Continuation {
+        _sender: &tokio::sync::broadcast::Sender<r3bl_tui::RRTEvent<Self::Output>>,
+    ) -> r3bl_tui::Continuation {
         self.dispatch_count += 1;
         tracing::trace!("LSP: dispatch enter #{}", self.dispatch_count);
         // Drain any user-requested file indices first (non-blocking).
@@ -425,7 +404,7 @@ impl RRTWorker for LspWorker {
                     // files colorize quickly before the readiness gate existed.)
                     LspInput::TokenRequest(_) => {
                         if self.process_input(input).is_err() {
-                            return Continuation::Restart;
+                            return r3bl_tui::Continuation::Restart;
                         }
                     }
                     // Hover→references resolves a cross-file qualified name, which
@@ -435,7 +414,7 @@ impl RRTWorker for LspWorker {
                     LspInput::HoverThenReferences { .. } => {
                         if self.server_ready {
                             if self.process_input(input).is_err() {
-                                return Continuation::Restart;
+                                return r3bl_tui::Continuation::Restart;
                             }
                         } else {
                             tracing::debug!("LSP: holding hover until ready: {:?}", input);
@@ -448,7 +427,7 @@ impl RRTWorker for LspWorker {
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Closed) => {
                     tracing::info!("LSP: dispatch -> Stop (input_receiver closed)");
-                    return Continuation::Stop;
+                    return r3bl_tui::Continuation::Stop;
                 }
                 Err(tokio::sync::broadcast::error::TryRecvError::Empty) => break,
             }
@@ -500,7 +479,7 @@ impl RRTWorker for LspWorker {
                 .expect("just checked non-empty");
             tracing::debug!("LSP: draining held request: {:?}", input);
             if self.process_input(input).is_err() {
-                return Continuation::Restart;
+                return r3bl_tui::Continuation::Restart;
             }
         } else if !self.warmup_queue.is_empty() && self.server_ready && !user_busy {
             // Send one warmup file. Before sending, drain one pending response if
@@ -516,7 +495,7 @@ impl RRTWorker for LspWorker {
                             "LSP: dispatch -> Restart (warmup drain recv_msg error: {:?})",
                             e.kind(),
                         );
-                        return Continuation::Restart;
+                        return r3bl_tui::Continuation::Restart;
                     }
                 };
                 return self.handle_recv_msg(msg);
@@ -550,7 +529,7 @@ impl RRTWorker for LspWorker {
                     "LSP: dispatch -> Restart (warmup request_tokens failed for file_idx={})",
                     file_idx
                 );
-                return Continuation::Restart;
+                return r3bl_tui::Continuation::Restart;
             }
             self.last_warmup_progress = Instant::now();
             tracing::debug!(
@@ -569,7 +548,7 @@ impl RRTWorker for LspWorker {
             self.warmup_queue.len(),
         );
         if !poll_ret {
-            return Continuation::Continue;
+            return r3bl_tui::Continuation::Continue;
         }
 
         // Block on stdout for up to READ_TIMEOUT, then return.
@@ -581,7 +560,7 @@ impl RRTWorker for LspWorker {
                     e.kind(),
                     self.req_state.pending.len()
                 );
-                return Continuation::Restart;
+                return r3bl_tui::Continuation::Restart;
             }
         };
 
@@ -688,19 +667,19 @@ impl LspWorker {
     ) -> std::io::Result<()> {
         let snapshot = self.files.load();
         let file = &snapshot[file_idx];
-        let uri: Uri = format!("file://{}", file.path).parse().expect("valid URI");
+        let uri: lsp_types::Uri = format!("file://{}", file.path).parse().expect("valid URI");
         let id = self.req_state.next_id;
         self.req_state.next_id += 1;
         let hover_req = RpcRequest {
             jsonrpc: "2.0",
             id,
             method: "textDocument/hover",
-            params: HoverParams {
-                text_document_position_params: TextDocumentPositionParams {
-                    text_document: TextDocumentIdentifier { uri },
-                    position: Position { line, character },
+            params: lsp_types::HoverParams {
+                text_document_position_params: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri },
+                    position: lsp_types::Position { line, character },
                 },
-                work_done_progress_params: WorkDoneProgressParams::default(),
+                work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
             },
         };
         tracing::debug!("LSP: sending hover id={} file_idx={}", id, file_idx);
@@ -720,7 +699,9 @@ impl LspWorker {
         Ok(())
     }
 
-    fn handle_recv_msg(&mut self, msg: RpcResponse) -> Continuation {
+    fn handle_recv_msg(&mut self, msg: RpcResponse) -> r3bl_tui::Continuation {
+        use crate::tui::state::AppSignal;
+        use crate::tui::state::SymbolRefLocation;
         let method = msg.method.as_deref().unwrap_or("");
         let has_id = msg.id.is_some();
         tracing::debug!(
@@ -747,7 +728,7 @@ impl LspWorker {
                 tracing::info!("LSP: server_ready {} -> {}", self.server_ready, quiescent);
             }
             self.server_ready = quiescent;
-            return Continuation::Continue;
+            return r3bl_tui::Continuation::Continue;
         }
 
         // Reply to server-initiated requests (e.g. window/workDoneProgress/create).
@@ -764,7 +745,7 @@ impl LspWorker {
                         tracing::info!(
                             "LSP: handle_recv_msg -> Restart (reply to server request failed)"
                         );
-                        return Continuation::Restart;
+                        return r3bl_tui::Continuation::Restart;
                     }
                 }
                 // rust-analyzer asks us to re-pull diagnostics after workspace changes.
@@ -778,7 +759,7 @@ impl LspWorker {
                         tracing::info!(
                             "LSP: handle_recv_msg -> Restart (reply to server request failed)"
                         );
-                        return Continuation::Restart;
+                        return r3bl_tui::Continuation::Restart;
                     }
                 }
                 _ => {
@@ -792,7 +773,7 @@ impl LspWorker {
         if let Some(id) = msg.id.as_ref().and_then(|v| v.as_u64())
             && let Some((file_idx, is_range, is_warmup)) = self.req_state.pending.remove(&id)
         {
-            let tokens: Option<SemanticTokens> = msg
+            let tokens: Option<lsp_types::SemanticTokens> = msg
                 .result
                 .as_ref()
                 .and_then(|v| serde_json::from_value(v.clone()).ok());
@@ -806,7 +787,7 @@ impl LspWorker {
                 has_data,
             );
 
-            if let Some(SemanticTokens { data, .. }) = tokens {
+            if let Some(lsp_types::SemanticTokens { data, .. }) = tokens {
                 let snapshot = self.files.load();
                 let file = &snapshot[file_idx];
                 let lines = {
@@ -862,7 +843,7 @@ impl LspWorker {
                         .and_then(|v| serde_json::from_value::<lsp_types::Hover>(v.clone()).ok());
                     let name: Option<String> =
                         hover_raw.as_ref().and_then(|hover| match &hover.contents {
-                            HoverContents::Markup(content) => {
+                            lsp_types::HoverContents::Markup(content) => {
                                 let name = match content.kind {
                                     lsp_types::MarkupKind::Markdown => {
                                         let mut parts = content.value.split('`');
@@ -933,7 +914,7 @@ impl LspWorker {
                                 word: pending.word,
                                 group_id: pending.group_id,
                             });
-                            return Continuation::Continue;
+                            return r3bl_tui::Continuation::Continue;
                         }
                         // blocking_send: this runs on the RRT std::thread, and a
                         // dropped result would strand the group in limbo forever.
@@ -951,30 +932,31 @@ impl LspWorker {
                                 },
                             ),
                         );
-                        return Continuation::Continue;
+                        return r3bl_tui::Continuation::Continue;
                     };
                     let snapshot = self.files.load();
                     let file = &snapshot[pending.file_idx];
-                    let uri: Uri = format!("file://{}", file.path).parse().expect("valid URI");
+                    let uri: lsp_types::Uri =
+                        format!("file://{}", file.path).parse().expect("valid URI");
                     let refs_id = self.req_state.next_id;
                     self.req_state.next_id += 1;
                     let refs_req = RpcRequest {
                         jsonrpc: "2.0",
                         id: refs_id,
                         method: "textDocument/references",
-                        params: ReferenceParams {
-                            text_document_position: TextDocumentPositionParams {
-                                text_document: TextDocumentIdentifier { uri },
-                                position: Position {
+                        params: lsp_types::ReferenceParams {
+                            text_document_position: lsp_types::TextDocumentPositionParams {
+                                text_document: lsp_types::TextDocumentIdentifier { uri },
+                                position: lsp_types::Position {
                                     line: pending.line,
                                     character: pending.character,
                                 },
                             },
-                            context: ReferenceContext {
+                            context: lsp_types::ReferenceContext {
                                 include_declaration: true,
                             },
-                            work_done_progress_params: WorkDoneProgressParams::default(),
-                            partial_result_params: PartialResultParams::default(),
+                            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+                            partial_result_params: lsp_types::PartialResultParams::default(),
                         },
                     };
                     tracing::debug!(
@@ -984,7 +966,7 @@ impl LspWorker {
                     );
                     if send_msg(&mut self.stdin, &refs_req).is_err() {
                         tracing::info!("LSP: refs send failed");
-                        return Continuation::Restart;
+                        return r3bl_tui::Continuation::Restart;
                     }
                     self.ref_queries.insert(
                         refs_id,
@@ -1005,9 +987,9 @@ impl LspWorker {
                 }
                 RefQueryPhase::References => {
                     let Some(name) = pending.qualified_name else {
-                        return Continuation::Continue;
+                        return r3bl_tui::Continuation::Continue;
                     };
-                    let locations: Vec<Location> = msg
+                    let locations: Vec<lsp_types::Location> = msg
                         .result
                         .and_then(|v| serde_json::from_value(v).ok())
                         .unwrap_or_default();
@@ -1073,18 +1055,18 @@ impl LspWorker {
                     );
                 }
             }
-            return Continuation::Continue;
+            return r3bl_tui::Continuation::Continue;
         }
 
         if notify {
             let _ = self
                 .app_tx
-                .try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                .try_send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
                     AppSignal::Redraw,
                 ));
         }
 
-        Continuation::Continue
+        r3bl_tui::Continuation::Continue
     }
 }
 
@@ -1137,7 +1119,7 @@ fn send_lsp_input(input: LspInput) {
     let output_receivers = LSP_RRT.get_receiver_count();
     let guard = LSP_RRT.shared_state.lock();
     match &*guard {
-        ThreadState::Running(_, tx) => {
+        r3bl_tui::core::ThreadState::Running(_, tx) => {
             let mut buf = FILE_REQUEST_BUFFER.lock();
             for item in buf.drain(..) {
                 let _ = tx.send(item);
@@ -1220,7 +1202,7 @@ pub fn health_check() -> LspHealth {
     let generation = LSP_RRT.get_thread_generation();
     let guard = LSP_RRT.shared_state.lock();
     match &*guard {
-        ThreadState::Running(_, tx) => LspHealth::Running {
+        r3bl_tui::core::ThreadState::Running(_, tx) => LspHealth::Running {
             input_receivers: tx.receiver_count(),
             generation,
         },
@@ -1232,7 +1214,7 @@ pub fn health_check() -> LspHealth {
 /// Safe to call from the main thread on any tick.
 pub fn try_drain_pending_requests() {
     let guard = LSP_RRT.shared_state.lock();
-    if let ThreadState::Running(_, tx) = &*guard {
+    if let r3bl_tui::core::ThreadState::Running(_, tx) = &*guard {
         drain_request_buffer(tx);
     }
 }
@@ -1243,14 +1225,16 @@ pub fn try_drain_pending_requests() {
 /// Retries on EINTR (signal interruption).
 fn poll_readable(fd: &impl AsFd, timeout: std::time::Duration) -> bool {
     use rustix::io::Errno;
-    let mut pollfds = [PollFd::new(fd, PollFlags::IN)];
+    let mut pollfds = [rustix::event::PollFd::new(fd, rustix::event::PollFlags::IN)];
     let ms = timeout.as_millis().min(i32::MAX as u128) as i32;
     loop {
-        match rpoll(&mut pollfds, ms) {
+        match rustix::event::poll(&mut pollfds, ms) {
             Ok(_) => {
-                return pollfds[0]
-                    .revents()
-                    .intersects(PollFlags::IN | PollFlags::HUP | PollFlags::ERR);
+                return pollfds[0].revents().intersects(
+                    rustix::event::PollFlags::IN
+                        | rustix::event::PollFlags::HUP
+                        | rustix::event::PollFlags::ERR,
+                );
             }
             Err(Errno::INTR) => continue,
             Err(_) => return false,
@@ -1258,7 +1242,7 @@ fn poll_readable(fd: &impl AsFd, timeout: std::time::Duration) -> bool {
     }
 }
 
-fn send_msg<T: Serialize>(stdin: &mut ChildStdin, msg: &T) -> std::io::Result<()> {
+fn send_msg<T: serde::Serialize>(stdin: &mut ChildStdin, msg: &T) -> std::io::Result<()> {
     let body = serde_json::to_string(msg)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;
     let framed = format!("Content-Length: {}\r\n\r\n{}", body.len(), body);
@@ -1341,14 +1325,14 @@ fn recv_msg(reader: &mut BufReader<ChildStdout>) -> std::io::Result<RpcResponse>
 /// Safe to call even if the file was never opened with the server.
 fn close_file(
     stdin: &mut ChildStdin,
-    file: &LoadedFile,
+    file: &crate::loader::LoadedFile,
     file_idx: usize,
     state: &mut TokenRequestState,
 ) -> std::io::Result<()> {
     if !state.opened.contains(&file_idx) {
         return Ok(());
     }
-    let uri: Uri = format!("file://{}", file.path)
+    let uri: lsp_types::Uri = format!("file://{}", file.path)
         .parse()
         .expect("valid file URI");
     tracing::debug!("LSP: didClose for file_idx={} path={}", file_idx, file.path);
@@ -1366,13 +1350,13 @@ fn close_file(
 
 fn request_tokens(
     stdin: &mut ChildStdin,
-    file: &LoadedFile,
+    file: &crate::loader::LoadedFile,
     file_idx: usize,
     supports_range: bool,
     state: &mut TokenRequestState,
     is_warmup: bool,
 ) -> std::io::Result<()> {
-    let uri: Uri = format!("file://{}", file.path)
+    let uri: lsp_types::Uri = format!("file://{}", file.path)
         .parse()
         .expect("valid file URI");
 
@@ -1404,11 +1388,12 @@ fn request_tokens(
             file_idx,
             content.len()
         );
+        use lsp_types::notification::Notification;
         let did_open = RpcNotification {
             jsonrpc: "2.0",
-            method: DidOpenTextDocument::METHOD,
-            params: DidOpenTextDocumentParams {
-                text_document: TextDocumentItem {
+            method: lsp_types::notification::DidOpenTextDocument::METHOD,
+            params: lsp_types::DidOpenTextDocumentParams {
+                text_document: lsp_types::TextDocumentItem {
                     uri: uri.clone(),
                     language_id: "rust".to_string(),
                     version: 1,
@@ -1430,20 +1415,21 @@ fn request_tokens(
             file_idx,
             end_line
         );
+        use lsp_types::request::Request;
         let range_req = RpcRequest {
             jsonrpc: "2.0",
             id: range_id,
-            method: SemanticTokensRangeRequest::METHOD,
-            params: SemanticTokensRangeParams {
-                work_done_progress_params: WorkDoneProgressParams::default(),
-                partial_result_params: PartialResultParams::default(),
-                text_document: TextDocumentIdentifier { uri: uri.clone() },
-                range: Range {
-                    start: Position {
+            method: lsp_types::request::SemanticTokensRangeRequest::METHOD,
+            params: lsp_types::SemanticTokensRangeParams {
+                work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+                partial_result_params: lsp_types::PartialResultParams::default(),
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                range: lsp_types::Range {
+                    start: lsp_types::Position {
                         line: 0,
                         character: 0,
                     },
-                    end: Position {
+                    end: lsp_types::Position {
                         line: end_line,
                         character: 0,
                     },
@@ -1461,14 +1447,15 @@ fn request_tokens(
     let full_id = state.next_id;
     state.next_id += 1;
     tracing::debug!("LSP: full request id={} file_idx={}", full_id, file_idx);
+    use lsp_types::request::Request;
     let full_req = RpcRequest {
         jsonrpc: "2.0",
         id: full_id,
-        method: SemanticTokensFullRequest::METHOD,
-        params: SemanticTokensParams {
-            work_done_progress_params: WorkDoneProgressParams::default(),
-            partial_result_params: PartialResultParams::default(),
-            text_document: TextDocumentIdentifier { uri },
+        method: lsp_types::request::SemanticTokensFullRequest::METHOD,
+        params: lsp_types::SemanticTokensParams {
+            work_done_progress_params: lsp_types::WorkDoneProgressParams::default(),
+            partial_result_params: lsp_types::PartialResultParams::default(),
+            text_document: lsp_types::TextDocumentIdentifier { uri },
         },
     };
     send_msg(stdin, &full_req)?;
@@ -1479,7 +1466,7 @@ fn request_tokens(
 
 type LineTokens = Vec<(usize, usize, &'static str)>;
 
-fn decode_tokens(data: &[SemanticToken], content: &str) -> Vec<ColoredLine> {
+fn decode_tokens(data: &[lsp_types::SemanticToken], content: &str) -> Vec<ColoredLine> {
     let token_types = TOKEN_TYPES.get().map(Vec::as_slice).unwrap_or(&[]);
     let static_types = token_types;
 

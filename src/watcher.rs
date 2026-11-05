@@ -1,23 +1,13 @@
-use crate::loader::{LoadedFile, walk_repo_files};
-use crate::tui::AppSignal;
-use arc_swap::ArcSwap;
-use camino::Utf8PathBuf;
-use notify::{EventKind, RecommendedWatcher, RecursiveMode, Watcher};
-use r3bl_tui::{
-    Continuation, RRT, RRTEvent, RRTSoftwareInterrupt, RRTWorker, RestartPolicy,
-    TerminalWindowMainThreadSignal,
-};
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::time::Duration;
-use tokio::sync::mpsc as tokio_mpsc;
 
 const DEBOUNCE: Duration = Duration::from_millis(50);
 
-pub static WATCHER_RRT: RRT<WatcherWorker> = RRT::new();
+pub static WATCHER_RRT: r3bl_tui::RRT<WatcherWorker> = r3bl_tui::RRT::new();
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum RawKind {
@@ -28,23 +18,25 @@ enum RawKind {
 
 #[derive(Debug, Clone)]
 pub struct BatchedWatchEvent {
-    pub modified: Vec<Utf8PathBuf>,
-    pub created: Vec<Utf8PathBuf>,
-    pub removed: Vec<Utf8PathBuf>,
+    pub modified: Vec<camino::Utf8PathBuf>,
+    pub created: Vec<camino::Utf8PathBuf>,
+    pub removed: Vec<camino::Utf8PathBuf>,
 }
 
 #[derive(Debug)]
 pub struct NoOpInterrupt;
 
-impl RRTSoftwareInterrupt for NoOpInterrupt {
+impl r3bl_tui::RRTSoftwareInterrupt for NoOpInterrupt {
     fn trigger_software_interrupt(&self) {}
 }
 
 #[derive(Clone)]
 pub struct WatcherConfig {
-    pub root: Utf8PathBuf,
-    pub app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-    pub files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
+    pub root: camino::Utf8PathBuf,
+    pub app_tx: tokio::sync::mpsc::Sender<
+        r3bl_tui::TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+    >,
+    pub files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
 }
 
 impl Debug for WatcherConfig {
@@ -56,18 +48,20 @@ impl Debug for WatcherConfig {
 }
 
 pub struct WatcherWorker {
-    root: Utf8PathBuf,
-    app_tx: tokio_mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
-    files: Arc<ArcSwap<Vec<Arc<LoadedFile>>>>,
+    root: camino::Utf8PathBuf,
+    app_tx: tokio::sync::mpsc::Sender<
+        r3bl_tui::TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+    >,
+    files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
     rx: mpsc::Receiver<notify::Result<notify::Event>>,
-    pending: HashMap<Utf8PathBuf, RawKind>,
+    pending: HashMap<camino::Utf8PathBuf, RawKind>,
     // Set when notify reports an event-queue overflow (`need_rescan`). On the
     // next flush we re-walk the tree and reconcile, recovering dropped events.
     pending_rescan: bool,
     // A git history trigger fired since the last flush, sent as one GitHistoryChanged on it.
     pending_git: bool,
     // Held to keep the watcher alive for the duration of the worker.
-    _watcher: RecommendedWatcher,
+    _watcher: notify::RecommendedWatcher,
 }
 
 impl Debug for WatcherWorker {
@@ -78,15 +72,16 @@ impl Debug for WatcherWorker {
     }
 }
 
-impl RRTWorker for WatcherWorker {
+impl r3bl_tui::RRTWorker for WatcherWorker {
     type Config = WatcherConfig;
-    type Output = AppSignal;
+    type Output = crate::tui::state::AppSignal;
     type Interrupt = NoOpInterrupt;
 
     fn create_and_register_os_sources(
         config: Self::Config,
         _receiver: tokio::sync::broadcast::Receiver<Self::Input>,
     ) -> miette::Result<(Self, Self::Interrupt)> {
+        use notify::Watcher;
         let WatcherConfig {
             root,
             app_tx,
@@ -94,10 +89,10 @@ impl RRTWorker for WatcherWorker {
         } = config;
 
         let (tx, rx) = mpsc::channel();
-        let mut watcher = RecommendedWatcher::new(tx, notify::Config::default())
+        let mut watcher = notify::RecommendedWatcher::new(tx, notify::Config::default())
             .map_err(|e| miette::miette!("notify watcher error: {e}"))?;
         watcher
-            .watch(root.as_std_path(), RecursiveMode::Recursive)
+            .watch(root.as_std_path(), notify::RecursiveMode::Recursive)
             .map_err(|e| miette::miette!("notify watch error: {e}"))?;
         tracing::info!("watcher created: root={}", root);
 
@@ -116,14 +111,15 @@ impl RRTWorker for WatcherWorker {
         ))
     }
 
-    fn restart_policy() -> RestartPolicy {
-        RestartPolicy::default()
+    fn restart_policy() -> r3bl_tui::RestartPolicy {
+        r3bl_tui::RestartPolicy::default()
     }
 
     fn block_until_ready_then_dispatch(
         &mut self,
-        _sender: &tokio::sync::broadcast::Sender<RRTEvent<Self::Output>>,
-    ) -> Continuation {
+        _sender: &tokio::sync::broadcast::Sender<r3bl_tui::RRTEvent<Self::Output>>,
+    ) -> r3bl_tui::Continuation {
+        use crate::tui::state::AppSignal;
         match self.rx.recv_timeout(DEBOUNCE) {
             Ok(Ok(event)) => {
                 // Event-queue overflow: the kernel dropped events, so per-path
@@ -133,16 +129,16 @@ impl RRTWorker for WatcherWorker {
                     tracing::warn!("watcher: event-queue overflow, scheduling rescan");
                     self.pending_rescan = true;
                     self.pending_git = true;
-                    return Continuation::Continue;
+                    return r3bl_tui::Continuation::Continue;
                 }
                 let kind = match event.kind {
-                    EventKind::Create(_) => RawKind::Created,
-                    EventKind::Modify(_) => RawKind::Modified,
-                    EventKind::Remove(_) => RawKind::Removed,
-                    _ => return Continuation::Continue,
+                    notify::EventKind::Create(_) => RawKind::Created,
+                    notify::EventKind::Modify(_) => RawKind::Modified,
+                    notify::EventKind::Remove(_) => RawKind::Removed,
+                    _ => return r3bl_tui::Continuation::Continue,
                 };
                 for path in event.paths {
-                    let Ok(utf8) = Utf8PathBuf::from_path_buf(path) else {
+                    let Ok(utf8) = camino::Utf8PathBuf::from_path_buf(path) else {
                         continue;
                     };
                     let Ok(rel) = utf8.strip_prefix(&self.root) else {
@@ -169,32 +165,32 @@ impl RRTWorker for WatcherWorker {
                         _ => *entry = kind,
                     }
                 }
-                Continuation::Continue
+                r3bl_tui::Continuation::Continue
             }
             Ok(Err(e)) => {
                 tracing::warn!("watcher: notify error: {:?}", e);
-                Continuation::Restart
+                r3bl_tui::Continuation::Restart
             }
             Err(mpsc::RecvTimeoutError::Disconnected) => {
                 tracing::warn!("watcher: channel disconnected, restarting");
-                Continuation::Restart
+                r3bl_tui::Continuation::Restart
             }
             Err(mpsc::RecvTimeoutError::Timeout) => {
                 if self.pending_git {
                     self.pending_git = false;
                     if self
                         .app_tx
-                        .blocking_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
+                        .blocking_send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
                             AppSignal::GitHistoryChanged,
                         ))
                         .is_err()
                     {
                         tracing::warn!("watcher: app_tx closed, stopping");
-                        return Continuation::Stop;
+                        return r3bl_tui::Continuation::Stop;
                     }
                 }
                 if self.pending.is_empty() && !self.pending_rescan {
-                    return Continuation::Continue;
+                    return r3bl_tui::Continuation::Continue;
                 }
                 let mut batch = BatchedWatchEvent {
                     modified: vec![],
@@ -221,13 +217,15 @@ impl RRTWorker for WatcherWorker {
                 let signal = AppSignal::FilesChanged(std::sync::Arc::new(batch));
                 if self
                     .app_tx
-                    .blocking_send(TerminalWindowMainThreadSignal::ApplyAppSignal(signal))
+                    .blocking_send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
+                        signal,
+                    ))
                     .is_err()
                 {
                     tracing::warn!("watcher: app_tx closed, stopping");
-                    return Continuation::Stop;
+                    return r3bl_tui::Continuation::Stop;
                 }
-                Continuation::Continue
+                r3bl_tui::Continuation::Continue
             }
         }
     }
@@ -240,16 +238,16 @@ impl WatcherWorker {
     /// handler resurrects a `removed` entry or appends a genuinely-new one),
     /// and active entries whose path is gone from disk become `removed`.
     fn reconcile_into(&self, batch: &mut BatchedWatchEvent) {
-        let on_disk: HashSet<Utf8PathBuf> = walk_repo_files(&self.root)
+        let on_disk: HashSet<camino::Utf8PathBuf> = crate::loader::walk_repo_files(&self.root)
             .into_iter()
-            .filter_map(|p| Utf8PathBuf::from_path_buf(p).ok())
+            .filter_map(|p| camino::Utf8PathBuf::from_path_buf(p).ok())
             .collect();
 
         let snapshot = self.files.load();
 
         // Paths already accounted for by this batch's coalesced events, so the
         // rescan delta doesn't duplicate them.
-        let mut seen: HashSet<Utf8PathBuf> = batch
+        let mut seen: HashSet<camino::Utf8PathBuf> = batch
             .created
             .iter()
             .chain(batch.modified.iter())
@@ -258,7 +256,7 @@ impl WatcherWorker {
             .collect();
 
         // Active (non-removed) paths currently in the list.
-        let active: HashSet<&Utf8PathBuf> = snapshot
+        let active: HashSet<&camino::Utf8PathBuf> = snapshot
             .iter()
             .filter(|f| !f.removed.load(Ordering::Relaxed))
             .map(|f| &f.path)
@@ -347,7 +345,7 @@ mod tests {
     #[test]
     fn git_history_trigger_matches_head_refs_and_packed_refs() {
         for path in [".git/refs", ".git/refs/heads/main", ".git/packed-refs"] {
-            let rel = Utf8PathBuf::from(path);
+            let rel = camino::Utf8PathBuf::from(path);
             assert!(
                 is_git_history_trigger(rel.components()),
                 "expected trigger: {path}"
@@ -362,7 +360,7 @@ mod tests {
             ".git/refs.lock",
             "src/main.rs",
         ] {
-            let rel = Utf8PathBuf::from(path);
+            let rel = camino::Utf8PathBuf::from(path);
             assert!(
                 !is_git_history_trigger(rel.components()),
                 "expected no trigger: {path}"

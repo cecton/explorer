@@ -1,11 +1,12 @@
-use crate::tui::*;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
-use tokio::sync::mpsc;
 
-type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
+type MainTx =
+    tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>>;
 
 pub const NAME: &str = "after-agents";
 
@@ -73,12 +74,12 @@ pub fn seconds_left(deadline: Instant, now: Instant) -> u64 {
     deadline.saturating_duration_since(now).as_secs_f64().ceil() as u64
 }
 
-pub fn is_idle(state: &AppState) -> bool {
+pub fn is_idle(state: &crate::tui::state::AppState) -> bool {
     state.running_turns.is_empty() && state.queued_turns.is_empty()
 }
 
 /// A turn ended: when nothing else runs or waits, the pending command starts its countdown.
-pub fn arm(state: &mut AppState, main_tx: MainTx) {
+pub fn arm(state: &mut crate::tui::state::AppState, main_tx: MainTx) {
     if !is_idle(state) {
         return;
     }
@@ -92,7 +93,7 @@ pub fn arm(state: &mut AppState, main_tx: MainTx) {
     tick(state, main_tx);
 }
 
-pub fn tick(state: &mut AppState, main_tx: MainTx) {
+pub fn tick(state: &mut crate::tui::state::AppState, main_tx: MainTx) {
     let Some(after) = state.after_agents.as_ref() else {
         return;
     };
@@ -113,6 +114,7 @@ pub fn tick(state: &mut AppState, main_tx: MainTx) {
 
 /// `None` when `sh` cannot start: the command is then gone, as a run that ended.
 fn spawn(command: &str, run: u64, root: &camino::Utf8Path, main_tx: MainTx) -> Option<AfterAgents> {
+    use crate::tui::state::AppSignal;
     let child = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -157,14 +159,14 @@ fn spawn(command: &str, run: u64, root: &camino::Utf8Path, main_tx: MainTx) -> O
 }
 
 /// The command ended; a stale exit, of a command replaced meanwhile, changes nothing.
-pub fn exited(state: &mut AppState, finished: u64) {
+pub fn exited(state: &mut crate::tui::state::AppState, finished: u64) {
     if matches!(&state.after_agents, Some(AfterAgents::Running { run, .. }) if *run == finished) {
         state.after_agents = None;
     }
 }
 
 /// Presence of the user during the countdown cancels the command; true when the event is consumed.
-pub fn cancel_on_input(state: &mut AppState, input_event: &InputEvent) -> bool {
+pub fn cancel_on_input(state: &mut crate::tui::state::AppState, input_event: &InputEvent) -> bool {
     if !matches!(state.after_agents, Some(AfterAgents::Countdown { .. })) {
         return false;
     }
@@ -271,9 +273,10 @@ mod tests {
 
     #[test]
     fn user_input_during_the_countdown_cancels() {
+        use crate::tui::state::AppState;
         let armed = || AppState {
             after_agents: Some(countdown(Instant::now())),
-            ..AppState::default()
+            ..crate::tui::state::AppState::default()
         };
         let mouse = |kind| {
             InputEvent::Mouse(MouseInput {
@@ -322,6 +325,7 @@ mod tests {
 
     #[test]
     fn a_stale_exit_leaves_a_newer_run_alone() {
+        use crate::tui::state::AppState;
         let mut state = AppState {
             after_agents: Some(AfterAgents::Running {
                 command: "x".into(),
@@ -331,7 +335,7 @@ mod tests {
                     reaped: Arc::default(),
                 }),
             }),
-            ..AppState::default()
+            ..crate::tui::state::AppState::default()
         };
         exited(&mut state, 1);
         assert!(state.after_agents.is_some());
@@ -341,7 +345,8 @@ mod tests {
 
     #[test]
     fn arming_leaves_a_running_command_alone() {
-        let (main_tx, _main_rx) = mpsc::channel(1);
+        use crate::tui::state::AppState;
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(1);
         let mut state = AppState {
             after_agents: Some(AfterAgents::Running {
                 command: "x".into(),
@@ -351,7 +356,7 @@ mod tests {
                     reaped: Arc::default(),
                 }),
             }),
-            ..AppState::default()
+            ..crate::tui::state::AppState::default()
         };
         arm(&mut state, main_tx);
         assert!(matches!(
@@ -362,11 +367,12 @@ mod tests {
 
     #[test]
     fn an_overflowing_grace_leaves_the_command_pending() {
-        let (main_tx, _main_rx) = mpsc::channel(1);
+        use crate::tui::state::AppState;
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(1);
         let mut state = AppState {
             after_agents: Some(AfterAgents::Pending("x".into())),
             after_agents_grace: Duration::from_secs(u64::MAX),
-            ..AppState::default()
+            ..crate::tui::state::AppState::default()
         };
         arm(&mut state, main_tx);
         assert!(matches!(state.after_agents, Some(AfterAgents::Pending(_))));

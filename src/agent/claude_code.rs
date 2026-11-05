@@ -1,14 +1,6 @@
-use super::Effort;
-use super::mcp::McpTools;
-use super::tools::arguments_detail;
-use super::turn::{Injector, Recorder};
-use super::usage::{Span, Usage, UsageWindow};
-use camino::Utf8Path;
-use serde_json::Value;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
 /// Settings every run gets: no trailer on the commits it makes, and no hooks, which are
 /// code a repository supplies and which Claude Code runs before the model is called.
@@ -21,7 +13,7 @@ const STEERING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(
 #[derive(Clone, Debug)]
 pub struct ClaudeTarget {
     pub model: String,
-    pub effort: Effort,
+    pub effort: crate::agent::Effort,
 }
 
 /// The session a run starts from.
@@ -36,13 +28,13 @@ pub enum Resume<'a> {
 
 pub struct Invocation<'a> {
     pub target: &'a ClaudeTarget,
-    pub root: &'a Utf8Path,
+    pub root: &'a camino::Utf8Path,
     /// Appended to Claude Code's own system prompt.
     pub system: &'a str,
     pub prompt: &'a str,
     pub resume: Resume<'a>,
     /// The MCP servers of the turn; the CLI starts them itself.
-    pub mcp: &'a McpTools,
+    pub mcp: &'a crate::agent::mcp::McpTools,
 }
 
 pub enum RunError {
@@ -69,7 +61,7 @@ enum StreamEvent {
     /// Part of that context the provider served from its prompt cache.
     CachedIn(u64),
     /// How much of the subscription is used after the request that just completed.
-    Usage(Usage),
+    Usage(crate::agent::usage::Usage),
     /// The run is over. `no_turn` is set when it ended before the model was called.
     Result {
         error: Option<String>,
@@ -77,19 +69,22 @@ enum StreamEvent {
     },
 }
 
-fn tool_activity(name: &str, input: &Value) -> String {
+fn tool_activity(name: &str, input: &serde_json::Value) -> String {
     let detail = ["command", "file_path", "pattern", "description"]
         .iter()
-        .find_map(|key| input.get(key).and_then(Value::as_str))
-        .map_or_else(|| arguments_detail(input), str::to_string);
+        .find_map(|key| input.get(key).and_then(serde_json::Value::as_str))
+        .map_or_else(
+            || crate::agent::tools::arguments_detail(input),
+            str::to_string,
+        );
     let detail = detail.lines().next().unwrap_or("");
     format!("{name} {detail}").trim_end().to_string()
 }
 
 /// The sizes of one request's context: its total, and how much of it the provider
 /// served from its prompt cache. The cache write is part of the context but not a hit.
-fn context_tokens(usage: &Value) -> Option<(u64, u64)> {
-    let field = |key: &str| usage.get(key).and_then(Value::as_u64);
+fn context_tokens(usage: &serde_json::Value) -> Option<(u64, u64)> {
+    let field = |key: &str| usage.get(key).and_then(serde_json::Value::as_u64);
     let cached = field("cache_read_input_tokens").unwrap_or(0);
     Some((
         field("input_tokens")? + field("cache_creation_input_tokens").unwrap_or(0) + cached,
@@ -97,7 +92,7 @@ fn context_tokens(usage: &Value) -> Option<(u64, u64)> {
     ))
 }
 
-fn context_sizes(usage: &Value) -> Vec<StreamEvent> {
+fn context_sizes(usage: &serde_json::Value) -> Vec<StreamEvent> {
     let Some((total, cached)) = context_tokens(usage) else {
         return Vec::new();
     };
@@ -106,7 +101,10 @@ fn context_sizes(usage: &Value) -> Vec<StreamEvent> {
 
 /// The subscription's limits in a `rate_limit_event`; a login without a subscription
 /// reports none.
-fn subscription_usage(info: &Value) -> Option<Usage> {
+fn subscription_usage(info: &serde_json::Value) -> Option<crate::agent::usage::Usage> {
+    use crate::agent::usage::Span;
+    use crate::agent::usage::Usage;
+    use crate::agent::usage::UsageWindow;
     let reported = info.get("unifiedWindows")?;
     let window = |key: &str, span: Span| {
         let window = reported.get(key)?;
@@ -129,7 +127,7 @@ fn subscription_usage(info: &Value) -> Option<Usage> {
 /// Translates one output line. Lines of subagents and of kinds we do not use yield
 /// nothing.
 fn parse_line(line: &str) -> Vec<StreamEvent> {
-    let Ok(message) = serde_json::from_str::<Value>(line) else {
+    let Ok(message) = serde_json::from_str::<serde_json::Value>(line) else {
         return Vec::new();
     };
     if message
@@ -138,11 +136,18 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
     {
         return Vec::new();
     }
-    let text =
-        |value: &Value, key: &str| value.get(key).and_then(Value::as_str).map(str::to_string);
-    let kind = message.get("type").and_then(Value::as_str).unwrap_or("");
+    let text = |value: &serde_json::Value, key: &str| {
+        value
+            .get(key)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    let kind = message
+        .get("type")
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("");
     match kind {
-        "system" if message.get("subtype").and_then(Value::as_str) == Some("init") => {
+        "system" if message.get("subtype").and_then(serde_json::Value::as_str) == Some("init") => {
             text(&message, "session_id")
                 .map(StreamEvent::Session)
                 .into_iter()
@@ -150,7 +155,11 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
         }
         "stream_event" => {
             let event = &message["event"];
-            match event.get("type").and_then(Value::as_str).unwrap_or("") {
+            match event
+                .get("type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or("")
+            {
                 "message_start" => {
                     let mut events = vec![StreamEvent::AnswerStart];
                     events.extend(context_sizes(&event["message"]["usage"]));
@@ -208,6 +217,7 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
 }
 
 fn arguments(invocation: &Invocation<'_>) -> Vec<String> {
+    use crate::agent::Effort;
     let mut args: Vec<String> = [
         "-p",
         "--output-format",
@@ -291,7 +301,14 @@ fn input_frame(content: &str) -> String {
 
 /// Runs the CLI once and feeds its output to `recorder`. The session id is recorded as
 /// soon as it is known, so it survives a failure or a cancellation.
-pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result<(), RunError> {
+pub async fn run(
+    invocation: &Invocation<'_>,
+    recorder: &mut crate::agent::turn::Recorder,
+) -> Result<(), RunError> {
+    use crate::agent::turn::Injector;
+    use tokio::io::AsyncBufReadExt;
+    use tokio::io::AsyncReadExt;
+    use tokio::io::AsyncWriteExt;
     let mut child = tokio::process::Command::new("claude")
         .args(arguments(invocation))
         .current_dir(invocation.root)
@@ -355,7 +372,7 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
 
     let mut outcome = None;
     if let Some(stdout) = child.stdout.take() {
-        let mut lines = BufReader::new(stdout).lines();
+        let mut lines = tokio::io::BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             for event in parse_line(&line) {
                 match event {
@@ -410,6 +427,7 @@ pub async fn run(invocation: &Invocation<'_>, recorder: &mut Recorder) -> Result
 
 /// One answer without tools and without a saved session, for titles and summaries.
 pub async fn complete(target: &ClaudeTarget, system: &str, user: &str) -> Result<String, String> {
+    use crate::agent::Effort;
     let mut command = tokio::process::Command::new("claude");
     command
         .args(["-p", "--output-format", "text", "--no-session-persistence"])
@@ -436,6 +454,7 @@ pub async fn complete(target: &ClaudeTarget, system: &str, user: &str) -> Result
         .spawn()
         .map_err(spawn_error)?;
     if let Some(mut stdin) = child.stdin.take() {
+        use tokio::io::AsyncWriteExt;
         let _ = stdin.write_all(user.as_bytes()).await;
     }
     let output = child.wait_with_output().await.map_err(|e| e.to_string())?;
@@ -542,6 +561,9 @@ mod tests {
 
     #[test]
     fn rate_limit_event_gives_the_usage_of_the_subscription() {
+        use crate::agent::usage::Span;
+        use crate::agent::usage::Usage;
+        use crate::agent::usage::UsageWindow;
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1791817200,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.22,"resetsAt":1791817200},"seven_day":{"utilization":0.18,"resetsAt":1792018800}}},"uuid":"8c092c44-667f-4329-af9b-b6a6803cb3ba","session_id":"s"}"#;
         assert_eq!(
             parse_line(line),
@@ -565,6 +587,8 @@ mod tests {
 
     #[test]
     fn arguments_follow_effort_and_session() {
+        use crate::agent::Effort;
+        use crate::agent::mcp::McpTools;
         let target = ClaudeTarget {
             model: "opus".to_string(),
             effort: Effort::High,
@@ -572,7 +596,7 @@ mod tests {
         let mcp = McpTools::default();
         let invocation = |resume| Invocation {
             target: &target,
-            root: Utf8Path::new("/repo"),
+            root: camino::Utf8Path::new("/repo"),
             system: "SYSTEM",
             prompt: "hi",
             resume,

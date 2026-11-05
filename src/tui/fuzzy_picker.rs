@@ -1,4 +1,5 @@
-use crate::tui::*;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::collections::HashSet;
 
 pub struct FuzzyPicker {
@@ -14,7 +15,7 @@ impl FuzzyPicker {
         &mut self,
         input_event: &InputEvent,
         page_size: usize,
-        picker_state: &mut FuzzyPickerState<K>,
+        picker_state: &mut crate::tui::state::FuzzyPickerState<K>,
     ) -> Option<EventPropagation> {
         let count = picker_state.results.len();
         if count == 0 {
@@ -62,14 +63,17 @@ impl FuzzyPicker {
 
     pub fn render_results<K: Clone + PartialEq>(
         &mut self,
-        state: &AppState,
-        picker_state: &FuzzyPickerState<K>,
+        state: &crate::tui::state::AppState,
+        picker_state: &crate::tui::state::FuzzyPickerState<K>,
         results_origin: VPPos,
         result_rows: usize,
         pane_width: usize,
-        display: impl Fn(&K, &AppState) -> (String, Option<RgbValue>),
+        display: impl Fn(&K, &crate::tui::state::AppState) -> (String, Option<RgbValue>),
     ) -> RenderOpIRVec {
-        let bg_rgb = state.theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
+        let bg_rgb = state
+            .theme
+            .ui_bg("ui.background")
+            .unwrap_or(crate::tui::title_row::DEFAULT_BG);
         let color_bg = TuiColor::from(bg_rgb);
 
         let match_rgb = state
@@ -83,7 +87,7 @@ impl FuzzyPicker {
         let selected_rgb = state
             .theme
             .ui_bg("ui.selection")
-            .unwrap_or(DEFAULT_SELECTION_BG);
+            .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG);
         let color_match_fg = TuiColor::from(match_rgb);
         let color_normal_fg = TuiColor::from(normal_rgb);
         let color_selected_bg = TuiColor::from(selected_rgb);

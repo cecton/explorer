@@ -1,8 +1,8 @@
-use crate::tui::*;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 use std::time::Instant;
-use tokio::sync::mpsc;
 
 /// Dispatcher component for a single pane slot. Holds both inner component types and
 /// delegates to the correct one based on which `Window` is currently assigned to this slot
@@ -10,16 +10,16 @@ use tokio::sync::mpsc;
 pub struct PaneComponent {
     pub id: FlexBoxId,
     pub slot: usize,
-    picker: WindowPickerComponent,
-    theme_picker: ThemePickerComponent,
-    git_log: GitLogPaneComponent,
-    commit_diff: CommitDiffPaneComponent,
+    picker: crate::tui::window_picker::WindowPickerComponent,
+    theme_picker: crate::tui::theme_picker::ThemePickerComponent,
+    git_log: crate::tui::git_log_pane::GitLogPaneComponent,
+    commit_diff: crate::tui::commit_diff_pane::CommitDiffPaneComponent,
     report: crate::tui::report_pane::ReportComponent,
-    conversation_tree: ConversationTreeComponent,
-    discussion: DiscussionComponent,
-    model_picker: ModelPickerComponent,
-    preview: FilePreviewComponent,
-    terminal: TerminalPaneComponent,
+    conversation_tree: crate::tui::conversation_tree_pane::ConversationTreeComponent,
+    discussion: crate::tui::discussion_pane::DiscussionComponent,
+    model_picker: crate::tui::model_picker::ModelPickerComponent,
+    preview: crate::tui::preview::FilePreviewComponent,
+    terminal: crate::tui::terminal_pane::TerminalPaneComponent,
     /// Origin row of the content area (below title bar), used for scrollbar mouse events.
     content_origin_row: u16,
     /// Total columns in the content area (full width including scrollbar column).
@@ -44,9 +44,19 @@ impl PaneComponent {
     pub fn new_boxed(
         slot: usize,
         id: FlexBoxId,
-        picker_results_tx: mpsc::Sender<PickerResultMsg>,
+        picker_results_tx: tokio::sync::mpsc::Sender<crate::tui::window_picker::PickerResultMsg>,
         picker_generation: Arc<AtomicU64>,
-    ) -> BoxedSafeComponent<AppState, AppSignal> {
+    ) -> BoxedSafeComponent<crate::tui::state::AppState, crate::tui::state::AppSignal> {
+        use crate::tui::commit_diff_pane::CommitDiffPaneComponent;
+        use crate::tui::conversation_tree_pane::ConversationTreeComponent;
+        use crate::tui::discussion_pane::DiscussionComponent;
+        use crate::tui::git_log_pane::GitLogPaneComponent;
+        use crate::tui::model_picker::ModelPickerComponent;
+        use crate::tui::preview::FilePreviewComponent;
+        use crate::tui::report_pane::ReportComponent;
+        use crate::tui::terminal_pane::TerminalPaneComponent;
+        use crate::tui::theme_picker::ThemePickerComponent;
+        use crate::tui::window_picker::WindowPickerComponent;
         Box::new(Self {
             id,
             slot,
@@ -54,7 +64,7 @@ impl PaneComponent {
             theme_picker: ThemePickerComponent::new(id),
             git_log: GitLogPaneComponent::new(id),
             commit_diff: CommitDiffPaneComponent::new(id),
-            report: crate::tui::report_pane::ReportComponent::new(id),
+            report: ReportComponent::new(id),
             conversation_tree: ConversationTreeComponent::new(id),
             discussion: DiscussionComponent::new(id),
             model_picker: ModelPickerComponent::new(id),
@@ -74,7 +84,10 @@ impl PaneComponent {
         })
     }
 
-    fn active_window(&self, state: &AppState) -> Option<Window> {
+    fn active_window(
+        &self,
+        state: &crate::tui::state::AppState,
+    ) -> Option<crate::tui::pane_manager::Window> {
         state
             .pane_manager
             .layout(state.last_surface_size)
@@ -86,9 +99,10 @@ impl PaneComponent {
     fn handle_scrollbar(
         &mut self,
         mouse: MouseInput,
-        global_data: &mut GlobalData<AppState, AppSignal>,
-        window: &Window,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        window: &crate::tui::pane_manager::Window,
     ) -> EventPropagation {
+        use crate::tui::pane_manager::Window;
         let row = mouse.pos.row_index.as_usize();
         let rel_y = row.saturating_sub(self.content_origin_row as usize);
 
@@ -183,10 +197,12 @@ impl PaneComponent {
 
     fn apply_scroll(
         &mut self,
-        state: &mut AppState,
-        window: &Window,
+        state: &mut crate::tui::state::AppState,
+        window: &crate::tui::pane_manager::Window,
         target: usize,
     ) -> EventPropagation {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::theme::HelixTheme;
         match window {
             Window::FilePreview(_) => {
                 state.pane_manager.set_window_scroll(window, target);
@@ -254,42 +270,50 @@ impl PaneComponent {
     }
 }
 
-impl TitleRow for PaneComponent {
+impl crate::tui::title_row::TitleRow for PaneComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        state: &mut AppState,
+        state: &mut crate::tui::state::AppState,
     ) -> usize {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::title_row::TitleRow;
         let Some(window) = self.active_window(state) else {
             return 0;
         };
         match window {
-            Window::WindowPicker => self.picker.render_title_row(ops, pane_box, focused, state),
-            Window::ThemePicker => self
-                .theme_picker
-                .render_title_row(ops, pane_box, focused, state),
-            Window::FilePreview(_) => self.preview.render_title_row(ops, pane_box, focused, state),
-            Window::Terminal(_) => self
-                .terminal
-                .render_title_row(ops, pane_box, focused, state),
+            Window::WindowPicker => {
+                TitleRow::render_title_row(&self.picker, ops, pane_box, focused, state)
+            }
+            Window::ThemePicker => {
+                TitleRow::render_title_row(&self.theme_picker, ops, pane_box, focused, state)
+            }
+            Window::FilePreview(_) => {
+                TitleRow::render_title_row(&self.preview, ops, pane_box, focused, state)
+            }
+            Window::Terminal(_) => {
+                TitleRow::render_title_row(&self.terminal, ops, pane_box, focused, state)
+            }
             Window::GitLog(id) => self
                 .git_log
                 .render_title_row(ops, pane_box, focused, state, id),
-            Window::CommitDiff(_) => self
-                .commit_diff
-                .render_title_row(ops, pane_box, focused, state),
-            Window::ConversationTree => self
-                .conversation_tree
-                .render_title_row(ops, pane_box, focused, state),
+            Window::CommitDiff(_) => {
+                TitleRow::render_title_row(&self.commit_diff, ops, pane_box, focused, state)
+            }
+            Window::ConversationTree => {
+                TitleRow::render_title_row(&self.conversation_tree, ops, pane_box, focused, state)
+            }
             Window::Discussion(id) => self
                 .discussion
                 .render_title_row(ops, pane_box, focused, state, id),
-            Window::Report(_) => self.report.render_title_row(ops, pane_box, focused, state),
-            Window::ModelPicker => self
-                .model_picker
-                .render_title_row(ops, pane_box, focused, state),
+            Window::Report(_) => {
+                TitleRow::render_title_row(&self.report, ops, pane_box, focused, state)
+            }
+            Window::ModelPicker => {
+                TitleRow::render_title_row(&self.model_picker, ops, pane_box, focused, state)
+            }
         }
     }
 }
@@ -324,7 +348,10 @@ fn scroll_from_y(
     (rel_y * (scroll_max - page_size)) / (scrollbar_height.saturating_sub(1).max(1))
 }
 
-pub(super) fn drag_modifier_from_mouse(mouse: &MouseInput) -> Option<DragModifier> {
+pub(super) fn drag_modifier_from_mouse(
+    mouse: &MouseInput,
+) -> Option<crate::tui::preview::DragModifier> {
+    use crate::tui::preview::DragModifier;
     let mask = mouse.maybe_modifier_keys?;
     let shift = mask.shift_key_state == KeyState::Pressed;
     let ctrl = mask.ctrl_key_state == KeyState::Pressed;
@@ -339,7 +366,7 @@ pub(super) fn drag_modifier_from_mouse(mouse: &MouseInput) -> Option<DragModifie
     }
 }
 
-impl Component<AppState, AppSignal> for PaneComponent {
+impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for PaneComponent {
     fn reset(&mut self) {
         self.picker.reset();
         self.theme_picker.reset();
@@ -362,10 +389,13 @@ impl Component<AppState, AppSignal> for PaneComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         input_event: InputEvent,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::pane_manager::TextSelection;
+        use crate::tui::pane_manager::Window;
         let active_window = self.active_window(&global_data.state);
 
         // If a preview drag was active but the window changed, clean up.
@@ -779,8 +809,10 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     let rel_col = col - origin_col;
 
                     let word_bounds = global_data.state.with_terminal(term_id, |pane| {
-                        let (line, _) = terminal_line_at_viewport_row(pane, rel_row);
-                        let (ws, we) = terminal_word_bounds(&line, rel_col);
+                        let (line, _) =
+                            crate::tui::terminal_pane::terminal_line_at_viewport_row(pane, rel_row);
+                        let (ws, we) =
+                            crate::tui::terminal_pane::terminal_word_bounds(&line, rel_col);
                         (ws, we)
                     });
 
@@ -853,8 +885,12 @@ impl Component<AppState, AppSignal> for PaneComponent {
                     let (word_bounds, cur_line_len) = global_data
                         .state
                         .with_terminal(term_id, |pane| {
-                            let (line, count) = terminal_line_at_viewport_row(pane, rel_row);
-                            let wb = terminal_word_bounds(&line, rel_col);
+                            let (line, count) =
+                                crate::tui::terminal_pane::terminal_line_at_viewport_row(
+                                    pane, rel_row,
+                                );
+                            let wb =
+                                crate::tui::terminal_pane::terminal_word_bounds(&line, rel_col);
                             let cl = click_anchor_row.filter(|&ar| ar != rel_row).map(|_| count);
                             (Some(wb), cl)
                         })
@@ -934,8 +970,10 @@ impl Component<AppState, AppSignal> for PaneComponent {
                             global_data
                                 .state
                                 .with_terminal(term_id, |pane| {
-                                    extract_terminal_text(pane, sel.start, sel.end)
-                                        .filter(|t| !t.is_empty())
+                                    crate::tui::terminal_pane::extract_terminal_text(
+                                        pane, sel.start, sel.end,
+                                    )
+                                    .filter(|t| !t.is_empty())
                                 })
                                 .flatten()
                         } else {
@@ -968,59 +1006,85 @@ impl Component<AppState, AppSignal> for PaneComponent {
         }
 
         match active_window {
-            Some(Window::WindowPicker) => {
-                self.picker
-                    .handle_event(global_data, input_event, has_focus)
-            }
-            Some(Window::ThemePicker) => {
-                self.theme_picker
-                    .handle_event(global_data, input_event, has_focus)
-            }
-            Some(Window::FilePreview(_)) => {
-                self.preview
-                    .handle_event(global_data, input_event, has_focus)
-            }
-            Some(Window::Terminal(_)) => {
-                self.terminal
-                    .handle_event(global_data, input_event, has_focus)
-            }
+            Some(Window::WindowPicker) => r3bl_tui::Component::handle_event(
+                &mut self.picker,
+                global_data,
+                input_event,
+                has_focus,
+            ),
+            Some(Window::ThemePicker) => r3bl_tui::Component::handle_event(
+                &mut self.theme_picker,
+                global_data,
+                input_event,
+                has_focus,
+            ),
+            Some(Window::FilePreview(_)) => r3bl_tui::Component::handle_event(
+                &mut self.preview,
+                global_data,
+                input_event,
+                has_focus,
+            ),
+            Some(Window::Terminal(_)) => r3bl_tui::Component::handle_event(
+                &mut self.terminal,
+                global_data,
+                input_event,
+                has_focus,
+            ),
             Some(Window::GitLog(id)) => {
                 self.git_log.set_window_id(id);
-                self.git_log
-                    .handle_event(global_data, input_event, has_focus)
+                r3bl_tui::Component::handle_event(
+                    &mut self.git_log,
+                    global_data,
+                    input_event,
+                    has_focus,
+                )
             }
-            Some(Window::CommitDiff(_)) => {
-                self.commit_diff
-                    .handle_event(global_data, input_event, has_focus)
-            }
-            Some(Window::ConversationTree) => {
-                self.conversation_tree
-                    .handle_event(global_data, input_event, has_focus)
-            }
+            Some(Window::CommitDiff(_)) => r3bl_tui::Component::handle_event(
+                &mut self.commit_diff,
+                global_data,
+                input_event,
+                has_focus,
+            ),
+            Some(Window::ConversationTree) => r3bl_tui::Component::handle_event(
+                &mut self.conversation_tree,
+                global_data,
+                input_event,
+                has_focus,
+            ),
             Some(Window::Discussion(id)) => {
                 self.discussion.set_window_id(id);
-                self.discussion
-                    .handle_event(global_data, input_event, has_focus)
+                r3bl_tui::Component::handle_event(
+                    &mut self.discussion,
+                    global_data,
+                    input_event,
+                    has_focus,
+                )
             }
-            Some(Window::Report(_)) => {
-                self.report
-                    .handle_event(global_data, input_event, has_focus)
-            }
-            Some(Window::ModelPicker) => {
-                self.model_picker
-                    .handle_event(global_data, input_event, has_focus)
-            }
+            Some(Window::Report(_)) => r3bl_tui::Component::handle_event(
+                &mut self.report,
+                global_data,
+                input_event,
+                has_focus,
+            ),
+            Some(Window::ModelPicker) => r3bl_tui::Component::handle_event(
+                &mut self.model_picker,
+                global_data,
+                input_event,
+                has_focus,
+            ),
             None => Ok(EventPropagation::Propagate),
         }
     }
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         current_box: FlexBox,
         surface_bounds: VPBoundingBox,
         has_focus: &mut HasFocus,
     ) -> CommonResult {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::title_row::TitleRow;
         throws!({
             let mut title_ops = RenderOpIRVec::new();
             let focused = has_focus.get_id() == Some(self.id);
@@ -1230,7 +1294,7 @@ fn render_scrollbar(
     scroll: usize,
     scroll_max: usize,
     page_size: usize,
-    theme: &HelixTheme,
+    theme: &crate::tui::theme::HelixTheme,
 ) {
     if visible_rows == 0 {
         return;
@@ -1248,7 +1312,7 @@ fn render_scrollbar(
     let track_rgb = theme
         .ui_bg("ui.menu.scroll")
         .or_else(|| theme.ui_bg("ui.virtual.ruler"))
-        .unwrap_or(DEFAULT_STATUSLINE_BG);
+        .unwrap_or(crate::tui::title_row::DEFAULT_STATUSLINE_BG);
 
     // Thumb: theme scrollbar fg -> selection -> cursorline -> default.
     let mut thumb_rgb = theme
@@ -1256,7 +1320,7 @@ fn render_scrollbar(
         .or_else(|| theme.ui_bg("ui.selection"))
         .or_else(|| theme.ui_bg("ui.cursorline.primary"))
         .or_else(|| theme.ui_bg("ui.cursorline"))
-        .unwrap_or(DEFAULT_SELECTION_BG);
+        .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG);
 
     // If thumb and track are the same, force contrast using cursor/text accent.
     if thumb_rgb == track_rgb {
@@ -1307,6 +1371,7 @@ fn render_scrollbar(
 }
 
 pub(crate) fn pane_slot(id: FlexBoxId) -> Option<usize> {
+    use crate::tui::app::Id;
     match id.inner {
         x if x == Id::Pane0 as u8 => Some(0),
         x if x == Id::Pane1 as u8 => Some(1),

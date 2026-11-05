@@ -1,8 +1,3 @@
-use super::llm::{self, LlmTarget};
-use super::subagent;
-use super::tools::{self, ToolContext};
-use super::turn::Recorder;
-use super::{Message, ToolCall};
 use std::collections::{HashSet, VecDeque};
 use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
@@ -84,7 +79,7 @@ pub struct Limits {
 /// serde_json sorts the keys of the arguments, so equal arguments print alike.
 type Signature = (String, String, u64);
 
-fn signature(call: &ToolCall, result: &str) -> Signature {
+fn signature(call: &crate::agent::ToolCall, result: &str) -> Signature {
     let mut hasher = DefaultHasher::new();
     result.hash(&mut hasher);
     (
@@ -145,11 +140,11 @@ impl StallDetector {
 }
 
 /// The call as the model sent it, not as it meant to send it.
-fn quoted_call(call: &ToolCall) -> String {
+fn quoted_call(call: &crate::agent::ToolCall) -> String {
     format!("{} {}", call.name, call.arguments)
 }
 
-fn stall_text(call: &ToolCall, limit: u32) -> String {
+fn stall_text(call: &crate::agent::ToolCall, limit: u32) -> String {
     format!(
         "[Note from Explorer: the call `{}` has now returned the same result {limit} \
          times. These are the arguments you sent, whatever you meant to send. Repeating \
@@ -159,7 +154,7 @@ fn stall_text(call: &ToolCall, limit: u32) -> String {
     )
 }
 
-fn stall_error(call: &ToolCall, limit: u32) -> String {
+fn stall_error(call: &crate::agent::ToolCall, limit: u32) -> String {
     format!(
         "the call `{}` returned the same result {limit} more times after Explorer \
          warned about it; the run was stopped",
@@ -171,7 +166,8 @@ fn stall_error(call: &ToolCall, limit: u32) -> String {
 /// tool calls whose results never arrived, because the turn died mid-stream or
 /// mid-tool. The calls are answered with a note, so replaying the transcript is a
 /// valid sequence that shows where the work stopped.
-pub fn repair_tail(messages: &mut Vec<Message>) {
+pub fn repair_tail(messages: &mut Vec<crate::agent::Message>) {
+    use crate::agent::Message;
     let Some(Message::Assistant { tool_calls, .. }) = messages.last_mut() else {
         return;
     };
@@ -190,12 +186,12 @@ pub fn repair_tail(messages: &mut Vec<Message>) {
 
 /// Our own agent loop, until an answer asks for no tool; boxed, as sub-agents recurse into it.
 pub fn run<'a>(
-    context: &'a ToolContext,
-    target: &'a LlmTarget,
+    context: &'a crate::agent::tools::ToolContext,
+    target: &'a crate::agent::llm::LlmTarget,
     session: &'a str,
     system: &'a str,
-    messages: &'a mut Vec<Message>,
-    recorder: &'a mut Recorder,
+    messages: &'a mut Vec<crate::agent::Message>,
+    recorder: &'a mut crate::agent::turn::Recorder,
     limits: Limits,
 ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
     Box::pin(run_loop(
@@ -204,15 +200,17 @@ pub fn run<'a>(
 }
 
 async fn run_loop(
-    context: &ToolContext,
-    target: &LlmTarget,
+    context: &crate::agent::tools::ToolContext,
+    target: &crate::agent::llm::LlmTarget,
     session: &str,
     system: &str,
-    messages: &mut Vec<Message>,
-    recorder: &mut Recorder,
+    messages: &mut Vec<crate::agent::Message>,
+    recorder: &mut crate::agent::turn::Recorder,
     limits: Limits,
 ) -> Result<(), String> {
-    let tool_specs = tools::specs(context);
+    use crate::agent::Message;
+    use crate::agent::ToolCall;
+    let tool_specs = crate::agent::tools::specs(context);
     let mut warned = false;
     let mut stalls = StallDetector::new(limits.repeat_limit);
     let mut nameless_rounds = 0;
@@ -237,7 +235,7 @@ async fn run_loop(
             }
         }
         recorder.begin_answer();
-        let response = match llm::stream_chat(
+        let response = match crate::agent::llm::stream_chat(
             target,
             session,
             system,
@@ -322,12 +320,12 @@ async fn run_loop(
         let mut failed: Option<&ToolCall> = None;
         let mut nudged: Vec<&ToolCall> = Vec::new();
         for call in &response.tool_calls {
-            recorder.tool_call(tools::describe(call));
+            recorder.tool_call(crate::agent::tools::describe(call));
             let content = match &context.subagents {
-                Some(subagents) if call.name == subagent::TOOL => {
-                    subagent::run(context, subagents, call, recorder).await
+                Some(subagents) if call.name == crate::agent::subagent::TOOL => {
+                    crate::agent::subagent::run(context, subagents, call, recorder).await
                 }
-                _ => tools::run(context, call).await,
+                _ => crate::agent::tools::run(context, call).await,
             };
             match stalls.record(signature(call, &content)) {
                 Some(Stall::Fail) => failed = Some(call),
@@ -361,10 +359,10 @@ async fn run_loop(
 #[cfg(test)]
 mod tests {
     use super::{
-        super::ToolCall, Nudge, Stall, StallDetector, nudge_text, repair_tail, signature,
-        stall_text, time_nudge,
+        Nudge, Stall, StallDetector, nudge_text, repair_tail, signature, stall_text, time_nudge,
     };
     use crate::agent::Message;
+    use crate::agent::ToolCall;
     use std::time::Duration;
 
     fn call(name: &str, arguments: serde_json::Value) -> ToolCall {

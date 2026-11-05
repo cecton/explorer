@@ -1,6 +1,5 @@
-use crate::tui::app::{notify_terminal_focus_change, sync_terminal_grabbed};
-use crate::tui::pane_component::pane_slot;
-use crate::tui::*;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 
 pub struct TerminalPaneComponent {
     id: FlexBoxId,
@@ -23,15 +22,19 @@ impl TerminalPaneComponent {
         }
     }
 
-    fn terminal_id(&self, state: &AppState) -> Option<usize> {
-        let slot = pane_slot(self.id)?;
+    fn terminal_id(&self, state: &crate::tui::state::AppState) -> Option<usize> {
+        use crate::tui::pane_manager::Window;
+        let slot = crate::tui::pane_component::pane_slot(self.id)?;
         let Window::Terminal(id) = state.pane_manager.window_stack.get(slot)? else {
             return None;
         };
         Some(*id)
     }
 
-    fn pane_height(&self, global_data: &GlobalData<AppState, AppSignal>) -> usize {
+    fn pane_height(
+        &self,
+        global_data: &GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+    ) -> usize {
         let slot = self.slot;
         let state = &global_data.state;
         state
@@ -50,13 +53,13 @@ impl TerminalPaneComponent {
     }
 }
 
-impl TitleRow for TerminalPaneComponent {
+impl crate::tui::title_row::TitleRow for TerminalPaneComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        state: &mut AppState,
+        state: &mut crate::tui::state::AppState,
     ) -> usize {
         let theme = &state.theme;
         let id = self.terminal_id(state).unwrap_or(0);
@@ -79,12 +82,14 @@ impl TitleRow for TerminalPaneComponent {
         } else {
             base
         };
-        render_pane_title(ops, pane_box, &title, false, theme, focused);
+        crate::tui::title_row::render_pane_title(ops, pane_box, &title, false, theme, focused);
         1
     }
 }
 
-impl Component<AppState, AppSignal> for TerminalPaneComponent {
+impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
+    for TerminalPaneComponent
+{
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -93,10 +98,11 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::pane_manager::Window;
         throws_with_return!({
             let Some(id) = self.terminal_id(&global_data.state) else {
                 return Ok(EventPropagation::Propagate);
@@ -141,7 +147,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
             };
 
             let mut pane = pane_arc.lock();
-            let tx = pane.pty_input_tx.clone();
+            let tx = std::sync::Arc::clone(&pane.pty_input_tx);
             let alternate_screen_active = pane.ofs_buf.get_terminal_mode().active_screen_buffer
                 == ActiveScreenBuffer::Alternate;
             let scrollback_len = pane.ofs_buf.get_history_len();
@@ -252,12 +258,12 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                     let window = Window::Terminal(id);
                     let old = Some(window);
                     global_data.state.pane_manager.send_to_back(&window);
-                    notify_terminal_focus_change(
+                    crate::tui::app::notify_terminal_focus_change(
                         &global_data.state,
                         old,
                         global_data.state.pane_manager.focused_window,
                     );
-                    sync_terminal_grabbed(&mut global_data.state);
+                    crate::tui::app::sync_terminal_grabbed(&mut global_data.state);
                     global_data.state.mark_session_dirty();
                     EventPropagation::ConsumedRender
                 }
@@ -305,11 +311,13 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::pane_manager::Window;
         throws!({
             let Some(id) = self.terminal_id(&global_data.state) else {
                 return Ok(());
@@ -354,7 +362,7 @@ impl Component<AppState, AppSignal> for TerminalPaneComponent {
                 .state
                 .theme
                 .ui_bg("ui.selection")
-                .unwrap_or(DEFAULT_SELECTION_BG);
+                .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG);
             let selection_rect = global_data.state.text_selection.as_ref().and_then(|sel| {
                 if sel.window != Window::Terminal(id) || !sel.active {
                     return None;
@@ -727,17 +735,21 @@ fn trimmed_pixel_char_line(line: &[PixelChar]) -> (String, usize) {
     (s, trimmed_len)
 }
 
-pub fn terminal_line_at_viewport_row(pane: &TerminalPane, viewport_row: usize) -> (String, usize) {
+pub fn terminal_line_at_viewport_row(
+    pane: &crate::tui::state::TerminalPane,
+    viewport_row: usize,
+) -> (String, usize) {
     let scroll_offset = pane.scroll_offset.min(pane.ofs_buf.get_history_len());
     terminal_row(&pane.ofs_buf, scroll_offset, viewport_row)
         .map_or((String::new(), 0), trimmed_pixel_char_line)
 }
 
 pub fn extract_terminal_text(
-    pane: &TerminalPane,
-    start: SelPoint,
-    end: SelPoint,
+    pane: &crate::tui::state::TerminalPane,
+    start: crate::tui::pane_manager::SelPoint,
+    end: crate::tui::pane_manager::SelPoint,
 ) -> Option<String> {
+    use crate::tui::pane_manager::SelPoint;
     let (
         SelPoint::Terminal {
             viewport_row: sr,
@@ -979,7 +991,8 @@ mod tests {
     #[test]
     fn extracts_the_selected_text_of_the_live_screen() {
         use super::extract_terminal_text;
-        use crate::tui::{SelPoint, TerminalPane};
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::state::TerminalPane;
         use r3bl_tui::{OfsBufVT100, vp_height, vp_width};
         use std::sync::Arc;
 

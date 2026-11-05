@@ -1,10 +1,5 @@
-use crate::agent::mcp::McpServerDecl;
-use crate::config::Alias;
-use crate::tui::after_agents::{self, AfterAgents};
-use crate::tui::text_layout::truncate;
-use crate::tui::*;
-use camino::{Utf8Path, Utf8PathBuf};
-use tokio::sync::mpsc;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 
 const PROMPT: &str = ":";
 const PLACEHOLDER: &str = "<shell command>";
@@ -27,23 +22,24 @@ pub(crate) struct Command {
 
 /// What a command is handed: the state it acts on, its argument, and the ways out.
 struct CommandRun<'a> {
-    state: &'a mut AppState,
+    state: &'a mut crate::tui::state::AppState,
     /// The text after the command's name, trimmed.
     argument: &'a str,
     /// The file in focus, for the `%` placeholders.
-    file: Option<&'a Utf8Path>,
+    file: Option<&'a camino::Utf8Path>,
     /// The window focused when the line opened.
-    origin: Option<Window>,
+    origin: Option<crate::tui::pane_manager::Window>,
     /// The main thread's channel, which an MCP server reports its status through.
-    main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+    main_tx:
+        tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>>,
     /// The terminal a command asks for, applied once the line has closed.
-    signal: Option<AppSignal>,
+    signal: Option<crate::tui::state::AppSignal>,
 }
 
 /// Every command the line runs, in the order the palette lists it.
 const COMMANDS: [Command; 10] = [
     Command {
-        name: after_agents::NAME,
+        name: crate::tui::after_agents::NAME,
         argument: "[shell command]",
         description: "run a shell command once the agents are done",
         run: run_after_agents,
@@ -153,21 +149,25 @@ impl Entry {
 /// The global command line opened with `<leader>:`, painted over the status bar.
 #[derive(Clone)]
 pub struct CommandLine {
-    pub input: InputLine,
+    pub input: crate::tui::input_line::InputLine,
     /// The window focused when the command line opened: focus follows the mouse meanwhile.
-    pub origin: Option<Window>,
+    pub origin: Option<crate::tui::pane_manager::Window>,
     pub error: Option<String>,
     /// The palette's highlight, an index into its entries. Reset whenever the text changes.
     pub selected: usize,
 }
 
 impl CommandLine {
-    pub fn new(origin: Option<Window>) -> Self {
+    pub fn new(origin: Option<crate::tui::pane_manager::Window>) -> Self {
         Self::prefilled(origin, "")
     }
 
     /// A line that opens with `text` already typed.
-    pub fn prefilled(origin: Option<Window>, text: impl Into<String>) -> Self {
+    pub fn prefilled(
+        origin: Option<crate::tui::pane_manager::Window>,
+        text: impl Into<String>,
+    ) -> Self {
+        use crate::tui::input_line::InputLine;
         Self {
             input: InputLine::with_text(text),
             origin,
@@ -178,7 +178,7 @@ impl CommandLine {
 }
 
 /// The aliases of the repository, project ones first, the config's shadowed by them.
-fn alias_rows(state: &AppState) -> Vec<AliasRow> {
+fn alias_rows(state: &crate::tui::state::AppState) -> Vec<AliasRow> {
     state
         .project_aliases
         .iter()
@@ -207,7 +207,7 @@ fn alias_rows(state: &AppState) -> Vec<AliasRow> {
 }
 
 /// Whether `word` names a project or config alias.
-fn is_alias(state: &AppState, word: &str) -> bool {
+fn is_alias(state: &crate::tui::state::AppState, word: &str) -> bool {
     state
         .project_aliases
         .iter()
@@ -219,7 +219,7 @@ fn is_alias(state: &AppState, word: &str) -> bool {
 /// names are prefix-matched too since typing one is how it runs. Only while that word is
 /// being typed — once it is followed by a space the line takes an argument, and once it
 /// names something exactly the line's own hint says more than a one-line description.
-pub(crate) fn palette_entries(typed: &str, state: &AppState) -> Vec<Entry> {
+pub(crate) fn palette_entries(typed: &str, state: &crate::tui::state::AppState) -> Vec<Entry> {
     if typed.contains(char::is_whitespace) || typed.starts_with('!') {
         return Vec::new();
     }
@@ -248,7 +248,7 @@ struct Palette {
 
 impl Palette {
     /// `None` when nothing matches, so the palette has nothing to show.
-    fn new(typed: &str, selected: usize, state: &AppState) -> Option<Self> {
+    fn new(typed: &str, selected: usize, state: &crate::tui::state::AppState) -> Option<Self> {
         let entries = palette_entries(typed, state);
         let last = entries.len().checked_sub(1)?;
         Some(Self {
@@ -285,7 +285,10 @@ impl CommandLine {
 }
 
 /// Runs the typed command: the command line closes, or stays open with the error.
-pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
+pub fn run_command_line(
+    global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+) {
+    use crate::tui::pane_manager::Window;
     let main_tx = global_data.main_thread_channel_sender.clone();
     let state = &mut global_data.state;
     let Some(command_line) = state.command_line.as_ref() else {
@@ -355,6 +358,7 @@ pub fn run_command_line(global_data: &mut GlobalData<AppState, AppSignal>) {
 }
 
 fn run_after_agents(run: &mut CommandRun<'_>) -> Result<(), String> {
+    use crate::tui::after_agents::AfterAgents;
     if run.argument.is_empty() {
         run.state.after_agents = None;
         return Ok(());
@@ -371,6 +375,7 @@ fn run_alias(run: &mut CommandRun<'_>) -> Result<(), String> {
 
 /// Marks lines of the file preview the line opened from, and scrolls to them.
 fn run_highlight(run: &mut CommandRun<'_>) -> Result<(), String> {
+    use crate::tui::pane_manager::Window;
     let Some(window @ Window::FilePreview(key)) = run.origin else {
         return Err("highlight needs a file preview in focus".to_string());
     };
@@ -384,7 +389,7 @@ fn run_highlight(run: &mut CommandRun<'_>) -> Result<(), String> {
     let ranges = parse_line_ranges(run.argument, max)
         .ok_or_else(|| "highlight: expected lines like 12, 3-7 or 1-3,8".to_string())?;
     let page_size = run.state.pane_manager.window_page_size(&window);
-    let target = compute_scroll_target(&ranges, page_size, max);
+    let target = crate::tui::preview::compute_scroll_target(&ranges, page_size, max);
     run.state.highlight_ranges.insert(key, ranges);
     run.state.pane_manager.set_window_scroll(&window, target);
     run.state.pane_manager.clamp_scroll(&window);
@@ -420,14 +425,17 @@ fn parse_line_ranges(text: &str, max: usize) -> Option<Vec<(usize, usize)>> {
 }
 
 fn run_all_features(run: &mut CommandRun<'_>) -> Result<(), String> {
-    select_features(run, crate::lsp::CargoFeatureSelection::All)
+    use crate::lsp::CargoFeatureSelection;
+    select_features(run, CargoFeatureSelection::All)
 }
 
 fn run_default_features(run: &mut CommandRun<'_>) -> Result<(), String> {
-    select_features(run, crate::lsp::CargoFeatureSelection::Default)
+    use crate::lsp::CargoFeatureSelection;
+    select_features(run, CargoFeatureSelection::Default)
 }
 
 fn run_features(run: &mut CommandRun<'_>) -> Result<(), String> {
+    use crate::lsp::CargoFeatureSelection;
     let mut tokens = run.argument.split_whitespace().peekable();
     let no_default_features = tokens.next_if_eq(&"no-default").is_some();
     let features: Vec<String> = tokens.map(str::to_string).collect();
@@ -436,7 +444,7 @@ fn run_features(run: &mut CommandRun<'_>) -> Result<(), String> {
     }
     select_features(
         run,
-        crate::lsp::CargoFeatureSelection::Explicit {
+        CargoFeatureSelection::Explicit {
             no_default_features,
             features,
         },
@@ -448,6 +456,7 @@ fn select_features(
     run: &mut CommandRun<'_>,
     selection: crate::lsp::CargoFeatureSelection,
 ) -> Result<(), String> {
+    use crate::tui::state::AppSignal;
     if crate::lsp::disabled() {
         return Err("rust-analyzer is disabled (EXPLORER_NO_LSP)".to_string());
     }
@@ -457,6 +466,7 @@ fn select_features(
 
 /// Failures are the line's error; a started server is reported in the tree's notice.
 fn run_mcp(run: &mut CommandRun<'_>) -> Result<(), String> {
+    use crate::agent::mcp::McpServerDecl;
     let words: Vec<&str> = run.argument.split_whitespace().collect();
     match words.as_slice() {
         ["add", name, program] => {
@@ -499,7 +509,10 @@ fn run_mcp(run: &mut CommandRun<'_>) -> Result<(), String> {
 }
 
 /// Why `name` cannot name a new MCP server: its tools are `mcp__<name>__<tool>`.
-fn check_server_name(name: &str, servers: &[McpServerDecl]) -> Result<(), String> {
+fn check_server_name(
+    name: &str,
+    servers: &[crate::agent::mcp::McpServerDecl],
+) -> Result<(), String> {
     let allowed = |c: char| c.is_ascii_alphanumeric() || c == '_' || c == '-';
     if !name.chars().all(allowed) || name.contains("__") {
         return Err(format!(
@@ -527,19 +540,21 @@ fn run_untrust(run: &mut CommandRun<'_>) -> Result<(), String> {
 
 /// Scans the repository and shows what it found in a report window. Runs in place: a scan
 /// of a large repository takes a fraction of a second, and nothing is written anywhere.
-pub(crate) fn scan_into_report(state: &mut AppState) {
+pub(crate) fn scan_into_report(state: &mut crate::tui::state::AppState) {
+    use crate::scan::Severity;
+    use crate::tui::report_pane::ReportComponent;
     let report = crate::scan::scan(&state.root);
-    let danger = report.count(crate::scan::Severity::Danger);
+    let danger = report.count(Severity::Danger);
     let title = match danger {
         0 => "Repository scan: nothing hidden found".to_string(),
         1 => "Repository scan: 1 danger finding".to_string(),
         count => format!("Repository scan: {count} danger findings"),
     };
-    crate::tui::report_pane::ReportComponent::show(state, title, report.to_markdown());
+    ReportComponent::show(state, title, report.to_markdown());
 }
 
 /// Allows or forbids agent turns in this repository, for the session this writes.
-fn set_trust(state: &mut AppState, trusted: bool) -> Result<(), String> {
+fn set_trust(state: &mut crate::tui::state::AppState, trusted: bool) -> Result<(), String> {
     if state.trusted == trusted {
         return Err(if trusted {
             "this repository is already trusted".to_string()
@@ -553,7 +568,8 @@ fn set_trust(state: &mut AppState, trusted: bool) -> Result<(), String> {
 }
 
 /// Sets, replaces or (with no command) removes a project alias.
-fn set_alias(state: &mut AppState, argument: &str) -> Result<(), String> {
+fn set_alias(state: &mut crate::tui::state::AppState, argument: &str) -> Result<(), String> {
+    use crate::config::Alias;
     let Some((name, command)) = argument
         .split_once(char::is_whitespace)
         .map(|(name, command)| (name, command.trim()))
@@ -587,7 +603,7 @@ fn set_alias(state: &mut AppState, argument: &str) -> Result<(), String> {
 
 /// `text` with its first word replaced by the alias it names, the project's before the
 /// config's; the rest is appended as typed. A miss returns `text` unchanged.
-pub fn resolve_alias(state: &AppState, text: &str) -> String {
+pub fn resolve_alias(state: &crate::tui::state::AppState, text: &str) -> String {
     let trimmed = text.trim_start();
     let (word, rest) = match trimmed.split_once(char::is_whitespace) {
         Some((word, rest)) => (word, rest.trim_start()),
@@ -606,7 +622,7 @@ pub fn resolve_alias(state: &AppState, text: &str) -> String {
 }
 
 /// ` · aliases: a, b` for the placeholder of the commands that take a shell command.
-fn aliases_suffix(state: &AppState) -> String {
+fn aliases_suffix(state: &crate::tui::state::AppState) -> String {
     let mut names: Vec<&str> = Vec::new();
     for alias in state.project_aliases.iter().chain(&state.config_aliases) {
         if !names.contains(&alias.name.as_str()) {
@@ -621,15 +637,16 @@ fn aliases_suffix(state: &AppState) -> String {
 }
 
 /// The placeholder for what is typed: what a command expects, and the aliases in force.
-fn command_hint(typed: &str, state: &AppState) -> Option<String> {
+fn command_hint(typed: &str, state: &crate::tui::state::AppState) -> Option<String> {
+    use crate::tui::pane_manager::Window;
     let mut words = typed.split_whitespace();
     let hint = match (words.next()?, words.next(), words.next()) {
         ("!", None, _) if typed == "!" => {
             format!("{PLACEHOLDER}{}", aliases_suffix(state))
         }
-        (after_agents::NAME, None, _) => format!(
+        (crate::tui::after_agents::NAME, None, _) => format!(
             "{}{}",
-            after_agents::hint(state.after_agents.as_ref()),
+            crate::tui::after_agents::hint(state.after_agents.as_ref()),
             aliases_suffix(state)
         ),
         ("alias", None, _) => {
@@ -662,7 +679,10 @@ fn command_hint(typed: &str, state: &AppState) -> Option<String> {
                 _ => None,
             };
             match current {
-                Some(ranges) => format!("current: {}", format_highlight_ranges(ranges)),
+                Some(ranges) => format!(
+                    "current: {}",
+                    crate::tui::preview::format_highlight_ranges(ranges)
+                ),
                 None => "[lines] 12, 3-7, 1-3,8".to_string(),
             }
         }
@@ -710,7 +730,12 @@ fn command_hint(typed: &str, state: &AppState) -> Option<String> {
 }
 
 /// Paints over the bottom rows, growing upward: the panes are not resized while typing.
-pub fn render_command_line(pipeline: &mut RenderPipeline, size: VPSize, state: &mut AppState) {
+pub fn render_command_line(
+    pipeline: &mut RenderPipeline,
+    size: VPSize,
+    state: &mut crate::tui::state::AppState,
+) {
+    use crate::tui::state::AppState;
     let palette = state.command_line.as_ref().and_then(|command_line| {
         Palette::new(command_line.input.text(), command_line.selected, state)
     });
@@ -726,13 +751,17 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: VPSize, state: &
     else {
         return;
     };
-    let (bg_rgb, fg_rgb) = title_bar_colors(false, theme);
+    let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(false, theme);
     let color_bg = TuiColor::from(bg_rgb);
     let color_fg = TuiColor::from(fg_rgb);
-    let color_selection = TuiColor::from(title_selection_bg(false, theme));
+    let color_selection = TuiColor::from(crate::tui::title_row::title_selection_bg(false, theme));
     let placeholder = match &command_line.error {
         Some(error) => {
-            let error_fg = TuiColor::from(theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG));
+            let error_fg = TuiColor::from(
+                theme
+                    .ui_fg("error")
+                    .unwrap_or(crate::tui::title_row::DEFAULT_ERROR_FG),
+            );
             Some((format!("  {error}"), error_fg))
         }
         // With the palette up, the keys that walk it are worth naming once, after whatever
@@ -800,7 +829,7 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: VPSize, state: &
         pipeline.push(ZOrder::Normal, ops);
         return;
     };
-    let picked_bg = TuiColor::from(title_selection_bg(false, theme));
+    let picked_bg = TuiColor::from(crate::tui::title_row::title_selection_bg(false, theme));
     // Keep the highlighted row in view when the list has to be cut short.
     let first = (palette.selected + 1).saturating_sub(list_rows);
     let lines: Vec<(bool, String)> = palette
@@ -821,7 +850,7 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: VPSize, state: &
     for (offset, (picked, line)) in lines.iter().enumerate() {
         let bg = if *picked { picked_bg } else { color_bg };
         let style = new_style!(color_fg: {color_fg} color_bg: {bg});
-        let line = truncate(line, width as usize);
+        let line = crate::tui::text_layout::truncate(line, width as usize);
         ops +=
             RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + vp_row((top + rows + offset) as u16));
         ops += RenderOpCommon::ApplyColors(Some(style));
@@ -833,9 +862,10 @@ pub fn render_command_line(pipeline: &mut RenderPipeline, size: VPSize, state: &
 /// The terminal a `!` command opens: a plain shell when the command is empty.
 pub fn shell_signal(
     shell_cmd: &str,
-    file: Option<&Utf8Path>,
-    state: &AppState,
-) -> Result<AppSignal, String> {
+    file: Option<&camino::Utf8Path>,
+    state: &crate::tui::state::AppState,
+) -> Result<crate::tui::state::AppSignal, String> {
+    use crate::tui::state::AppSignal;
     let cmd = if shell_cmd.is_empty() {
         None
     } else {
@@ -863,7 +893,7 @@ fn is_word_end(s: &str) -> bool {
 }
 
 /// Finds the nearest ancestor directory of `file_path` that contains a `Cargo.toml`.
-fn find_crate_root(file_path: &Utf8Path) -> Option<Utf8PathBuf> {
+fn find_crate_root(file_path: &camino::Utf8Path) -> Option<camino::Utf8PathBuf> {
     let mut dir = file_path.parent()?;
     loop {
         if dir.join("Cargo.toml").exists() {
@@ -874,7 +904,7 @@ fn find_crate_root(file_path: &Utf8Path) -> Option<Utf8PathBuf> {
 }
 
 /// Finds the nearest ancestor directory of `file_path` that contains a `.git` directory.
-fn find_repo_root(file_path: &Utf8Path) -> Option<Utf8PathBuf> {
+fn find_repo_root(file_path: &camino::Utf8Path) -> Option<camino::Utf8PathBuf> {
     let mut dir = file_path.parent()?;
     loop {
         if dir.join(".git").exists() {
@@ -897,8 +927,8 @@ fn find_repo_root(file_path: &Utf8Path) -> Option<Utf8PathBuf> {
 /// be found.
 fn expand_placeholders(
     cmd: &str,
-    file: Option<&Utf8Path>,
-    root: &Utf8Path,
+    file: Option<&camino::Utf8Path>,
+    root: &camino::Utf8Path,
 ) -> Result<String, String> {
     let mut result = String::with_capacity(cmd.len());
     let mut s = cmd;
@@ -965,8 +995,8 @@ mod tests {
 
     #[test]
     fn double_percent_is_a_literal_percent() {
-        let root = Utf8Path::new("/repo");
-        let file = Utf8Path::new("/repo/src/main.rs");
+        let root = camino::Utf8Path::new("/repo");
+        let file = camino::Utf8Path::new("/repo/src/main.rs");
         assert_eq!(
             expand_placeholders("date +%%Y %", Some(file), root),
             Ok("date +%Y 'src/main.rs'".to_string())
@@ -979,8 +1009,8 @@ mod tests {
 
     #[test]
     fn project_is_the_root_directory_name_and_needs_no_file() {
-        let root = Utf8Path::new("/home/me/my repo");
-        let file = Utf8Path::new("/home/me/my repo/src/main.rs");
+        let root = camino::Utf8Path::new("/home/me/my repo");
+        let file = camino::Utf8Path::new("/home/me/my repo/src/main.rs");
         assert_eq!(
             expand_placeholders("notify-send %project", None, root),
             Ok("notify-send 'my repo'".to_string())
@@ -991,21 +1021,23 @@ mod tests {
         );
     }
 
-    fn alias(name: &str, command: &str) -> Alias {
+    fn alias(name: &str, command: &str) -> crate::config::Alias {
+        use crate::config::Alias;
         Alias {
             name: name.to_string(),
             command: command.to_string(),
         }
     }
 
-    fn state_with_aliases() -> AppState {
+    fn state_with_aliases() -> crate::tui::state::AppState {
+        use crate::tui::state::AppState;
         AppState {
             config_aliases: vec![
                 alias("poweroff", "systemctl poweroff"),
                 alias("notify", "notify-send %project"),
             ],
             project_aliases: vec![alias("notify", "echo project"), alias("ci", "cargo test")],
-            ..AppState::default()
+            ..crate::tui::state::AppState::default()
         }
     }
 
@@ -1111,6 +1143,7 @@ mod tests {
 
     #[test]
     fn the_table_is_what_the_line_runs_and_the_palette_lists() {
+        use crate::tui::state::AppState;
         // One table, so a command cannot be listed without being runnable, nor runnable
         // without being listed and described.
         let state = AppState::default();
@@ -1199,6 +1232,7 @@ mod tests {
 
     #[test]
     fn tab_and_enter_complete_to_the_highlighted_entry() {
+        use crate::tui::input_line::InputLine;
         let state = state_with_aliases();
         let completed = |text: &str, selected: usize| {
             let mut line = CommandLine {
@@ -1239,6 +1273,7 @@ mod tests {
 
     #[test]
     fn server_names_are_unique_and_fit_tool_names() {
+        use crate::agent::mcp::McpServerDecl;
         let servers = vec![McpServerDecl {
             name: "egui".to_string(),
             program: "egui-mcp".to_string(),
@@ -1269,7 +1304,7 @@ mod tests {
 
     #[test]
     fn placeholder_without_a_file_is_refused() {
-        let root = Utf8Path::new("/repo");
+        let root = camino::Utf8Path::new("/repo");
         assert_eq!(
             expand_placeholders("cat %", None, root),
             Err("% needs a file preview in focus".to_string())

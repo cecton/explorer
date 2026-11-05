@@ -1,4 +1,5 @@
-use crate::tui::*;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 
 pub(crate) trait TitleRow {
     fn render_title_row(
@@ -6,7 +7,7 @@ pub(crate) trait TitleRow {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        state: &mut AppState,
+        state: &mut crate::tui::state::AppState,
     ) -> usize;
 }
 
@@ -46,7 +47,10 @@ pub(crate) const DEFAULT_WARNING_FG: RgbValue = RgbValue {
     blue: 80,
 };
 
-pub(crate) fn title_bar_colors(focused: bool, theme: &HelixTheme) -> (RgbValue, RgbValue) {
+pub(crate) fn title_bar_colors(
+    focused: bool,
+    theme: &crate::tui::theme::HelixTheme,
+) -> (RgbValue, RgbValue) {
     if focused {
         (
             theme.ui_bg("ui.selection").unwrap_or(DEFAULT_SELECTION_BG),
@@ -66,7 +70,7 @@ pub(crate) fn title_bar_colors(focused: bool, theme: &HelixTheme) -> (RgbValue, 
 
 /// Background of a mouse selection in a title-bar input: a focused title bar already
 /// wears `ui.selection`, so the selection takes the other title bar's background.
-pub(crate) fn title_selection_bg(focused: bool, theme: &HelixTheme) -> RgbValue {
+pub(crate) fn title_selection_bg(focused: bool, theme: &crate::tui::theme::HelixTheme) -> RgbValue {
     title_bar_colors(!focused, theme).0
 }
 
@@ -75,7 +79,7 @@ pub(crate) fn render_pane_title(
     pane_box: &FlexBox,
     title: &str,
     is_deleted: bool,
-    theme: &HelixTheme,
+    theme: &crate::tui::theme::HelixTheme,
     focused: bool,
 ) {
     let origin = pane_box.style_adjusted_bounds.origin_pos;

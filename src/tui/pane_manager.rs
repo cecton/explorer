@@ -1,5 +1,5 @@
-use crate::loader::FileKey;
-use r3bl_tui::{FlexBox, VPBoundingBox, VPSize, vp_col, vp_height, vp_row, vp_width};
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::collections::HashMap;
 
 /// Maximum number of panes the layout engine may render at once.
@@ -13,7 +13,7 @@ pub const MAX_PANES: usize = 16;
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Window {
     /// Preview of the file identified by `FileKey`.
-    FilePreview(FileKey),
+    FilePreview(crate::loader::FileKey),
     /// Fuzzy picker of open windows and, once a query is typed, of files by name.
     #[allow(clippy::enum_variant_names)]
     WindowPicker,
@@ -984,6 +984,7 @@ mod tests {
 
     #[test]
     fn send_to_back_refocuses_next_pane() {
+        use crate::loader::FileKey;
         let mut manager = PaneManager::new();
         manager.push_window(Window::Terminal(1));
         manager.push_window(Window::Terminal(2));

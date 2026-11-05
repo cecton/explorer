@@ -1,11 +1,3 @@
-use super::ToolCall;
-use super::llm::ToolSpec;
-use super::mcp::McpTools;
-use super::subagent::{self, Subagents};
-use crate::conversation::{ConversationTree, NodeId, PROCESSES_DIR};
-use camino::{Utf8Component, Utf8Path, Utf8PathBuf};
-use parking_lot::{Mutex, RwLock};
-use serde_json::{Value, json};
 use std::process::Stdio;
 use std::sync::Arc;
 use std::time::Duration;
@@ -23,24 +15,24 @@ const DESCRIBE_MAX_CHARS: usize = 200;
 
 /// What the tools of one turn act on.
 pub struct ToolContext {
-    pub root: Utf8PathBuf,
-    pub tree: Arc<RwLock<ConversationTree>>,
+    pub root: camino::Utf8PathBuf,
+    pub tree: Arc<parking_lot::RwLock<crate::conversation::ConversationTree>>,
     /// The node whose turn is running.
-    pub node: NodeId,
+    pub node: crate::conversation::NodeId,
     /// What the turn lends to its sub-agents; `None` for a sub-agent, which cannot
     /// call one in turn.
-    pub subagents: Option<Subagents>,
+    pub subagents: Option<crate::agent::subagent::Subagents>,
     /// Background commands of the turn, shared with its sub-agents.
     pub background: Arc<Background>,
     /// Tools of the MCP servers running when the turn started.
-    pub mcp: McpTools,
+    pub mcp: crate::agent::mcp::McpTools,
 }
 
 /// The process groups of a turn's background commands, killed when the turn ends.
 #[derive(Default)]
 pub struct Background {
     // Never waited for: a zombie leader keeps the group id from being reused.
-    leaders: Mutex<Vec<tokio::process::Child>>,
+    leaders: parking_lot::Mutex<Vec<tokio::process::Child>>,
 }
 
 impl Drop for Background {
@@ -58,16 +50,17 @@ impl Drop for Background {
 
 /// The tools advertised to the model: the `agent` tool only when sub-agents can run,
 /// then the tools of the MCP servers.
-pub fn specs(context: &ToolContext) -> Vec<ToolSpec> {
+pub fn specs(context: &ToolContext) -> Vec<crate::agent::llm::ToolSpec> {
     let mut specs = base_specs();
     if let Some(subagents) = &context.subagents {
-        specs.push(subagent::spec(&subagents.config.roles));
+        specs.push(crate::agent::subagent::spec(&subagents.config.roles));
     }
     specs.extend(context.mcp.specs());
     specs
 }
 
-fn base_specs() -> Vec<ToolSpec> {
+fn base_specs() -> Vec<crate::agent::llm::ToolSpec> {
+    use crate::agent::llm::ToolSpec;
     vec![
         ToolSpec {
             name: "conversation".into(),
@@ -78,7 +71,7 @@ fn base_specs() -> Vec<ToolSpec> {
                           prompt and reply; `commit` finds the node that produced a \
                           commit."
                 .into(),
-            schema: json!({
+            schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "action": {"type": "string", "enum": ["toc", "read", "commit"]},
@@ -97,7 +90,7 @@ fn base_specs() -> Vec<ToolSpec> {
                           than 2000 characters is truncated; use grep to find content \
                           inside such a line."
                 .into(),
-            schema: json!({
+            schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path relative to the repository root"},
@@ -116,7 +109,7 @@ fn base_specs() -> Vec<ToolSpec> {
                           formatted recursively. \
                           Returns the files it rewrote."
                 .into(),
-            schema: json!({
+            schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "paths": {
@@ -132,7 +125,7 @@ fn base_specs() -> Vec<ToolSpec> {
             description: "List the files of the repository whose path matches a glob \
                           pattern such as `src/**/*.rs`."
                 .into(),
-            schema: json!({
+            schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Glob with *, ** and ?"}
@@ -145,7 +138,7 @@ fn base_specs() -> Vec<ToolSpec> {
             description: "Search file contents with a regular expression. Returns \
                           `path:line: text` for each match."
                 .into(),
-            schema: json!({
+            schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "pattern": {"type": "string", "description": "Regular expression"},
@@ -163,7 +156,7 @@ fn base_specs() -> Vec<ToolSpec> {
                           command that keeps running, such as an app to test; it is \
                           killed when the turn ends."
                 .into(),
-            schema: json!({
+            schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "command": {"type": "string"},
@@ -178,7 +171,7 @@ fn base_specs() -> Vec<ToolSpec> {
             description: "Create a file or replace its whole content. Missing parent \
                           directories are created."
                 .into(),
-            schema: json!({
+            schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path relative to the repository root"},
@@ -193,7 +186,7 @@ fn base_specs() -> Vec<ToolSpec> {
                           `new_string`. Fails when the text is absent or appears more \
                           than once; include enough surrounding lines to make it unique."
                 .into(),
-            schema: json!({
+            schema: serde_json::json!({
                 "type": "object",
                 "properties": {
                     "path": {"type": "string", "description": "Path relative to the repository root"},
@@ -207,11 +200,11 @@ fn base_specs() -> Vec<ToolSpec> {
 }
 
 /// Short description of a call for the status line, e.g. `shell cargo check`.
-pub fn describe(call: &ToolCall) -> String {
-    if call.name == subagent::TOOL {
-        return subagent::describe(&call.arguments);
+pub fn describe(call: &crate::agent::ToolCall) -> String {
+    if call.name == crate::agent::subagent::TOOL {
+        return crate::agent::subagent::describe(&call.arguments);
     }
-    let arg = |key: &str| call.arguments.get(key).and_then(Value::as_str);
+    let arg = |key: &str| call.arguments.get(key).and_then(serde_json::Value::as_str);
     let detail = match (arg("pattern"), arg("command"), arg("path")) {
         (Some(pattern), _, Some(path)) => format!("{pattern} in {path}"),
         (Some(pattern), _, None) => pattern.to_string(),
@@ -224,7 +217,7 @@ pub fn describe(call: &ToolCall) -> String {
 }
 
 /// The arguments of a call as compact JSON, cut short; empty when there are none.
-pub(super) fn arguments_detail(arguments: &Value) -> String {
+pub(super) fn arguments_detail(arguments: &serde_json::Value) -> String {
     if arguments.is_null() || arguments.as_object().is_some_and(|map| map.is_empty()) {
         return String::new();
     }
@@ -236,7 +229,8 @@ pub(super) fn arguments_detail(arguments: &Value) -> String {
 }
 
 /// Runs one tool call. A failure is returned as text for the model, never raised.
-pub async fn run(context: &ToolContext, call: &ToolCall) -> String {
+pub async fn run(context: &ToolContext, call: &crate::agent::ToolCall) -> String {
+    use crate::agent::mcp::McpTools;
     let args = call.arguments.clone();
     let root = context.root.as_path();
     let result = match call.name.as_str() {
@@ -260,7 +254,7 @@ pub async fn run(context: &ToolContext, call: &ToolCall) -> String {
             let root = root.to_owned();
             blocking(move || grep(&root, &args)).await
         }
-        "shell" if args.get("background").and_then(Value::as_bool) == Some(true) => {
+        "shell" if args.get("background").and_then(serde_json::Value::as_bool) == Some(true) => {
             let dir = context.tree.read().node_dir(&context.node);
             match dir {
                 Some(dir) => shell_background(root, &dir, &context.background, &args),
@@ -282,30 +276,30 @@ async fn blocking(
         .map_err(|e| e.to_string())?
 }
 
-fn str_arg<'a>(args: &'a Value, key: &str) -> Result<&'a str, String> {
+fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
-        .and_then(Value::as_str)
+        .and_then(serde_json::Value::as_str)
         .ok_or_else(|| format!("missing string argument `{key}`"))
 }
 
-fn usize_arg(args: &Value, key: &str) -> Option<usize> {
+fn usize_arg(args: &serde_json::Value, key: &str) -> Option<usize> {
     args.get(key)
-        .and_then(Value::as_u64)
+        .and_then(serde_json::Value::as_u64)
         .and_then(|n| usize::try_from(n).ok())
 }
 
 /// Resolves `path` against the repository root and refuses anything outside it.
-pub fn resolve(root: &Utf8Path, path: &str) -> Result<Utf8PathBuf, String> {
-    let joined = if Utf8Path::new(path).is_absolute() {
-        Utf8PathBuf::from(path)
+pub fn resolve(root: &camino::Utf8Path, path: &str) -> Result<camino::Utf8PathBuf, String> {
+    let joined = if camino::Utf8Path::new(path).is_absolute() {
+        camino::Utf8PathBuf::from(path)
     } else {
         root.join(path)
     };
-    let mut resolved = Utf8PathBuf::new();
+    let mut resolved = camino::Utf8PathBuf::new();
     for component in joined.components() {
         match component {
-            Utf8Component::CurDir => {}
-            Utf8Component::ParentDir => {
+            camino::Utf8Component::CurDir => {}
+            camino::Utf8Component::ParentDir => {
                 resolved.pop();
             }
             other => resolved.push(other.as_str()),
@@ -318,8 +312,8 @@ pub fn resolve(root: &Utf8Path, path: &str) -> Result<Utf8PathBuf, String> {
     }
 }
 
-fn format_markdown(root: &Utf8Path, args: &Value) -> Result<String, String> {
-    let relatives = match args.get("paths").and_then(Value::as_array) {
+fn format_markdown(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
+    let relatives = match args.get("paths").and_then(serde_json::Value::as_array) {
         Some(paths) if !paths.is_empty() => paths
             .iter()
             .map(|path| {
@@ -327,10 +321,10 @@ fn format_markdown(root: &Utf8Path, args: &Value) -> Result<String, String> {
                 let resolved = resolve(root, path)?;
                 resolved
                     .strip_prefix(root)
-                    .map(Utf8Path::to_path_buf)
+                    .map(camino::Utf8Path::to_path_buf)
                     .map_err(|_| format!("{path} is outside the repository"))
             })
-            .collect::<Result<Vec<Utf8PathBuf>, String>>()?,
+            .collect::<Result<Vec<camino::Utf8PathBuf>, String>>()?,
         _ => crate::git::working_tree_changes(root)?,
     };
     let relatives = crate::markdown_format::expand_directories(root, relatives)?;
@@ -343,7 +337,7 @@ fn format_markdown(root: &Utf8Path, args: &Value) -> Result<String, String> {
     }
 }
 
-fn read(root: &Utf8Path, args: &Value) -> Result<String, String> {
+fn read(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
     let path = resolve(root, str_arg(args, "path")?)?;
     let content = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
     let offset = usize_arg(args, "offset").unwrap_or(1).max(1);
@@ -390,16 +384,17 @@ fn render_line(number: usize, line: &str) -> String {
 }
 
 fn conversation(
-    tree: &RwLock<ConversationTree>,
-    current: &NodeId,
-    args: &Value,
+    tree: &parking_lot::RwLock<crate::conversation::ConversationTree>,
+    current: &crate::conversation::NodeId,
+    args: &serde_json::Value,
 ) -> Result<String, String> {
-    let node_arg = || str_arg(args, "node").map(NodeId::new);
+    use crate::conversation::NodeId;
+    let node_arg = || str_arg(args, "node").map(crate::conversation::NodeId::new);
     let unknown = |node: &NodeId| format!("unknown node: {}", node.as_str());
     match str_arg(args, "action")? {
-        "toc" => match args.get("node").and_then(Value::as_str) {
+        "toc" => match args.get("node").and_then(serde_json::Value::as_str) {
             Some(node) => {
-                let node = NodeId::new(node);
+                let node = crate::conversation::NodeId::new(node);
                 tree.read()
                     .toc_node(&node, current)
                     .ok_or_else(|| unknown(&node))
@@ -430,7 +425,7 @@ fn conversation(
     }
 }
 
-fn write(root: &Utf8Path, args: &Value) -> Result<String, String> {
+fn write(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
     let path = resolve(root, str_arg(args, "path")?)?;
     let content = str_arg(args, "content")?;
     if let Some(parent) = path.parent() {
@@ -440,7 +435,7 @@ fn write(root: &Utf8Path, args: &Value) -> Result<String, String> {
     Ok(format!("wrote {} bytes\n", content.len()))
 }
 
-fn edit(root: &Utf8Path, args: &Value) -> Result<String, String> {
+fn edit(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
     let path = resolve(root, str_arg(args, "path")?)?;
     let old = str_arg(args, "old_string")?;
     let new = str_arg(args, "new_string")?;
@@ -487,19 +482,19 @@ fn glob_regex(pattern: &str) -> Result<regex::Regex, String> {
 }
 
 /// Repository files as paths relative to the root, sorted.
-fn repo_files(root: &Utf8Path) -> Vec<Utf8PathBuf> {
-    let mut files: Vec<Utf8PathBuf> = crate::loader::walk_repo_files(root)
+fn repo_files(root: &camino::Utf8Path) -> Vec<camino::Utf8PathBuf> {
+    let mut files: Vec<camino::Utf8PathBuf> = crate::loader::walk_repo_files(root)
         .into_iter()
-        .filter_map(|path| Utf8PathBuf::from_path_buf(path).ok())
-        .filter_map(|path| path.strip_prefix(root).ok().map(Utf8Path::to_owned))
+        .filter_map(|path| camino::Utf8PathBuf::from_path_buf(path).ok())
+        .filter_map(|path| path.strip_prefix(root).ok().map(camino::Utf8Path::to_owned))
         .collect();
     files.sort();
     files
 }
 
-fn glob(root: &Utf8Path, args: &Value) -> Result<String, String> {
+fn glob(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
     let matcher = glob_regex(str_arg(args, "pattern")?)?;
-    let matches: Vec<Utf8PathBuf> = repo_files(root)
+    let matches: Vec<camino::Utf8PathBuf> = repo_files(root)
         .into_iter()
         .filter(|path| matcher.is_match(path.as_str()))
         .collect();
@@ -520,16 +515,16 @@ fn glob(root: &Utf8Path, args: &Value) -> Result<String, String> {
     Ok(out)
 }
 
-fn grep(root: &Utf8Path, args: &Value) -> Result<String, String> {
+fn grep(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
     let pattern = regex::Regex::new(str_arg(args, "pattern")?).map_err(|e| e.to_string())?;
-    let scope = match args.get("path").and_then(Value::as_str) {
+    let scope = match args.get("path").and_then(serde_json::Value::as_str) {
         Some(path) => resolve(root, path)?
             .strip_prefix(root)
-            .map(Utf8Path::to_owned)
+            .map(camino::Utf8Path::to_owned)
             .unwrap_or_default(),
-        None => Utf8PathBuf::new(),
+        None => camino::Utf8PathBuf::new(),
     };
-    let filter = match args.get("glob").and_then(Value::as_str) {
+    let filter = match args.get("glob").and_then(serde_json::Value::as_str) {
         Some(glob) => Some(glob_regex(glob)?),
         None => None,
     };
@@ -604,11 +599,11 @@ pub(super) fn truncate_middle(text: &str, max_bytes: usize) -> String {
     )
 }
 
-async fn shell(root: &Utf8Path, args: &Value) -> Result<String, String> {
+async fn shell(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
     let command = str_arg(args, "command")?;
     let timeout = args
         .get("timeout")
-        .and_then(Value::as_u64)
+        .and_then(serde_json::Value::as_u64)
         .unwrap_or(SHELL_DEFAULT_TIMEOUT_SECS)
         .clamp(1, SHELL_MAX_TIMEOUT_SECS);
 
@@ -657,13 +652,13 @@ async fn shell(root: &Utf8Path, args: &Value) -> Result<String, String> {
 /// Starts a command that outlives the call, its output going to
 /// `<node dir>/processes/<n>.log`.
 fn shell_background(
-    root: &Utf8Path,
-    node_dir: &Utf8Path,
+    root: &camino::Utf8Path,
+    node_dir: &camino::Utf8Path,
     background: &Background,
-    args: &Value,
+    args: &serde_json::Value,
 ) -> Result<String, String> {
     let command = str_arg(args, "command")?;
-    let dir = node_dir.join(PROCESSES_DIR);
+    let dir = node_dir.join(crate::conversation::PROCESSES_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{dir}: {e}"))?;
     let mut index = 1;
     let (log, file) = loop {
@@ -698,9 +693,9 @@ fn shell_background(
 mod tests {
     use super::*;
 
-    fn repo() -> (tempfile::TempDir, Utf8PathBuf) {
+    fn repo() -> (tempfile::TempDir, camino::Utf8PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8PathBuf::from_path_buf(tmp.path().canonicalize().unwrap()).unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().canonicalize().unwrap()).unwrap();
         std::fs::create_dir_all(root.join("src/tui")).unwrap();
         std::fs::create_dir_all(root.join("target")).unwrap();
         std::fs::write(root.join("src/main.rs"), "fn main() {\n    run();\n}\n").unwrap();
@@ -710,7 +705,9 @@ mod tests {
         (tmp, root)
     }
 
-    fn context(root: &Utf8Path) -> ToolContext {
+    fn context(root: &camino::Utf8Path) -> ToolContext {
+        use crate::agent::mcp::McpTools;
+        use crate::conversation::NodeId;
         ToolContext {
             root: root.to_owned(),
             tree: Arc::default(),
@@ -721,7 +718,8 @@ mod tests {
         }
     }
 
-    fn call(name: &str, arguments: Value) -> ToolCall {
+    fn call(name: &str, arguments: serde_json::Value) -> crate::agent::ToolCall {
+        use crate::agent::ToolCall;
         ToolCall {
             id: "c1".into(),
             name: name.into(),
@@ -731,7 +729,7 @@ mod tests {
 
     #[test]
     fn resolve_refuses_paths_outside_the_root() {
-        let root = Utf8Path::new("/repo");
+        let root = camino::Utf8Path::new("/repo");
         assert_eq!(resolve(root, "src/../a.rs").unwrap(), "/repo/a.rs");
         assert_eq!(resolve(root, "/repo/b.rs").unwrap(), "/repo/b.rs");
         assert!(resolve(root, "../etc/passwd").is_err());
@@ -760,7 +758,11 @@ mod tests {
             many.push_str(&format!("{number}\t{}\n", "y".repeat(1000)));
         }
         std::fs::write(root.join("many.txt"), many).unwrap();
-        let out = run(&context(&root), &call("read", json!({"path": "many.txt"}))).await;
+        let out = run(
+            &context(&root),
+            &call("read", serde_json::json!({"path": "many.txt"})),
+        )
+        .await;
         assert!(out.len() <= READ_MAX_BYTES + 100, "{}", out.len());
         let footer = out.lines().last().unwrap();
         assert!(footer.starts_with("[lines 1-"), "{footer}");
@@ -779,7 +781,11 @@ mod tests {
         let (_tmp, root) = repo();
         let payload = "x".repeat(100_000);
         std::fs::write(root.join("min.json"), format!("{{\"k\":\"{payload}\"}}")).unwrap();
-        let out = run(&context(&root), &call("read", json!({"path": "min.json"}))).await;
+        let out = run(
+            &context(&root),
+            &call("read", serde_json::json!({"path": "min.json"})),
+        )
+        .await;
         assert!(out.len() < 3000, "{}", out.len());
         assert!(out.starts_with("1\t{\"k\":\"xxx"), "{out}");
         assert!(
@@ -795,7 +801,10 @@ mod tests {
         let (_tmp, root) = repo();
         let out = run(
             &context(&root),
-            &call("read", json!({"path": "src/main.rs", "offset": 500})),
+            &call(
+                "read",
+                serde_json::json!({"path": "src/main.rs", "offset": 500}),
+            ),
         )
         .await;
         assert_eq!(out, "[3 lines; offset 500 is past the end]\n");
@@ -806,7 +815,10 @@ mod tests {
         let (_tmp, root) = repo();
         let out = run(
             &context(&root),
-            &call("read", json!({"path": "src/main.rs", "limit": 0})),
+            &call(
+                "read",
+                serde_json::json!({"path": "src/main.rs", "limit": 0}),
+            ),
         )
         .await;
         assert_eq!(
@@ -820,7 +832,7 @@ mod tests {
         let (_tmp, root) = repo();
         let out = run(
             &context(&root),
-            &call("read", json!({"path": "src/main.rs"})),
+            &call("read", serde_json::json!({"path": "src/main.rs"})),
         )
         .await;
         assert_eq!(out, "1\tfn main() {\n2\t    run();\n3\t}\n");
@@ -831,7 +843,7 @@ mod tests {
         let (_tmp, root) = repo();
         let all = run(
             &context(&root),
-            &call("read", json!({"path": "src/main.rs"})),
+            &call("read", serde_json::json!({"path": "src/main.rs"})),
         )
         .await;
         assert_eq!(all, "1\tfn main() {\n2\t    run();\n3\t}\n");
@@ -839,7 +851,7 @@ mod tests {
             &context(&root),
             &call(
                 "read",
-                json!({"path": "src/main.rs", "offset": 2, "limit": 1}),
+                serde_json::json!({"path": "src/main.rs", "offset": 2, "limit": 1}),
             ),
         )
         .await;
@@ -847,7 +859,11 @@ mod tests {
             part,
             "2\t    run();\n[lines 2-2 of 3; use offset 3 to read more]\n"
         );
-        let outside = run(&context(&root), &call("read", json!({"path": "../x"}))).await;
+        let outside = run(
+            &context(&root),
+            &call("read", serde_json::json!({"path": "../x"})),
+        )
+        .await;
         assert!(outside.starts_with("error: "), "{outside}");
     }
 
@@ -856,12 +872,16 @@ mod tests {
         let (_tmp, root) = repo();
         let listed = run(
             &context(&root),
-            &call("glob", json!({"pattern": "**/*.rs"})),
+            &call("glob", serde_json::json!({"pattern": "**/*.rs"})),
         )
         .await;
         assert_eq!(listed, "src/main.rs\nsrc/tui/app.rs\n");
 
-        let found = run(&context(&root), &call("grep", json!({"pattern": "run"}))).await;
+        let found = run(
+            &context(&root),
+            &call("grep", serde_json::json!({"pattern": "run"})),
+        )
+        .await;
         assert_eq!(
             found,
             "README.md:2: run it\nsrc/main.rs:2:     run();\nsrc/tui/app.rs:1: pub fn run() {}\n"
@@ -870,12 +890,16 @@ mod tests {
             &context(&root),
             &call(
                 "grep",
-                json!({"pattern": "run", "path": "src", "glob": "**/app.rs"}),
+                serde_json::json!({"pattern": "run", "path": "src", "glob": "**/app.rs"}),
             ),
         )
         .await;
         assert_eq!(scoped, "src/tui/app.rs:1: pub fn run() {}\n");
-        let none = run(&context(&root), &call("grep", json!({"pattern": "zzz"}))).await;
+        let none = run(
+            &context(&root),
+            &call("grep", serde_json::json!({"pattern": "zzz"})),
+        )
+        .await;
         assert_eq!(none, "no matches\n");
     }
 
@@ -884,19 +908,25 @@ mod tests {
         let (_tmp, root) = repo();
         let ok = run(
             &context(&root),
-            &call("shell", json!({"command": "echo hi; pwd"})),
+            &call("shell", serde_json::json!({"command": "echo hi; pwd"})),
         )
         .await;
         assert_eq!(ok, format!("hi\n{root}\n"));
         let failed = run(
             &context(&root),
-            &call("shell", json!({"command": "echo oops >&2; exit 3"})),
+            &call(
+                "shell",
+                serde_json::json!({"command": "echo oops >&2; exit 3"}),
+            ),
         )
         .await;
         assert_eq!(failed, "oops\nexit code: 3\n");
         let slow = run(
             &context(&root),
-            &call("shell", json!({"command": "sleep 5", "timeout": 1})),
+            &call(
+                "shell",
+                serde_json::json!({"command": "sleep 5", "timeout": 1}),
+            ),
         )
         .await;
         assert_eq!(slow, "command killed after 1s timeout\n");
@@ -904,12 +934,15 @@ mod tests {
 
     #[tokio::test]
     async fn background_shell_returns_at_once_and_dies_with_the_turn() {
+        use crate::agent::mcp::McpTools;
+        use crate::conversation::ConversationTree;
+        use crate::conversation::NodeId;
         let (_tmp, root) = repo();
         let store = root.join("store");
         std::fs::create_dir_all(store.join("n1")).unwrap();
         let context = ToolContext {
             root: root.clone(),
-            tree: Arc::new(RwLock::new(ConversationTree::load(&store))),
+            tree: Arc::new(parking_lot::RwLock::new(ConversationTree::load(&store))),
             node: NodeId::new("n1"),
             subagents: None,
             background: Arc::default(),
@@ -920,7 +953,7 @@ mod tests {
             &context,
             &call(
                 "shell",
-                json!({"command": "echo up; exec sleep 30", "background": true}),
+                serde_json::json!({"command": "echo up; exec sleep 30", "background": true}),
             ),
         )
         .await;
@@ -946,7 +979,10 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "up\n");
         assert!(alive());
-        let second = call("shell", json!({"command": "true", "background": true}));
+        let second = call(
+            "shell",
+            serde_json::json!({"command": "true", "background": true}),
+        );
         let second = run(&context, &second).await;
         assert!(second.contains("n1/processes/2.log"), "{second}");
 
@@ -970,26 +1006,32 @@ mod tests {
 
     #[test]
     fn describe_shows_the_main_argument() {
-        let shell = call("shell", json!({"command": "cargo check\necho done"}));
+        let shell = call(
+            "shell",
+            serde_json::json!({"command": "cargo check\necho done"}),
+        );
         assert_eq!(describe(&shell), "shell cargo check");
         assert_eq!(
-            describe(&call("glob", json!({"pattern": "*.rs"}))),
+            describe(&call("glob", serde_json::json!({"pattern": "*.rs"}))),
             "glob *.rs"
         );
-        assert_eq!(describe(&call("odd", json!({}))), "odd");
+        assert_eq!(describe(&call("odd", serde_json::json!({}))), "odd");
         assert_eq!(
-            describe(&call("mcp__egui__click", json!({"id": 4}))),
+            describe(&call("mcp__egui__click", serde_json::json!({"id": 4}))),
             r#"mcp__egui__click {"id":4}"#
         );
-        let grep = call("grep", json!({"pattern": "struct Recorder", "path": "src"}));
+        let grep = call(
+            "grep",
+            serde_json::json!({"pattern": "struct Recorder", "path": "src"}),
+        );
         assert_eq!(describe(&grep), "grep struct Recorder in src");
         let grep = call(
             "grep",
-            json!({"pattern": "struct Recorder", "glob": "*.rs"}),
+            serde_json::json!({"pattern": "struct Recorder", "glob": "*.rs"}),
         );
         assert_eq!(describe(&grep), "grep struct Recorder");
         assert_eq!(
-            describe(&call("read", json!({"path": "src/main.rs"}))),
+            describe(&call("read", serde_json::json!({"path": "src/main.rs"}))),
             "read src/main.rs"
         );
     }
@@ -1017,14 +1059,17 @@ mod tests {
 
         let write_call = call(
             "write",
-            json!({"path": "docs/new.md", "content": "one\ntwo\n"}),
+            serde_json::json!({"path": "docs/new.md", "content": "one\ntwo\n"}),
         );
         assert_eq!(run(&context(&root), &write_call).await, "wrote 8 bytes\n");
         assert_eq!(
             std::fs::read_to_string(root.join("docs/new.md")).unwrap(),
             "one\ntwo\n"
         );
-        let outside = call("write", json!({"path": "../evil", "content": "x"}));
+        let outside = call(
+            "write",
+            serde_json::json!({"path": "../evil", "content": "x"}),
+        );
         assert!(run(&context(&root), &outside).await.starts_with("error: "));
     }
 
@@ -1032,7 +1077,10 @@ mod tests {
     async fn format_markdown_formats_the_given_files_and_refuses_outside_paths() {
         let (_tmp, root) = repo();
         std::fs::write(root.join("t.md"), "|a|b|\n|-|-|\n|1|2|\n").unwrap();
-        let format_call = call("format_markdown", json!({"paths": ["t.md", "src/main.rs"]}));
+        let format_call = call(
+            "format_markdown",
+            serde_json::json!({"paths": ["t.md", "src/main.rs"]}),
+        );
         assert_eq!(run(&context(&root), &format_call).await, "formatted:\nt.md");
         assert_eq!(
             std::fs::read_to_string(root.join("t.md")).unwrap(),
@@ -1042,7 +1090,7 @@ mod tests {
             run(&context(&root), &format_call).await,
             "nothing to format"
         );
-        let outside = call("format_markdown", json!({"paths": ["../x.md"]}));
+        let outside = call("format_markdown", serde_json::json!({"paths": ["../x.md"]}));
         assert!(run(&context(&root), &outside).await.starts_with("error: "));
     }
 
@@ -1053,7 +1101,7 @@ mod tests {
         let edit_call = |old: &str, new: &str| {
             call(
                 "edit",
-                json!({"path": "a.txt", "old_string": old, "new_string": new}),
+                serde_json::json!({"path": "a.txt", "old_string": old, "new_string": new}),
             )
         };
         let ambiguous = run(&context(&root), &edit_call("alpha", "x")).await;
@@ -1072,6 +1120,9 @@ mod tests {
 
     #[tokio::test]
     async fn conversation_tool_serves_pages_nodes_and_commit_lookups() {
+        use crate::agent::mcp::McpTools;
+        use crate::conversation::ConversationTree;
+        use crate::conversation::NodeId;
         let (_tmp, root) = repo();
         let store = root.join("store");
         let node_dir = store.join("n1");
@@ -1086,7 +1137,7 @@ mod tests {
         std::fs::write(node_dir.join("reply.md"), "done\n").unwrap();
         let context = ToolContext {
             root: root.clone(),
-            tree: Arc::new(RwLock::new(ConversationTree::load(&store))),
+            tree: Arc::new(parking_lot::RwLock::new(ConversationTree::load(&store))),
             node: NodeId::new("n2"),
             subagents: None,
             background: Arc::default(),
@@ -1094,30 +1145,42 @@ mod tests {
         };
         let ask = |arguments| call("conversation", arguments);
 
-        let roots = run(&context, &ask(json!({"action": "toc"}))).await;
+        let roots = run(&context, &ask(serde_json::json!({"action": "toc"}))).await;
         assert!(
             roots.contains("- n1 [commit] abcdef0 First (2 nodes) <- your branch"),
             "{roots}"
         );
-        let page = run(&context, &ask(json!({"action": "toc", "node": "n1"}))).await;
+        let page = run(
+            &context,
+            &ask(serde_json::json!({"action": "toc", "node": "n1"})),
+        )
+        .await;
         assert!(
             page.contains("Continues with:\n- n2 [?] (no prompt) <- this turn"),
             "{page}"
         );
-        let read = run(&context, &ask(json!({"action": "read", "node": "n1"}))).await;
+        let read = run(
+            &context,
+            &ask(serde_json::json!({"action": "read", "node": "n1"})),
+        )
+        .await;
         assert_eq!(read, "# Prompt\n\ndo it\n\n# Reply\n\ndone\n");
         let owner = run(
             &context,
-            &ask(json!({"action": "commit", "hash": "abcdef0"})),
+            &ask(serde_json::json!({"action": "commit", "hash": "abcdef0"})),
         )
         .await;
         assert!(owner.starts_with("Node:\n- n1 [commit]"), "{owner}");
 
-        let missing = run(&context, &ask(json!({"action": "read", "node": "zz"}))).await;
+        let missing = run(
+            &context,
+            &ask(serde_json::json!({"action": "read", "node": "zz"})),
+        )
+        .await;
         assert_eq!(missing, "error: unknown node: zz");
         let unknown = run(
             &context,
-            &ask(json!({"action": "commit", "hash": "1234567"})),
+            &ask(serde_json::json!({"action": "commit", "hash": "1234567"})),
         )
         .await;
         assert_eq!(unknown, "error: no node recorded commit 1234567");

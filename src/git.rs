@@ -1,7 +1,3 @@
-use gix::ObjectId;
-use gix::diff::blob::Algorithm;
-use gix::object::tree::diff::ChangeDetached;
-use gix::objs::tree::EntryKind;
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -461,7 +457,7 @@ pub fn is_dirty(repo: &gix::ThreadSafeRepository) -> Result<bool, String> {
 pub fn load_commit_diff(repo: &gix::ThreadSafeRepository, id: [u8; 20]) -> Result<String, String> {
     let repo = repo.to_thread_local();
     let commit = repo
-        .find_commit(ObjectId::from(id))
+        .find_commit(gix::ObjectId::from(id))
         .map_err(|e| format!("find commit: {e}"))?;
 
     let parent_tree = match commit.parent_ids().next() {
@@ -487,26 +483,26 @@ pub fn load_commit_diff(repo: &gix::ThreadSafeRepository, id: [u8; 20]) -> Resul
     let mut out = String::new();
     for change in changes {
         let (location, source_location, old_id, new_id, entry_mode) = match change {
-            ChangeDetached::Modification {
+            gix::object::tree::diff::ChangeDetached::Modification {
                 location,
                 previous_id,
                 id,
                 entry_mode,
                 ..
             } => (location, None, Some(previous_id), Some(id), entry_mode),
-            ChangeDetached::Addition {
+            gix::object::tree::diff::ChangeDetached::Addition {
                 location,
                 id,
                 entry_mode,
                 ..
             } => (location, None, None, Some(id), entry_mode),
-            ChangeDetached::Deletion {
+            gix::object::tree::diff::ChangeDetached::Deletion {
                 location,
                 id,
                 entry_mode,
                 ..
             } => (location, None, Some(id), None, entry_mode),
-            ChangeDetached::Rewrite {
+            gix::object::tree::diff::ChangeDetached::Rewrite {
                 location,
                 source_location,
                 source_id,
@@ -524,7 +520,7 @@ pub fn load_commit_diff(repo: &gix::ThreadSafeRepository, id: [u8; 20]) -> Resul
         let path = String::from_utf8_lossy(&location).into_owned();
         if matches!(
             entry_mode.kind(),
-            EntryKind::Blob | EntryKind::BlobExecutable
+            gix::objs::tree::EntryKind::Blob | gix::objs::tree::EntryKind::BlobExecutable
         ) {
             let source_path = source_location
                 .as_deref()
@@ -545,11 +541,11 @@ pub fn load_commit_diff(repo: &gix::ThreadSafeRepository, id: [u8; 20]) -> Resul
 
 fn file_diff(
     repo: &gix::Repository,
-    algorithm: Algorithm,
+    algorithm: gix::diff::blob::Algorithm,
     path: &str,
     source_path: Option<&str>,
-    old_id: Option<ObjectId>,
-    new_id: Option<ObjectId>,
+    old_id: Option<gix::ObjectId>,
+    new_id: Option<gix::ObjectId>,
     out: &mut String,
 ) -> Result<(), String> {
     let old_data = match old_id {
@@ -600,7 +596,7 @@ fn file_diff(
     Ok(())
 }
 
-fn blob_data(repo: &gix::Repository, id: ObjectId) -> Result<Vec<u8>, String> {
+fn blob_data(repo: &gix::Repository, id: gix::ObjectId) -> Result<Vec<u8>, String> {
     Ok(repo
         .find_object(id)
         .map_err(|e| format!("find object {id}: {e}"))?

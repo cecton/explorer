@@ -1,9 +1,3 @@
-use crate::agent::commands::{self, Command};
-use crate::agent::subagent::Role;
-use crate::agent::{
-    AgentConfig, CLAUDE_CODE_KIND, CLINE_KIND, DEFAULT_REPEAT_LIMIT, DEFAULT_REVIEW_ROUNDS,
-    Endpoint, EndpointKind, KIMI_CODE_KIND, ModelSpec, OPENCODE_GO_KIND, OPENROUTER_KIND,
-};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -51,8 +45,8 @@ impl Default for AfterAgentsConfig {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AgentSettings {
     pub endpoints: Vec<EndpointDecl>,
-    pub summary_model: Option<ModelSpec>,
-    pub subagent_model: Option<ModelSpec>,
+    pub summary_model: Option<crate::agent::ModelSpec>,
+    pub subagent_model: Option<crate::agent::ModelSpec>,
     pub review_rounds: Option<u32>,
     pub repeat_limit: Option<u32>,
 }
@@ -131,7 +125,7 @@ fn parse_auth(content: &str) -> Result<HashMap<String, String>, String> {
 }
 
 /// Custom slash commands, from `<config_dir>/commands/<name>.md`.
-pub fn load_commands() -> Vec<Command> {
+pub fn load_commands() -> Vec<crate::agent::commands::Command> {
     directories::ProjectDirs::from("", "", "explorer")
         .map(|dirs| read_commands(&dirs.config_dir().join("commands")))
         .unwrap_or_default()
@@ -139,7 +133,8 @@ pub fn load_commands() -> Vec<Command> {
 
 /// The commands of the `.md` files in `dir`, by name. A file that cannot make a
 /// command is logged and skipped; a missing directory yields none.
-fn read_commands(dir: &Path) -> Vec<Command> {
+fn read_commands(dir: &Path) -> Vec<crate::agent::commands::Command> {
+    use crate::agent::commands::Command;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -150,21 +145,21 @@ fn read_commands(dir: &Path) -> Vec<Command> {
                 return None;
             }
             let name = path.file_stem()?.to_str()?;
-            if !commands::is_command_name(name) {
+            if !crate::agent::commands::is_command_name(name) {
                 tracing::warn!(
                     "ignoring {}: a command name is made of lowercase letters, digits and dashes",
                     path.display()
                 );
                 return None;
             }
-            if commands::is_built_in(name) {
+            if crate::agent::commands::is_built_in(name) {
                 tracing::warn!("ignoring {}: '{name}' is built in", path.display());
                 return None;
             }
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| tracing::warn!("cannot read {}: {e}", path.display()))
                 .ok()?;
-            let command = Command::parse(name, &text);
+            let command = crate::agent::commands::Command::parse(name, &text);
             if command.is_none() {
                 tracing::warn!("ignoring {}: it has no prompt", path.display());
             }
@@ -176,7 +171,7 @@ fn read_commands(dir: &Path) -> Vec<Command> {
 }
 
 /// Reads the sub-agent roles from `<config_dir>/agents/<name>.md`.
-pub fn load_roles() -> Vec<Role> {
+pub fn load_roles() -> Vec<crate::agent::subagent::Role> {
     directories::ProjectDirs::from("", "", "explorer")
         .map(|dirs| read_roles(&dirs.config_dir().join("agents")))
         .unwrap_or_default()
@@ -184,7 +179,8 @@ pub fn load_roles() -> Vec<Role> {
 
 /// The roles of the `.md` files in `dir`, by name. A file that cannot make a role is
 /// logged and skipped; a missing directory yields none.
-fn read_roles(dir: &Path) -> Vec<Role> {
+fn read_roles(dir: &Path) -> Vec<crate::agent::subagent::Role> {
+    use crate::agent::subagent::Role;
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
@@ -195,7 +191,7 @@ fn read_roles(dir: &Path) -> Vec<Role> {
                 return None;
             }
             let name = path.file_stem()?.to_str()?;
-            if !commands::is_command_name(name) {
+            if !crate::agent::commands::is_command_name(name) {
                 tracing::warn!(
                     "ignoring {}: a role name is made of lowercase letters, digits and dashes",
                     path.display()
@@ -205,7 +201,7 @@ fn read_roles(dir: &Path) -> Vec<Role> {
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| tracing::warn!("cannot read {}: {e}", path.display()))
                 .ok()?;
-            Role::parse(name, &text)
+            crate::agent::subagent::Role::parse(name, &text)
                 .map_err(|reason| tracing::warn!("ignoring {}: {reason}", path.display()))
                 .ok()
         })
@@ -219,9 +215,12 @@ fn read_roles(dir: &Path) -> Vec<Role> {
 pub fn resolve_agent(
     settings: AgentSettings,
     tokens: &HashMap<String, String>,
-    commands: Vec<Command>,
-    roles: Vec<Role>,
-) -> AgentConfig {
+    commands: Vec<crate::agent::commands::Command>,
+    roles: Vec<crate::agent::subagent::Role>,
+) -> crate::agent::AgentConfig {
+    use crate::agent::AgentConfig;
+    use crate::agent::Endpoint;
+    use crate::agent::EndpointKind;
     let token_of = |name: &str| {
         let token = tokens.get(name).cloned();
         if token.is_none() {
@@ -280,8 +279,12 @@ pub fn resolve_agent(
         commands,
         subagent_model: settings.subagent_model,
         roles,
-        review_rounds: settings.review_rounds.unwrap_or(DEFAULT_REVIEW_ROUNDS),
-        repeat_limit: settings.repeat_limit.unwrap_or(DEFAULT_REPEAT_LIMIT),
+        review_rounds: settings
+            .review_rounds
+            .unwrap_or(crate::agent::DEFAULT_REVIEW_ROUNDS),
+        repeat_limit: settings
+            .repeat_limit
+            .unwrap_or(crate::agent::DEFAULT_REPEAT_LIMIT),
     }
 }
 
@@ -293,6 +296,7 @@ fn string_arg(node: &kdl::KdlNode) -> Option<&str> {
 }
 
 fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
+    use crate::agent::ModelSpec;
     let mut settings = AgentSettings::default();
     let Some(children) = node.children() else {
         return Ok(settings);
@@ -335,23 +339,23 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                         url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
                         name,
                     },
-                    OPENCODE_GO_KIND => EndpointDecl::OpenCodeGo {
+                    crate::agent::OPENCODE_GO_KIND => EndpointDecl::OpenCodeGo {
                         url: url.unwrap_or_else(|| OPENCODE_GO_URL.to_string()),
                         name,
                     },
-                    KIMI_CODE_KIND => EndpointDecl::KimiCode {
+                    crate::agent::KIMI_CODE_KIND => EndpointDecl::KimiCode {
                         url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
                         name,
                     },
-                    CLINE_KIND => EndpointDecl::Cline {
+                    crate::agent::CLINE_KIND => EndpointDecl::Cline {
                         url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
                         name,
                     },
-                    OPENROUTER_KIND => EndpointDecl::OpenRouter {
+                    crate::agent::OPENROUTER_KIND => EndpointDecl::OpenRouter {
                         url: url.unwrap_or_else(|| OPENROUTER_URL.to_string()),
                         name,
                     },
-                    CLAUDE_CODE_KIND => {
+                    crate::agent::CLAUDE_CODE_KIND => {
                         if models.is_empty() {
                             models = CLAUDE_CODE_DEFAULT_MODELS.map(str::to_string).to_vec();
                         }
@@ -619,6 +623,8 @@ mod config_tests {
 
     #[test]
     fn opencode_go_endpoint_has_a_default_url_and_needs_a_token() {
+        use crate::agent::Endpoint;
+        use crate::agent::EndpointKind;
         let config = parse(
             r#"
             agent {
@@ -662,6 +668,8 @@ mod config_tests {
 
     #[test]
     fn kimi_code_endpoint_needs_a_url_and_a_token() {
+        use crate::agent::Endpoint;
+        use crate::agent::EndpointKind;
         let config = parse(
             r#"
             agent {
@@ -708,6 +716,8 @@ mod config_tests {
 
     #[test]
     fn cline_endpoint_needs_a_url_and_a_token() {
+        use crate::agent::Endpoint;
+        use crate::agent::EndpointKind;
         let config = parse(
             r#"
             agent {
@@ -849,6 +859,7 @@ mod config_tests {
 
     #[test]
     fn endpoint_without_a_token_is_skipped() {
+        use crate::agent::EndpointKind;
         let settings = AgentSettings {
             endpoints: vec![
                 EndpointDecl::OpenAi {

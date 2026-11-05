@@ -11,8 +11,8 @@
 //! `open-git-log`, `open-conversations`, `toggle-favorite`, `open-model-picker`,
 //! `close-pane`, `resize-grow`, `resize-shrink`, `move-pane-forward`, `move-pane-backward`,
 //! `send-to-back`, `open-command-line`.
-
-use r3bl_tui::{Key, KeyPress, KeyState, ModifierKeysMask, SpecialKey};
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 
 /// A semantic action a top-level key binding can trigger. `GrabTerminal` and
 /// `DismissLeader` are intentionally not user-rebindable (they track the leader key / Esc),

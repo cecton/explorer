@@ -1,30 +1,19 @@
-use crate::agent::commands::{self, Command, Expansion};
-use crate::agent::context;
-use crate::agent::turn::{self, LiveSubagent, LiveTurn, TurnHandle, TurnRequest};
-use crate::agent::{Mode, ModelSpec};
-use crate::conversation::{ConversationTree, Metadata, Node, NodeId, NodeStatus, NodeType};
-use crate::keymap::{Action, Keymap, hint};
-use crate::loader::{drag_range, word_bounds};
-use crate::tui::markdown;
-use crate::tui::pane_component::drag_modifier_from_mouse;
-use crate::tui::text_layout::{display_width, truncate, wrap};
-use crate::tui::*;
-use parking_lot::Mutex;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::borrow::Cow;
 use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
-use tokio::sync::mpsc;
-use unicode_segmentation::UnicodeSegmentation;
 
 const SCROLL_STEP: usize = 3;
 
-type MainTx = mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>;
+type MainTx =
+    tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>>;
 
 struct DocLine {
     /// Text the line shows a piece of; `None` for the blank line between two of them.
-    part: Option<DocPart>,
+    part: Option<crate::tui::pane_manager::DocPart>,
     /// Each span's `src` is a byte offset in the text of `part`.
-    spans: Vec<markdown::Span>,
+    spans: Vec<crate::tui::markdown::Span>,
     /// Set on code block lines, painted instead of the surrounding background.
     bg: Option<RgbValue>,
 }
@@ -45,7 +34,7 @@ struct DocCache {
 
 impl DocCache {
     /// Whether the lines were laid out from the texts and view settings `discussion` has now.
-    fn shows(&self, window_id: usize, discussion: &DiscussionState) -> bool {
+    fn shows(&self, window_id: usize, discussion: &crate::tui::state::DiscussionState) -> bool {
         self.window_id == window_id
             && self.prompt_len == discussion.prompt.len()
             && self.reply_len == discussion.reply.len()
@@ -62,8 +51,8 @@ enum DragKind {
     /// A Shift or Ctrl drag: adds to or removes from the highlights `node` had when the
     /// drag began.
     Highlight {
-        modifier: DragModifier,
-        node: NodeId,
+        modifier: crate::tui::preview::DragModifier,
+        node: crate::conversation::NodeId,
         snapshot: Vec<(usize, usize)>,
     },
 }
@@ -72,7 +61,7 @@ enum DragKind {
 struct Drag {
     window_id: usize,
     kind: DragKind,
-    part: DocPart,
+    part: crate::tui::pane_manager::DocPart,
     /// Byte offset under the click, and the word around it.
     anchor: usize,
     word: (usize, usize),
@@ -94,7 +83,7 @@ pub struct DiscussionComponent {
 /// What a turn is asked to do.
 pub(crate) enum TurnKind {
     /// A prompt run in a mode: feedback, or commit for the built-in `/commit`.
-    Prompt(Mode),
+    Prompt(crate::agent::Mode),
     /// A custom command sent without the mode's system prompt: nothing tells its turn
     /// that the tree is a lab, so its work is kept and closed like a commit turn.
     NoSystemPrompt,
@@ -102,12 +91,12 @@ pub(crate) enum TurnKind {
     Compact { instructions: String },
     /// The built-in `/continue`: resume the turn of an interrupted node in the mode it
     /// ran, replaying its transcript and adding a note of how it ended.
-    Continue(Mode),
+    Continue(crate::agent::Mode),
 }
 
 /// A turn to start: a new node under `parent`, or a new root.
 pub(crate) struct Launch {
-    pub parent: Option<NodeId>,
+    pub parent: Option<crate::conversation::NodeId>,
     /// Text stored as the node's `prompt.md`.
     pub prompt: String,
     /// The prompt as typed, when a slash command expanded it into `prompt`.
@@ -115,21 +104,23 @@ pub(crate) struct Launch {
     pub kind: TurnKind,
     /// Custom slash command the prompt was expanded from.
     pub command: Option<String>,
-    pub spec: ModelSpec,
+    pub spec: crate::agent::ModelSpec,
 }
 
 impl Launch {
     /// The turn of an existing node, to run again as it was sent: same prompt, mode and
     /// command. `prompt` is the node's `prompt.md`.
     fn replay(
-        tree: &ConversationTree,
-        node: &NodeId,
+        tree: &crate::conversation::ConversationTree,
+        node: &crate::conversation::NodeId,
         prompt: String,
-        spec: ModelSpec,
+        spec: crate::agent::ModelSpec,
     ) -> Option<Self> {
+        use crate::agent::commands::Expansion;
+        use crate::conversation::NodeType;
         let source = tree.node(node)?;
         let kind = match source.meta.node_type {
-            Some(NodeType::Compact) => match commands::expand(&prompt, &[]) {
+            Some(NodeType::Compact) => match crate::agent::commands::expand(&prompt, &[]) {
                 Expansion::Compact { instructions } => TurnKind::Compact { instructions },
                 Expansion::Prompt { .. }
                 | Expansion::Commit { .. }
@@ -181,13 +172,17 @@ impl Refusal {
 }
 
 /// Forgets the prompt queued by `window`, when it has one.
-pub(crate) fn drop_queue_entry(state: &mut AppState, window: usize) {
+pub(crate) fn drop_queue_entry(state: &mut crate::tui::state::AppState, window: usize) {
     state.queued_turns.retain(|entry| entry.window != window);
 }
 
 /// Takes back the head-most prompt queued below `parent`, if any: it returns to the
 /// draft of the window that queued it, and the queue moves up.
-pub(crate) fn take_back(state: &mut AppState, main_tx: MainTx, parent: &NodeId) {
+pub(crate) fn take_back(
+    state: &mut crate::tui::state::AppState,
+    main_tx: MainTx,
+    parent: &crate::conversation::NodeId,
+) {
     let Some(entry) = state
         .queued_turns
         .iter()
@@ -203,7 +198,11 @@ pub(crate) fn take_back(state: &mut AppState, main_tx: MainTx, parent: &NodeId) 
 /// Takes back the prompt window `window` queued, if any. Its text stays the draft of
 /// that window. A window on a new conversation queues with no parent, so its entry is
 /// found by window, not by the node it will follow.
-pub(crate) fn take_back_window(state: &mut AppState, main_tx: MainTx, window: usize) {
+pub(crate) fn take_back_window(
+    state: &mut crate::tui::state::AppState,
+    main_tx: MainTx,
+    window: usize,
+) {
     drop_queue_entry(state, window);
     DiscussionComponent::release_queue(state, main_tx);
 }
@@ -211,10 +210,16 @@ pub(crate) fn take_back_window(state: &mut AppState, main_tx: MainTx, window: us
 /// Checks the guards, creates the node on disk and starts its turn. On refusal nothing
 /// is created and the reason is returned.
 pub(crate) fn start_turn(
-    state: &mut AppState,
+    state: &mut crate::tui::state::AppState,
     main_tx: MainTx,
     launch: Launch,
-) -> Result<NodeId, Refusal> {
+) -> Result<crate::conversation::NodeId, Refusal> {
+    use crate::agent::Mode;
+    use crate::agent::turn::TurnRequest;
+    use crate::conversation::Metadata;
+    use crate::conversation::NodeStatus;
+    use crate::conversation::NodeType;
+    use crate::tui::state::RowTarget;
     let Launch {
         parent,
         prompt,
@@ -361,19 +366,19 @@ pub(crate) fn start_turn(
         tree: Arc::clone(&state.conversations),
         mcp: Arc::clone(&state.mcp),
     };
-    let handle = turn::spawn(request, main_tx.clone());
+    let handle = crate::agent::turn::spawn(request, main_tx.clone());
     state.running_turns.insert(node.clone(), handle);
     state.mark_session_dirty();
     Ok(node)
 }
 
 /// The model a node was run with, when its metadata names one completely.
-pub(crate) fn node_model(node: &Node) -> Option<ModelSpec> {
+pub(crate) fn node_model(node: &crate::conversation::Node) -> Option<crate::agent::ModelSpec> {
     node.meta.model_spec()
 }
 
 /// Whether the node shown by Discussion window `id` has a turn running.
-pub(crate) fn window_is_running(state: &AppState, id: usize) -> bool {
+pub(crate) fn window_is_running(state: &crate::tui::state::AppState, id: usize) -> bool {
     state
         .discussions
         .get(&id)
@@ -382,7 +387,10 @@ pub(crate) fn window_is_running(state: &AppState, id: usize) -> bool {
 }
 
 /// The sub-agent run window `discussion` shows, while it runs.
-fn running_agent(state: &AppState, discussion: &DiscussionState) -> Option<LiveSubagent> {
+fn running_agent(
+    state: &crate::tui::state::AppState,
+    discussion: &crate::tui::state::DiscussionState,
+) -> Option<crate::agent::turn::LiveSubagent> {
     let index = discussion.agent?;
     let handle = state.running_turns.get(discussion.node.as_ref()?)?;
     let running = handle.live.lock().subagent.clone()?;
@@ -391,7 +399,10 @@ fn running_agent(state: &AppState, discussion: &DiscussionState) -> Option<LiveS
 
 /// What the turn or the sub-agent run window `discussion` shows has produced so far,
 /// while it runs.
-fn running_output(state: &AppState, discussion: &DiscussionState) -> Option<Arc<Mutex<LiveTurn>>> {
+fn running_output(
+    state: &crate::tui::state::AppState,
+    discussion: &crate::tui::state::DiscussionState,
+) -> Option<Arc<parking_lot::Mutex<crate::agent::turn::LiveTurn>>> {
     match discussion.agent {
         Some(_) => running_agent(state, discussion).map(|running| running.live),
         None => {
@@ -403,9 +414,9 @@ fn running_output(state: &AppState, discussion: &DiscussionState) -> Option<Arc<
 
 /// Metadata of the node or the sub-agent run window `discussion` shows.
 fn shown_meta<'a>(
-    tree: &'a ConversationTree,
-    discussion: &DiscussionState,
-) -> Option<&'a Metadata> {
+    tree: &'a crate::conversation::ConversationTree,
+    discussion: &crate::tui::state::DiscussionState,
+) -> Option<&'a crate::conversation::Metadata> {
     let node = discussion.node.as_ref()?;
     match discussion.agent {
         Some(index) => tree.agent(node, index).map(|agent| &agent.meta),
@@ -414,7 +425,9 @@ fn shown_meta<'a>(
 }
 
 /// The mode a node was run in; a compact node counts as feedback.
-fn node_mode(node: &Node) -> Mode {
+fn node_mode(node: &crate::conversation::Node) -> crate::agent::Mode {
+    use crate::agent::Mode;
+    use crate::conversation::NodeType;
     match node.meta.node_type {
         Some(NodeType::Commit) => Mode::Commit,
         _ => Mode::Feedback,
@@ -426,7 +439,7 @@ const MARKER_STRENGTH: f32 = 0.4;
 
 /// Background of highlighted text: the theme's warning color laid over the pane
 /// background, since `ui.selection` barely differs from it in many themes.
-fn marker_bg(theme: &HelixTheme, pane_bg: RgbValue) -> RgbValue {
+fn marker_bg(theme: &crate::tui::theme::HelixTheme, pane_bg: RgbValue) -> RgbValue {
     let Some(accent) = theme.color_for_scope("warning") else {
         return theme.ui_bg("ui.selection").unwrap_or(pane_bg);
     };
@@ -441,7 +454,7 @@ fn marker_bg(theme: &HelixTheme, pane_bg: RgbValue) -> RgbValue {
 }
 
 /// Paint style for one markdown span: its fg over `bg`, with the span's attributes.
-pub(crate) fn span_style(span: &markdown::Span, bg: RgbValue) -> TuiStyle {
+pub(crate) fn span_style(span: &crate::tui::markdown::Span, bg: RgbValue) -> TuiStyle {
     let mut style = new_style!(
         color_fg: {TuiColor::from(span.fg)} color_bg: {TuiColor::from(bg)}
     );
@@ -464,7 +477,7 @@ pub(crate) fn span_style(span: &markdown::Span, bg: RgbValue) -> TuiStyle {
 /// Why a prompt in `mode` cannot start while `running` turns are in progress: turns
 /// run one at a time, since a feedback turn experiments freely in the working tree
 /// and a commit turn must have it clean and to itself.
-fn lock_refusal(running: &[Mode]) -> Option<&'static str> {
+fn lock_refusal(running: &[crate::agent::Mode]) -> Option<&'static str> {
     (!running.is_empty()).then_some("another turn is running; wait for it to finish")
 }
 
@@ -481,7 +494,7 @@ fn ordinal(rank: usize) -> String {
 
 /// Status line part of a window whose prompt is queued: its place and the keys that
 /// act on it.
-fn queue_hint(state: &AppState, window: usize) -> Option<String> {
+fn queue_hint(state: &crate::tui::state::AppState, window: usize) -> Option<String> {
     let index = state
         .queued_turns
         .iter()
@@ -493,7 +506,7 @@ fn queue_hint(state: &AppState, window: usize) -> Option<String> {
 }
 
 /// Moves the prompt queued by `window` one place earlier or later.
-fn move_queued(state: &mut AppState, window: usize, earlier: bool) {
+fn move_queued(state: &mut crate::tui::state::AppState, window: usize, earlier: bool) {
     let queue = &mut state.queued_turns;
     let Some(index) = queue.iter().position(|entry| entry.window == window) else {
         return;
@@ -510,7 +523,8 @@ fn move_queued(state: &mut AppState, window: usize, earlier: bool) {
 
 /// How the turn of `node` ended, for the note a resume sends: `None` when it ran to
 /// completion, since nothing was interrupted then.
-fn interrupted_of(node: &Node) -> Option<String> {
+fn interrupted_of(node: &crate::conversation::Node) -> Option<String> {
+    use crate::conversation::NodeStatus;
     match node.meta.status {
         Some(NodeStatus::Failed) => Some(
             node.meta
@@ -525,7 +539,7 @@ fn interrupted_of(node: &Node) -> Option<String> {
 
 /// What a resume of `node` sends: how its turn ended, the mode it ran in, and whether
 /// its uncommitted work was discarded.
-fn resume_of(node: &Node) -> (Option<String>, Mode, bool) {
+fn resume_of(node: &crate::conversation::Node) -> (Option<String>, crate::agent::Mode, bool) {
     (
         interrupted_of(node),
         node_mode(node),
@@ -537,7 +551,12 @@ fn resume_of(node: &Node) -> (Option<String>, Mode, bool) {
 /// `/continue` does: its turn stopped without finishing, so the reasoning on disk is
 /// what the message builds on. A compact node is left out — it has no work to resume,
 /// and a resume would replay the summary request and read a summary that is not there.
-fn resumes_on_message(state: &AppState, discussion: &DiscussionState) -> bool {
+fn resumes_on_message(
+    state: &crate::tui::state::AppState,
+    discussion: &crate::tui::state::DiscussionState,
+) -> bool {
+    use crate::conversation::NodeStatus;
+    use crate::conversation::NodeType;
     discussion.node.as_ref().is_some_and(|node| {
         state.conversations.read().node(node).is_some_and(|node| {
             matches!(
@@ -552,13 +571,23 @@ fn resumes_on_message(state: &AppState, discussion: &DiscussionState) -> bool {
 /// below the node shown, or a sibling of it when its turn failed. A cancelled node
 /// cut short with something to show, so follow-ups build on it. `None` without a
 /// draft or a model; a refusal when the draft cannot make a turn.
-fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>> {
+fn compose_launch(
+    state: &crate::tui::state::AppState,
+    id: usize,
+) -> Option<Result<Launch, Refusal>> {
+    use crate::agent::Mode;
+    use crate::agent::commands::Command;
+    use crate::agent::commands::Expansion;
+    use crate::conversation::Metadata;
+    use crate::conversation::Node;
+    use crate::conversation::NodeStatus;
+    use crate::conversation::NodeType;
     let discussion = state.discussions.get(&id)?;
     let typed = discussion.draft.text().trim().to_string();
     if typed.is_empty() {
         return None;
     }
-    let expansion = commands::expand(&typed, &state.agent.commands);
+    let expansion = crate::agent::commands::expand(&typed, &state.agent.commands);
     // A message sent to a node whose turn stopped for any reason resumes that turn, the
     // way `/continue` does, rather than starting a sibling that knows nothing of it: the
     // reasoning is on disk, and this is what builds on it. A slash command keeps its own
@@ -572,7 +601,7 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
         other => other,
     };
     let spec = discussion.model.clone()?;
-    let continue_on_node = expansion.matches_command(commands::CONTINUE);
+    let continue_on_node = expansion.matches_command(crate::agent::commands::CONTINUE);
     let parent = {
         let tree = state.conversations.read();
         match discussion.node.as_ref().and_then(|node| tree.node(node)) {
@@ -613,7 +642,11 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
                 resume_of(resumed)
             };
             (
-                context::continue_request(interrupted.as_deref(), discarded, &instructions),
+                crate::agent::context::continue_request(
+                    interrupted.as_deref(),
+                    discarded,
+                    &instructions,
+                ),
                 Some(typed),
                 TurnKind::Continue(mode),
                 None,
@@ -625,7 +658,7 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
             )));
         }
         Expansion::Commit { instructions } => (
-            commands::commit_prompt(&instructions),
+            crate::agent::commands::commit_prompt(&instructions),
             Some(typed),
             TurnKind::Prompt(Mode::Commit),
             None,
@@ -654,7 +687,11 @@ fn compose_launch(state: &AppState, id: usize) -> Option<Result<Launch, Refusal>
 
 /// The text of `part`, as the offsets of a [`DocLine`] index it. The work log entries
 /// are joined by a newline.
-fn part_text(discussion: &DiscussionState, part: DocPart) -> Cow<'_, str> {
+fn part_text(
+    discussion: &crate::tui::state::DiscussionState,
+    part: crate::tui::pane_manager::DocPart,
+) -> Cow<'_, str> {
+    use crate::tui::pane_manager::DocPart;
     match part {
         DocPart::Prompt => Cow::Borrowed(&discussion.prompt),
         DocPart::WorkLog => Cow::Owned(discussion.shown_work_log().join("\n")),
@@ -666,7 +703,8 @@ fn part_text(discussion: &DiscussionState, part: DocPart) -> Cow<'_, str> {
 /// Source offset of the cell at `col` of a row. A cell the source has no place for
 /// (marker, padding, border) or a column past the text stands for the nearest cell
 /// before it, or else after it.
-fn offset_at(spans: &[markdown::Span], col: usize) -> Option<usize> {
+fn offset_at(spans: &[crate::tui::markdown::Span], col: usize) -> Option<usize> {
+    use unicode_segmentation::UnicodeSegmentation;
     let mut found = None;
     let mut x = 0;
     for span in spans {
@@ -677,7 +715,7 @@ fn offset_at(spans: &[markdown::Span], col: usize) -> Option<usize> {
                 }
                 found = Some(src + at);
             }
-            x += display_width(grapheme);
+            x += crate::tui::text_layout::display_width(grapheme);
         }
     }
     found
@@ -686,7 +724,11 @@ fn offset_at(spans: &[markdown::Span], col: usize) -> Option<usize> {
 /// The text and source offset under `row` and `col` of the document. A row without
 /// text (blank line, rule) stands for the end of the text above it, or else the start
 /// of the text below.
-fn locate(lines: &[DocLine], row: usize, col: usize) -> Option<(DocPart, usize)> {
+fn locate(
+    lines: &[DocLine],
+    row: usize,
+    col: usize,
+) -> Option<(crate::tui::pane_manager::DocPart, usize)> {
     let last = lines.len().checked_sub(1)?;
     let (row, col) = if row > last {
         (last, usize::MAX)
@@ -736,15 +778,20 @@ fn remove_range(ranges: &[(usize, usize)], lo: usize, hi: usize) -> Vec<(usize, 
 /// A run of cells of one span that are all marked (selected or highlighted) or all not.
 struct Piece<'a> {
     text: &'a str,
-    span: &'a markdown::Span,
+    span: &'a crate::tui::markdown::Span,
     marked: bool,
 }
 
 /// Cuts the spans of a row where `marked` source ranges begin and end. Cells the source
 /// has no place for are marked when the text on both sides of them is.
-fn row_pieces<'a>(spans: &'a [markdown::Span], marked: &[(usize, usize)]) -> Vec<Piece<'a>> {
-    let mut runs: Vec<(&str, &markdown::Span, Option<bool>)> = Vec::with_capacity(spans.len());
+fn row_pieces<'a>(
+    spans: &'a [crate::tui::markdown::Span],
+    marked: &[(usize, usize)],
+) -> Vec<Piece<'a>> {
+    use crate::tui::markdown::Span;
+    let mut runs: Vec<(&str, &Span, Option<bool>)> = Vec::with_capacity(spans.len());
     for span in spans {
+        use unicode_segmentation::UnicodeSegmentation;
         let Some(src) = span.src.filter(|_| !marked.is_empty()) else {
             runs.push((&span.text, span, span.src.map(|_| false)));
             continue;
@@ -793,7 +840,8 @@ fn utc_date(secs: i64) -> String {
 
 /// Points the view of window `id` at a document that starts now: at its top, with no
 /// height of its own yet, so the render reads a running turn as one to follow.
-fn start_view(state: &mut AppState, id: usize) {
+fn start_view(state: &mut crate::tui::state::AppState, id: usize) {
+    use crate::tui::pane_manager::Window;
     let window = Window::Discussion(id);
     state.pane_manager.set_window_scroll(&window, 0);
     state.pane_manager.set_window_scroll_max(&window, 0);
@@ -833,11 +881,12 @@ impl DiscussionComponent {
     /// The text and source offset under a screen position, clamped to the document area.
     fn locate(
         &self,
-        state: &AppState,
-        discussion: &DiscussionState,
+        state: &crate::tui::state::AppState,
+        discussion: &crate::tui::state::DiscussionState,
         window_id: usize,
         pos: VPPos,
-    ) -> Option<(DocPart, usize)> {
+    ) -> Option<(crate::tui::pane_manager::DocPart, usize)> {
+        use crate::tui::pane_manager::Window;
         let cache = self
             .cache
             .as_ref()
@@ -857,7 +906,11 @@ impl DiscussionComponent {
 
     /// Starts a drag on the word under the mouse: a selection, or with Shift or Ctrl a
     /// change to the highlights of the node shown.
-    fn begin_drag(&mut self, state: &mut AppState, mouse: &MouseInput) {
+    fn begin_drag(&mut self, state: &mut crate::tui::state::AppState, mouse: &MouseInput) {
+        use crate::tui::pane_manager::DocPart;
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::pane_manager::TextSelection;
+        use crate::tui::pane_manager::Window;
         let id = self.window_id;
         let Some(discussion) = state.discussions.get(&id) else {
             return;
@@ -869,13 +922,16 @@ impl DiscussionComponent {
         if anchor >= text.len() || !text.is_char_boundary(anchor) {
             return;
         }
-        let word = word_bounds(&text, anchor);
+        let word = crate::loader::word_bounds(&text, anchor);
         // A sub-agent run has no highlights: a modified drag selects too.
         let highlighted = discussion
             .node
             .as_ref()
             .filter(|_| discussion.agent.is_none());
-        let kind = match (drag_modifier_from_mouse(mouse), highlighted) {
+        let kind = match (
+            crate::tui::pane_component::drag_modifier_from_mouse(mouse),
+            highlighted,
+        ) {
             (Some(modifier), Some(node)) => {
                 let refusal = if part == DocPart::WorkLog {
                     Some("the work log cannot be highlighted")
@@ -925,7 +981,9 @@ impl DiscussionComponent {
 
     /// Extends the drag to the word under the mouse. A drag never leaves the text it
     /// began in: past it, it reaches that text's start or end.
-    fn update_drag(&mut self, state: &mut AppState, pos: VPPos) {
+    fn update_drag(&mut self, state: &mut crate::tui::state::AppState, pos: VPPos) {
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::preview::DragModifier;
         let Some(drag) = &self.drag else {
             return;
         };
@@ -938,7 +996,7 @@ impl DiscussionComponent {
                 if cursor >= text.len() || !text.is_char_boundary(cursor) {
                     return;
                 }
-                drag_range(&text, drag.anchor, drag.word, cursor)
+                crate::loader::drag_range(&text, drag.anchor, drag.word, cursor)
             }
             Some((part, _)) if part < drag.part => (0, drag.word.1),
             Some(_) => (drag.word.0, text.len()),
@@ -978,7 +1036,9 @@ impl DiscussionComponent {
     }
 
     /// Ends the drag; a selection is copied to the clipboard as its source text.
-    fn end_drag(&mut self, state: &mut AppState) {
+    fn end_drag(&mut self, state: &mut crate::tui::state::AppState) {
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::pane_manager::TextSelection;
         if let Some(Drag {
             window_id,
             kind: DragKind::Select,
@@ -1001,7 +1061,7 @@ impl DiscussionComponent {
     }
 
     /// Drops the drag in progress, if any, and its selection.
-    pub(crate) fn cancel_drag(&mut self, state: &mut AppState) {
+    pub(crate) fn cancel_drag(&mut self, state: &mut crate::tui::state::AppState) {
         let Some(drag) = self.drag.take() else {
             return;
         };
@@ -1011,7 +1071,8 @@ impl DiscussionComponent {
         state.mouse_drag_active = false;
     }
 
-    pub(crate) fn show(state: &mut AppState, id: usize) {
+    pub(crate) fn show(state: &mut crate::tui::state::AppState, id: usize) {
+        use crate::tui::pane_manager::Window;
         let window = Window::Discussion(id);
         let old = state.pane_manager.focused_window;
         state.pane_manager.push_window(window);
@@ -1022,7 +1083,12 @@ impl DiscussionComponent {
 
     /// Runs the prompt of `node` again as a new sibling, with the model `spec`, and
     /// opens it. A refusal is reported in the tree.
-    pub(crate) fn duplicate(state: &mut AppState, main_tx: MainTx, node: &NodeId, spec: ModelSpec) {
+    pub(crate) fn duplicate(
+        state: &mut crate::tui::state::AppState,
+        main_tx: MainTx,
+        node: &crate::conversation::NodeId,
+        spec: crate::agent::ModelSpec,
+    ) {
         let launch = {
             let tree = state.conversations.read();
             let dir = tree.node_dir(node);
@@ -1044,7 +1110,13 @@ impl DiscussionComponent {
 
     /// Opens a window on the parent of `node` with the input prefilled with the node's
     /// prompt as it was typed, so that an edited version can be sent as a new sibling.
-    pub(crate) fn open_edit(state: &mut AppState, main_tx: MainTx, node: &NodeId) {
+    pub(crate) fn open_edit(
+        state: &mut crate::tui::state::AppState,
+        main_tx: MainTx,
+        node: &crate::conversation::NodeId,
+    ) {
+        use crate::tui::input_line::InputLine;
+        use crate::tui::state::DiscussionState;
         let (parent, draft, model) = {
             let tree = state.conversations.read();
             let Some(source) = tree.node(node) else {
@@ -1075,7 +1147,12 @@ impl DiscussionComponent {
     /// Focuses the window already showing `node`, or opens a new one and loads the
     /// node's prompt and reply from disk. The window starts with the node's model and
     /// an empty draft: opening never runs anything.
-    pub(crate) fn open(state: &mut AppState, main_tx: MainTx, node: NodeId) {
+    pub(crate) fn open(
+        state: &mut crate::tui::state::AppState,
+        main_tx: MainTx,
+        node: crate::conversation::NodeId,
+    ) {
+        use crate::tui::state::DiscussionState;
         let existing = state
             .discussions
             .iter()
@@ -1103,7 +1180,13 @@ impl DiscussionComponent {
 
     /// Focuses the window already showing sub-agent run `index` of `node`, or opens a
     /// new one, read-only, and loads the run's task and answer from disk.
-    pub(crate) fn open_agent(state: &mut AppState, main_tx: MainTx, node: NodeId, index: u32) {
+    pub(crate) fn open_agent(
+        state: &mut crate::tui::state::AppState,
+        main_tx: MainTx,
+        node: crate::conversation::NodeId,
+        index: u32,
+    ) {
+        use crate::tui::state::DiscussionState;
         let existing = state
             .discussions
             .iter()
@@ -1138,9 +1221,9 @@ impl DiscussionComponent {
     /// while a run is in progress they follow its live output, which is gone once it
     /// ends.
     pub(crate) fn reload_agent_windows(
-        state: &AppState,
+        state: &crate::tui::state::AppState,
         main_tx: MainTx,
-        node: &NodeId,
+        node: &crate::conversation::NodeId,
         index: Option<u32>,
     ) {
         let shown: Vec<usize> = state
@@ -1159,7 +1242,8 @@ impl DiscussionComponent {
     }
 
     /// Opens a window for a new conversation, offering the model last picked.
-    pub(crate) fn open_new_root(state: &mut AppState) {
+    pub(crate) fn open_new_root(state: &mut crate::tui::state::AppState) {
+        use crate::tui::state::DiscussionState;
         let id = state.next_discussion_id;
         state.next_discussion_id += 1;
         state.discussions.insert(
@@ -1175,7 +1259,8 @@ impl DiscussionComponent {
 
     /// Reads the prompt and reply of window `id`'s node or sub-agent run off the UI
     /// thread.
-    pub(crate) fn load_content(state: &AppState, main_tx: MainTx, id: usize) {
+    pub(crate) fn load_content(state: &crate::tui::state::AppState, main_tx: MainTx, id: usize) {
+        use crate::tui::state::AppSignal;
         let Some(discussion) = state.discussions.get(&id) else {
             return;
         };
@@ -1212,7 +1297,10 @@ impl DiscussionComponent {
     /// directly: it joins the loop at its next round and the draft is cleared. A prompt
     /// for any other turn is queued, and stays in the input until its turn starts. A
     /// refused send keeps the draft and explains itself in the window's notice.
-    fn send(state: &mut AppState, main_tx: MainTx, id: usize) {
+    fn send(state: &mut crate::tui::state::AppState, main_tx: MainTx, id: usize) {
+        use crate::tui::model_picker::ModelPickerComponent;
+        use crate::tui::state::ModelPickerPurpose;
+        use crate::tui::state::PendingTurn;
         if Self::inject(state, id) {
             return;
         }
@@ -1262,7 +1350,7 @@ impl DiscussionComponent {
     /// Hands the draft of window `id` to the turn running on the node it shows, when
     /// there is one: it joins the loop at its next round and the draft is cleared.
     /// Returns whether it did.
-    fn inject(state: &mut AppState, id: usize) -> bool {
+    fn inject(state: &mut crate::tui::state::AppState, id: usize) -> bool {
         let Some(discussion) = state.discussions.get_mut(&id) else {
             return false;
         };
@@ -1292,7 +1380,11 @@ impl DiscussionComponent {
 
     /// Gives the messages the user sent that the turn never read back to the windows
     /// showing `node`, under whatever they hold now.
-    pub(crate) fn restore_injected(state: &mut AppState, node: &NodeId, handle: &TurnHandle) {
+    pub(crate) fn restore_injected(
+        state: &mut crate::tui::state::AppState,
+        node: &crate::conversation::NodeId,
+        handle: &crate::agent::turn::TurnHandle,
+    ) {
         let pending = handle.live.lock().take_injected();
         if pending.is_empty() {
             return;
@@ -1322,7 +1414,12 @@ impl DiscussionComponent {
     }
 
     /// Makes window `id` show `node`, the node its draft was just sent as.
-    fn apply_sent(state: &mut AppState, id: usize, node: NodeId, prompt: String) {
+    fn apply_sent(
+        state: &mut crate::tui::state::AppState,
+        id: usize,
+        node: crate::conversation::NodeId,
+        prompt: String,
+    ) {
         let Some(discussion) = state.discussions.get_mut(&id) else {
             return;
         };
@@ -1342,7 +1439,7 @@ impl DiscussionComponent {
     /// Starts the queued prompts, next first, for as long as no turn is running. Each is
     /// composed from its window as it stands now. A prompt that can no longer be sent
     /// leaves the queue with a notice; a dirty working tree holds the whole queue back.
-    pub(crate) fn release_queue(state: &mut AppState, main_tx: MainTx) {
+    pub(crate) fn release_queue(state: &mut crate::tui::state::AppState, main_tx: MainTx) {
         while state.running_turns.is_empty() {
             let Some(entry) = state.queued_turns.first().cloned() else {
                 return;
@@ -1394,11 +1491,13 @@ impl DiscussionComponent {
 
     fn doc_lines(
         &mut self,
-        discussion: &DiscussionState,
+        discussion: &crate::tui::state::DiscussionState,
         work_log_shown: bool,
-        theme: &HelixTheme,
+        theme: &crate::tui::theme::HelixTheme,
         width: usize,
     ) -> &[DocLine] {
+        use crate::tui::markdown::Span;
+        use crate::tui::pane_manager::DocPart;
         let fresh = self.cache.as_ref().is_some_and(|cache| {
             cache.window_id == self.window_id
                 && cache.width == width
@@ -1417,12 +1516,12 @@ impl DiscussionComponent {
             let dim_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
             let mut lines = Vec::new();
             if discussion.node.is_some() {
-                for (start, text) in wrap(&discussion.prompt, width) {
+                for (start, text) in crate::tui::text_layout::wrap(&discussion.prompt, width) {
                     lines.push(DocLine {
                         part: Some(DocPart::Prompt),
-                        spans: vec![markdown::Span {
+                        spans: vec![Span {
                             src: Some(start),
-                            ..markdown::Span::plain(text, text_fg)
+                            ..crate::tui::markdown::Span::plain(text, text_fg)
                         }],
                         bg: None,
                     });
@@ -1433,12 +1532,13 @@ impl DiscussionComponent {
                     bg: None,
                 });
                 if !discussion.thinking.is_empty() {
-                    for (start, text) in wrap(&discussion.thinking, width) {
+                    for (start, text) in crate::tui::text_layout::wrap(&discussion.thinking, width)
+                    {
                         lines.push(DocLine {
                             part: Some(DocPart::Thinking),
-                            spans: vec![markdown::Span {
+                            spans: vec![Span {
                                 src: Some(start),
-                                ..markdown::Span::plain(text, dim_fg)
+                                ..crate::tui::markdown::Span::plain(text, dim_fg)
                             }],
                             bg: None,
                         });
@@ -1453,12 +1553,12 @@ impl DiscussionComponent {
                 if work_log_shown && !work_log_to_show.is_empty() {
                     let mut base = 0;
                     for entry in work_log_to_show {
-                        for (start, text) in wrap(entry, width) {
+                        for (start, text) in crate::tui::text_layout::wrap(entry, width) {
                             lines.push(DocLine {
                                 part: Some(DocPart::WorkLog),
-                                spans: vec![markdown::Span {
+                                spans: vec![Span {
                                     src: Some(base + start),
-                                    ..markdown::Span::plain(text, dim_fg)
+                                    ..crate::tui::markdown::Span::plain(text, dim_fg)
                                 }],
                                 bg: None,
                             });
@@ -1471,7 +1571,7 @@ impl DiscussionComponent {
                         bg: None,
                     });
                 }
-                for md in markdown::render(&discussion.reply, theme, width) {
+                for md in crate::tui::markdown::render(&discussion.reply, theme, width) {
                     lines.push(DocLine {
                         part: Some(DocPart::Reply),
                         spans: md.spans,
@@ -1495,7 +1595,7 @@ impl DiscussionComponent {
         self.cache.as_ref().map_or(&[], |cache| &cache.lines)
     }
 
-    pub(crate) fn title(state: &AppState, window_id: usize) -> String {
+    pub(crate) fn title(state: &crate::tui::state::AppState, window_id: usize) -> String {
         let tree = state.conversations.read();
         state
             .discussions
@@ -1518,7 +1618,7 @@ impl DiscussionComponent {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        state: &mut AppState,
+        state: &mut crate::tui::state::AppState,
         window_id: usize,
     ) -> usize {
         let theme = &state.theme;
@@ -1538,7 +1638,7 @@ impl DiscussionComponent {
             .col_width
             .as_usize();
         let label = format!(" {model} ");
-        let label_width = display_width(&label);
+        let label_width = crate::tui::text_layout::display_width(&label);
         let title_box = FlexBox {
             style_adjusted_bounds: VPBoundingBox::new(
                 pane_box.style_adjusted_bounds.origin_pos,
@@ -1547,10 +1647,10 @@ impl DiscussionComponent {
             ),
             ..*pane_box
         };
-        render_pane_title(ops, pane_box, "", false, theme, focused);
-        render_pane_title(ops, &title_box, &title, false, theme, focused);
+        crate::tui::title_row::render_pane_title(ops, pane_box, "", false, theme, focused);
+        crate::tui::title_row::render_pane_title(ops, &title_box, &title, false, theme, focused);
         if label_width < pane_width {
-            let (bg, fg) = title_bar_colors(focused, theme);
+            let (bg, fg) = crate::tui::title_row::title_bar_colors(focused, theme);
             let style = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
             *ops += RenderOpCommon::MoveCursorPositionRelTo(
                 pane_box.style_adjusted_bounds.origin_pos,
@@ -1565,7 +1665,9 @@ impl DiscussionComponent {
 
 /// One-line description of the outcome of a node or a sub-agent run, and whether it
 /// reports a failure.
-fn status_text(meta: &Metadata) -> (String, bool) {
+fn status_text(meta: &crate::conversation::Metadata) -> (String, bool) {
+    use crate::conversation::NodeStatus;
+    use crate::conversation::NodeType;
     let kind = match meta.node_type {
         Some(NodeType::Compact) => "compact",
         _ => "",
@@ -1631,7 +1733,11 @@ fn fmt_elapsed(secs: u64) -> String {
 
 /// Whether the work log of the node shown is displayed: as toggled, otherwise only
 /// until the node is done and has a reply.
-fn work_log_shown(tree: &ConversationTree, discussion: &DiscussionState) -> bool {
+fn work_log_shown(
+    tree: &crate::conversation::ConversationTree,
+    discussion: &crate::tui::state::DiscussionState,
+) -> bool {
+    use crate::conversation::NodeStatus;
     discussion.show_work_log.unwrap_or_else(|| {
         let done =
             shown_meta(tree, discussion).is_some_and(|meta| meta.status == Some(NodeStatus::Done));
@@ -1641,7 +1747,10 @@ fn work_log_shown(tree: &ConversationTree, discussion: &DiscussionState) -> bool
 
 /// Hint of the input of a window whose node's turn stopped: sending a message there
 /// resumes the turn, the way `/continue` does.
-fn resume_hint(state: &AppState, discussion: &DiscussionState) -> Option<String> {
+fn resume_hint(
+    state: &crate::tui::state::AppState,
+    discussion: &crate::tui::state::DiscussionState,
+) -> Option<String> {
     if discussion.agent.is_some() || !discussion.draft.text().trim().is_empty() {
         return None;
     }
@@ -1652,7 +1761,11 @@ fn resume_hint(state: &AppState, discussion: &DiscussionState) -> Option<String>
 /// Status line of window `id`: a refusal, the progress of a running turn, the place of
 /// its prompt in the queue, or the outcome of the node shown. The flag asks for the
 /// error color.
-fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (String, bool) {
+fn status_line(
+    state: &crate::tui::state::AppState,
+    id: usize,
+    discussion: &crate::tui::state::DiscussionState,
+) -> (String, bool) {
     if let Some(notice) = &discussion.notice {
         return (notice.clone(), true);
     }
@@ -1701,9 +1814,13 @@ fn status_line(state: &AppState, id: usize, discussion: &DiscussionState) -> (St
 
 /// The progress of a turn or a sub-agent run started at `started`: spinner, time,
 /// activity and context size.
-fn progress_text(live: &LiveTurn, started: Instant, spinner_tick: u8) -> String {
+fn progress_text(
+    live: &crate::agent::turn::LiveTurn,
+    started: Instant,
+    spinner_tick: u8,
+) -> String {
     let elapsed = started.elapsed();
-    let spinner = turn::spinner_char(spinner_tick);
+    let spinner = crate::agent::turn::spinner_char(spinner_tick);
     let time = fmt_elapsed(elapsed.as_secs());
     let mut text = match (&live.activity, live.reply.is_empty()) {
         (Some(activity), _) => format!("{spinner} running {time} · {activity}"),
@@ -1719,15 +1836,16 @@ fn progress_text(live: &LiveTurn, started: Instant, spinner_tick: u8) -> String 
     text
 }
 
-fn model_picker_chord(keymap: &Keymap) -> String {
+fn model_picker_chord(keymap: &crate::keymap::Keymap) -> String {
+    use crate::keymap::Action;
     let key = keymap
         .leader_key_for(Action::OpenModelPicker)
-        .map(|key| hint(&key))
+        .map(|key| crate::keymap::hint(&key))
         .unwrap_or_default();
-    format!("{} {key}", hint(&keymap.leader_key))
+    format!("{} {key}", crate::keymap::hint(&keymap.leader_key))
 }
 
-impl Component<AppState, AppSignal> for DiscussionComponent {
+impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for DiscussionComponent {
     fn reset(&mut self) {
         self.cache = None;
         self.drag = None;
@@ -1739,10 +1857,11 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::pane_manager::Window;
         let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;
         let id = self.window_id;
@@ -1889,11 +2008,16 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         has_focus: &mut HasFocus,
     ) -> CommonResult {
+        use crate::tui::markdown::Span;
+        use crate::tui::pane_manager::DocPart;
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::pane_manager::TextSelection;
+        use crate::tui::pane_manager::Window;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -1937,17 +2061,21 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             };
 
             let theme = &state.theme;
-            let pane_bg = theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
+            let pane_bg = theme
+                .ui_bg("ui.background")
+                .unwrap_or(crate::tui::title_row::DEFAULT_BG);
             let prompt_bg = theme
                 .ui_bg("ui.cursorline")
                 .or_else(|| theme.ui_bg("ui.cursorline.primary"))
                 .or_else(|| theme.ui_bg("ui.statusline"))
-                .unwrap_or(DEFAULT_STATUSLINE_BG);
+                .unwrap_or(crate::tui::title_row::DEFAULT_STATUSLINE_BG);
             let text_fg = theme
                 .ui_fg("ui.text")
                 .unwrap_or(RgbValue::from_u8(170, 170, 200));
             let status_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
-            let error_fg = theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG);
+            let error_fg = theme
+                .ui_fg("error")
+                .unwrap_or(crate::tui::title_row::DEFAULT_ERROR_FG);
             // A surface of its own, like Helix's help box: the input sits inside the
             // window, where the focused title colors would read as the window's own row.
             let input_bg = theme.ui_bg("ui.help").unwrap_or(pane_bg);
@@ -1959,8 +2087,9 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
 
             let (status, alert) = status_line(state, self.window_id, discussion);
             let read_only = discussion.agent.is_some();
-            let hint = commands::placeholder(discussion.draft.text(), &state.agent.commands)
-                .or_else(|| resume_hint(state, discussion));
+            let hint =
+                crate::agent::commands::placeholder(discussion.draft.text(), &state.agent.commands)
+                    .or_else(|| resume_hint(state, discussion));
             let input_rows = if read_only {
                 0
             } else {
@@ -2072,7 +2201,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             let mut render_ops = RenderOpIRVec::new();
             let paint_row = |ops: &mut RenderOpIRVec,
                              row_offset: usize,
-                             spans: &[markdown::Span],
+                             spans: &[Span],
                              fg: RgbValue,
                              bg: RgbValue,
                              marked: &[(usize, usize)],
@@ -2092,18 +2221,23 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                 let mut x = 0usize;
                 for piece in row_pieces(spans, marked) {
                     let truncated;
-                    let text: &str = if x + display_width(piece.text) > doc_width {
-                        truncated = truncate(piece.text, doc_width.saturating_sub(x));
-                        truncated.as_str()
-                    } else {
-                        piece.text
-                    };
+                    let text: &str =
+                        if x + crate::tui::text_layout::display_width(piece.text) > doc_width {
+                            truncated = crate::tui::text_layout::truncate(
+                                piece.text,
+                                doc_width.saturating_sub(x),
+                            );
+                            truncated.as_str()
+                        } else {
+                            piece.text
+                        };
                     let mut style = span_style(piece.span, bg);
                     if piece.marked {
                         style.color_bg = Some(TuiColor::from(marked_bg));
                         if !keep_fg {
-                            style.color_fg =
-                                Some(TuiColor::from(ensure_readable_fg(piece.span.fg, marked_bg)));
+                            style.color_fg = Some(TuiColor::from(
+                                crate::tui::preview::ensure_readable_fg(piece.span.fg, marked_bg),
+                            ));
                         }
                     }
                     *ops += RenderOpCommon::MoveCursorPositionRelTo(
@@ -2112,7 +2246,7 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
                     );
                     *ops += RenderOpCommon::ApplyColors(Some(style));
                     *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                    x += display_width(text);
+                    x += crate::tui::text_layout::display_width(text);
                 }
             };
             for row_offset in 0..doc_rows {
@@ -2148,8 +2282,8 @@ impl Component<AppState, AppSignal> for DiscussionComponent {
             }
             if status_rows > 0 {
                 let fg = if alert { error_fg } else { status_fg };
-                let text = truncate(&status, doc_width);
-                let span = [markdown::Span::plain(text, fg)];
+                let text = crate::tui::text_layout::truncate(&status, doc_width);
+                let span = [crate::tui::markdown::Span::plain(text, fg)];
                 paint_row(
                     &mut render_ops,
                     doc_rows,
@@ -2195,7 +2329,15 @@ mod tests {
     use super::*;
     use camino::Utf8PathBuf;
 
-    fn node_with_metadata(metadata: &str) -> (tempfile::TempDir, ConversationTree, NodeId) {
+    fn node_with_metadata(
+        metadata: &str,
+    ) -> (
+        tempfile::TempDir,
+        crate::conversation::ConversationTree,
+        crate::conversation::NodeId,
+    ) {
+        use crate::conversation::ConversationTree;
+        use crate::conversation::NodeId;
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let id = NodeId::new("2026-10-05T14-32-07Z");
@@ -2207,6 +2349,7 @@ mod tests {
 
     #[test]
     fn marker_bg_lays_the_warning_color_over_the_pane_background() {
+        use crate::tui::theme::HelixTheme;
         let theme = HelixTheme::default();
         let pane_bg = theme.ui_bg("ui.background").unwrap();
         let marker = marker_bg(&theme, pane_bg);
@@ -2215,14 +2358,18 @@ mod tests {
         assert_eq!(marker, RgbValue::from_u8(0x76, 0x6c, 0x62));
     }
 
-    fn span(text: &str, src: Option<usize>) -> markdown::Span {
-        markdown::Span {
+    fn span(text: &str, src: Option<usize>) -> crate::tui::markdown::Span {
+        use crate::tui::markdown::Span;
+        Span {
             src,
-            ..markdown::Span::plain(text, RgbValue::from_u8(0, 0, 0))
+            ..crate::tui::markdown::Span::plain(text, RgbValue::from_u8(0, 0, 0))
         }
     }
 
-    fn doc_line(part: Option<DocPart>, spans: Vec<markdown::Span>) -> DocLine {
+    fn doc_line(
+        part: Option<crate::tui::pane_manager::DocPart>,
+        spans: Vec<crate::tui::markdown::Span>,
+    ) -> DocLine {
         DocLine {
             part,
             spans,
@@ -2249,6 +2396,7 @@ mod tests {
 
     #[test]
     fn locate_sends_a_row_without_text_to_the_text_around_it() {
+        use crate::tui::pane_manager::DocPart;
         let lines = [
             doc_line(Some(DocPart::Prompt), vec![span("hi", Some(0))]),
             doc_line(None, Vec::new()),
@@ -2268,12 +2416,12 @@ mod tests {
     #[test]
     fn drag_range_takes_whole_words_across_lines_in_both_directions() {
         let text = "one two\nthree four";
-        let word = word_bounds(text, 5);
+        let word = crate::loader::word_bounds(text, 5);
         assert_eq!(word, (4, 7));
-        assert_eq!(drag_range(text, 5, word, 5), (4, 7));
-        assert_eq!(drag_range(text, 5, word, 15), (4, 18));
+        assert_eq!(crate::loader::drag_range(text, 5, word, 5), (4, 7));
+        assert_eq!(crate::loader::drag_range(text, 5, word, 15), (4, 18));
         assert_eq!(&text[4..18], "two\nthree four");
-        assert_eq!(drag_range(text, 5, word, 1), (0, 7));
+        assert_eq!(crate::loader::drag_range(text, 5, word, 1), (0, 7));
     }
 
     #[test]
@@ -2398,25 +2546,35 @@ mod tests {
 
     #[test]
     fn node_mode_follows_the_node_type() {
+        use crate::agent::Mode;
         let (_tmp, tree, id) = node_with_metadata("type: commit\n");
         assert_eq!(node_mode(tree.node(&id).unwrap()), Mode::Commit);
         let (_tmp, tree, id) = node_with_metadata("type: compact\n");
         assert_eq!(node_mode(tree.node(&id).unwrap()), Mode::Feedback);
     }
 
-    fn empty_state() -> AppState {
+    fn empty_state() -> crate::tui::state::AppState {
+        use crate::keymap::Keymap;
+        use crate::tui::state::AppState;
+        use crate::tui::theme::HelixTheme;
         let files = Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new()));
         AppState::new(
             files,
             Utf8PathBuf::from("/tmp"),
             HelixTheme::default(),
-            crate::keymap::Keymap::default(),
+            Keymap::default(),
         )
     }
 
     /// A state over a done root `a1` and its failed child `a2`, which was sent with the
     /// `review` command; window 0 shows `a1` and window 1 shows `a2`.
-    fn state_with_failed_child() -> (tempfile::TempDir, AppState) {
+    fn state_with_failed_child() -> (tempfile::TempDir, crate::tui::state::AppState) {
+        use crate::agent::AgentConfig;
+        use crate::agent::ModelSpec;
+        use crate::agent::commands::Command;
+        use crate::conversation::ConversationTree;
+        use crate::conversation::NodeId;
+        use crate::tui::state::DiscussionState;
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let parent = root.join("a1");
@@ -2429,7 +2587,7 @@ mod tests {
 
         let mut state = empty_state();
         *state.conversations.write() = ConversationTree::load(&root);
-        state.agent = Arc::new(crate::agent::AgentConfig {
+        state.agent = Arc::new(AgentConfig {
             commands: vec![
                 Command::parse("review", "Review it.").unwrap(),
                 Command::parse("squash", "---\nsystem-prompt: off\n---\nSquash since:").unwrap(),
@@ -2451,6 +2609,8 @@ mod tests {
     }
 
     fn feedback_launch() -> Launch {
+        use crate::agent::Mode;
+        use crate::agent::ModelSpec;
         Launch {
             parent: None,
             prompt: "hello".to_string(),
@@ -2463,10 +2623,13 @@ mod tests {
 
     /// A configured endpoint, so that a refusal is the trust gate and not a missing token.
     fn agent_with_endpoint() -> Arc<crate::agent::AgentConfig> {
-        Arc::new(crate::agent::AgentConfig {
-            endpoints: vec![crate::agent::Endpoint {
+        use crate::agent::AgentConfig;
+        use crate::agent::Endpoint;
+        use crate::agent::EndpointKind;
+        Arc::new(AgentConfig {
+            endpoints: vec![Endpoint {
                 name: "mock".to_string(),
-                kind: crate::agent::EndpointKind::OpenAi {
+                kind: EndpointKind::OpenAi {
                     url: "http://localhost:1".to_string(),
                     token: "t".to_string(),
                 },
@@ -2480,7 +2643,7 @@ mod tests {
         let (_tmp, mut state) = state_with_failed_child();
         state.agent = agent_with_endpoint();
         state.trusted = false;
-        let (main_tx, _rx) = mpsc::channel(1);
+        let (main_tx, _rx) = tokio::sync::mpsc::channel(1);
         let refused = start_turn(&mut state, main_tx.clone(), feedback_launch());
         assert_eq!(refused, Err(Refusal::Untrusted));
         assert!(
@@ -2494,7 +2657,8 @@ mod tests {
         assert!(started.is_ok(), "{started:?}");
     }
 
-    fn queue(state: &mut AppState, windows: &[usize]) {
+    fn queue(state: &mut crate::tui::state::AppState, windows: &[usize]) {
+        use crate::tui::state::PendingTurn;
         state.queued_turns = windows
             .iter()
             .map(|window| PendingTurn {
@@ -2504,7 +2668,7 @@ mod tests {
             .collect();
     }
 
-    fn queued_windows(state: &AppState) -> Vec<usize> {
+    fn queued_windows(state: &crate::tui::state::AppState) -> Vec<usize> {
         state
             .queued_turns
             .iter()
@@ -2517,7 +2681,7 @@ mod tests {
         let (_tmp, mut state) = state_with_failed_child();
         state.agent = agent_with_endpoint();
         state.trusted = true;
-        let (main_tx, _rx) = mpsc::channel(1);
+        let (main_tx, _rx) = tokio::sync::mpsc::channel(1);
         let node = start_turn(&mut state, main_tx.clone(), feedback_launch()).unwrap();
         state.discussions.get_mut(&0).unwrap().node = Some(node.clone());
         state
@@ -2543,7 +2707,7 @@ mod tests {
         let (_tmp, mut state) = state_with_failed_child();
         state.agent = agent_with_endpoint();
         state.trusted = true;
-        let (main_tx, _rx) = mpsc::channel(1);
+        let (main_tx, _rx) = tokio::sync::mpsc::channel(1);
         let node = start_turn(&mut state, main_tx.clone(), feedback_launch()).unwrap();
         state.discussions.get_mut(&0).unwrap().node = Some(node.clone());
         state.running_turns.get(&node).unwrap().live.lock().closed = true;
@@ -2579,7 +2743,7 @@ mod tests {
         let (_tmp, mut state) = state_with_failed_child();
         state.agent = agent_with_endpoint();
         state.trusted = true;
-        let (main_tx, _rx) = mpsc::channel(1);
+        let (main_tx, _rx) = tokio::sync::mpsc::channel(1);
         let node = start_turn(&mut state, main_tx.clone(), feedback_launch()).unwrap();
         let handle = state.running_turns.get(&node).unwrap().clone();
         handle
@@ -2611,6 +2775,8 @@ mod tests {
 
     #[tokio::test]
     async fn a_resume_is_allowed_on_an_interrupted_node_that_already_has_children() {
+        use crate::conversation::ConversationTree;
+        use crate::conversation::NodeId;
         let (_tmp, mut state) = state_with_failed_child();
         state.agent = agent_with_endpoint();
         state.trusted = true;
@@ -2637,7 +2803,7 @@ mod tests {
                 .is_empty()
         );
 
-        let (main_tx, _rx) = mpsc::channel(1);
+        let (main_tx, _rx) = tokio::sync::mpsc::channel(1);
         state
             .discussions
             .get_mut(&1)
@@ -2654,10 +2820,13 @@ mod tests {
 
     #[tokio::test]
     async fn the_model_of_a_window_whose_turn_runs_cannot_be_changed() {
+        use crate::tui::model_picker::ModelPickerComponent;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::ModelPickerPurpose;
         let (_tmp, mut state) = state_with_failed_child();
         state.agent = agent_with_endpoint();
         state.trusted = true;
-        let (main_tx, _rx) = mpsc::channel(1);
+        let (main_tx, _rx) = tokio::sync::mpsc::channel(1);
         let node = start_turn(&mut state, main_tx.clone(), feedback_launch()).unwrap();
         state.discussions.get_mut(&0).unwrap().node = Some(node);
 
@@ -2728,10 +2897,12 @@ mod tests {
 
     #[test]
     fn the_work_log_text_follows_the_entries_shown() {
+        use crate::tui::pane_manager::DocPart;
+        use crate::tui::state::DiscussionState;
         let mut discussion = DiscussionState {
             work_log: vec!["old".into(), "new".into()],
             log_start: 1,
-            ..DiscussionState::default()
+            ..crate::tui::state::DiscussionState::default()
         };
         assert_eq!(part_text(&discussion, DocPart::WorkLog), "new");
         discussion.show_work_log = Some(true);
@@ -2753,6 +2924,8 @@ mod tests {
 
     #[test]
     fn a_draft_is_composed_below_a_done_node_and_beside_a_failed_one() {
+        use crate::agent::Mode;
+        use crate::conversation::NodeId;
         let (_tmp, mut state) = state_with_failed_child();
         assert!(compose_launch(&state, 0).is_none());
 
@@ -2816,6 +2989,9 @@ mod tests {
 
     #[test]
     fn continue_composes_a_child_of_the_node_shown() {
+        use crate::agent::Mode;
+        use crate::conversation::NodeId;
+        use crate::conversation::NodeType;
         let (_tmp, mut state) = state_with_failed_child();
         state
             .discussions
@@ -2858,6 +3034,7 @@ mod tests {
 
     #[test]
     fn continue_note_carries_the_error_and_says_the_work_was_discarded() {
+        use crate::conversation::NodeId;
         let (_tmp, mut state) = state_with_failed_child();
         state
             .conversations
@@ -2900,6 +3077,8 @@ mod tests {
 
     #[test]
     fn commit_command_composes_a_go_ahead_in_commit_mode() {
+        use crate::agent::Mode;
+        use crate::conversation::NodeId;
         let (_tmp, mut state) = state_with_failed_child();
         state
             .discussions
@@ -2958,6 +3137,8 @@ mod tests {
 
     #[test]
     fn a_plain_message_on_a_failed_node_resumes_it() {
+        use crate::agent::Mode;
+        use crate::conversation::NodeId;
         let (_tmp, mut state) = state_with_failed_child();
         state
             .discussions
@@ -3000,6 +3181,9 @@ mod tests {
 
     #[test]
     fn a_message_on_a_cancelled_node_resumes_it() {
+        use crate::agent::Mode;
+        use crate::conversation::NodeId;
+        use crate::conversation::NodeStatus;
         let (_tmp, mut state) = state_with_failed_child();
         state
             .conversations
@@ -3022,6 +3206,9 @@ mod tests {
 
     #[test]
     fn a_failed_commit_node_resumes_in_commit_mode() {
+        use crate::agent::Mode;
+        use crate::conversation::NodeId;
+        use crate::conversation::NodeType;
         let (_tmp, mut state) = state_with_failed_child();
         state
             .conversations
@@ -3042,6 +3229,9 @@ mod tests {
 
     #[test]
     fn a_message_on_a_failed_compact_node_does_not_resume_it() {
+        use crate::agent::Mode;
+        use crate::conversation::NodeId;
+        use crate::conversation::NodeType;
         let (_tmp, mut state) = state_with_failed_child();
         state
             .conversations
@@ -3075,8 +3265,11 @@ mod tests {
 
     #[test]
     fn take_back_takes_the_head_most_prompt_below_the_node() {
+        use crate::conversation::NodeId;
+        use crate::tui::state::DiscussionState;
+        use crate::tui::state::PendingTurn;
         let (_tmp, mut state) = state_with_failed_child();
-        let (main_tx, _main_rx) = mpsc::channel(1);
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(1);
         state.queued_turns = vec![
             PendingTurn {
                 window: 1,
@@ -3101,7 +3294,11 @@ mod tests {
             .draft
             .set_text("queued text");
 
-        take_back(&mut state, mpsc::channel(1).0, &NodeId::new("a3"));
+        take_back(
+            &mut state,
+            tokio::sync::mpsc::channel(1).0,
+            &NodeId::new("a3"),
+        );
         assert_eq!(queued_windows(&state), [1, 2]);
 
         // The head-most entry leaves the queue and its text stays its window's draft;
@@ -3113,8 +3310,10 @@ mod tests {
 
     #[test]
     fn a_queued_prompt_that_cannot_be_sent_leaves_the_queue() {
+        use crate::conversation::NodeId;
+        use crate::tui::state::PendingTurn;
         let (_tmp, mut state) = state_with_failed_child();
-        let (main_tx, _main_rx) = mpsc::channel(1);
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(1);
         state.discussions.get_mut(&0).unwrap().draft.set_text("go");
         state.discussions.get_mut(&1).unwrap().draft.set_text("   ");
         state.queued_turns = vec![
@@ -3146,6 +3345,7 @@ mod tests {
 
     #[test]
     fn lock_excludes_every_turn_while_one_is_running() {
+        use crate::agent::Mode;
         use Mode::{Commit, Feedback};
         assert!(lock_refusal(&[]).is_none());
         assert!(lock_refusal(&[Feedback]).is_some());
@@ -3155,6 +3355,10 @@ mod tests {
 
     #[test]
     fn replay_keeps_parent_mode_and_command_of_the_node() {
+        use crate::agent::Mode;
+        use crate::agent::ModelSpec;
+        use crate::conversation::ConversationTree;
+        use crate::conversation::NodeId;
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let parent = root.join("a1");
@@ -3202,6 +3406,8 @@ mod tests {
 
     #[tokio::test]
     async fn opening_a_node_starts_nothing_and_keeps_what_the_attempt_left() {
+        use crate::conversation::ConversationTree;
+        use crate::conversation::NodeId;
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let dir = root.join("a1").join("a2");
@@ -3219,7 +3425,7 @@ mod tests {
 
         let mut state = empty_state();
         *state.conversations.write() = ConversationTree::load(&root);
-        let (main_tx, _main_rx) = mpsc::channel(1);
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(1);
         DiscussionComponent::open(&mut state, main_tx, NodeId::new("a2"));
 
         assert_eq!(state.discussions.len(), 1);
@@ -3247,7 +3453,7 @@ mod tests {
     /// Sends `events` to `window` through `component`, as the pane slot showing it would.
     fn type_into(
         component: &mut DiscussionComponent,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         window: usize,
         events: &[InputEvent],
     ) {
@@ -3259,7 +3465,11 @@ mod tests {
         }
     }
 
-    fn global_data_with_drafts(drafts: &[&str]) -> GlobalData<AppState, AppSignal> {
+    fn global_data_with_drafts(
+        drafts: &[&str],
+    ) -> GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal> {
+        use crate::tui::input_line::InputLine;
+        use crate::tui::state::DiscussionState;
         let mut state = empty_state();
         for (id, draft) in drafts.iter().enumerate() {
             state.discussions.insert(
@@ -3270,7 +3480,7 @@ mod tests {
                 },
             );
         }
-        let (main_tx, _) = mpsc::channel(8);
+        let (main_tx, _) = tokio::sync::mpsc::channel(8);
         let size = vp_width(80) + vp_height(24);
         GlobalData::try_to_create_instance(
             main_tx,
@@ -3339,6 +3549,9 @@ mod tests {
 
     #[test]
     fn a_window_input_holds_the_mouse_while_it_selects() {
+        use crate::tui::input_line::InputLine;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::DiscussionState;
         let mut state = empty_state();
         state.discussions.insert(
             0,

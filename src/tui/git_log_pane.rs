@@ -1,25 +1,18 @@
-use crate::git::GitRef;
-use crate::git::LogEntry;
-use crate::git::RefKind;
-use crate::git::commit_type_prefix;
-use crate::git::format_log_time;
-use crate::tui::*;
-use nucleo::Matcher;
-use nucleo::pattern::{CaseMatching, Normalization, Pattern};
-use nucleo::{Config, Utf32Str};
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::sync::Arc;
-use tokio::sync::mpsc;
 
 pub struct GitLogPaneComponent {
     id: FlexBoxId,
     window_id: usize,
     content_origin_row: usize,
     content_row_count: usize,
-    branch_fuzzy: FuzzyPicker,
+    branch_fuzzy: crate::tui::fuzzy_picker::FuzzyPicker,
 }
 
 impl GitLogPaneComponent {
     pub fn new(id: FlexBoxId) -> Self {
+        use crate::tui::fuzzy_picker::FuzzyPicker;
         Self {
             id,
             window_id: 0,
@@ -34,10 +27,15 @@ impl GitLogPaneComponent {
     }
 
     pub(crate) fn open_commit_diff(
-        state: &mut AppState,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+        state: &mut crate::tui::state::AppState,
+        main_tx: tokio::sync::mpsc::Sender<
+            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+        >,
         id: [u8; 20],
     ) {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::AppSignal;
+        use crate::tui::state::CommitDiffState;
         if let std::collections::hash_map::Entry::Vacant(slot) = state.commit_diffs.entry(id) {
             slot.insert(CommitDiffState::default());
             match state.repo.clone() {
@@ -78,10 +76,15 @@ impl GitLogPaneComponent {
     /// unless a window already sits on that exact commit, which comes to the front
     /// with its state untouched.
     pub(crate) fn open_log_at_commit(
-        state: &mut AppState,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+        state: &mut crate::tui::state::AppState,
+        main_tx: tokio::sync::mpsc::Sender<
+            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+        >,
         hash: String,
     ) {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::GitLogWindowState;
+        use crate::tui::state::LogSource;
         let existing = state
             .git_logs
             .iter()
@@ -115,10 +118,14 @@ impl GitLogPaneComponent {
 
     pub(crate) fn reload_log(
         repo: Option<gix::ThreadSafeRepository>,
-        main_tx: mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>,
+        main_tx: tokio::sync::mpsc::Sender<
+            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
+        >,
         id: usize,
-        source: &LogSource,
+        source: &crate::tui::state::LogSource,
     ) {
+        use crate::tui::state::AppSignal;
+        use crate::tui::state::LogSource;
         let arg = match source {
             LogSource::Head => None,
             LogSource::Branch(name) | LogSource::Commit(name) => Some(name.clone()),
@@ -148,7 +155,10 @@ impl GitLogPaneComponent {
         }
     }
 
-    fn refresh_branch_results(git_refs: &Option<Arc<Vec<GitRef>>>, win: &mut GitLogWindowState) {
+    fn refresh_branch_results(
+        git_refs: &Option<Arc<Vec<crate::git::GitRef>>>,
+        win: &mut crate::tui::state::GitLogWindowState,
+    ) {
         let Some(refs) = git_refs.as_ref() else {
             return;
         };
@@ -156,7 +166,11 @@ impl GitLogPaneComponent {
         win.branch_picker.selected = win.branch_picker.results.first().map(|(k, _)| *k);
     }
 
-    pub(crate) fn refresh_branch_results_for_window(state: &mut AppState, id: usize) {
+    pub(crate) fn refresh_branch_results_for_window(
+        state: &mut crate::tui::state::AppState,
+        id: usize,
+    ) {
+        use crate::tui::state::AppState;
         if !state.git_logs.get(&id).is_some_and(|w| w.branch_picking) {
             return;
         }
@@ -169,7 +183,11 @@ impl GitLogPaneComponent {
         Self::refresh_branch_results(git_refs, win);
     }
 
-    fn move_selection(win: &mut GitLogWindowState, target: usize, count: usize) -> bool {
+    fn move_selection(
+        win: &mut crate::tui::state::GitLogWindowState,
+        target: usize,
+        count: usize,
+    ) -> bool {
         if count == 0 {
             return false;
         }
@@ -183,7 +201,8 @@ impl GitLogPaneComponent {
 }
 
 impl GitLogPaneComponent {
-    pub(crate) fn title(win: &GitLogWindowState) -> String {
+    pub(crate) fn title(win: &crate::tui::state::GitLogWindowState) -> String {
+        use crate::tui::state::LogSource;
         let mut title = match &win.source {
             LogSource::Head => "Logs".to_string(),
             LogSource::Branch(branch) => format!("Logs ({branch})"),
@@ -210,7 +229,7 @@ impl GitLogPaneComponent {
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        state: &mut AppState,
+        state: &mut crate::tui::state::AppState,
         window_id: usize,
     ) -> usize {
         let theme = &state.theme;
@@ -231,10 +250,11 @@ impl GitLogPaneComponent {
                 .bounds_size
                 .col_width
                 .as_u16();
-            let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
+            let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(focused, theme);
             let color_bg = TuiColor::from(bg_rgb);
             let color_fg = TuiColor::from(fg_rgb);
-            let color_selection = TuiColor::from(title_selection_bg(focused, theme));
+            let color_selection =
+                TuiColor::from(crate::tui::title_row::title_selection_bg(focused, theme));
             let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
             *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
             *ops += RenderOpCommon::SetBgColor(color_bg);
@@ -254,13 +274,20 @@ impl GitLogPaneComponent {
             );
             1
         } else {
-            render_pane_title(ops, pane_box, &Self::title(win), false, theme, focused);
+            crate::tui::title_row::render_pane_title(
+                ops,
+                pane_box,
+                &Self::title(win),
+                false,
+                theme,
+                focused,
+            );
             1
         }
     }
 }
 
-impl Component<AppState, AppSignal> for GitLogPaneComponent {
+impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for GitLogPaneComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -269,10 +296,15 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::AppSignal;
+        use crate::tui::state::AppState;
+        use crate::tui::state::FuzzyPickerState;
+        use crate::tui::state::LogSource;
         let window_id = self.window_id;
         let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;
@@ -533,11 +565,13 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
+        use crate::git::RefKind;
+        use crate::tui::pane_manager::Window;
         throws!({
             let window_id = self.window_id;
             let origin = current_box.style_adjusted_bounds.origin_pos;
@@ -576,14 +610,17 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                 state.pane_manager.set_window_scroll(&window, scroll);
             }
 
-            let pane_bg = state.theme.ui_bg("ui.background").unwrap_or(DEFAULT_BG);
+            let pane_bg = state
+                .theme
+                .ui_bg("ui.background")
+                .unwrap_or(crate::tui::title_row::DEFAULT_BG);
             let bg = TuiColor::from(pane_bg);
             let bg_style = new_style!(color_bg: {bg});
             let selected_bg = TuiColor::from(
                 state
                     .theme
                     .ui_bg("ui.selection")
-                    .unwrap_or(DEFAULT_SELECTION_BG),
+                    .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG),
             );
             let normal_fg = TuiColor::from(
                 state
@@ -685,7 +722,7 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                 let selection_bg_rgb = state
                     .theme
                     .ui_bg("ui.selection")
-                    .unwrap_or(DEFAULT_SELECTION_BG);
+                    .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG);
                 let linenum_selected_fg_rgb = if linenum_bg_rgb == selection_bg_rgb {
                     state
                         .theme
@@ -763,7 +800,7 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
                     render_ops +=
                         RenderOpIR::PaintTextWithAttributes(left.into(), Some(left_style));
 
-                    let type_span = commit_type_prefix(&summary).map(|(ty, len)| {
+                    let type_span = crate::git::commit_type_prefix(&summary).map(|(ty, len)| {
                         (
                             summary.char_indices().take_while(|(b, _)| *b < len).count(),
                             TuiColor::from(commit_type_color(&state.theme, ty)),
@@ -871,18 +908,25 @@ impl Component<AppState, AppSignal> for GitLogPaneComponent {
     }
 }
 
-pub(crate) fn run_log_match(query: &str, entries: &[LogEntry]) -> Vec<(usize, Vec<u32>)> {
-    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+pub(crate) fn run_log_match(
+    query: &str,
+    entries: &[crate::git::LogEntry],
+) -> Vec<(usize, Vec<u32>)> {
+    let pattern = nucleo::pattern::Pattern::parse(
+        query,
+        nucleo::pattern::CaseMatching::Smart,
+        nucleo::pattern::Normalization::Smart,
+    );
     if pattern.atoms.is_empty() {
         return (0..entries.len()).map(|i| (i, Vec::new())).collect();
     }
-    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
     let mut buf = Vec::new();
     let mut scored: Vec<(usize, u32, Vec<u32>)> = entries
         .iter()
         .enumerate()
         .filter_map(|(i, entry)| {
-            let haystack = Utf32Str::new(&entry.summary, &mut buf);
+            let haystack = nucleo::Utf32Str::new(&entry.summary, &mut buf);
             let mut indices = Vec::new();
             pattern
                 .indices(haystack, &mut matcher, &mut indices)
@@ -900,18 +944,22 @@ pub(crate) fn run_log_match(query: &str, entries: &[LogEntry]) -> Vec<(usize, Ve
         .collect()
 }
 
-pub(crate) fn run_ref_match(query: &str, refs: &[GitRef]) -> Vec<(usize, Vec<u32>)> {
-    let pattern = Pattern::parse(query, CaseMatching::Smart, Normalization::Smart);
+pub(crate) fn run_ref_match(query: &str, refs: &[crate::git::GitRef]) -> Vec<(usize, Vec<u32>)> {
+    let pattern = nucleo::pattern::Pattern::parse(
+        query,
+        nucleo::pattern::CaseMatching::Smart,
+        nucleo::pattern::Normalization::Smart,
+    );
     if pattern.atoms.is_empty() {
         return (0..refs.len()).map(|i| (i, Vec::new())).collect();
     }
-    let mut matcher = Matcher::new(Config::DEFAULT);
+    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
     let mut buf = Vec::new();
     let mut scored: Vec<(usize, u32, Vec<u32>)> = refs
         .iter()
         .enumerate()
         .filter_map(|(i, git_ref)| {
-            let haystack = Utf32Str::new(&git_ref.name, &mut buf);
+            let haystack = nucleo::Utf32Str::new(&git_ref.name, &mut buf);
             let mut indices = Vec::new();
             pattern
                 .indices(haystack, &mut matcher, &mut indices)
@@ -929,7 +977,7 @@ pub(crate) fn run_ref_match(query: &str, refs: &[GitRef]) -> Vec<(usize, Vec<u32
         .collect()
 }
 
-pub(crate) fn apply_filter(win: &mut GitLogWindowState) {
+pub(crate) fn apply_filter(win: &mut crate::tui::state::GitLogWindowState) {
     let total = win
         .entries
         .as_ref()
@@ -948,7 +996,7 @@ pub(crate) fn apply_filter(win: &mut GitLogWindowState) {
     }
 }
 
-fn visible_len(win: &GitLogWindowState) -> usize {
+fn visible_len(win: &crate::tui::state::GitLogWindowState) -> usize {
     let total = win
         .entries
         .as_ref()
@@ -956,7 +1004,7 @@ fn visible_len(win: &GitLogWindowState) -> usize {
     win.filtered.as_ref().map_or(total, |matches| matches.len())
 }
 
-fn visible_entry_id(win: &GitLogWindowState) -> Option<[u8; 20]> {
+fn visible_entry_id(win: &crate::tui::state::GitLogWindowState) -> Option<[u8; 20]> {
     let history = win.entries.as_ref()?;
     let entry_idx = match win.filtered.as_ref() {
         Some(matches) => matches.get(win.selected).map(|&(idx, _)| idx)?,
@@ -971,7 +1019,7 @@ fn visible_entry_id(win: &GitLogWindowState) -> Option<[u8; 20]> {
     history.entries.get(entry_idx).map(|entry| entry.id)
 }
 
-fn commit_type_color(theme: &HelixTheme, ty: &str) -> RgbValue {
+fn commit_type_color(theme: &crate::tui::theme::HelixTheme, ty: &str) -> RgbValue {
     let scope = match ty {
         "feat" => "diff.plus",
         "fix" => "diff.minus",
@@ -992,8 +1040,8 @@ fn commit_type_color(theme: &HelixTheme, ty: &str) -> RgbValue {
     })
 }
 
-fn log_row_parts(entry: &LogEntry, pane_width: usize) -> (String, String) {
-    let date = format_log_time(entry.time_secs, entry.time_offset_secs);
+fn log_row_parts(entry: &crate::git::LogEntry, pane_width: usize) -> (String, String) {
+    let date = crate::git::format_log_time(entry.time_secs, entry.time_offset_secs);
     let gap = "   ";
     let max_chars = pane_width.saturating_sub(1);
     let summary_max = max_chars.saturating_sub(date.chars().count() + gap.len());
@@ -1001,7 +1049,12 @@ fn log_row_parts(entry: &LogEntry, pane_width: usize) -> (String, String) {
     (format!("{date}{gap}"), summary)
 }
 
-fn layout_refs(available: usize, refs: &[GitRef]) -> (Vec<&GitRef>, Option<RefKind>) {
+fn layout_refs(
+    available: usize,
+    refs: &[crate::git::GitRef],
+) -> (Vec<&crate::git::GitRef>, Option<crate::git::RefKind>) {
+    use crate::git::GitRef;
+    use crate::git::RefKind;
     if available == 0 || refs.is_empty() {
         return (Vec::new(), None);
     }
@@ -1031,7 +1084,8 @@ fn layout_refs(available: usize, refs: &[GitRef]) -> (Vec<&GitRef>, Option<RefKi
 mod tests {
     use super::*;
 
-    fn entry_with_summary(summary: &str) -> LogEntry {
+    fn entry_with_summary(summary: &str) -> crate::git::LogEntry {
+        use crate::git::LogEntry;
         LogEntry {
             id: [0u8; 20],
             time_secs: 0,
@@ -1040,7 +1094,10 @@ mod tests {
         }
     }
 
-    fn window_with_source(source: LogSource) -> GitLogWindowState {
+    fn window_with_source(
+        source: crate::tui::state::LogSource,
+    ) -> crate::tui::state::GitLogWindowState {
+        use crate::tui::state::GitLogWindowState;
         GitLogWindowState {
             source,
             ..Default::default()
@@ -1049,6 +1106,8 @@ mod tests {
 
     #[test]
     fn title_shows_the_branch_commit_or_head() {
+        use crate::tui::state::GitLogWindowState;
+        use crate::tui::state::LogSource;
         let title = |win: &GitLogWindowState| GitLogPaneComponent::title(win);
         assert_eq!(title(&window_with_source(LogSource::Head)), "Logs");
         assert_eq!(
@@ -1063,7 +1122,8 @@ mod tests {
         );
     }
 
-    fn git_ref(kind: RefKind, name: &str) -> GitRef {
+    fn git_ref(kind: crate::git::RefKind, name: &str) -> crate::git::GitRef {
+        use crate::git::GitRef;
         GitRef {
             kind,
             name: name.to_string(),
@@ -1072,6 +1132,7 @@ mod tests {
 
     #[test]
     fn layout_refs_shows_all_when_they_fit() {
+        use crate::git::RefKind;
         let refs = [
             git_ref(RefKind::Branch, "main"),
             git_ref(RefKind::Tag, "v1.0"),
@@ -1083,6 +1144,7 @@ mod tests {
 
     #[test]
     fn layout_refs_drops_tags_first_with_tag_ellipsis() {
+        use crate::git::RefKind;
         let refs = [
             git_ref(RefKind::Branch, "main"),
             git_ref(RefKind::Tag, "v1.0"),
@@ -1096,6 +1158,7 @@ mod tests {
 
     #[test]
     fn layout_refs_drops_last_branch_with_branch_ellipsis() {
+        use crate::git::RefKind;
         let refs = [git_ref(RefKind::Branch, "feature-x")];
         let (shown, ellipsis) = layout_refs(6, &refs);
         assert!(shown.is_empty());
@@ -1104,6 +1167,7 @@ mod tests {
 
     #[test]
     fn layout_refs_shows_nothing_when_ellipsis_does_not_fit() {
+        use crate::git::RefKind;
         let refs = [git_ref(RefKind::Branch, "main")];
         let (shown, ellipsis) = layout_refs(2, &refs);
         assert!(shown.is_empty());
@@ -1112,6 +1176,7 @@ mod tests {
 
     #[test]
     fn layout_refs_handles_narrow_available_width() {
+        use crate::git::RefKind;
         let refs = [
             git_ref(RefKind::Branch, "main"),
             git_ref(RefKind::Tag, "v1"),

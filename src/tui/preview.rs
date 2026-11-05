@@ -1,6 +1,5 @@
-use crate::loader::{FileData, FileKey};
-use crate::tui::pane_component::pane_slot;
-use crate::tui::*;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 use std::time::{Duration, Instant};
 
 const GUTTER_GAP: &str = "   ";
@@ -44,7 +43,11 @@ impl FilePreviewComponent {
 
     /// Repaints once the error just set has expired. The 1s `Tick` repaints only on
     /// change, so nothing else would take the message off the title bar.
-    fn repaint_when_error_expires(&self, global_data: &GlobalData<AppState, AppSignal>) {
+    fn repaint_when_error_expires(
+        &self,
+        global_data: &GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+    ) {
+        use crate::tui::state::AppSignal;
         if self.error.is_none() {
             return;
         }
@@ -57,7 +60,7 @@ impl FilePreviewComponent {
         });
     }
 
-    fn title_text_render(&self, state: &AppState) -> Option<(String, bool)> {
+    fn title_text_render(&self, state: &crate::tui::state::AppState) -> Option<(String, bool)> {
         if let Some((msg, set_at)) = &self.error
             && set_at.elapsed() < ERROR_SHOWN_FOR
         {
@@ -85,7 +88,7 @@ impl FilePreviewComponent {
     /// or None if no range is at that column or the title is truncated.
     pub fn range_at_title_col(
         &self,
-        state: &AppState,
+        state: &crate::tui::state::AppState,
         col: usize,
         pane_width: usize,
     ) -> Option<(usize, usize)> {
@@ -128,7 +131,14 @@ impl FilePreviewComponent {
         None
     }
 
-    pub fn scroll_to_range(&self, state: &mut AppState, key: FileKey, lo: usize, hi: usize) {
+    pub fn scroll_to_range(
+        &self,
+        state: &mut crate::tui::state::AppState,
+        key: crate::loader::FileKey,
+        lo: usize,
+        hi: usize,
+    ) {
+        use crate::tui::pane_manager::Window;
         let window = Window::FilePreview(key);
         let page_size = state.pane_manager.window_page_size(&window);
         let target = compute_single_block_scroll(lo, hi - lo + 1, page_size);
@@ -139,7 +149,13 @@ impl FilePreviewComponent {
     /// Commits the in-progress search input for `key`. An empty pattern clears the active search;
     /// an invalid regex shows a transient error and leaves any prior search intact; a valid pattern
     /// becomes the active search and jumps to the first match in the search direction.
-    fn commit_search(&mut self, state: &mut AppState, key: FileKey) {
+    fn commit_search(
+        &mut self,
+        state: &mut crate::tui::state::AppState,
+        key: crate::loader::FileKey,
+    ) {
+        use crate::tui::state::PreviewInput;
+        use crate::tui::state::PreviewSearch;
         let Some(PreviewInput::Search(input, direction)) = state.preview_inputs.get(&key) else {
             return;
         };
@@ -169,7 +185,14 @@ impl FilePreviewComponent {
 
     /// Moves the active search for `key` to the next match in `direction`, wrapping around, and
     /// scrolls it into view. Match positions are collected on demand (only on a keypress).
-    fn goto_match(&mut self, state: &mut AppState, key: FileKey, direction: SearchDirection) {
+    fn goto_match(
+        &mut self,
+        state: &mut crate::tui::state::AppState,
+        key: crate::loader::FileKey,
+        direction: crate::tui::state::SearchDirection,
+    ) {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::SearchDirection;
         // Collect non-empty matches in document order: (line_idx, start_byte, end_byte) per line.
         let matches: Vec<(usize, usize, usize)> = {
             let Some(search) = state.search.get(&key) else {
@@ -235,18 +258,19 @@ impl FilePreviewComponent {
     #[allow(clippy::too_many_arguments)]
     fn render_input_title(
         ops: &mut RenderOpIRVec,
-        input: &mut InputLine,
+        input: &mut crate::tui::input_line::InputLine,
         prompt: &str,
         origin: VPPos,
         width: u16,
         height: usize,
         focused: bool,
-        theme: &HelixTheme,
+        theme: &crate::tui::theme::HelixTheme,
     ) {
-        let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
+        let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(focused, theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
-        let color_selection = TuiColor::from(title_selection_bg(focused, theme));
+        let color_selection =
+            TuiColor::from(crate::tui::title_row::title_selection_bg(focused, theme));
         let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
         for row_offset in 0..height {
@@ -272,7 +296,11 @@ impl FilePreviewComponent {
         );
     }
 
-    fn is_line_highlighted(state: &AppState, file_key: FileKey, line_1_indexed: usize) -> bool {
+    fn is_line_highlighted(
+        state: &crate::tui::state::AppState,
+        file_key: crate::loader::FileKey,
+        line_1_indexed: usize,
+    ) -> bool {
         state
             .highlight_ranges
             .get(&file_key)
@@ -286,8 +314,12 @@ impl FilePreviewComponent {
 
     /// Returns the `FileKey` this pane slot should render, or `None` if the slot holds a
     /// non-preview window or the stack has no entry for this slot.
-    pub(super) fn file_key(&self, state: &AppState) -> Option<FileKey> {
-        let slot = pane_slot(self.id)?;
+    pub(super) fn file_key(
+        &self,
+        state: &crate::tui::state::AppState,
+    ) -> Option<crate::loader::FileKey> {
+        use crate::tui::pane_manager::Window;
+        let slot = crate::tui::pane_component::pane_slot(self.id)?;
         let Window::FilePreview(key) = state.pane_manager.window_stack.get(slot)? else {
             return None;
         };
@@ -296,8 +328,8 @@ impl FilePreviewComponent {
 
     pub fn start_drag(
         &mut self,
-        state: &AppState,
-        key: FileKey,
+        state: &crate::tui::state::AppState,
+        key: crate::loader::FileKey,
         line: usize,
         modifier: DragModifier,
     ) {
@@ -306,7 +338,12 @@ impl FilePreviewComponent {
         self.drag_modifier = Some(modifier);
     }
 
-    pub fn update_drag(&mut self, state: &mut AppState, key: FileKey, current_line: usize) {
+    pub fn update_drag(
+        &mut self,
+        state: &mut crate::tui::state::AppState,
+        key: crate::loader::FileKey,
+        current_line: usize,
+    ) {
         let Some(start) = self.drag_start_line else {
             return;
         };
@@ -338,12 +375,13 @@ impl FilePreviewComponent {
     /// absolute byte offset within `FileData.content`. Accounts for line wrapping.
     pub fn screen_pos_to_line_char(
         &self,
-        state: &AppState,
+        state: &crate::tui::state::AppState,
         row: usize,
         col: usize,
-        key: FileKey,
+        key: crate::loader::FileKey,
         data: &parking_lot::RwLockReadGuard<'_, crate::loader::FileData>,
     ) -> (usize, usize, usize) {
+        use crate::tui::pane_manager::Window;
         let window = Window::FilePreview(key);
         let scroll = state.pane_manager.window_scroll(&window);
 
@@ -387,7 +425,7 @@ impl FilePreviewComponent {
     }
 }
 
-impl Component<AppState, AppSignal> for FilePreviewComponent {
+impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for FilePreviewComponent {
     fn reset(&mut self) {
         self.drag_snapshot = None;
         self.drag_start_line = None;
@@ -400,10 +438,16 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::tui::command_line::CommandLine;
+        use crate::tui::input_line::InputLine;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::AppSignal;
+        use crate::tui::state::PreviewInput;
+        use crate::tui::state::SearchDirection;
         throws_with_return!({
             let Some(key) = self.file_key(&global_data.state) else {
                 return Ok(EventPropagation::Propagate);
@@ -465,7 +509,7 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 // The highlights are typed on the global command line, which knows this file.
                 global_data.state.command_line = Some(CommandLine::prefilled(
                     Some(window),
-                    format!("{} ", command_line::HIGHLIGHT),
+                    format!("{} ", crate::tui::command_line::HIGHLIGHT),
                 ));
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -522,7 +566,11 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                 let editor = std::env::var("VISUAL")
                     .or_else(|_| std::env::var("EDITOR"))
                     .unwrap_or_else(|_| "nvim".into());
-                let editor_cmd = format!("{} {}", editor, sh_quote(file_path.as_str()));
+                let editor_cmd = format!(
+                    "{} {}",
+                    editor,
+                    crate::tui::command_line::sh_quote(file_path.as_str())
+                );
                 send_signal!(
                     global_data.main_thread_channel_sender,
                     TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::OpenEditor {
@@ -655,11 +703,13 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::pane_manager::Window;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -903,9 +953,15 @@ impl Component<AppState, AppSignal> for FilePreviewComponent {
                             }
                             let is_current = search.current == Some((line_idx, m.start()));
                             let (bg, fg) = if is_current {
-                                (SEARCH_CURRENT, SEARCH_CURRENT_FG)
+                                (
+                                    crate::tui::state::SEARCH_CURRENT,
+                                    crate::tui::state::SEARCH_CURRENT_FG,
+                                )
                             } else {
-                                (SEARCH_MATCH, SEARCH_MATCH_FG)
+                                (
+                                    crate::tui::state::SEARCH_MATCH,
+                                    crate::tui::state::SEARCH_MATCH_FG,
+                                )
                             };
                             let m_lo = byte_to_char(line, m.start());
                             let m_hi = byte_to_char(line, m.end());
@@ -1006,14 +1062,16 @@ fn subtract_ranges(snapshot: &[(usize, usize)], lo: usize, hi: usize) -> Vec<(us
     result
 }
 
-impl TitleRow for FilePreviewComponent {
+impl crate::tui::title_row::TitleRow for FilePreviewComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
         focused: bool,
-        state: &mut AppState,
+        state: &mut crate::tui::state::AppState,
     ) -> usize {
+        use crate::tui::state::PreviewInput;
+        use crate::tui::state::SearchDirection;
         let theme = &state.theme;
         let input = self
             .file_key(state)
@@ -1052,7 +1110,9 @@ impl TitleRow for FilePreviewComponent {
             let (title, removed) = self
                 .title_text_render(state)
                 .unwrap_or_else(|| (String::new(), false));
-            render_pane_title(ops, pane_box, &title, removed, theme, focused);
+            crate::tui::title_row::render_pane_title(
+                ops, pane_box, &title, removed, theme, focused,
+            );
             1
         }
     }
@@ -1061,11 +1121,11 @@ impl TitleRow for FilePreviewComponent {
 #[allow(clippy::too_many_arguments)] // cohesive per-line paint context; single call site
 fn paint_line_segment(
     render_ops: &mut RenderOpIRVec,
-    data: &FileData,
+    data: &crate::loader::FileData,
     colored_guard: &[crate::lsp::ColoredLine],
     line_idx: usize,
     (seg_start_char, seg_end_char): (usize, usize),
-    theme: &HelixTheme,
+    theme: &crate::tui::theme::HelixTheme,
     pane_bg: RgbValue,
     fg_override: Option<RgbValue>,
 ) {

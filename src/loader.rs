@@ -1,12 +1,8 @@
-use camino::{Utf8Path, Utf8PathBuf};
-use parking_lot::{Mutex, RwLock};
 use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-
-use crate::lsp;
 
 /// Stable index into the file list.
 ///
@@ -170,25 +166,25 @@ pub(crate) fn drag_range(
 }
 
 pub struct LoadedFile {
-    pub path: Utf8PathBuf,
-    pub data: RwLock<FileData>,
-    pub colored_lines: Mutex<Vec<lsp::ColoredLine>>,
+    pub path: camino::Utf8PathBuf,
+    pub data: parking_lot::RwLock<FileData>,
+    pub colored_lines: parking_lot::Mutex<Vec<crate::lsp::ColoredLine>>,
     pub removed: AtomicBool,
     pub needs_full_load: AtomicBool,
 }
 
 impl LoadedFile {
     pub fn load(path: PathBuf) -> Option<Arc<Self>> {
-        let path = Utf8PathBuf::from_path_buf(path).ok()?;
+        let path = camino::Utf8PathBuf::from_path_buf(path).ok()?;
         let content = fs::read_to_string(&path).ok()?;
         let line_starts = compute_line_starts(&content);
         Some(Arc::new(Self {
             path,
-            data: RwLock::new(FileData {
+            data: parking_lot::RwLock::new(FileData {
                 content,
                 line_starts,
             }),
-            colored_lines: Mutex::new(vec![]),
+            colored_lines: parking_lot::Mutex::new(vec![]),
             removed: AtomicBool::new(false),
             needs_full_load: AtomicBool::new(false),
         }))
@@ -253,7 +249,7 @@ pub const IGNORED_DIRS: [&str; 2] = ["target", GIT_DIR];
 
 /// Whether a repository-relative path sits under an [`IGNORED_DIRS`] directory at any
 /// depth: the walk prunes them everywhere, so the watcher must drop their events too.
-pub fn is_ignored(rel: &Utf8Path) -> bool {
+pub fn is_ignored(rel: &camino::Utf8Path) -> bool {
     rel.components()
         .any(|component| IGNORED_DIRS.contains(&component.as_str()))
 }
@@ -261,7 +257,7 @@ pub fn is_ignored(rel: &Utf8Path) -> bool {
 /// Walk `root` recursively and return every regular-file path, skipping the
 /// [`IGNORED_DIRS`]. Shared by the initial load (`main.rs`) and the watcher's
 /// overflow rescan so both see the same set of files.
-pub fn walk_repo_files(root: &Utf8Path) -> Vec<PathBuf> {
+pub fn walk_repo_files(root: &camino::Utf8Path) -> Vec<PathBuf> {
     jwalk::WalkDir::new(root)
         .process_read_dir(move |_, _, _, children| {
             children.retain(|entry| {
@@ -283,23 +279,23 @@ pub fn walk_repo_files(root: &Utf8Path) -> Vec<PathBuf> {
         .collect()
 }
 
-pub fn path_for_file_key(files: &[Arc<LoadedFile>], key: FileKey) -> Option<&Utf8Path> {
+pub fn path_for_file_key(files: &[Arc<LoadedFile>], key: FileKey) -> Option<&camino::Utf8Path> {
     files.get(key.0).map(|f| f.path.as_ref())
 }
 
-pub fn file_key_for_path(files: &[Arc<LoadedFile>], path: &Utf8Path) -> Option<FileKey> {
+pub fn file_key_for_path(files: &[Arc<LoadedFile>], path: &camino::Utf8Path) -> Option<FileKey> {
     files.iter().position(|f| f.path == path).map(FileKey)
 }
 
 impl LoadedFile {
-    pub fn stub(path: Utf8PathBuf) -> Arc<Self> {
+    pub fn stub(path: camino::Utf8PathBuf) -> Arc<Self> {
         Arc::new(Self {
             path,
-            data: RwLock::new(FileData {
+            data: parking_lot::RwLock::new(FileData {
                 content: String::new(),
                 line_starts: vec![0],
             }),
-            colored_lines: Mutex::new(vec![]),
+            colored_lines: parking_lot::Mutex::new(vec![]),
             removed: AtomicBool::new(true),
             needs_full_load: AtomicBool::new(false),
         })
@@ -467,7 +463,7 @@ mod tests {
 
     #[test]
     fn stub_file_is_marked_removed() {
-        let stub = LoadedFile::stub(Utf8PathBuf::from("/repo/missing.rs"));
+        let stub = LoadedFile::stub(camino::Utf8PathBuf::from("/repo/missing.rs"));
         assert!(stub.removed.load(std::sync::atomic::Ordering::Relaxed));
         assert!(stub.data.read().content.is_empty());
     }

@@ -1,18 +1,24 @@
-use super::app::Id;
-use crate::tui::*;
+#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
+use r3bl_tui::*;
 
 pub(super) struct PanesRenderer<'a> {
-    pub(super) visible: &'a [PaneSlot],
+    pub(super) visible: &'a [crate::tui::pane_manager::PaneSlot],
 }
 
-impl SurfaceRender<AppState, AppSignal> for PanesRenderer<'_> {
+impl SurfaceRender<crate::tui::state::AppState, crate::tui::state::AppSignal>
+    for PanesRenderer<'_>
+{
     fn render_in_surface(
         &mut self,
         surface: &mut Surface,
-        global_data: &mut GlobalData<AppState, AppSignal>,
-        component_registry_map: &mut ComponentRegistryMap<AppState, AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        component_registry_map: &mut ComponentRegistryMap<
+            crate::tui::state::AppState,
+            crate::tui::state::AppSignal,
+        >,
         has_focus: &mut HasFocus,
     ) -> CommonResult<()> {
+        use crate::tui::app::Id;
         throws!({
             const COLUMN_ID_BASE: u8 = 100;
             let container_id = FlexBoxId::from(Id::Container);

@@ -10,7 +10,6 @@ pub mod tools;
 pub mod turn;
 pub mod usage;
 
-use serde::{Deserialize, Serialize};
 use std::fmt;
 
 /// How a turn runs: for the teacher, or for the executor.
@@ -259,7 +258,7 @@ impl AgentConfig {
 
 /// One message of a transcript, in our own form so that `transcript.jsonl` does not
 /// depend on any provider or library.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "role", rename_all = "snake_case")]
 pub enum Message {
     User {
@@ -280,7 +279,7 @@ pub enum Message {
     },
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
