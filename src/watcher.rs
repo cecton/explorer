@@ -148,6 +148,8 @@ impl RRTWorker for WatcherWorker {
                     let Ok(rel) = utf8.strip_prefix(&self.root) else {
                         continue;
                     };
+                    // Ahead of the ignored filter: the paths that reload the git log are
+                    // under `.git`, which `is_ignored` drops.
                     if is_git_history_trigger(rel.components()) {
                         self.pending_git = true;
                         continue;
@@ -310,29 +312,35 @@ fn is_git_history_trigger(components: camino::Utf8Components<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use camino::Utf8Path;
 
     #[test]
-    fn ignored_dirs_are_dropped_at_any_depth() {
+    fn events_under_ignored_dirs_are_dropped_at_any_depth() {
         for path in [
             "target/debug/explorer",
             "crates/xtask/target/debug/build.rs",
             ".git/config",
             "vendor/x/.git/HEAD",
         ] {
-            assert!(
-                crate::loader::is_ignored(Utf8PathBuf::from(path).as_path()),
-                "{path}"
-            );
+            assert!(crate::loader::is_ignored(Utf8Path::new(path)), "{path}");
         }
         for path in [
             "src/target_edit.rs",
             "docs/targeting.md",
             "xtask/src/main.rs",
         ] {
-            assert!(
-                !crate::loader::is_ignored(Utf8PathBuf::from(path).as_path()),
-                "{path}"
-            );
+            assert!(!crate::loader::is_ignored(Utf8Path::new(path)), "{path}");
+        }
+    }
+
+    #[test]
+    fn the_git_history_trigger_is_checked_before_the_ignored_dir_filter() {
+        // Both predicates hold for these, so only the order of the two checks in the
+        // dispatch loop keeps a ref update reloading the git log instead of dropping it.
+        for path in [".git/HEAD", ".git/refs/heads/main", ".git/packed-refs"] {
+            let rel = Utf8Path::new(path);
+            assert!(is_git_history_trigger(rel.components()), "{path}");
+            assert!(crate::loader::is_ignored(rel), "{path}");
         }
     }
 
