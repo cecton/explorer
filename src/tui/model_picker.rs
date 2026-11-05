@@ -19,9 +19,7 @@ impl ModelPickerComponent {
     /// model lists that failed to load.
     pub(crate) fn open(
         state: &mut crate::tui::state::AppState,
-        main_tx: tokio::sync::mpsc::Sender<
-            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-        >,
+        main_tx: crate::signal::MainTx,
         purpose: crate::tui::state::ModelPickerPurpose,
     ) {
         use crate::tui::pane_manager::Window;
@@ -90,14 +88,9 @@ impl ModelPickerComponent {
 
 /// Gets the model list of `endpoint` in the background: fetched from an
 /// OpenAI-compatible server, taken from the configuration for the `claude` CLI.
-pub(crate) fn fetch_models(
-    endpoint: &crate::agent::Endpoint,
-    main_tx: tokio::sync::mpsc::Sender<
-        TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-    >,
-) {
+pub(crate) fn fetch_models(endpoint: &crate::agent::Endpoint, main_tx: crate::signal::MainTx) {
     use crate::agent::EndpointKind;
-    use crate::tui::state::AppSignal;
+    use crate::signal::AppSignal;
     let name = endpoint.name.clone();
     let kind = endpoint.kind.clone();
     tokio::spawn(async move {
@@ -113,14 +106,13 @@ pub(crate) fn fetch_models(
             }
             EndpointKind::ClaudeCode { models } => Ok(models),
         };
-        let _ = main_tx
-            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                AppSignal::ModelsFetched {
-                    endpoint: name,
-                    result,
-                },
-            ))
-            .await;
+        crate::signal::send(
+            &main_tx,
+            AppSignal::ModelsFetched {
+                endpoint: name,
+                result,
+            },
+        );
     });
 }
 
@@ -225,7 +217,7 @@ impl crate::tui::title_row::TitleRow for ModelPickerComponent {
     }
 }
 
-impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for ModelPickerComponent {
+impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ModelPickerComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -234,7 +226,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Mo
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -298,7 +290,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Mo
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,

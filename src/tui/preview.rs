@@ -45,18 +45,16 @@ impl FilePreviewComponent {
     /// change, so nothing else would take the message off the title bar.
     fn repaint_when_error_expires(
         &self,
-        global_data: &GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
     ) {
-        use crate::tui::state::AppSignal;
+        use crate::signal::AppSignal;
         if self.error.is_none() {
             return;
         }
         let main_tx = global_data.main_thread_channel_sender.clone();
         tokio::spawn(async move {
             tokio::time::sleep(ERROR_SHOWN_FOR).await;
-            let _ = main_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                AppSignal::Redraw,
-            ));
+            crate::signal::try_send(&main_tx, AppSignal::Redraw);
         });
     }
 
@@ -425,7 +423,7 @@ impl FilePreviewComponent {
     }
 }
 
-impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for FilePreviewComponent {
+impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePreviewComponent {
     fn reset(&mut self) {
         self.drag_snapshot = None;
         self.drag_start_line = None;
@@ -438,14 +436,14 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Fi
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::signal::AppSignal;
         use crate::tui::command_line::CommandLine;
         use crate::tui::input_line::InputLine;
         use crate::tui::pane_manager::Window;
-        use crate::tui::state::AppSignal;
         use crate::tui::state::PreviewInput;
         use crate::tui::state::SearchDirection;
         throws_with_return!({
@@ -571,13 +569,13 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Fi
                     editor,
                     crate::tui::command_line::sh_quote(file_path.as_str())
                 );
-                send_signal!(
-                    global_data.main_thread_channel_sender,
-                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::OpenEditor {
+                crate::signal::send(
+                    &global_data.main_thread_channel_sender,
+                    AppSignal::OpenEditor {
                         cmd: editor_cmd,
                         cwd,
                         file_key: key,
-                    })
+                    },
                 );
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -703,7 +701,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Fi
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,

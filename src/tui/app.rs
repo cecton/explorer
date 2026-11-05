@@ -67,11 +67,7 @@ pub struct AppMain {
     picker_results_tx: tokio::sync::mpsc::Sender<crate::tui::window_picker::PickerResultMsg>,
     picker_results_rx: tokio::sync::mpsc::Receiver<crate::tui::window_picker::PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
-    exit_tx: Arc<
-        OnceLock<
-            tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>>,
-        >,
-    >,
+    exit_tx: Arc<OnceLock<crate::signal::MainTx>>,
     terminal_event_tx: tokio::sync::mpsc::UnboundedSender<(usize, PtyOutputEvent)>,
     terminal_event_rx: tokio::sync::mpsc::UnboundedReceiver<(usize, PtyOutputEvent)>,
     lsp_guard: Option<SubscriberGuard<crate::lsp::LspWorker>>,
@@ -93,14 +89,8 @@ impl AppMain {
     fn new_boxed(
         files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
         root: camino::Utf8PathBuf,
-        exit_tx: Arc<
-            OnceLock<
-                tokio::sync::mpsc::Sender<
-                    TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-                >,
-            >,
-        >,
-    ) -> BoxedSafeApp<crate::tui::state::AppState, crate::tui::state::AppSignal> {
+        exit_tx: Arc<OnceLock<crate::signal::MainTx>>,
+    ) -> BoxedSafeApp<crate::tui::state::AppState, crate::signal::AppSignal> {
         let (picker_results_tx, picker_results_rx) = tokio::sync::mpsc::channel(32);
         let (terminal_event_tx, terminal_event_rx) = tokio::sync::mpsc::unbounded_channel();
         Box::new(Self {
@@ -159,7 +149,7 @@ impl AppMain {
     fn restart_lsp_if_pending(
         &mut self,
         state: &crate::tui::state::AppState,
-        main_tx: MainTx,
+        main_tx: crate::signal::MainTx,
     ) -> bool {
         use crate::lsp::LspConfig;
         use crate::lsp::LspHealth;
@@ -208,15 +198,15 @@ impl AppMain {
 
     fn open_terminal(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         cmd: Option<String>,
         cwd: Option<camino::Utf8PathBuf>,
         pane_size: Option<crate::tui::pane_manager::PaneSize>,
         id: Option<usize>,
         replace_window: Option<crate::tui::pane_manager::Window>,
     ) -> CommonResult<EventPropagation> {
+        use crate::signal::AppSignal;
         use crate::tui::pane_manager::Window;
-        use crate::tui::state::AppSignal;
         use crate::tui::state::TerminalPane;
         throws_with_return!({
             let state = &mut global_data.state;
@@ -338,9 +328,7 @@ impl AppMain {
                     // Exit: always send Redraw (never throttled) so the
                     // terminal pane is removed from the UI immediately.
                     if is_exit {
-                        let _ = notify_tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                            AppSignal::Redraw,
-                        ));
+                        crate::signal::try_send(&notify_tx, AppSignal::Redraw);
                         break;
                     }
 
@@ -488,61 +476,33 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut crate::tui::state::AppSta
     }
 }
 
-/// Tells the main thread that the status of an MCP server changed.
-pub(crate) fn mcp_notify(
-    main_tx: tokio::sync::mpsc::Sender<
-        TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-    >,
-) -> crate::agent::mcp::Notify {
-    use crate::tui::state::AppSignal;
-    Arc::new(move |name| {
-        let main_tx = main_tx.clone();
-        let name = name.to_string();
-        tokio::spawn(async move {
-            let _ = main_tx
-                .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                    AppSignal::McpStatus { name },
-                ))
-                .await;
-        });
-    })
-}
-
-type MainTx =
-    tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>>;
-
 /// How many 5s `Housekeeping` calls apart a steady LSP health is logged: about 30s.
 const LSP_HEALTH_LOG_EVERY: u32 = 6;
 
 /// Sends `signal` every `period`, the first time at once. A stall costs one late signal,
 /// never a burst of catch-up ones; a full channel drops that period's signal.
-fn every(tx: &MainTx, period: Duration, signal: crate::tui::state::AppSignal) {
+fn every(tx: &crate::signal::MainTx, period: Duration, signal: crate::signal::AppSignal) {
     let tx = tx.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(period);
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             interval.tick().await;
-            let _ = tx.try_send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                signal.clone(),
-            ));
+            crate::signal::try_send(&tx, signal.clone());
         }
     });
 }
 
 /// Rechecks the working-tree dirty status off the main thread (it walks the index and
 /// the worktree); the answer comes back as `DirtyStatusLoaded`.
-fn spawn_dirty_check(state: &crate::tui::state::AppState, main_tx: MainTx) {
-    use crate::tui::state::AppSignal;
+fn spawn_dirty_check(state: &crate::tui::state::AppState, main_tx: crate::signal::MainTx) {
+    use crate::signal::AppSignal;
     let Some(repo) = state.repo.clone() else {
         return;
     };
     tokio::task::spawn_blocking(move || {
         let result = crate::git::is_dirty(&repo);
-        send_signal!(
-            main_tx,
-            TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::DirtyStatusLoaded(result))
-        );
+        crate::signal::send(&main_tx, AppSignal::DirtyStatusLoaded(result));
     });
 }
 
@@ -568,7 +528,7 @@ fn maybe_save_session(state: &mut crate::tui::state::AppState, root: &camino::Ut
 
 impl App for AppMain {
     type S = crate::tui::state::AppState;
-    type AS = crate::tui::state::AppSignal;
+    type AS = crate::signal::AppSignal;
 
     fn app_init_components(
         &mut self,
@@ -601,13 +561,13 @@ impl App for AppMain {
 
     fn app_start_background_services(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
     ) {
         use crate::conversation::ConversationTree;
         use crate::lsp::LspConfig;
+        use crate::signal::AppSignal;
         use crate::tui::git_log_pane::GitLogPaneComponent;
         use crate::tui::pane_manager::Window;
-        use crate::tui::state::AppSignal;
         use crate::tui::state::CommitDiffState;
         use crate::watcher::WatcherConfig;
         let notify_tx = global_data.main_thread_channel_sender.clone();
@@ -634,7 +594,7 @@ impl App for AppMain {
             }
         }
 
-        let notify = mcp_notify(notify_tx.clone());
+        let notify = crate::agent::mcp::notify(notify_tx.clone());
         for decl in &global_data.state.mcp_servers {
             global_data.state.mcp.start(decl, Arc::clone(&notify));
         }
@@ -707,23 +667,16 @@ impl App for AppMain {
                     tokio::task::spawn_blocking(move || {
                         let result = crate::git::load_commit_diff(&repo, id)
                             .map(|text| std::sync::Arc::new(crate::git::classify_diff(&text)));
-                        send_signal!(
-                            main_tx,
-                            TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::CommitDiffLoaded { id, result }
-                            )
-                        );
+                        crate::signal::send(&main_tx, AppSignal::CommitDiffLoaded { id, result });
                     });
                 }
                 None => {
-                    send_signal!(
-                        main_tx,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(
-                            AppSignal::CommitDiffLoaded {
-                                id,
-                                result: Err("open repository: not a git repository".to_string()),
-                            }
-                        )
+                    crate::signal::send(
+                        &main_tx,
+                        AppSignal::CommitDiffLoaded {
+                            id,
+                            result: Err("open repository: not a git repository".to_string()),
+                        },
                     );
                 }
             }
@@ -745,10 +698,7 @@ impl App for AppMain {
             let main_tx = notify_tx.clone();
             tokio::task::spawn_blocking(move || {
                 *tree.write() = ConversationTree::load(&dir);
-                send_signal!(
-                    main_tx,
-                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::ConversationsLoaded)
-                );
+                crate::signal::send(&main_tx, AppSignal::ConversationsLoaded);
             });
         }
 
@@ -768,10 +718,10 @@ impl App for AppMain {
     fn app_handle_input_event(
         &mut self,
         input_event: InputEvent,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         component_registry_map: &mut ComponentRegistryMap<
             crate::tui::state::AppState,
-            crate::tui::state::AppSignal,
+            crate::signal::AppSignal,
         >,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -1249,11 +1199,11 @@ impl App for AppMain {
 
     fn app_handle_signal(
         &mut self,
-        action: &crate::tui::state::AppSignal,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        action: &crate::signal::AppSignal,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         _component_registry_map: &mut ComponentRegistryMap<
             crate::tui::state::AppState,
-            crate::tui::state::AppSignal,
+            crate::signal::AppSignal,
         >,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -1261,13 +1211,13 @@ impl App for AppMain {
         use crate::conversation::NodeStatus;
         use crate::loader::FileKey;
         use crate::loader::LoadedFile;
+        use crate::signal::AppSignal;
+        use crate::signal::SymbolRefLocation;
         use crate::tui::after_agents::AfterAgents;
         use crate::tui::discussion_pane::DiscussionComponent;
         use crate::tui::git_log_pane::GitLogPaneComponent;
         use crate::tui::pane_manager::Window;
-        use crate::tui::state::AppSignal;
         use crate::tui::state::SymbolHighlightGroup;
-        use crate::tui::state::SymbolRefLocation;
         use crate::tui::window_picker::WindowPickerComponent;
         sync_has_focus(&global_data.state, _has_focus);
 
@@ -1481,24 +1431,17 @@ impl App for AppMain {
                 AppSignal::SetCargoFeatures(_) => {
                     // Handled as early return above; unreachable here.
                 }
-                AppSignal::SymbolHighlightResult {
-                    qualified_name,
-                    group_id,
-                    origin_file_idx,
-                    origin_line,
-                    origin_char,
-                    origin_word,
-                    origin_locations,
-                    reference_locations,
-                } => {
-                    let qualified_name = qualified_name.clone();
-                    let group_id = *group_id;
-                    let origin_file_idx = *origin_file_idx;
-                    let origin_line = *origin_line;
-                    let origin_char = *origin_char;
-                    let origin_word = origin_word.clone();
+                AppSignal::SymbolHighlight(highlight) => {
+                    let qualified_name = highlight.qualified_name.clone();
+                    let group_id = highlight.group_id;
+                    let origin_file_idx = highlight.origin.0;
+                    let origin_line = highlight.origin_line;
+                    let origin_char = highlight.origin_char;
+                    let origin_word = highlight.origin_word.clone();
+                    let origin_locations = &highlight.origin_locations;
+                    let reference_locations = &highlight.reference_locations;
                     tracing::debug!(
-                        "AppSignal::SymbolHighlightResult: qn={:?} group_id={:?} origin_locs={} ref_locs={}",
+                        "AppSignal::SymbolHighlight: qn={:?} group_id={:?} origin_locs={} ref_locs={}",
                         qualified_name,
                         group_id,
                         origin_locations.len(),
@@ -1627,12 +1570,7 @@ impl App for AppMain {
                     if let Some(repo) = state.repo.clone() {
                         tokio::task::spawn_blocking(move || {
                             let result = crate::git::load_refs(&repo).map(Arc::new);
-                            send_signal!(
-                                main_tx,
-                                TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                    AppSignal::GitRefsLoaded(result)
-                                )
-                            );
+                            crate::signal::send(&main_tx, AppSignal::GitRefsLoaded(result));
                         });
                     }
                 }
@@ -1753,7 +1691,7 @@ impl App for AppMain {
                 }
                 AppSignal::UsageFetched { endpoint, usage } => {
                     state.usage.insert(endpoint.clone(), usage.clone());
-                    crate::agent::usage::save(&state.usage);
+                    crate::usage::save(&state.usage);
                 }
                 AppSignal::TurnTick => {
                     state.spinner_tick =
@@ -1808,17 +1746,10 @@ impl App for AppMain {
                             }
                         }
                     }
-                    let updated = state.conversations.write().update_meta(node, |meta| {
-                        meta.status = Some(outcome.status);
-                        meta.error = outcome.error.clone();
-                        meta.secs = Some(outcome.secs);
-                        meta.head_after = outcome.head_after.clone();
-                        meta.tokens_in = outcome.tokens_in;
-                        meta.cached_in = outcome.cached_in;
-                        meta.commits = outcome.commits.clone();
-                        meta.scratch_reset = outcome.reset;
-                        meta.session_id = outcome.session_id.clone();
-                    });
+                    let updated = state
+                        .conversations
+                        .write()
+                        .update_meta(node, |meta| meta.record_outcome(outcome));
                     if let Err(e) = updated {
                         tracing::warn!("failed to save the outcome of {}: {e}", node.as_str());
                     }
@@ -1923,10 +1854,10 @@ impl App for AppMain {
 
     fn app_render(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         component_registry_map: &mut ComponentRegistryMap<
             crate::tui::state::AppState,
-            crate::tui::state::AppSignal,
+            crate::signal::AppSignal,
         >,
         has_focus: &mut HasFocus,
     ) -> CommonResult {
@@ -2445,12 +2376,7 @@ fn focused_usage(state: &crate::tui::state::AppState) -> Vec<(String, Option<u32
 /// Asks what each OpenRouter key of the configuration has spent. Its counter settles
 /// seconds after the requests that spent it, so the display is polled at startup and
 /// between turns, not only when a turn ends.
-fn poll_openrouter_usage(
-    state: &crate::tui::state::AppState,
-    main_tx: tokio::sync::mpsc::Sender<
-        TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-    >,
-) {
+fn poll_openrouter_usage(state: &crate::tui::state::AppState, main_tx: crate::signal::MainTx) {
     use crate::agent::EndpointKind;
     for endpoint in &state.agent.endpoints {
         if matches!(endpoint.kind, EndpointKind::OpenRouter { .. }) {
@@ -2499,10 +2425,7 @@ pub async fn run(
     root: camino::Utf8PathBuf,
 ) -> CommonResult<()> {
     use crate::agent::Mode;
-    use crate::tui::state::AppSignal;
-    let exit_tx: Arc<
-        OnceLock<tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<AppSignal>>>,
-    > = Arc::new(OnceLock::new());
+    let exit_tx: Arc<OnceLock<crate::signal::MainTx>> = Arc::new(OnceLock::new());
     let exit_message: Arc<OnceLock<&'static str>> = Arc::new(OnceLock::new());
 
     // Send Exit to the TUI event loop on SIGTERM/SIGINT/SIGHUP so RawMode::end() runs cleanly.

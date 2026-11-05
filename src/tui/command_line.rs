@@ -30,10 +30,9 @@ struct CommandRun<'a> {
     /// The window focused when the line opened.
     origin: Option<crate::tui::pane_manager::Window>,
     /// The main thread's channel, which an MCP server reports its status through.
-    main_tx:
-        tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>>,
+    main_tx: crate::signal::MainTx,
     /// The terminal a command asks for, applied once the line has closed.
-    signal: Option<crate::tui::state::AppSignal>,
+    signal: Option<crate::signal::AppSignal>,
 }
 
 /// Every command the line runs, in the order the palette lists it.
@@ -286,7 +285,7 @@ impl CommandLine {
 
 /// Runs the typed command: the command line closes, or stays open with the error.
 pub fn run_command_line(
-    global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+    global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
 ) {
     use crate::tui::pane_manager::Window;
     let main_tx = global_data.main_thread_channel_sender.clone();
@@ -343,10 +342,7 @@ pub fn run_command_line(
             let signal = run.signal.take();
             state.command_line = None;
             if let Some(signal) = signal {
-                send_signal!(
-                    global_data.main_thread_channel_sender,
-                    TerminalWindowMainThreadSignal::ApplyAppSignal(signal)
-                );
+                crate::signal::send(&global_data.main_thread_channel_sender, signal);
             }
         }
         Err(error) => {
@@ -425,17 +421,17 @@ fn parse_line_ranges(text: &str, max: usize) -> Option<Vec<(usize, usize)>> {
 }
 
 fn run_all_features(run: &mut CommandRun<'_>) -> Result<(), String> {
-    use crate::lsp::CargoFeatureSelection;
+    use crate::config::CargoFeatureSelection;
     select_features(run, CargoFeatureSelection::All)
 }
 
 fn run_default_features(run: &mut CommandRun<'_>) -> Result<(), String> {
-    use crate::lsp::CargoFeatureSelection;
+    use crate::config::CargoFeatureSelection;
     select_features(run, CargoFeatureSelection::Default)
 }
 
 fn run_features(run: &mut CommandRun<'_>) -> Result<(), String> {
-    use crate::lsp::CargoFeatureSelection;
+    use crate::config::CargoFeatureSelection;
     let mut tokens = run.argument.split_whitespace().peekable();
     let no_default_features = tokens.next_if_eq(&"no-default").is_some();
     let features: Vec<String> = tokens.map(str::to_string).collect();
@@ -454,9 +450,9 @@ fn run_features(run: &mut CommandRun<'_>) -> Result<(), String> {
 /// Asks for rust-analyzer to restart with `selection`, once the line has closed.
 fn select_features(
     run: &mut CommandRun<'_>,
-    selection: crate::lsp::CargoFeatureSelection,
+    selection: crate::config::CargoFeatureSelection,
 ) -> Result<(), String> {
-    use crate::tui::state::AppSignal;
+    use crate::signal::AppSignal;
     if crate::lsp::disabled() {
         return Err("rust-analyzer is disabled (EXPLORER_NO_LSP)".to_string());
     }
@@ -475,7 +471,7 @@ fn run_mcp(run: &mut CommandRun<'_>) -> Result<(), String> {
                 name: name.to_string(),
                 program: program.to_string(),
             };
-            let notify = crate::tui::app::mcp_notify(run.main_tx.clone());
+            let notify = crate::agent::mcp::notify(run.main_tx.clone());
             run.state.mcp.start(&decl, notify);
             run.state.mcp_servers.push(decl);
             run.state
@@ -864,8 +860,8 @@ pub fn shell_signal(
     shell_cmd: &str,
     file: Option<&camino::Utf8Path>,
     state: &crate::tui::state::AppState,
-) -> Result<crate::tui::state::AppSignal, String> {
-    use crate::tui::state::AppSignal;
+) -> Result<crate::signal::AppSignal, String> {
+    use crate::signal::AppSignal;
     let cmd = if shell_cmd.is_empty() {
         None
     } else {

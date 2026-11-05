@@ -69,29 +69,12 @@ pub static LSP_RRT: r3bl_tui::RRT<LspWorker> = r3bl_tui::RRT::new();
 
 // ── Shared config set before first subscribe ──────────────────────────────────
 
-/// Which Cargo features rust-analyzer should analyze. Set via the `features` /
-/// `all-features` / `default-features` command line commands; changing it requires
-/// restarting the rust-analyzer process since these are initialization-time-only
-/// settings (rust-analyzer doesn't hot-reload `cargo.*` via `didChangeConfiguration`).
-#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
-pub enum CargoFeatureSelection {
-    #[default]
-    Default,
-    All,
-    Explicit {
-        no_default_features: bool,
-        features: Vec<String>,
-    },
-}
-
 #[derive(Clone)]
 pub struct LspConfig {
     pub root: camino::Utf8PathBuf,
     pub files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
-    pub app_tx: tokio::sync::mpsc::Sender<
-        r3bl_tui::TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-    >,
-    pub cargo_features: CargoFeatureSelection,
+    pub app_tx: crate::signal::MainTx,
+    pub cargo_features: crate::config::CargoFeatureSelection,
 }
 
 impl Debug for LspConfig {
@@ -104,9 +87,12 @@ impl Debug for LspConfig {
 }
 
 /// Builds the `initializationOptions` value sent to rust-analyzer for a given
-/// [`CargoFeatureSelection`]. `Default` omits the `cargo` key entirely so
+/// [`crate::config::CargoFeatureSelection`]. `Default` omits the `cargo` key entirely so
 /// rust-analyzer falls back to its own default (default-features-only) behavior.
-fn cargo_initialization_options(selection: &CargoFeatureSelection) -> Option<serde_json::Value> {
+fn cargo_initialization_options(
+    selection: &crate::config::CargoFeatureSelection,
+) -> Option<serde_json::Value> {
+    use crate::config::CargoFeatureSelection;
     match selection {
         CargoFeatureSelection::Default => None,
         CargoFeatureSelection::All => Some(serde_json::json!({
@@ -153,9 +139,7 @@ pub struct LspWorker {
     stdin: ChildStdin,
     reader: BufReader<ChildStdout>,
     input_receiver: tokio::sync::broadcast::Receiver<LspInput>,
-    app_tx: tokio::sync::mpsc::Sender<
-        r3bl_tui::TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-    >,
+    app_tx: crate::signal::MainTx,
     files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
     req_state: TokenRequestState,
     warmup_queue: VecDeque<usize>,
@@ -695,8 +679,9 @@ impl LspWorker {
     }
 
     fn handle_recv_msg(&mut self, msg: RpcResponse) -> r3bl_tui::Continuation {
-        use crate::tui::state::AppSignal;
-        use crate::tui::state::SymbolRefLocation;
+        use crate::signal::AppSignal;
+        use crate::signal::SymbolHighlight;
+        use crate::signal::SymbolRefLocation;
         let method = msg.method.as_deref().unwrap_or("");
         let has_id = msg.id.is_some();
         tracing::debug!(
@@ -915,16 +900,16 @@ impl LspWorker {
                         // dropped result would strand the group in limbo forever.
                         let _ = self.app_tx.blocking_send(
                             r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::SymbolHighlightResult {
+                                AppSignal::SymbolHighlight(SymbolHighlight {
                                     qualified_name: String::new(),
                                     group_id: pending.group_id,
-                                    origin_file_idx: pending.file_idx,
+                                    origin: crate::loader::FileKey(pending.file_idx),
                                     origin_line: pending.line,
                                     origin_char: pending.character,
                                     origin_word: pending.word,
                                     origin_locations: Vec::new(),
                                     reference_locations: Vec::new(),
-                                },
+                                }),
                             ),
                         );
                         return r3bl_tui::Continuation::Continue;
@@ -1036,16 +1021,16 @@ impl LspWorker {
                     );
                     let _ = self.app_tx.blocking_send(
                         r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
-                            AppSignal::SymbolHighlightResult {
+                            AppSignal::SymbolHighlight(SymbolHighlight {
                                 qualified_name: name,
                                 group_id: pending.group_id,
-                                origin_file_idx: pending.file_idx,
+                                origin: crate::loader::FileKey(pending.file_idx),
                                 origin_line: pending.line,
                                 origin_char: pending.character,
                                 origin_word: pending.word,
                                 origin_locations,
                                 reference_locations,
-                            },
+                            }),
                         ),
                     );
                 }
@@ -1054,11 +1039,7 @@ impl LspWorker {
         }
 
         if notify {
-            let _ = self
-                .app_tx
-                .try_send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
-                    AppSignal::Redraw,
-                ));
+            crate::signal::try_send(&self.app_tx, AppSignal::Redraw);
         }
 
         r3bl_tui::Continuation::Continue
@@ -1566,6 +1547,7 @@ pub(crate) fn byte_to_utf16(s: &str, byte_offset: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::CargoFeatureSelection;
 
     #[test]
     fn test_byte_to_utf16_ascii() {

@@ -5,9 +5,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-type MainTx =
-    tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>>;
-
 pub const NAME: &str = "after-agents";
 
 /// The shell command typed with `after-agents`, run once every agent turn has ended.
@@ -76,7 +73,7 @@ pub fn is_idle(state: &crate::tui::state::AppState) -> bool {
 }
 
 /// A turn ended: when nothing else runs or waits, the pending command starts its countdown.
-pub fn arm(state: &mut crate::tui::state::AppState, main_tx: MainTx) {
+pub fn arm(state: &mut crate::tui::state::AppState, main_tx: crate::signal::MainTx) {
     if !is_idle(state) {
         return;
     }
@@ -90,7 +87,7 @@ pub fn arm(state: &mut crate::tui::state::AppState, main_tx: MainTx) {
     tick(state, main_tx);
 }
 
-pub fn tick(state: &mut crate::tui::state::AppState, main_tx: MainTx) {
+pub fn tick(state: &mut crate::tui::state::AppState, main_tx: crate::signal::MainTx) {
     let Some(after) = state.after_agents.as_ref() else {
         return;
     };
@@ -110,8 +107,13 @@ pub fn tick(state: &mut crate::tui::state::AppState, main_tx: MainTx) {
 }
 
 /// `None` when `sh` cannot start: the command is then gone, as a run that ended.
-fn spawn(command: &str, run: u64, root: &camino::Utf8Path, main_tx: MainTx) -> Option<AfterAgents> {
-    use crate::tui::state::AppSignal;
+fn spawn(
+    command: &str,
+    run: u64,
+    root: &camino::Utf8Path,
+    main_tx: crate::signal::MainTx,
+) -> Option<AfterAgents> {
+    use crate::signal::AppSignal;
     let child = tokio::process::Command::new("sh")
         .arg("-c")
         .arg(command)
@@ -142,11 +144,7 @@ fn spawn(command: &str, run: u64, root: &camino::Utf8Path, main_tx: MainTx) -> O
             Err(e) => tracing::warn!("after-agents: `{task_command}` could not be awaited: {e}"),
         }
         task_reaped.store(true, Ordering::SeqCst);
-        let _ = main_tx
-            .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                AppSignal::AfterAgentsExited { run },
-            ))
-            .await;
+        crate::signal::send(&main_tx, AppSignal::AfterAgentsExited { run });
     });
     Some(AfterAgents::Running {
         command: command.to_string(),

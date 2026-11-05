@@ -6,9 +6,6 @@ use std::time::Instant;
 
 const SCROLL_STEP: usize = 3;
 
-type MainTx =
-    tokio::sync::mpsc::Sender<TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>>;
-
 struct DocLine {
     /// Text the line shows a piece of; `None` for the blank line between two of them.
     part: Option<crate::tui::pane_manager::DocPart>,
@@ -180,7 +177,7 @@ pub(crate) fn drop_queue_entry(state: &mut crate::tui::state::AppState, window: 
 /// draft of the window that queued it, and the queue moves up.
 pub(crate) fn take_back(
     state: &mut crate::tui::state::AppState,
-    main_tx: MainTx,
+    main_tx: crate::signal::MainTx,
     parent: &crate::conversation::NodeId,
 ) {
     let Some(entry) = state
@@ -200,7 +197,7 @@ pub(crate) fn take_back(
 /// found by window, not by the node it will follow.
 pub(crate) fn take_back_window(
     state: &mut crate::tui::state::AppState,
-    main_tx: MainTx,
+    main_tx: crate::signal::MainTx,
     window: usize,
 ) {
     drop_queue_entry(state, window);
@@ -211,7 +208,7 @@ pub(crate) fn take_back_window(
 /// is created and the reason is returned.
 pub(crate) fn start_turn(
     state: &mut crate::tui::state::AppState,
-    main_tx: MainTx,
+    main_tx: crate::signal::MainTx,
     launch: Launch,
 ) -> Result<crate::conversation::NodeId, Refusal> {
     use crate::agent::Mode;
@@ -1074,7 +1071,7 @@ impl DiscussionComponent {
     /// opens it. A refusal is reported in the tree.
     pub(crate) fn duplicate(
         state: &mut crate::tui::state::AppState,
-        main_tx: MainTx,
+        main_tx: crate::signal::MainTx,
         node: &crate::conversation::NodeId,
         spec: crate::agent::ModelSpec,
     ) {
@@ -1101,7 +1098,7 @@ impl DiscussionComponent {
     /// prompt as it was typed, so that an edited version can be sent as a new sibling.
     pub(crate) fn open_edit(
         state: &mut crate::tui::state::AppState,
-        main_tx: MainTx,
+        main_tx: crate::signal::MainTx,
         node: &crate::conversation::NodeId,
     ) {
         use crate::tui::input_line::InputLine;
@@ -1138,7 +1135,7 @@ impl DiscussionComponent {
     /// an empty draft: opening never runs anything.
     pub(crate) fn open(
         state: &mut crate::tui::state::AppState,
-        main_tx: MainTx,
+        main_tx: crate::signal::MainTx,
         node: crate::conversation::NodeId,
     ) {
         use crate::tui::state::DiscussionState;
@@ -1171,7 +1168,7 @@ impl DiscussionComponent {
     /// new one, read-only, and loads the run's task and answer from disk.
     pub(crate) fn open_agent(
         state: &mut crate::tui::state::AppState,
-        main_tx: MainTx,
+        main_tx: crate::signal::MainTx,
         node: crate::conversation::NodeId,
         index: u32,
     ) {
@@ -1211,7 +1208,7 @@ impl DiscussionComponent {
     /// ends.
     pub(crate) fn reload_agent_windows(
         state: &crate::tui::state::AppState,
-        main_tx: MainTx,
+        main_tx: crate::signal::MainTx,
         node: &crate::conversation::NodeId,
         index: Option<u32>,
     ) {
@@ -1248,8 +1245,12 @@ impl DiscussionComponent {
 
     /// Reads the prompt and reply of window `id`'s node or sub-agent run off the UI
     /// thread.
-    pub(crate) fn load_content(state: &crate::tui::state::AppState, main_tx: MainTx, id: usize) {
-        use crate::tui::state::AppSignal;
+    pub(crate) fn load_content(
+        state: &crate::tui::state::AppState,
+        main_tx: crate::signal::MainTx,
+        id: usize,
+    ) {
+        use crate::signal::AppSignal;
         let Some(discussion) = state.discussions.get(&id) else {
             return;
         };
@@ -1269,15 +1270,15 @@ impl DiscussionComponent {
         tokio::task::spawn_blocking(move || {
             let (prompt, reply) = crate::conversation::read_prompt_and_reply(&dir);
             let work_log = crate::conversation::read_work_log(&dir);
-            send_signal!(
-                main_tx,
-                TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::NodeContentLoaded {
+            crate::signal::send(
+                &main_tx,
+                AppSignal::NodeContentLoaded {
                     window_id: id,
                     node,
                     prompt,
                     reply,
                     work_log,
-                })
+                },
             );
         });
     }
@@ -1286,7 +1287,7 @@ impl DiscussionComponent {
     /// directly: it joins the loop at its next round and the draft is cleared. A prompt
     /// for any other turn is queued, and stays in the input until its turn starts. A
     /// refused send keeps the draft and explains itself in the window's notice.
-    fn send(state: &mut crate::tui::state::AppState, main_tx: MainTx, id: usize) {
+    fn send(state: &mut crate::tui::state::AppState, main_tx: crate::signal::MainTx, id: usize) {
         use crate::tui::model_picker::ModelPickerComponent;
         use crate::tui::state::ModelPickerPurpose;
         use crate::tui::state::PendingTurn;
@@ -1428,7 +1429,10 @@ impl DiscussionComponent {
     /// Starts the queued prompts, next first, for as long as no turn is running. Each is
     /// composed from its window as it stands now. A prompt that can no longer be sent
     /// leaves the queue with a notice; a dirty working tree holds the whole queue back.
-    pub(crate) fn release_queue(state: &mut crate::tui::state::AppState, main_tx: MainTx) {
+    pub(crate) fn release_queue(
+        state: &mut crate::tui::state::AppState,
+        main_tx: crate::signal::MainTx,
+    ) {
         while state.running_turns.is_empty() {
             let Some(entry) = state.queued_turns.first().cloned() else {
                 return;
@@ -1834,7 +1838,7 @@ fn model_picker_chord(keymap: &crate::keymap::Keymap) -> String {
     format!("{} {key}", crate::keymap::hint(&keymap.leader_key))
 }
 
-impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for DiscussionComponent {
+impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for DiscussionComponent {
     fn reset(&mut self) {
         self.cache = None;
         self.drag = None;
@@ -1846,7 +1850,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Di
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -1997,7 +2001,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Di
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         has_focus: &mut HasFocus,
@@ -3436,7 +3440,7 @@ mod tests {
     /// Sends `events` to `window` through `component`, as the pane slot showing it would.
     fn type_into(
         component: &mut DiscussionComponent,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         window: usize,
         events: &[InputEvent],
     ) {
@@ -3450,7 +3454,7 @@ mod tests {
 
     fn global_data_with_drafts(
         drafts: &[&str],
-    ) -> GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal> {
+    ) -> GlobalData<crate::tui::state::AppState, crate::signal::AppSignal> {
         use crate::tui::input_line::InputLine;
         use crate::tui::state::DiscussionState;
         let mut state = empty_state();

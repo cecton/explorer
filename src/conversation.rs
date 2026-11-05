@@ -78,6 +78,24 @@ impl NodeStatus {
     }
 }
 
+/// How a turn ended, applied to the node's metadata on the main thread.
+#[derive(Clone, Debug)]
+pub struct TurnOutcome {
+    pub status: NodeStatus,
+    pub error: Option<String>,
+    /// Seconds the turn took, wall clock.
+    pub secs: u64,
+    pub head_after: Option<String>,
+    pub tokens_in: Option<u64>,
+    pub cached_in: Option<u64>,
+    /// Commits the turn produced, oldest first.
+    pub commits: Vec<String>,
+    /// True when the turn's uncommitted work was discarded at its end.
+    pub reset: bool,
+    /// Claude Code session of the turn; `None` for our own loop.
+    pub session_id: Option<String>,
+}
+
 /// Content of a node's `metadata.md`: flat `key: value` lines.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct Metadata {
@@ -112,6 +130,20 @@ pub struct Metadata {
 }
 
 impl Metadata {
+    /// Records how a turn ended: the fields `TurnOutcome` carries, in one place so a
+    /// new one cannot be forgotten at a call site.
+    pub fn record_outcome(&mut self, outcome: &TurnOutcome) {
+        self.status = Some(outcome.status);
+        self.error.clone_from(&outcome.error);
+        self.secs = Some(outcome.secs);
+        self.head_after.clone_from(&outcome.head_after);
+        self.tokens_in = outcome.tokens_in;
+        self.cached_in = outcome.cached_in;
+        self.commits.clone_from(&outcome.commits);
+        self.scratch_reset = outcome.reset;
+        self.session_id.clone_from(&outcome.session_id);
+    }
+
     pub fn parse(text: &str) -> Self {
         let mut meta = Self::default();
         for (key, value) in crate::util::text::key_values(text) {

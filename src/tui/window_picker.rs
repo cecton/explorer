@@ -31,9 +31,7 @@ impl WindowPickerComponent {
     fn on_query_changed(
         &self,
         state: &crate::tui::state::AppState,
-        main_tx: tokio::sync::mpsc::Sender<
-            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-        >,
+        main_tx: crate::signal::MainTx,
     ) {
         Self::spawn_match(
             state,
@@ -47,11 +45,9 @@ impl WindowPickerComponent {
         state: &crate::tui::state::AppState,
         generation: Arc<AtomicU64>,
         results_tx: tokio::sync::mpsc::Sender<PickerResultMsg>,
-        main_tx: tokio::sync::mpsc::Sender<
-            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-        >,
+        main_tx: crate::signal::MainTx,
     ) {
-        use crate::tui::state::AppSignal;
+        use crate::signal::AppSignal;
         let query = state.window_picker.query.text().to_string();
         let files = Arc::clone(&state.files);
         let root = state.root.clone();
@@ -63,10 +59,7 @@ impl WindowPickerComponent {
             let results = run_file_name_match(&query, &snapshot, &root, &window_stack);
             if gen_counter.load(Ordering::Relaxed) == current_generation {
                 let _ = results_tx.try_send((current_generation, results));
-                send_signal!(
-                    main_tx,
-                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::Redraw)
-                );
+                crate::signal::send(&main_tx, AppSignal::Redraw);
             }
         });
     }
@@ -242,9 +235,7 @@ fn run_file_name_match(
         .collect()
 }
 
-impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
-    for WindowPickerComponent
-{
+impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for WindowPickerComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -253,7 +244,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -374,7 +365,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,

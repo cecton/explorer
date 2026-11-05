@@ -41,6 +41,21 @@ impl Default for AfterAgentsConfig {
     }
 }
 
+/// Which Cargo features rust-analyzer should analyze. Set via the `features` /
+/// `all-features` / `default-features` command line commands; changing it requires
+/// restarting the rust-analyzer process since these are initialization-time-only
+/// settings (rust-analyzer doesn't hot-reload `cargo.*` via `didChangeConfiguration`).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum CargoFeatureSelection {
+    #[default]
+    Default,
+    All,
+    Explicit {
+        no_default_features: bool,
+        features: Vec<String>,
+    },
+}
+
 /// The `agent` block as written in `config.kdl`: endpoints still without their tokens.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AgentSettings {

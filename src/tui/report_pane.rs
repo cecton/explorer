@@ -91,7 +91,7 @@ impl crate::tui::title_row::TitleRow for ReportComponent {
     }
 }
 
-impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for ReportComponent {
+impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ReportComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -100,7 +100,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Re
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -159,7 +159,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Re
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
@@ -333,7 +333,7 @@ mod tests {
 
     fn global_data_with_a_report(
         state: crate::tui::state::AppState,
-    ) -> GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal> {
+    ) -> GlobalData<crate::tui::state::AppState, crate::signal::AppSignal> {
         let (main_tx, _) = mpsc::channel(8);
         let size = vp_width(80) + vp_height(24);
         GlobalData::try_to_create_instance(

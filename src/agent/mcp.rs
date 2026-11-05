@@ -72,6 +72,19 @@ impl McpStatus {
 /// Called with a server's name whenever its status changes.
 pub type Notify = Arc<dyn Fn(&str) + Send + Sync>;
 
+/// The `Notify` that reports a server's status changes to the main thread, as signals.
+pub(crate) fn notify(main_tx: crate::signal::MainTx) -> Notify {
+    use crate::signal::AppSignal;
+    Arc::new(move |name| {
+        crate::signal::send(
+            &main_tx,
+            AppSignal::McpStatus {
+                name: name.to_string(),
+            },
+        );
+    })
+}
+
 /// The MCP servers of the repository, running for as long as Explorer does.
 #[derive(Default)]
 pub struct McpHost {

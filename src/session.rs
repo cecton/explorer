@@ -18,7 +18,7 @@ pub struct Session {
     pub symbol_highlights: Vec<SessionSymbolGroup>,
     /// Which Cargo features rust-analyzer analyzes for this project.
     #[serde(default)]
-    pub cargo_features: crate::lsp::CargoFeatureSelection,
+    pub cargo_features: crate::config::CargoFeatureSelection,
     /// Selected UI theme name for this project.
     #[serde(default)]
     pub theme: Option<String>,
@@ -670,7 +670,7 @@ mod tests {
 
     #[test]
     fn session_serialization_round_trip() {
-        use crate::lsp::CargoFeatureSelection;
+        use crate::config::CargoFeatureSelection;
         let session = Session {
             version: SESSION_VERSION,
             repo_root: Utf8PathBuf::from("/tmp/repo"),
@@ -807,7 +807,7 @@ mod tests {
 
     #[test]
     fn session_apply_creates_stubs_and_restores_highlights() {
-        use crate::lsp::CargoFeatureSelection;
+        use crate::config::CargoFeatureSelection;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
 
@@ -858,8 +858,8 @@ mod tests {
 
     #[test]
     fn session_apply_batches_stubs_so_multiple_missing_files_get_distinct_keys() {
+        use crate::config::CargoFeatureSelection;
         use crate::loader::LoadedFile;
-        use crate::lsp::CargoFeatureSelection;
         use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
 
@@ -926,7 +926,7 @@ mod tests {
 
     #[test]
     fn session_apply_stores_terminal_restore_infos() {
-        use crate::lsp::CargoFeatureSelection;
+        use crate::config::CargoFeatureSelection;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
 
@@ -962,7 +962,7 @@ mod tests {
 
     #[test]
     fn session_apply_skips_when_repo_root_mismatches() {
-        use crate::lsp::CargoFeatureSelection;
+        use crate::config::CargoFeatureSelection;
         let (_dir_a, root_a) = temp_root();
         let (_dir_b, root_b) = temp_root();
         let mut state = empty_state(root_b.clone());
@@ -1001,8 +1001,8 @@ mod tests {
 
     #[test]
     fn session_apply_restores_symbol_groups() {
+        use crate::config::CargoFeatureSelection;
         use crate::loader::LoadedFile;
-        use crate::lsp::CargoFeatureSelection;
         use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
 

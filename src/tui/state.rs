@@ -397,7 +397,7 @@ pub struct AppState {
     pub models: ModelCatalog,
     /// Last known usage of the spending behind each endpoint, by endpoint name; kept
     /// in `<data_dir>/usage.json`.
-    pub usage: HashMap<String, crate::agent::usage::Usage>,
+    pub usage: HashMap<String, crate::usage::Usage>,
     /// MCP servers of the repository, as saved in its session.
     pub mcp_servers: Vec<crate::agent::mcp::McpServerDecl>,
     /// The running MCP servers, shared with the turns.
@@ -453,7 +453,7 @@ pub struct AppState {
     /// Which Cargo features rust-analyzer analyzes; set via `features`/`all-features`/
     /// `default-features` on the global command line, persisted per-project in the
     /// session file.
-    pub cargo_features: crate::lsp::CargoFeatureSelection,
+    pub cargo_features: crate::config::CargoFeatureSelection,
 }
 
 impl AppState {
@@ -554,7 +554,7 @@ impl AppState {
         keymap: crate::keymap::Keymap,
     ) -> Self {
         use crate::agent::mcp::McpHost;
-        use crate::lsp::CargoFeatureSelection;
+        use crate::config::CargoFeatureSelection;
         use crate::tui::pane_manager::PaneManager;
         use crate::tui::pane_manager::Window;
         use crate::tui::theme::HelixTheme;
@@ -657,144 +657,6 @@ impl Display for AppState {
     }
 }
 
-#[derive(Default, Clone, Debug)]
-#[non_exhaustive]
-pub enum AppSignal {
-    FilesChanged(Arc<crate::watcher::BatchedWatchEvent>),
-    /// Open a terminal pane. `cmd = None` means an interactive shell; `cmd = Some(s)` runs
-    /// `/bin/sh -c s`. `cwd` is the working directory for the child process.
-    OpenTerminal {
-        cmd: Option<String>,
-        cwd: camino::Utf8PathBuf,
-    },
-    /// Open an embedded editor terminal that replaces the FilePreview in-place.
-    OpenEditor {
-        cmd: String,
-        cwd: camino::Utf8PathBuf,
-        file_key: crate::loader::FileKey,
-    },
-    SymbolHighlightResult {
-        qualified_name: String,
-        group_id: Option<usize>,
-        origin_file_idx: usize,
-        origin_line: u32,
-        origin_char: u32,
-        origin_word: Option<String>,
-        origin_locations: Vec<SymbolRefLocation>,
-        reference_locations: Vec<SymbolRefLocation>,
-    },
-    /// A terminal pane produced output and should be re-painted. A flooding pane drives
-    /// this many times a second, so it does nothing but render.
-    TerminalOutput,
-    /// Change which Cargo features rust-analyzer analyzes. rust-analyzer doesn't
-    /// hot-reload `cargo.*` settings, so applying this restarts the LSP worker
-    /// (deferred until the old one has actually exited — see `app_handle_signal`).
-    SetCargoFeatures(crate::lsp::CargoFeatureSelection),
-    /// Result of an async `git::load_log` run for git log window `id`.
-    GitLogLoaded {
-        id: usize,
-        result: Result<Arc<crate::git::LogHistory>, String>,
-    },
-    /// Result of an async `git::load_refs` run (branch picker list).
-    GitRefsLoaded(Result<Arc<Vec<crate::git::GitRef>>, String>),
-    /// Result of an async `git::load_commit_diff` run for `id`.
-    CommitDiffLoaded {
-        id: [u8; 20],
-        result: Result<Arc<Vec<crate::git::DiffLine>>, String>,
-    },
-    /// Result of an async `git::is_dirty` check.
-    DirtyStatusLoaded(Result<bool, String>),
-    /// The watcher saw `.git/HEAD`, `.git/refs/**` or `.git/packed-refs` change:
-    /// the git history or the refs moved since the last knowledge of it, the git
-    /// log windows and the branch picker list are stale until reloaded.
-    GitHistoryChanged,
-    /// The startup load filled `AppState::conversations`.
-    ConversationsLoaded,
-    /// Result of fetching the model list of `endpoint`.
-    ModelsFetched {
-        endpoint: String,
-        result: Result<Vec<String>, String>,
-    },
-    /// How much of the spending behind `endpoint` is used: as known when a turn that
-    /// spent some of it ended, or as just polled for an OpenRouter key.
-    UsageFetched {
-        endpoint: String,
-        usage: crate::agent::usage::Usage,
-    },
-    /// The shared spinner advances one frame (`SPINNER_INTERVAL`); renders only while
-    /// a turn runs.
-    TurnTick,
-    /// The turn of `node` started a sub-agent, already recorded in the tree.
-    SubagentStarted {
-        node: crate::conversation::NodeId,
-    },
-    /// Sub-agent run `index` of `node` ended; its outcome is in the tree.
-    SubagentFinished {
-        node: crate::conversation::NodeId,
-        index: u32,
-    },
-    /// The MCP server `name` started, failed or is starting again.
-    McpStatus {
-        name: String,
-    },
-    /// The `after-agents` command of run `run` ended.
-    AfterAgentsExited {
-        run: u64,
-    },
-    /// The turn of `node` ended.
-    TurnFinished {
-        node: crate::conversation::NodeId,
-        outcome: crate::agent::turn::TurnOutcome,
-    },
-    /// `title.md` of `node` was written.
-    NodeTitleReady {
-        node: crate::conversation::NodeId,
-        title: String,
-    },
-    /// The new attempt at the title and summary of `node` ended, whatever its outcome.
-    NodeRetitleEnded {
-        node: crate::conversation::NodeId,
-    },
-    /// `title.md` of sub-agent run `index` of `node` was written.
-    AgentTitleReady {
-        node: crate::conversation::NodeId,
-        index: u32,
-        title: String,
-    },
-    /// `summary.md` of `node` was written.
-    NodeSummaryReady {
-        node: crate::conversation::NodeId,
-        summary: String,
-    },
-    /// Prompt and reply of `node`, read from disk for discussion window `window_id`.
-    NodeContentLoaded {
-        window_id: usize,
-        node: crate::conversation::NodeId,
-        prompt: String,
-        reply: String,
-        work_log: Vec<String>,
-    },
-    /// Repaint, nothing else.
-    #[default]
-    Redraw,
-    /// Every second: ticks the `after-agents` countdown, the LSP buffer and restart,
-    /// and repaints only when the clock minute changed, a countdown is active, a
-    /// terminal pane has output no signal announced or the LSP restart cleared colors.
-    Tick,
-    /// Every 5 seconds: session save, working-tree dirty check, LSP health log. Never
-    /// repaints; the results come back as their own signals.
-    Housekeeping,
-    /// Every minute: polls what the OpenRouter keys have spent. Never repaints.
-    UsagePollDue,
-}
-
-#[derive(Clone, Debug)]
-pub struct SymbolRefLocation {
-    pub file_key: crate::loader::FileKey,
-    pub start_byte: usize,
-    pub end_byte: usize,
-}
-
 #[derive(Clone, Debug)]
 pub struct SymbolHighlightGroup {
     pub qualified_name: String,
@@ -807,7 +669,7 @@ pub struct SymbolHighlightGroup {
     pub origin_byte_start: Option<usize>,
     pub origin_byte_end: Option<usize>,
     pub color: RgbValue,
-    pub locations: Vec<SymbolRefLocation>,
+    pub locations: Vec<crate::signal::SymbolRefLocation>,
     pub needs_rebuild: bool,
 }
 

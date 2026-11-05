@@ -28,13 +28,11 @@ impl GitLogPaneComponent {
 
     pub(crate) fn open_commit_diff(
         state: &mut crate::tui::state::AppState,
-        main_tx: tokio::sync::mpsc::Sender<
-            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-        >,
+        main_tx: crate::signal::MainTx,
         id: [u8; 20],
     ) {
+        use crate::signal::AppSignal;
         use crate::tui::pane_manager::Window;
-        use crate::tui::state::AppSignal;
         use crate::tui::state::CommitDiffState;
         if let std::collections::hash_map::Entry::Vacant(slot) = state.commit_diffs.entry(id) {
             slot.insert(CommitDiffState::default());
@@ -43,23 +41,16 @@ impl GitLogPaneComponent {
                     tokio::task::spawn_blocking(move || {
                         let result = crate::git::load_commit_diff(&repo, id)
                             .map(|text| Arc::new(crate::git::classify_diff(&text)));
-                        send_signal!(
-                            main_tx,
-                            TerminalWindowMainThreadSignal::ApplyAppSignal(
-                                AppSignal::CommitDiffLoaded { id, result }
-                            )
-                        );
+                        crate::signal::send(&main_tx, AppSignal::CommitDiffLoaded { id, result });
                     });
                 }
                 None => {
-                    send_signal!(
-                        main_tx,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(
-                            AppSignal::CommitDiffLoaded {
-                                id,
-                                result: Err("open repository: not a git repository".to_string()),
-                            }
-                        )
+                    crate::signal::send(
+                        &main_tx,
+                        AppSignal::CommitDiffLoaded {
+                            id,
+                            result: Err("open repository: not a git repository".to_string()),
+                        },
                     );
                 }
             }
@@ -77,9 +68,7 @@ impl GitLogPaneComponent {
     /// with its state untouched.
     pub(crate) fn open_log_at_commit(
         state: &mut crate::tui::state::AppState,
-        main_tx: tokio::sync::mpsc::Sender<
-            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-        >,
+        main_tx: crate::signal::MainTx,
         hash: String,
     ) {
         use crate::tui::pane_manager::Window;
@@ -118,13 +107,11 @@ impl GitLogPaneComponent {
 
     pub(crate) fn reload_log(
         repo: Option<gix::ThreadSafeRepository>,
-        main_tx: tokio::sync::mpsc::Sender<
-            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-        >,
+        main_tx: crate::signal::MainTx,
         id: usize,
         source: &crate::tui::state::LogSource,
     ) {
-        use crate::tui::state::AppSignal;
+        use crate::signal::AppSignal;
         use crate::tui::state::LogSource;
         let arg = match source {
             LogSource::Head => None,
@@ -134,22 +121,16 @@ impl GitLogPaneComponent {
             Some(repo) => {
                 tokio::task::spawn_blocking(move || {
                     let result = crate::git::load_log(&repo, arg.as_deref()).map(Arc::new);
-                    send_signal!(
-                        main_tx,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::GitLogLoaded {
-                            id,
-                            result
-                        })
-                    );
+                    crate::signal::send(&main_tx, AppSignal::GitLogLoaded { id, result });
                 });
             }
             None => {
-                send_signal!(
-                    main_tx,
-                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::GitLogLoaded {
+                crate::signal::send(
+                    &main_tx,
+                    AppSignal::GitLogLoaded {
                         id,
                         result: Err("open repository: not a git repository".to_string()),
-                    })
+                    },
                 );
             }
         }
@@ -287,7 +268,7 @@ impl GitLogPaneComponent {
     }
 }
 
-impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for GitLogPaneComponent {
+impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLogPaneComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -296,12 +277,12 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Gi
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
+        use crate::signal::AppSignal;
         use crate::tui::pane_manager::Window;
-        use crate::tui::state::AppSignal;
         use crate::tui::state::AppState;
         use crate::tui::state::FuzzyPickerState;
         use crate::tui::state::LogSource;
@@ -351,19 +332,14 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Gi
                 let picker_tx = main_tx.clone();
                 tokio::task::spawn_blocking(move || {
                     let result = crate::git::load_refs(&repo).map(Arc::new);
-                    send_signal!(
-                        picker_tx,
-                        TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::GitRefsLoaded(
-                            result
-                        ))
-                    );
+                    crate::signal::send(&picker_tx, AppSignal::GitRefsLoaded(result));
                 });
             } else {
-                send_signal!(
-                    main_tx,
-                    TerminalWindowMainThreadSignal::ApplyAppSignal(AppSignal::GitRefsLoaded(Err(
+                crate::signal::send(
+                    &main_tx,
+                    AppSignal::GitRefsLoaded(Err(
                         "open repository: not a git repository".to_string()
-                    )))
+                    )),
                 );
             }
             return Ok(EventPropagation::ConsumedRender);
@@ -565,7 +541,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Gi
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,

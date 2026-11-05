@@ -111,7 +111,7 @@ fn run_theme_name_match(query: &str) -> Vec<(String, Vec<u32>)> {
         .collect()
 }
 
-impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for ThemePickerComponent {
+impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ThemePickerComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -120,7 +120,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Th
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -188,7 +188,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Th
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,

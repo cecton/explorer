@@ -46,7 +46,7 @@ impl PaneComponent {
         id: FlexBoxId,
         picker_results_tx: tokio::sync::mpsc::Sender<crate::tui::window_picker::PickerResultMsg>,
         picker_generation: Arc<AtomicU64>,
-    ) -> BoxedSafeComponent<crate::tui::state::AppState, crate::tui::state::AppSignal> {
+    ) -> BoxedSafeComponent<crate::tui::state::AppState, crate::signal::AppSignal> {
         use crate::tui::commit_diff_pane::CommitDiffPaneComponent;
         use crate::tui::conversation_tree_pane::ConversationTreeComponent;
         use crate::tui::discussion_pane::DiscussionComponent;
@@ -99,7 +99,7 @@ impl PaneComponent {
     fn handle_scrollbar(
         &mut self,
         mouse: MouseInput,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         window: &crate::tui::pane_manager::Window,
     ) -> EventPropagation {
         use crate::tui::pane_manager::Window;
@@ -366,7 +366,7 @@ pub(super) fn drag_modifier_from_mouse(
     }
 }
 
-impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for PaneComponent {
+impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneComponent {
     fn reset(&mut self) {
         self.picker.reset();
         self.theme_picker.reset();
@@ -389,7 +389,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Pa
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         input_event: InputEvent,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -1078,7 +1078,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Pa
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         current_box: FlexBox,
         surface_bounds: VPBoundingBox,
         has_focus: &mut HasFocus,

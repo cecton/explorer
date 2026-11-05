@@ -17,10 +17,6 @@ pub const TOOL_LINE_PREFIX: &str = "- ";
 /// Sets a sub-agent's tool calls apart in the work log of the turn that called it.
 const SUBAGENT_INDENT: &str = "  ";
 
-pub(super) type MainTx = tokio::sync::mpsc::Sender<
-    r3bl_tui::TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
->;
-
 /// What a running turn has produced so far, read by Discussion windows at render time.
 #[derive(Default)]
 pub struct LiveTurn {
@@ -48,7 +44,7 @@ pub struct LiveTurn {
     /// Claude Code session holding this turn, once the CLI has announced it.
     pub session_id: Option<String>,
     /// What the CLI last reported of the subscription's limits.
-    pub usage: Option<crate::agent::usage::Usage>,
+    pub usage: Option<crate::usage::Usage>,
     /// The sub-agent this turn is waiting for.
     pub subagent: Option<LiveSubagent>,
     /// What the user sent while the turn was working, waiting to join the loop at its
@@ -178,24 +174,6 @@ impl Injector {
     }
 }
 
-/// How a turn ended, applied to the node's metadata on the main thread.
-#[derive(Clone, Debug)]
-pub struct TurnOutcome {
-    pub status: crate::conversation::NodeStatus,
-    pub error: Option<String>,
-    /// Seconds the turn took, wall clock.
-    pub secs: u64,
-    pub head_after: Option<String>,
-    pub tokens_in: Option<u64>,
-    pub cached_in: Option<u64>,
-    /// Commits the turn produced, oldest first.
-    pub commits: Vec<String>,
-    /// True when the turn's uncommitted work was discarded at its end.
-    pub reset: bool,
-    /// Claude Code session of the turn; `None` for our own loop.
-    pub session_id: Option<String>,
-}
-
 #[derive(Clone)]
 pub struct TurnRequest {
     pub mode: crate::agent::Mode,
@@ -277,7 +255,7 @@ fn message_to_send(request: &TurnRequest) -> String {
 pub struct Recorder {
     pub(super) live: Arc<parking_lot::Mutex<LiveTurn>>,
     node_dir: camino::Utf8PathBuf,
-    main_tx: MainTx,
+    main_tx: crate::signal::MainTx,
     /// The recorder of the turn that called this sub-agent, which logs its tool calls
     /// too.
     caller: Option<Caller>,
@@ -329,7 +307,7 @@ impl Recorder {
     fn new(
         live: Arc<parking_lot::Mutex<LiveTurn>>,
         node_dir: camino::Utf8PathBuf,
-        main_tx: MainTx,
+        main_tx: crate::signal::MainTx,
     ) -> Self {
         Self {
             live,
@@ -354,17 +332,12 @@ impl Recorder {
         }
     }
 
-    pub(super) fn main_tx(&self) -> MainTx {
+    pub(super) fn main_tx(&self) -> crate::signal::MainTx {
         self.main_tx.clone()
     }
 
-    pub(super) async fn send(&self, signal: crate::tui::state::AppSignal) {
-        let _ = self
-            .main_tx
-            .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
-                signal,
-            ))
-            .await;
+    pub(super) fn send(&self, signal: crate::signal::AppSignal) {
+        crate::signal::send(&self.main_tx, signal);
     }
 
     pub(super) fn flush_reply(&mut self) {
@@ -495,7 +468,7 @@ impl Recorder {
         self.live.lock().session_id = Some(session_id);
     }
 
-    pub fn usage(&mut self, usage: crate::agent::usage::Usage) {
+    pub fn usage(&mut self, usage: crate::usage::Usage) {
         self.live.lock().usage = Some(usage);
     }
 }
@@ -507,54 +480,51 @@ impl Recorder {
 /// spent it.
 pub fn report_usage(
     endpoint: crate::agent::Endpoint,
-    reported: Option<crate::agent::usage::Usage>,
-    main_tx: MainTx,
+    reported: Option<crate::usage::Usage>,
+    main_tx: crate::signal::MainTx,
 ) {
     use crate::agent::EndpointKind;
-    use crate::tui::state::AppSignal;
+    use crate::signal::AppSignal;
     tokio::spawn(async move {
         let usage = match &endpoint.kind {
             EndpointKind::ClaudeCode { .. } => reported,
-            EndpointKind::OpenCodeGo { url, token } => crate::agent::usage::fetch(url, token)
+            EndpointKind::OpenCodeGo { url, token } => crate::usage::fetch(url, token)
                 .await
                 .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
                 .ok(),
-            EndpointKind::KimiCode { url, token } => crate::agent::usage::fetch_kimi(url, token)
+            EndpointKind::KimiCode { url, token } => crate::usage::fetch_kimi(url, token)
                 .await
                 .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
                 .ok(),
-            EndpointKind::Cline { url, token } => crate::agent::usage::fetch_cline(url, token)
+            EndpointKind::Cline { url, token } => crate::usage::fetch_cline(url, token)
                 .await
                 .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
                 .ok(),
-            EndpointKind::OpenRouter { url, token } => {
-                crate::agent::usage::fetch_openrouter(url, token)
-                    .await
-                    .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
-                    .ok()
-            }
+            EndpointKind::OpenRouter { url, token } => crate::usage::fetch_openrouter(url, token)
+                .await
+                .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
+                .ok(),
             EndpointKind::OpenAi { .. } => None,
         };
         let Some(usage) = usage else {
             return;
         };
-        let _ = main_tx
-            .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
-                AppSignal::UsageFetched {
-                    endpoint: endpoint.name,
-                    usage,
-                },
-            ))
-            .await;
+        crate::signal::send(
+            &main_tx,
+            AppSignal::UsageFetched {
+                endpoint: endpoint.name,
+                usage,
+            },
+        );
     });
 }
 
 /// Starts the turn of a node already created on disk and returns its handle. The
 /// outcome arrives as `AppSignal::TurnFinished`.
-pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
+pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle {
     use crate::agent::Mode;
     use crate::conversation::NodeStatus;
-    use crate::tui::state::AppSignal;
+    use crate::signal::AppSignal;
     let live = Arc::new(parking_lot::Mutex::new(LiveTurn::default()));
     let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
     let handle = TurnHandle {
@@ -638,7 +608,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
                 live.usage.clone(),
             )
         };
-        let outcome = TurnOutcome {
+        let outcome = crate::conversation::TurnOutcome {
             status,
             error,
             secs: handle.started.elapsed().as_secs(),
@@ -649,14 +619,13 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
             reset,
             session_id,
         };
-        let _ = main_tx
-            .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
-                AppSignal::TurnFinished {
-                    node: request.node.clone(),
-                    outcome,
-                },
-            ))
-            .await;
+        crate::signal::send(
+            &main_tx,
+            AppSignal::TurnFinished {
+                node: request.node.clone(),
+                outcome,
+            },
+        );
         report_usage(request.endpoint.clone(), reported_usage, main_tx.clone());
         let reply_blank = recorder.live.lock().reply.trim().is_empty();
         if (status == NodeStatus::Done || !reply_blank || !commits.is_empty())
@@ -1108,7 +1077,7 @@ pub async fn retitle(
     head_before: Option<String>,
     head_after: Option<String>,
     backend: &crate::agent::Backend,
-    main_tx: &MainTx,
+    main_tx: &crate::signal::MainTx,
 ) {
     let root = root.to_path_buf();
     let commits = tokio::task::spawn_blocking(move || match (head_before, head_after) {
@@ -1130,9 +1099,9 @@ async fn title_and_summarize(
     session: &str,
     backend: &crate::agent::Backend,
     input: &str,
-    main_tx: &MainTx,
+    main_tx: &crate::signal::MainTx,
 ) {
-    use crate::tui::state::AppSignal;
+    use crate::signal::AppSignal;
     let answer = match complete(
         backend,
         session,
@@ -1154,30 +1123,26 @@ async fn title_and_summarize(
     if let Err(e) = crate::util::fs::write_atomic(&node_dir.join("title.md"), &title) {
         tracing::warn!("failed to write title.md: {e}");
     }
-    let signal = AppSignal::NodeTitleReady {
-        node: node.clone(),
-        title,
-    };
-    let _ = main_tx
-        .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
-            signal,
-        ))
-        .await;
+    crate::signal::send(
+        main_tx,
+        AppSignal::NodeTitleReady {
+            node: node.clone(),
+            title,
+        },
+    );
     if summary.is_empty() {
         return;
     }
     if let Err(e) = crate::util::fs::write_atomic(&node_dir.join("summary.md"), &summary) {
         tracing::warn!("failed to write summary.md: {e}");
     }
-    let signal = AppSignal::NodeSummaryReady {
-        node: node.clone(),
-        summary,
-    };
-    let _ = main_tx
-        .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
-            signal,
-        ))
-        .await;
+    crate::signal::send(
+        main_tx,
+        AppSignal::NodeSummaryReady {
+            node: node.clone(),
+            summary,
+        },
+    );
 }
 
 #[cfg(test)]

@@ -427,7 +427,7 @@ struct Outcome {
     tokens_in: Option<u64>,
     cached_in: Option<u64>,
     session_id: Option<String>,
-    usage: Option<crate::agent::usage::Usage>,
+    usage: Option<crate::usage::Usage>,
 }
 
 impl Outcome {
@@ -526,7 +526,7 @@ pub async fn run(
     call: &crate::agent::ToolCall,
     recorder: &mut crate::agent::turn::Recorder,
 ) -> String {
-    use crate::tui::state::AppSignal;
+    use crate::signal::AppSignal;
     let launch = {
         let tree = Arc::clone(&context.tree);
         let root = context.root.clone();
@@ -542,11 +542,9 @@ pub async fn run(
         Ok(launch) => launch,
         Err(error) => return format!("error: {error}"),
     };
-    recorder
-        .send(AppSignal::SubagentStarted {
-            node: context.node.clone(),
-        })
-        .await;
+    recorder.send(AppSignal::SubagentStarted {
+        node: context.node.clone(),
+    });
 
     let mut outcome = execute(context, subagents, recorder, &launch, &launch.backend).await;
     // A failed run is concluded at once, so a cancel mid-retry cannot leave it Running;
@@ -652,7 +650,7 @@ async fn conclude(
     outcome: &Outcome,
     recorder: &mut crate::agent::turn::Recorder,
 ) {
-    use crate::tui::state::AppSignal;
+    use crate::signal::AppSignal;
     let id = crate::conversation::agent_id(&context.node, outcome.index);
     let updated = context
         .tree
@@ -670,12 +668,10 @@ async fn conclude(
         tracing::warn!("failed to save the outcome of sub-agent {id}: {e}");
     }
     title_run(context, subagents, outcome, recorder.main_tx());
-    recorder
-        .send(AppSignal::SubagentFinished {
-            node: context.node.clone(),
-            index: outcome.index,
-        })
-        .await;
+    recorder.send(AppSignal::SubagentFinished {
+        node: context.node.clone(),
+        index: outcome.index,
+    });
 }
 
 /// Asks the summary model what the finished run came to, and writes its answer as the
@@ -685,9 +681,9 @@ fn title_run(
     context: &crate::agent::tools::ToolContext,
     subagents: &Subagents,
     outcome: &Outcome,
-    main_tx: crate::agent::turn::MainTx,
+    main_tx: crate::signal::MainTx,
 ) {
-    use crate::tui::state::AppSignal;
+    use crate::signal::AppSignal;
     let Some(backend) = title_backend(subagents, outcome) else {
         return;
     };
@@ -722,11 +718,7 @@ fn title_run(
         if let Err(e) = crate::util::fs::write_atomic(&dir.join("title.md"), &title) {
             tracing::warn!("failed to write the title of sub-agent {session}: {e}");
         }
-        let _ = main_tx
-            .send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
-                AppSignal::AgentTitleReady { node, index, title },
-            ))
-            .await;
+        crate::signal::send(&main_tx, AppSignal::AgentTitleReady { node, index, title });
     });
 }
 

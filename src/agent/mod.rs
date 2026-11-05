@@ -8,7 +8,6 @@ pub mod models;
 pub mod subagent;
 pub mod tools;
 pub mod turn;
-pub mod usage;
 
 use std::fmt;
 

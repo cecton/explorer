@@ -5,16 +5,14 @@ pub(super) struct PanesRenderer<'a> {
     pub(super) visible: &'a [crate::tui::pane_manager::PaneSlot],
 }
 
-impl SurfaceRender<crate::tui::state::AppState, crate::tui::state::AppSignal>
-    for PanesRenderer<'_>
-{
+impl SurfaceRender<crate::tui::state::AppState, crate::signal::AppSignal> for PanesRenderer<'_> {
     fn render_in_surface(
         &mut self,
         surface: &mut Surface,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         component_registry_map: &mut ComponentRegistryMap<
             crate::tui::state::AppState,
-            crate::tui::state::AppSignal,
+            crate::signal::AppSignal,
         >,
         has_focus: &mut HasFocus,
     ) -> CommonResult<()> {

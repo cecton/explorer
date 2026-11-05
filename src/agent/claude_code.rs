@@ -61,7 +61,7 @@ enum StreamEvent {
     /// Part of that context the provider served from its prompt cache.
     CachedIn(u64),
     /// How much of the subscription is used after the request that just completed.
-    Usage(crate::agent::usage::Usage),
+    Usage(crate::usage::Usage),
     /// The run is over. `no_turn` is set when it ended before the model was called.
     Result {
         error: Option<String>,
@@ -101,10 +101,10 @@ fn context_sizes(usage: &serde_json::Value) -> Vec<StreamEvent> {
 
 /// The subscription's limits in a `rate_limit_event`; a login without a subscription
 /// reports none.
-fn subscription_usage(info: &serde_json::Value) -> Option<crate::agent::usage::Usage> {
-    use crate::agent::usage::Span;
-    use crate::agent::usage::Usage;
-    use crate::agent::usage::UsageWindow;
+fn subscription_usage(info: &serde_json::Value) -> Option<crate::usage::Usage> {
+    use crate::usage::Span;
+    use crate::usage::Usage;
+    use crate::usage::UsageWindow;
     let reported = info.get("unifiedWindows")?;
     let window = |key: &str, span: Span| {
         let window = reported.get(key)?;
@@ -551,9 +551,9 @@ mod tests {
 
     #[test]
     fn rate_limit_event_gives_the_usage_of_the_subscription() {
-        use crate::agent::usage::Span;
-        use crate::agent::usage::Usage;
-        use crate::agent::usage::UsageWindow;
+        use crate::usage::Span;
+        use crate::usage::Usage;
+        use crate::usage::UsageWindow;
         let line = r#"{"type":"rate_limit_event","rate_limit_info":{"status":"allowed","resetsAt":1791817200,"rateLimitType":"five_hour","overageStatus":"rejected","overageDisabledReason":"out_of_credits","isUsingOverage":false,"unifiedWindows":{"five_hour":{"utilization":0.22,"resetsAt":1791817200},"seven_day":{"utilization":0.18,"resetsAt":1792018800}}},"uuid":"8c092c44-667f-4329-af9b-b6a6803cb3ba","session_id":"s"}"#;
         assert_eq!(
             parse_line(line),

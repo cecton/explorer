@@ -33,7 +33,7 @@ impl TerminalPaneComponent {
 
     fn pane_height(
         &self,
-        global_data: &GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
     ) -> usize {
         let slot = self.slot;
         let state = &global_data.state;
@@ -87,9 +87,7 @@ impl crate::tui::title_row::TitleRow for TerminalPaneComponent {
     }
 }
 
-impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
-    for TerminalPaneComponent
-{
+impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for TerminalPaneComponent {
     fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
@@ -98,7 +96,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -311,7 +309,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,

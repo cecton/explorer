@@ -552,7 +552,7 @@ pub struct ConversationTreeComponent {
 impl ConversationTreeComponent {
     fn handle_input(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -911,12 +911,10 @@ impl ConversationTreeComponent {
     /// Asks the summary model again for an untitled node the cursor just landed on.
     fn retitle_selected(
         state: &mut crate::tui::state::AppState,
-        main_tx: tokio::sync::mpsc::Sender<
-            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-        >,
+        main_tx: crate::signal::MainTx,
         id: crate::conversation::NodeId,
     ) {
-        use crate::tui::state::AppSignal;
+        use crate::signal::AppSignal;
         let Some(backend) = state
             .agent
             .summary_model
@@ -960,11 +958,7 @@ impl ConversationTreeComponent {
                 &main_tx,
             )
             .await;
-            let _ = main_tx
-                .send(TerminalWindowMainThreadSignal::ApplyAppSignal(
-                    AppSignal::NodeRetitleEnded { node: id },
-                ))
-                .await;
+            crate::signal::send(&main_tx, AppSignal::NodeRetitleEnded { node: id });
         });
     }
 
@@ -1070,9 +1064,7 @@ impl ConversationTreeComponent {
 
     fn open_commits(
         state: &mut crate::tui::state::AppState,
-        main_tx: tokio::sync::mpsc::Sender<
-            TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-        >,
+        main_tx: crate::signal::MainTx,
         id: &crate::conversation::NodeId,
     ) {
         use crate::tui::git_log_pane::GitLogPaneComponent;
@@ -1216,7 +1208,7 @@ fn needs_retitle(
         && !retitling.contains(id)
 }
 
-impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
+impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
     for ConversationTreeComponent
 {
     fn reset(&mut self) {}
@@ -1227,7 +1219,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
 
     fn handle_event(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         input_event: InputEvent,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
@@ -1246,7 +1238,7 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal>
 
     fn render(
         &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::tui::state::AppSignal>,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         current_box: FlexBox,
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,

@@ -15,7 +15,9 @@ mod lsp;
 mod markdown_format;
 mod scan;
 mod session;
+mod signal;
 mod tui;
+mod usage;
 mod util;
 mod watcher;
 
@@ -163,7 +165,7 @@ async fn main() {
         config::load_commands(),
         config::load_roles(),
     ));
-    initial_state.usage = agent::usage::load();
+    initial_state.usage = usage::load();
 
     if let Some(session) = session::load_session(&root) {
         session.apply(&mut initial_state);

@@ -16,13 +16,6 @@ enum RawKind {
     Removed,
 }
 
-#[derive(Debug, Clone)]
-pub struct BatchedWatchEvent {
-    pub modified: Vec<camino::Utf8PathBuf>,
-    pub created: Vec<camino::Utf8PathBuf>,
-    pub removed: Vec<camino::Utf8PathBuf>,
-}
-
 #[derive(Debug)]
 pub struct NoOpInterrupt;
 
@@ -33,9 +26,7 @@ impl r3bl_tui::RRTSoftwareInterrupt for NoOpInterrupt {
 #[derive(Clone)]
 pub struct WatcherConfig {
     pub root: camino::Utf8PathBuf,
-    pub app_tx: tokio::sync::mpsc::Sender<
-        r3bl_tui::TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-    >,
+    pub app_tx: crate::signal::MainTx,
     pub files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
 }
 
@@ -49,9 +40,7 @@ impl Debug for WatcherConfig {
 
 pub struct WatcherWorker {
     root: camino::Utf8PathBuf,
-    app_tx: tokio::sync::mpsc::Sender<
-        r3bl_tui::TerminalWindowMainThreadSignal<crate::tui::state::AppSignal>,
-    >,
+    app_tx: crate::signal::MainTx,
     files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
     rx: mpsc::Receiver<notify::Result<notify::Event>>,
     pending: HashMap<camino::Utf8PathBuf, RawKind>,
@@ -74,7 +63,7 @@ impl Debug for WatcherWorker {
 
 impl r3bl_tui::RRTWorker for WatcherWorker {
     type Config = WatcherConfig;
-    type Output = crate::tui::state::AppSignal;
+    type Output = ();
     type Interrupt = NoOpInterrupt;
 
     fn create_and_register_os_sources(
@@ -119,7 +108,8 @@ impl r3bl_tui::RRTWorker for WatcherWorker {
         &mut self,
         _sender: &tokio::sync::broadcast::Sender<r3bl_tui::RRTEvent<Self::Output>>,
     ) -> r3bl_tui::Continuation {
-        use crate::tui::state::AppSignal;
+        use crate::signal::AppSignal;
+        use crate::signal::FilesChanged;
         match self.rx.recv_timeout(DEBOUNCE) {
             Ok(Ok(event)) => {
                 // Event-queue overflow: the kernel dropped events, so per-path
@@ -192,7 +182,7 @@ impl r3bl_tui::RRTWorker for WatcherWorker {
                 if self.pending.is_empty() && !self.pending_rescan {
                     return r3bl_tui::Continuation::Continue;
                 }
-                let mut batch = BatchedWatchEvent {
+                let mut batch = FilesChanged {
                     modified: vec![],
                     created: vec![],
                     removed: vec![],
@@ -214,7 +204,7 @@ impl r3bl_tui::RRTWorker for WatcherWorker {
                     batch.created.len(),
                     batch.removed.len()
                 );
-                let signal = AppSignal::FilesChanged(std::sync::Arc::new(batch));
+                let signal = AppSignal::FilesChanged(Arc::new(batch));
                 if self
                     .app_tx
                     .blocking_send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
@@ -237,7 +227,7 @@ impl WatcherWorker {
     /// files on disk but not active in the list become `created` (the app
     /// handler resurrects a `removed` entry or appends a genuinely-new one),
     /// and active entries whose path is gone from disk become `removed`.
-    fn reconcile_into(&self, batch: &mut BatchedWatchEvent) {
+    fn reconcile_into(&self, batch: &mut crate::signal::FilesChanged) {
         let on_disk: HashSet<camino::Utf8PathBuf> = crate::loader::walk_repo_files(&self.root)
             .into_iter()
             .filter_map(|p| camino::Utf8PathBuf::from_path_buf(p).ok())
