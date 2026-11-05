@@ -24,7 +24,7 @@ pub struct Role {
     /// When to call it, as the `agent` tool tells the model.
     pub description: String,
     /// Model the role runs on, ahead of the `subagent-model` setting.
-    pub model: Option<crate::agent::ModelSpec>,
+    pub model: Option<crate::model_spec::ModelSpec>,
     /// Wall-clock budget of one run, from the role's `budget-minutes`.
     pub budget: Option<Duration>,
     /// The role's system prompt.
@@ -36,7 +36,7 @@ impl Role {
     /// lines, with a `description`, an optional `model` and `budget-minutes`, then the
     /// system prompt.
     pub fn parse(name: &str, text: &str) -> Result<Self, String> {
-        use crate::agent::ModelSpec;
+        use crate::model_spec::ModelSpec;
         let (metadata, prompt) = crate::util::text::split_metadata(text);
         let prompt = prompt.trim();
         if prompt.is_empty() {
@@ -77,6 +77,45 @@ impl Role {
     }
 }
 
+/// The sub-agent roles, from `<config_dir>/agents/<name>.md`.
+pub fn load_roles() -> Vec<Role> {
+    crate::util::fs::config_dir()
+        .map(|dir| read_roles(&dir.join("agents").into_std_path_buf()))
+        .unwrap_or_default()
+}
+
+/// The roles of the `.md` files in `dir`, by name. A file that cannot make a role is
+/// logged and skipped; a missing directory yields none.
+fn read_roles(dir: &std::path::Path) -> Vec<Role> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<Role> = entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "md" {
+                return None;
+            }
+            let name = path.file_stem()?.to_str()?;
+            if !crate::agent::commands::is_command_name(name) {
+                tracing::warn!(
+                    "ignoring {}: a role name is made of lowercase letters, digits and dashes",
+                    path.display()
+                );
+                return None;
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| tracing::warn!("cannot read {}: {e}", path.display()))
+                .ok()?;
+            Role::parse(name, &text)
+                .map_err(|reason| tracing::warn!("ignoring {}: {reason}", path.display()))
+                .ok()
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
 /// What a turn lends to the sub-agents it calls.
 #[derive(Clone)]
 pub struct Subagents {
@@ -88,7 +127,7 @@ pub struct Subagents {
     pub date: String,
     pub repo: Option<gix::ThreadSafeRepository>,
     /// Model of the calling turn, for the sub-agents nothing else assigns one to.
-    pub spec: crate::agent::ModelSpec,
+    pub spec: crate::model_spec::ModelSpec,
 }
 
 /// The `agent` tool as advertised to the model, with the roles it offers.
@@ -145,7 +184,7 @@ struct Launch {
     backend: crate::agent::Backend,
     endpoint: crate::agent::Endpoint,
     /// Model of this run, named in the notes of a retry.
-    spec: crate::agent::ModelSpec,
+    spec: crate::model_spec::ModelSpec,
     /// The role's name, for the retry's metadata.
     role: Option<String>,
     /// The role's prompt, or the default one.
@@ -170,7 +209,7 @@ struct Launch {
     /// Model to rerun on when this one fails: the caller's, for a fresh run on an
     /// OpenAI-compatible endpoint. `claude` has no such failures to recover from, and
     /// a continued run keeps its own model.
-    fallback: Option<crate::agent::ModelSpec>,
+    fallback: Option<crate::model_spec::ModelSpec>,
 }
 
 fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
@@ -419,7 +458,7 @@ async fn execute(
 /// record's metadata keeps.
 struct Outcome {
     index: u32,
-    spec: crate::agent::ModelSpec,
+    spec: crate::model_spec::ModelSpec,
     endpoint: crate::agent::Endpoint,
     result: Result<(), String>,
     reply: String,
@@ -453,7 +492,7 @@ impl Outcome {
 async fn prepare_retry(
     context: &crate::agent::tools::ToolContext,
     launch: &Launch,
-    spec: &crate::agent::ModelSpec,
+    spec: &crate::model_spec::ModelSpec,
     config: &crate::agent::AgentConfig,
 ) -> Result<Launch, String> {
     use crate::conversation::Metadata;
@@ -884,6 +923,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn roles_are_read_from_markdown_files_and_need_a_description() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(
+            dir.join("reviewer.md"),
+            "---\ndescription: Reviews commits\nmodel: claude/opus/high\n---\nYou review.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("vague.md"), "You do things.\n").unwrap();
+        std::fs::write(dir.join("Bad Name.md"), "---\ndescription: x\n---\ny\n").unwrap();
+
+        let roles = read_roles(dir);
+        assert_eq!(roles.len(), 1);
+        assert_eq!(roles[0].name, "reviewer");
+        assert_eq!(roles[0].description, "Reviews commits");
+        assert_eq!(roles[0].prompt, "You review.");
+        let model = roles[0].model.as_ref().expect("role model");
+        assert_eq!(model.to_string(), "claude/opus/high");
+
+        assert!(read_roles(&dir.join("missing")).is_empty());
+    }
+
+    #[test]
     fn a_role_needs_a_description_and_a_prompt() {
         let role = Role::parse(
             "reviewer",
@@ -948,7 +1010,7 @@ mod tests {
         use crate::agent::Endpoint;
         use crate::agent::EndpointKind;
         use crate::agent::Mode;
-        use crate::agent::ModelSpec;
+        use crate::model_spec::ModelSpec;
         let config = |summary: Option<ModelSpec>| Subagents {
             config: Arc::new(AgentConfig {
                 endpoints: vec![Endpoint {
@@ -964,11 +1026,11 @@ mod tests {
             mode: Mode::Commit,
             date: "2026-11-01".to_string(),
             repo: None,
-            spec: crate::agent::ModelSpec::parse("router/x/low").unwrap(),
+            spec: crate::model_spec::ModelSpec::parse("router/x/low").unwrap(),
         };
         let outcome = |result: Result<(), String>, reply: &str| Outcome {
             index: 1,
-            spec: crate::agent::ModelSpec::parse("router/x/low").unwrap(),
+            spec: crate::model_spec::ModelSpec::parse("router/x/low").unwrap(),
             endpoint: Endpoint {
                 name: "router".to_string(),
                 kind: EndpointKind::OpenAi {
@@ -984,7 +1046,7 @@ mod tests {
             session_id: None,
             usage: None,
         };
-        let summary = Some(crate::agent::ModelSpec::parse("router/x/low").unwrap());
+        let summary = Some(crate::model_spec::ModelSpec::parse("router/x/low").unwrap());
 
         // A finished run with an answer, and a summary model to ask.
         assert!(title_backend(&config(summary.clone()), &outcome(Ok(()), "done")).is_some());
@@ -1002,7 +1064,7 @@ mod tests {
         // No summary model, nothing asked.
         assert!(title_backend(&config(None), &outcome(Ok(()), "done")).is_none());
         // An endpoint without a token resolves to no backend.
-        let unknown = Some(crate::agent::ModelSpec::parse("gone/x/low").unwrap());
+        let unknown = Some(crate::model_spec::ModelSpec::parse("gone/x/low").unwrap());
         assert!(title_backend(&config(unknown), &outcome(Ok(()), "done")).is_none());
     }
 

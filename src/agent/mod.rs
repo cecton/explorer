@@ -9,8 +9,6 @@ pub mod subagent;
 pub mod tools;
 pub mod turn;
 
-use std::fmt;
-
 /// How a turn runs: for the teacher, or for the executor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Mode {
@@ -18,103 +16,6 @@ pub enum Mode {
     Feedback,
     /// The agent carries out an instruction and commits the result.
     Commit,
-}
-
-/// Reasoning effort offered for every model. `Default` sends no effort parameter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Effort {
-    Default,
-    Low,
-    Medium,
-    High,
-}
-
-impl Effort {
-    pub const ALL: [Effort; 4] = [Effort::Default, Effort::Low, Effort::Medium, Effort::High];
-
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Effort::Default => "default",
-            Effort::Low => "low",
-            Effort::Medium => "medium",
-            Effort::High => "high",
-        }
-    }
-
-    fn parse(value: &str) -> Option<Self> {
-        Self::ALL
-            .into_iter()
-            .find(|effort| effort.as_str() == value)
-    }
-}
-
-/// `endpoint/model/effort`. The model id may itself contain `/`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct ModelSpec {
-    pub endpoint: String,
-    pub model: String,
-    pub effort: Effort,
-}
-
-impl ModelSpec {
-    /// `endpoint/model/effort`, where the effort may also be left out: `endpoint/model`
-    /// means the same model with a `default` effort. The model id may itself contain
-    /// `/`, so a last segment that is no effort keyword stays part of it.
-    pub fn parse(text: &str) -> Option<Self> {
-        let (endpoint, rest) = text.split_once('/')?;
-        if endpoint.is_empty() || rest.is_empty() || rest.starts_with('/') || rest.ends_with('/') {
-            return None;
-        }
-        if let Some((model, effort)) = rest.rsplit_once('/')
-            && let Some(spec) = Self::from_parts(endpoint, model, effort)
-        {
-            return Some(spec);
-        }
-        Some(Self::bare(endpoint, rest))
-    }
-
-    /// `endpoint/model` with no effort: the same as a `default` effort.
-    pub fn bare(endpoint: &str, model: &str) -> Self {
-        Self {
-            endpoint: endpoint.to_string(),
-            model: model.to_string(),
-            effort: Effort::Default,
-        }
-    }
-
-    pub fn from_parts(endpoint: &str, model: &str, effort: &str) -> Option<Self> {
-        if endpoint.is_empty() || model.is_empty() {
-            return None;
-        }
-        Some(Self {
-            endpoint: endpoint.to_string(),
-            model: model.to_string(),
-            effort: Effort::parse(effort)?,
-        })
-    }
-}
-
-impl ModelSpec {
-    /// `endpoint/model (effort)`, the form shown in discussion windows; a default
-    /// effort is not shown.
-    pub fn short_label(&self) -> String {
-        match self.effort {
-            Effort::Default => format!("{}/{}", self.endpoint, self.model),
-            effort => format!("{}/{} ({})", self.endpoint, self.model, effort.as_str()),
-        }
-    }
-}
-
-impl fmt::Display for ModelSpec {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}/{}/{}",
-            self.endpoint,
-            self.model,
-            self.effort.as_str()
-        )
-    }
 }
 
 /// A place to run models, as declared in `config.kdl`.
@@ -154,11 +55,11 @@ impl EndpointKind {
     pub fn label(&self) -> &'static str {
         match self {
             EndpointKind::OpenAi { .. } => "openai",
-            EndpointKind::OpenCodeGo { .. } => OPENCODE_GO_KIND,
-            EndpointKind::KimiCode { .. } => KIMI_CODE_KIND,
-            EndpointKind::Cline { .. } => CLINE_KIND,
-            EndpointKind::OpenRouter { .. } => OPENROUTER_KIND,
-            EndpointKind::ClaudeCode { .. } => CLAUDE_CODE_KIND,
+            EndpointKind::OpenCodeGo { .. } => crate::config::OPENCODE_GO_KIND,
+            EndpointKind::KimiCode { .. } => crate::config::KIMI_CODE_KIND,
+            EndpointKind::Cline { .. } => crate::config::CLINE_KIND,
+            EndpointKind::OpenRouter { .. } => crate::config::OPENROUTER_KIND,
+            EndpointKind::ClaudeCode { .. } => crate::config::CLAUDE_CODE_KIND,
         }
     }
 
@@ -175,12 +76,6 @@ impl EndpointKind {
         }
     }
 }
-
-pub const CLAUDE_CODE_KIND: &str = "claude-code";
-pub const OPENCODE_GO_KIND: &str = "opencode-go";
-pub const KIMI_CODE_KIND: &str = "kimi-code";
-pub const CLINE_KIND: &str = "cline";
-pub const OPENROUTER_KIND: &str = "openrouter";
 
 /// A model ready to run: where it lives and how to reach it.
 #[derive(Clone, Debug)]
@@ -201,12 +96,12 @@ pub struct AgentConfig {
     /// Only endpoints that have a token; the others were skipped with a warning.
     pub endpoints: Vec<Endpoint>,
     /// Model used for titles and summaries; neither is generated without it.
-    pub summary_model: Option<ModelSpec>,
+    pub summary_model: Option<crate::model_spec::ModelSpec>,
     /// Custom slash commands.
     pub commands: Vec<commands::Command>,
     /// Model of the sub-agents whose role names none; without it they run on the model
     /// of the turn that calls them.
-    pub subagent_model: Option<ModelSpec>,
+    pub subagent_model: Option<crate::model_spec::ModelSpec>,
     /// Sub-agent roles the `agent` tool offers.
     pub roles: Vec<subagent::Role>,
     /// Most review rounds a commit turn runs on each of its commits; at least 1.
@@ -235,7 +130,7 @@ impl AgentConfig {
     }
 
     /// The backend `spec` designates, if its endpoint is usable.
-    pub fn backend(&self, spec: &ModelSpec) -> Option<Backend> {
+    pub fn backend(&self, spec: &crate::model_spec::ModelSpec) -> Option<Backend> {
         Some(match &self.endpoint(&spec.endpoint)?.kind {
             EndpointKind::OpenAi { url, token }
             | EndpointKind::OpenCodeGo { url, token }
@@ -252,6 +147,81 @@ impl AgentConfig {
                 effort: spec.effort,
             }),
         })
+    }
+
+    /// Builds the configuration from what the config file and the config directory
+    /// hold: an endpoint without a token is logged and skipped, so none of its models
+    /// is ever listed.
+    pub fn resolve(
+        settings: crate::config::AgentSettings,
+        tokens: &std::collections::HashMap<String, String>,
+        commands: Vec<commands::Command>,
+        roles: Vec<subagent::Role>,
+    ) -> Self {
+        use crate::agent::Endpoint;
+        use crate::agent::EndpointKind;
+        use crate::config::EndpointDecl;
+        let token_of = |name: &str| {
+            let token = tokens.get(name).cloned();
+            if token.is_none() {
+                tracing::warn!("endpoint '{name}' has no token in auth.kdl; skipping it");
+            }
+            token
+        };
+        let endpoints = settings
+            .endpoints
+            .into_iter()
+            .filter_map(|decl| match decl {
+                EndpointDecl::ClaudeCode { name, models } => Some(Endpoint {
+                    name,
+                    kind: EndpointKind::ClaudeCode { models },
+                }),
+                EndpointDecl::OpenAi { name, url } => {
+                    let token = token_of(&name)?;
+                    Some(Endpoint {
+                        name,
+                        kind: EndpointKind::OpenAi { url, token },
+                    })
+                }
+                EndpointDecl::OpenCodeGo { name, url } => {
+                    let token = token_of(&name)?;
+                    Some(Endpoint {
+                        name,
+                        kind: EndpointKind::OpenCodeGo { url, token },
+                    })
+                }
+                EndpointDecl::KimiCode { name, url } => {
+                    let token = token_of(&name)?;
+                    Some(Endpoint {
+                        name,
+                        kind: EndpointKind::KimiCode { url, token },
+                    })
+                }
+                EndpointDecl::Cline { name, url } => {
+                    let token = token_of(&name)?;
+                    Some(Endpoint {
+                        name,
+                        kind: EndpointKind::Cline { url, token },
+                    })
+                }
+                EndpointDecl::OpenRouter { name, url } => {
+                    let token = token_of(&name)?;
+                    Some(Endpoint {
+                        name,
+                        kind: EndpointKind::OpenRouter { url, token },
+                    })
+                }
+            })
+            .collect();
+        Self {
+            endpoints,
+            summary_model: settings.summary_model,
+            commands,
+            subagent_model: settings.subagent_model,
+            roles,
+            review_rounds: settings.review_rounds.unwrap_or(DEFAULT_REVIEW_ROUNDS),
+            repeat_limit: settings.repeat_limit.unwrap_or(DEFAULT_REPEAT_LIMIT),
+        }
     }
 }
 
@@ -289,49 +259,212 @@ pub struct ToolCall {
 mod tests {
     use super::*;
 
-    #[test]
-    fn model_spec_parses_ids_containing_slashes() {
-        let spec = ModelSpec::parse("openrouter/anthropic/claude-opus/high").unwrap();
-        assert_eq!(spec.endpoint, "openrouter");
-        assert_eq!(spec.model, "anthropic/claude-opus");
-        assert_eq!(spec.effort, Effort::High);
-        assert_eq!(spec.to_string(), "openrouter/anthropic/claude-opus/high");
+    fn resolve(content: &str) -> AgentConfig {
+        let settings = crate::config::parse(content).expect("valid config").agent;
+        AgentConfig::resolve(
+            settings,
+            &std::collections::HashMap::new(),
+            Vec::new(),
+            Vec::new(),
+        )
     }
 
     #[test]
-    fn short_label_shows_the_effort_except_when_default() {
-        let spec = ModelSpec::parse("zai/glm-5.3-flash/default").unwrap();
-        assert_eq!(spec.short_label(), "zai/glm-5.3-flash");
-        let spec = ModelSpec::parse("zai/glm-5.3-flash/low").unwrap();
-        assert_eq!(spec.short_label(), "zai/glm-5.3-flash (low)");
+    fn opencode_go_endpoint_has_a_default_url_and_needs_a_token() {
+        use crate::config::EndpointDecl;
+        let settings = crate::config::parse(
+            r#"
+            agent {
+                endpoint "go" {
+                    kind "opencode-go"
+                }
+                endpoint "mirror" {
+                    kind "opencode-go"
+                    url "https://mirror/v1"
+                }
+            }
+        "#,
+        )
+        .expect("valid config")
+        .agent;
+        assert_eq!(
+            settings.endpoints,
+            [
+                EndpointDecl::OpenCodeGo {
+                    name: "go".to_string(),
+                    url: "https://opencode.ai/zen/go/v1".to_string()
+                },
+                EndpointDecl::OpenCodeGo {
+                    name: "mirror".to_string(),
+                    url: "https://mirror/v1".to_string()
+                },
+            ]
+        );
+        let tokens = crate::config::parse_auth("go \"sk-go\"").expect("valid auth");
+        let agent = AgentConfig::resolve(settings, &tokens, Vec::new(), Vec::new());
+        assert_eq!(
+            agent.endpoints,
+            [Endpoint {
+                name: "go".to_string(),
+                kind: EndpointKind::OpenCodeGo {
+                    url: "https://opencode.ai/zen/go/v1".to_string(),
+                    token: "sk-go".to_string()
+                }
+            }]
+        );
     }
 
     #[test]
-    fn model_spec_rejects_missing_parts() {
-        assert!(ModelSpec::parse("kimi/").is_none());
-        assert!(ModelSpec::parse("/kimi-k2/low").is_none());
-        assert!(ModelSpec::parse("kimi//low").is_none());
-        assert!(ModelSpec::parse("kimi//").is_none());
-        assert!(ModelSpec::parse("nonsense").is_none());
+    fn kimi_code_endpoint_needs_a_url_and_a_token() {
+        let settings = crate::config::parse(
+            r#"
+            agent {
+                endpoint "kimi" {
+                    kind "kimi-code"
+                    url "https://api.kimi.ai/coding/v1"
+                }
+            }
+        "#,
+        )
+        .expect("valid config")
+        .agent;
+        let tokens = crate::config::parse_auth("kimi \"sk-kimi\"").expect("valid auth");
+        let agent = AgentConfig::resolve(settings, &tokens, Vec::new(), Vec::new());
+        assert_eq!(
+            agent.endpoints,
+            [Endpoint {
+                name: "kimi".to_string(),
+                kind: EndpointKind::KimiCode {
+                    url: "https://api.kimi.ai/coding/v1".to_string(),
+                    token: "sk-kimi".to_string()
+                }
+            }]
+        );
+        assert!(
+            crate::config::parse(
+                r#"
+            agent {
+                endpoint "kimi" {
+                    kind "kimi-code"
+                }
+            }
+        "#,
+            )
+            .is_err()
+        );
     }
 
     #[test]
-    fn an_effort_may_be_left_out_and_the_last_segment_is_not_always_one() {
-        let spec = ModelSpec::parse("opencode-go/deepseek-v4.1-flash").unwrap();
-        assert_eq!(spec.endpoint, "opencode-go");
-        assert_eq!(spec.model, "deepseek-v4.1-flash");
-        assert_eq!(spec.effort, Effort::Default);
-        assert_eq!(spec.to_string(), "opencode-go/deepseek-v4.1-flash/default");
+    fn cline_endpoint_needs_a_url_and_a_token() {
+        let settings = crate::config::parse(
+            r#"
+            agent {
+                endpoint "cline" {
+                    kind "cline"
+                    url "https://api.cline.bot/api/v1"
+                }
+            }
+        "#,
+        )
+        .expect("valid config")
+        .agent;
+        let tokens = crate::config::parse_auth("cline \"sk_4d98\"").expect("valid auth");
+        let agent = AgentConfig::resolve(settings, &tokens, Vec::new(), Vec::new());
+        assert_eq!(
+            agent.endpoints,
+            [Endpoint {
+                name: "cline".to_string(),
+                kind: EndpointKind::Cline {
+                    url: "https://api.cline.bot/api/v1".to_string(),
+                    token: "sk_4d98".to_string()
+                }
+            }]
+        );
+        assert!(
+            crate::config::parse(
+                r#"
+            agent {
+                endpoint "cline" {
+                    kind "cline"
+                }
+            }
+        "#,
+            )
+            .is_err()
+        );
+    }
 
-        // A trailing non-effort word stays part of the model id.
-        let spec = ModelSpec::parse("kimi/kimi-k2/extreme").unwrap();
-        assert_eq!(spec.model, "kimi-k2/extreme");
-        assert_eq!(spec.effort, Effort::Default);
+    #[test]
+    fn review_rounds_default_to_three_and_must_be_at_least_one() {
+        assert_eq!(resolve("theme \"night_owl\"").review_rounds, 3);
+        assert_eq!(resolve("agent {\n review-rounds 5\n}").review_rounds, 5);
+        assert!(crate::config::parse("agent {\n review-rounds 0\n}").is_err());
+        assert!(crate::config::parse("agent {\n review-rounds -2\n}").is_err());
+        assert!(crate::config::parse("agent {\n review-rounds \"3\"\n}").is_err());
+    }
 
-        // A real effort is still honoured.
-        let spec = ModelSpec::parse("claude/opus/high").unwrap();
-        assert_eq!(spec.model, "opus");
-        assert_eq!(spec.effort, Effort::High);
+    #[test]
+    fn repeat_limit_defaults_to_five_and_is_zero_or_at_least_two() {
+        assert_eq!(resolve("theme \"night_owl\"").repeat_limit, 5);
+        assert_eq!(resolve("agent {\n repeat-limit 3\n}").repeat_limit, 3);
+        assert_eq!(resolve("agent {\n repeat-limit 0\n}").repeat_limit, 0);
+        assert!(crate::config::parse("agent {\n repeat-limit 1\n}").is_err());
+        assert!(crate::config::parse("agent {\n repeat-limit -2\n}").is_err());
+        assert!(crate::config::parse("agent {\n repeat-limit \"5\"\n}").is_err());
+    }
+
+    #[test]
+    fn endpoint_without_a_token_is_skipped() {
+        use crate::config::AgentSettings;
+        use crate::config::EndpointDecl;
+        let settings = AgentSettings {
+            endpoints: vec![
+                EndpointDecl::OpenAi {
+                    name: "kimi".to_string(),
+                    url: "https://k".to_string(),
+                },
+                EndpointDecl::OpenAi {
+                    name: "router".to_string(),
+                    url: "https://r".to_string(),
+                },
+                EndpointDecl::ClaudeCode {
+                    name: "claude".to_string(),
+                    models: vec!["opus".to_string()],
+                },
+            ],
+            summary_model: None,
+            subagent_model: None,
+            review_rounds: None,
+            repeat_limit: None,
+        };
+        let tokens =
+            crate::config::parse_auth("router \"sk-or\"\nunused \"x\"").expect("valid auth");
+        let agent = AgentConfig::resolve(settings, &tokens, Vec::new(), Vec::new());
+        let names: Vec<&str> = agent.endpoints.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, ["router", "claude"]);
+        assert_eq!(
+            agent.endpoints[0].kind,
+            EndpointKind::OpenAi {
+                url: "https://r".to_string(),
+                token: "sk-or".to_string()
+            }
+        );
+        assert!(agent.endpoint("kimi").is_none());
+    }
+
+    #[test]
+    fn a_summary_and_a_subagent_model_are_kept_as_written() {
+        let agent = resolve(
+            "agent {\n summary-model \"router/openai/gpt-mini/low\"\n subagent-model \"kimi/kimi-k2/high\"\n}",
+        );
+        assert_eq!(
+            agent.summary_model.expect("summary model").to_string(),
+            "router/openai/gpt-mini/low"
+        );
+        assert_eq!(
+            agent.subagent_model.expect("sub-agent model").to_string(),
+            "kimi/kimi-k2/high"
+        );
     }
 
     #[test]

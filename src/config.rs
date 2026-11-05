@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 /// A name standing for a shell command; what is typed after it is appended as is.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -60,8 +60,8 @@ pub enum CargoFeatureSelection {
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AgentSettings {
     pub endpoints: Vec<EndpointDecl>,
-    pub summary_model: Option<crate::agent::ModelSpec>,
-    pub subagent_model: Option<crate::agent::ModelSpec>,
+    pub summary_model: Option<crate::model_spec::ModelSpec>,
+    pub subagent_model: Option<crate::model_spec::ModelSpec>,
     pub review_rounds: Option<u32>,
     pub repeat_limit: Option<u32>,
 }
@@ -94,6 +94,12 @@ pub enum EndpointDecl {
     OpenRouter { name: String, url: String },
     ClaudeCode { name: String, models: Vec<String> },
 }
+
+pub const CLAUDE_CODE_KIND: &str = "claude-code";
+pub const OPENCODE_GO_KIND: &str = "opencode-go";
+pub const KIMI_CODE_KIND: &str = "kimi-code";
+pub const CLINE_KIND: &str = "cline";
+pub const OPENROUTER_KIND: &str = "openrouter";
 
 /// Models offered for a `claude-code` endpoint that lists none.
 const CLAUDE_CODE_DEFAULT_MODELS: [&str; 3] = ["opus", "sonnet", "haiku"];
@@ -131,7 +137,7 @@ pub fn load_auth() -> HashMap<String, String> {
     }
 }
 
-fn parse_auth(content: &str) -> Result<HashMap<String, String>, String> {
+pub(crate) fn parse_auth(content: &str) -> Result<HashMap<String, String>, String> {
     let doc: kdl::KdlDocument = content.parse().map_err(|e: kdl::KdlError| e.to_string())?;
     let mut tokens = HashMap::new();
     for node in doc.nodes() {
@@ -143,170 +149,6 @@ fn parse_auth(content: &str) -> Result<HashMap<String, String>, String> {
     Ok(tokens)
 }
 
-/// Custom slash commands, from `<config_dir>/commands/<name>.md`.
-pub fn load_commands() -> Vec<crate::agent::commands::Command> {
-    crate::util::fs::config_dir()
-        .map(|dir| read_commands(&dir.join("commands").into_std_path_buf()))
-        .unwrap_or_default()
-}
-
-/// The commands of the `.md` files in `dir`, by name. A file that cannot make a
-/// command is logged and skipped; a missing directory yields none.
-fn read_commands(dir: &Path) -> Vec<crate::agent::commands::Command> {
-    use crate::agent::commands::Command;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<Command> = entries
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            if path.extension()? != "md" {
-                return None;
-            }
-            let name = path.file_stem()?.to_str()?;
-            if !crate::agent::commands::is_command_name(name) {
-                tracing::warn!(
-                    "ignoring {}: a command name is made of lowercase letters, digits and dashes",
-                    path.display()
-                );
-                return None;
-            }
-            if crate::agent::commands::is_built_in(name) {
-                tracing::warn!("ignoring {}: '{name}' is built in", path.display());
-                return None;
-            }
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| tracing::warn!("cannot read {}: {e}", path.display()))
-                .ok()?;
-            let command = crate::agent::commands::Command::parse(name, &text);
-            if command.is_none() {
-                tracing::warn!("ignoring {}: it has no prompt", path.display());
-            }
-            command
-        })
-        .collect();
-    found.sort_by(|a, b| a.name.cmp(&b.name));
-    found
-}
-
-/// Reads the sub-agent roles from `<config_dir>/agents/<name>.md`.
-pub fn load_roles() -> Vec<crate::agent::subagent::Role> {
-    crate::util::fs::config_dir()
-        .map(|dir| read_roles(&dir.join("agents").into_std_path_buf()))
-        .unwrap_or_default()
-}
-
-/// The roles of the `.md` files in `dir`, by name. A file that cannot make a role is
-/// logged and skipped; a missing directory yields none.
-fn read_roles(dir: &Path) -> Vec<crate::agent::subagent::Role> {
-    use crate::agent::subagent::Role;
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<Role> = entries
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            if path.extension()? != "md" {
-                return None;
-            }
-            let name = path.file_stem()?.to_str()?;
-            if !crate::agent::commands::is_command_name(name) {
-                tracing::warn!(
-                    "ignoring {}: a role name is made of lowercase letters, digits and dashes",
-                    path.display()
-                );
-                return None;
-            }
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| tracing::warn!("cannot read {}: {e}", path.display()))
-                .ok()?;
-            crate::agent::subagent::Role::parse(name, &text)
-                .map_err(|reason| tracing::warn!("ignoring {}: {reason}", path.display()))
-                .ok()
-        })
-        .collect();
-    found.sort_by(|a, b| a.name.cmp(&b.name));
-    found
-}
-
-/// Joins the declared endpoints with their tokens. An endpoint without a token is
-/// logged and left out, so none of its models is ever listed.
-pub fn resolve_agent(
-    settings: AgentSettings,
-    tokens: &HashMap<String, String>,
-    commands: Vec<crate::agent::commands::Command>,
-    roles: Vec<crate::agent::subagent::Role>,
-) -> crate::agent::AgentConfig {
-    use crate::agent::AgentConfig;
-    use crate::agent::Endpoint;
-    use crate::agent::EndpointKind;
-    let token_of = |name: &str| {
-        let token = tokens.get(name).cloned();
-        if token.is_none() {
-            tracing::warn!("endpoint '{name}' has no token in auth.kdl; skipping it");
-        }
-        token
-    };
-    let endpoints = settings
-        .endpoints
-        .into_iter()
-        .filter_map(|decl| match decl {
-            EndpointDecl::ClaudeCode { name, models } => Some(Endpoint {
-                name,
-                kind: EndpointKind::ClaudeCode { models },
-            }),
-            EndpointDecl::OpenAi { name, url } => {
-                let token = token_of(&name)?;
-                Some(Endpoint {
-                    name,
-                    kind: EndpointKind::OpenAi { url, token },
-                })
-            }
-            EndpointDecl::OpenCodeGo { name, url } => {
-                let token = token_of(&name)?;
-                Some(Endpoint {
-                    name,
-                    kind: EndpointKind::OpenCodeGo { url, token },
-                })
-            }
-            EndpointDecl::KimiCode { name, url } => {
-                let token = token_of(&name)?;
-                Some(Endpoint {
-                    name,
-                    kind: EndpointKind::KimiCode { url, token },
-                })
-            }
-            EndpointDecl::Cline { name, url } => {
-                let token = token_of(&name)?;
-                Some(Endpoint {
-                    name,
-                    kind: EndpointKind::Cline { url, token },
-                })
-            }
-            EndpointDecl::OpenRouter { name, url } => {
-                let token = token_of(&name)?;
-                Some(Endpoint {
-                    name,
-                    kind: EndpointKind::OpenRouter { url, token },
-                })
-            }
-        })
-        .collect();
-    AgentConfig {
-        endpoints,
-        summary_model: settings.summary_model,
-        commands,
-        subagent_model: settings.subagent_model,
-        roles,
-        review_rounds: settings
-            .review_rounds
-            .unwrap_or(crate::agent::DEFAULT_REVIEW_ROUNDS),
-        repeat_limit: settings
-            .repeat_limit
-            .unwrap_or(crate::agent::DEFAULT_REPEAT_LIMIT),
-    }
-}
-
 fn string_arg(node: &kdl::KdlNode) -> Option<&str> {
     node.entries()
         .iter()
@@ -315,7 +157,7 @@ fn string_arg(node: &kdl::KdlNode) -> Option<&str> {
 }
 
 fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
-    use crate::agent::ModelSpec;
+    use crate::model_spec::ModelSpec;
     let mut settings = AgentSettings::default();
     let Some(children) = node.children() else {
         return Ok(settings);
@@ -358,23 +200,23 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                         url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
                         name,
                     },
-                    crate::agent::OPENCODE_GO_KIND => EndpointDecl::OpenCodeGo {
+                    OPENCODE_GO_KIND => EndpointDecl::OpenCodeGo {
                         url: url.unwrap_or_else(|| OPENCODE_GO_URL.to_string()),
                         name,
                     },
-                    crate::agent::KIMI_CODE_KIND => EndpointDecl::KimiCode {
+                    KIMI_CODE_KIND => EndpointDecl::KimiCode {
                         url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
                         name,
                     },
-                    crate::agent::CLINE_KIND => EndpointDecl::Cline {
+                    CLINE_KIND => EndpointDecl::Cline {
                         url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
                         name,
                     },
-                    crate::agent::OPENROUTER_KIND => EndpointDecl::OpenRouter {
+                    OPENROUTER_KIND => EndpointDecl::OpenRouter {
                         url: url.unwrap_or_else(|| OPENROUTER_URL.to_string()),
                         name,
                     },
-                    crate::agent::CLAUDE_CODE_KIND => {
+                    CLAUDE_CODE_KIND => {
                         if models.is_empty() {
                             models = CLAUDE_CODE_DEFAULT_MODELS.map(str::to_string).to_vec();
                         }
@@ -437,7 +279,7 @@ fn config_path() -> Option<PathBuf> {
     )
 }
 
-fn parse(content: &str) -> Result<Config, String> {
+pub(crate) fn parse(content: &str) -> Result<Config, String> {
     let doc: kdl::KdlDocument = content.parse().map_err(|e: kdl::KdlError| e.to_string())?;
 
     let mut theme = None;
@@ -641,175 +483,6 @@ mod config_tests {
     }
 
     #[test]
-    fn opencode_go_endpoint_has_a_default_url_and_needs_a_token() {
-        use crate::agent::Endpoint;
-        use crate::agent::EndpointKind;
-        let config = parse(
-            r#"
-            agent {
-                endpoint "go" {
-                    kind "opencode-go"
-                }
-                endpoint "mirror" {
-                    kind "opencode-go"
-                    url "https://mirror/v1"
-                }
-            }
-        "#,
-        )
-        .expect("valid config");
-        assert_eq!(
-            config.agent.endpoints,
-            [
-                EndpointDecl::OpenCodeGo {
-                    name: "go".to_string(),
-                    url: "https://opencode.ai/zen/go/v1".to_string()
-                },
-                EndpointDecl::OpenCodeGo {
-                    name: "mirror".to_string(),
-                    url: "https://mirror/v1".to_string()
-                },
-            ]
-        );
-        let tokens = parse_auth("go \"sk-go\"").expect("valid auth");
-        let agent = resolve_agent(config.agent, &tokens, Vec::new(), Vec::new());
-        assert_eq!(
-            agent.endpoints,
-            [Endpoint {
-                name: "go".to_string(),
-                kind: EndpointKind::OpenCodeGo {
-                    url: "https://opencode.ai/zen/go/v1".to_string(),
-                    token: "sk-go".to_string()
-                }
-            }]
-        );
-    }
-
-    #[test]
-    fn kimi_code_endpoint_needs_a_url_and_a_token() {
-        use crate::agent::Endpoint;
-        use crate::agent::EndpointKind;
-        let config = parse(
-            r#"
-            agent {
-                endpoint "kimi" {
-                    kind "kimi-code"
-                    url "https://api.kimi.ai/coding/v1"
-                }
-            }
-        "#,
-        )
-        .expect("valid config");
-        assert_eq!(
-            config.agent.endpoints,
-            [EndpointDecl::KimiCode {
-                name: "kimi".to_string(),
-                url: "https://api.kimi.ai/coding/v1".to_string()
-            }]
-        );
-        let tokens = parse_auth("kimi \"sk-kimi\"").expect("valid auth");
-        let agent = resolve_agent(config.agent, &tokens, Vec::new(), Vec::new());
-        assert_eq!(
-            agent.endpoints,
-            [Endpoint {
-                name: "kimi".to_string(),
-                kind: EndpointKind::KimiCode {
-                    url: "https://api.kimi.ai/coding/v1".to_string(),
-                    token: "sk-kimi".to_string()
-                }
-            }]
-        );
-        assert!(
-            parse(
-                r#"
-            agent {
-                endpoint "kimi" {
-                    kind "kimi-code"
-                }
-            }
-        "#,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn cline_endpoint_needs_a_url_and_a_token() {
-        use crate::agent::Endpoint;
-        use crate::agent::EndpointKind;
-        let config = parse(
-            r#"
-            agent {
-                endpoint "cline" {
-                    kind "cline"
-                    url "https://api.cline.bot/api/v1"
-                }
-            }
-        "#,
-        )
-        .expect("valid config");
-        assert_eq!(
-            config.agent.endpoints,
-            [EndpointDecl::Cline {
-                name: "cline".to_string(),
-                url: "https://api.cline.bot/api/v1".to_string()
-            }]
-        );
-        let tokens = parse_auth("cline \"sk_4d98\"").expect("valid auth");
-        let agent = resolve_agent(config.agent, &tokens, Vec::new(), Vec::new());
-        assert_eq!(
-            agent.endpoints,
-            [Endpoint {
-                name: "cline".to_string(),
-                kind: EndpointKind::Cline {
-                    url: "https://api.cline.bot/api/v1".to_string(),
-                    token: "sk_4d98".to_string()
-                }
-            }]
-        );
-        assert!(
-            parse(
-                r#"
-            agent {
-                endpoint "cline" {
-                    kind "cline"
-                }
-            }
-        "#,
-            )
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn commands_are_read_from_markdown_files_named_after_them() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        std::fs::write(dir.join("review.md"), "Review the change below.\n").unwrap();
-        std::fs::write(
-            dir.join("plan-it.md"),
-            "---\nsystem-prompt: off\nargument: topic\n---\nPlan this.\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("Bad Name.md"), "x").unwrap();
-        std::fs::write(dir.join("compact.md"), "x").unwrap();
-        std::fs::write(dir.join("commit.md"), "x").unwrap();
-        std::fs::write(dir.join("empty.md"), "---\nargument: x\n---\n").unwrap();
-        std::fs::write(dir.join("notes.txt"), "x").unwrap();
-
-        let commands = read_commands(dir);
-        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
-        assert_eq!(names, ["plan-it", "review"]);
-        assert_eq!(commands[0].prompt, "Plan this.");
-        assert!(!commands[0].system_prompt);
-        assert_eq!(commands[0].argument.as_deref(), Some("topic"));
-        assert_eq!(commands[1].prompt, "Review the change below.");
-        assert!(commands[1].system_prompt);
-
-        assert!(read_commands(&dir.join("missing")).is_empty());
-    }
-
-    #[test]
     fn agent_block_is_empty_when_absent() {
         let config = parse("theme \"night_owl\"").expect("valid config");
         assert_eq!(config.agent, AgentSettings::default());
@@ -822,95 +495,6 @@ mod config_tests {
         assert!(parse("agent {\n endpoint \"a\" {\n url \"u\"\n kind \"wat\"\n }\n}").is_err());
         assert!(parse("agent {\n summary-model \"nonsense\"\n}").is_err());
         assert!(parse("agent {\n subagent-model \"a//low\"\n}").is_err());
-    }
-
-    #[test]
-    fn review_rounds_default_to_three_and_must_be_at_least_one() {
-        let tokens = HashMap::new();
-        let resolve = |content: &str| {
-            let config = parse(content).expect("valid config");
-            resolve_agent(config.agent, &tokens, Vec::new(), Vec::new()).review_rounds
-        };
-        assert_eq!(resolve("theme \"night_owl\""), 3);
-        assert_eq!(resolve("agent {\n review-rounds 5\n}"), 5);
-        assert!(parse("agent {\n review-rounds 0\n}").is_err());
-        assert!(parse("agent {\n review-rounds -2\n}").is_err());
-        assert!(parse("agent {\n review-rounds \"3\"\n}").is_err());
-    }
-
-    #[test]
-    fn repeat_limit_defaults_to_five_and_is_zero_or_at_least_two() {
-        let tokens = HashMap::new();
-        let resolve = |content: &str| {
-            let config = parse(content).expect("valid config");
-            resolve_agent(config.agent, &tokens, Vec::new(), Vec::new()).repeat_limit
-        };
-        assert_eq!(resolve("theme \"night_owl\""), 5);
-        assert_eq!(resolve("agent {\n repeat-limit 3\n}"), 3);
-        assert_eq!(resolve("agent {\n repeat-limit 0\n}"), 0);
-        assert!(parse("agent {\n repeat-limit 1\n}").is_err());
-        assert!(parse("agent {\n repeat-limit -2\n}").is_err());
-        assert!(parse("agent {\n repeat-limit \"5\"\n}").is_err());
-    }
-
-    #[test]
-    fn roles_are_read_from_markdown_files_and_need_a_description() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path();
-        std::fs::write(
-            dir.join("reviewer.md"),
-            "---\ndescription: Reviews commits\nmodel: claude/opus/high\n---\nYou review.\n",
-        )
-        .unwrap();
-        std::fs::write(dir.join("vague.md"), "You do things.\n").unwrap();
-        std::fs::write(dir.join("Bad Name.md"), "---\ndescription: x\n---\ny\n").unwrap();
-
-        let roles = read_roles(dir);
-        assert_eq!(roles.len(), 1);
-        assert_eq!(roles[0].name, "reviewer");
-        assert_eq!(roles[0].description, "Reviews commits");
-        assert_eq!(roles[0].prompt, "You review.");
-        let model = roles[0].model.as_ref().expect("role model");
-        assert_eq!(model.to_string(), "claude/opus/high");
-
-        assert!(read_roles(&dir.join("missing")).is_empty());
-    }
-
-    #[test]
-    fn endpoint_without_a_token_is_skipped() {
-        use crate::agent::EndpointKind;
-        let settings = AgentSettings {
-            endpoints: vec![
-                EndpointDecl::OpenAi {
-                    name: "kimi".to_string(),
-                    url: "https://k".to_string(),
-                },
-                EndpointDecl::OpenAi {
-                    name: "router".to_string(),
-                    url: "https://r".to_string(),
-                },
-                EndpointDecl::ClaudeCode {
-                    name: "claude".to_string(),
-                    models: vec!["opus".to_string()],
-                },
-            ],
-            summary_model: None,
-            subagent_model: None,
-            review_rounds: None,
-            repeat_limit: None,
-        };
-        let tokens = parse_auth("router \"sk-or\"\nunused \"x\"").expect("valid auth");
-        let agent = resolve_agent(settings, &tokens, Vec::new(), Vec::new());
-        let names: Vec<&str> = agent.endpoints.iter().map(|e| e.name.as_str()).collect();
-        assert_eq!(names, ["router", "claude"]);
-        assert_eq!(
-            agent.endpoints[0].kind,
-            EndpointKind::OpenAi {
-                url: "https://r".to_string(),
-                token: "sk-or".to_string()
-            }
-        );
-        assert!(agent.endpoint("kimi").is_none());
     }
 
     #[test]

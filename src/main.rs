@@ -13,6 +13,7 @@ mod keymap;
 mod loader;
 mod lsp;
 mod markdown_format;
+mod model_spec;
 mod scan;
 mod session;
 mod signal;
@@ -159,11 +160,11 @@ async fn main() {
         tui::app::build_state(Arc::clone(&files), root.clone(), theme.clone(), keymap);
     initial_state.after_agents_grace = std::time::Duration::from_secs(after_agents.grace_seconds);
     initial_state.config_aliases = aliases;
-    initial_state.agent = Arc::new(config::resolve_agent(
+    initial_state.agent = Arc::new(agent::AgentConfig::resolve(
         agent_settings,
         &config::load_auth(),
-        config::load_commands(),
-        config::load_roles(),
+        agent::commands::load(),
+        agent::subagent::load_roles(),
     ));
     initial_state.usage = usage::load();
 

@@ -198,9 +198,82 @@ pub fn expand<'a>(typed: &str, commands: &'a [Command]) -> Expansion<'a> {
     }
 }
 
+/// The custom slash commands, from `<config_dir>/commands/<name>.md`.
+pub fn load() -> Vec<Command> {
+    crate::util::fs::config_dir()
+        .map(|dir| read(&dir.join("commands").into_std_path_buf()))
+        .unwrap_or_default()
+}
+
+/// The commands of the `.md` files in `dir`, by name. A file that cannot make a
+/// command is logged and skipped; a missing directory yields none.
+fn read(dir: &std::path::Path) -> Vec<Command> {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return Vec::new();
+    };
+    let mut found: Vec<Command> = entries
+        .filter_map(|entry| {
+            let path = entry.ok()?.path();
+            if path.extension()? != "md" {
+                return None;
+            }
+            let name = path.file_stem()?.to_str()?;
+            if !is_command_name(name) {
+                tracing::warn!(
+                    "ignoring {}: a command name is made of lowercase letters, digits and dashes",
+                    path.display()
+                );
+                return None;
+            }
+            if is_built_in(name) {
+                tracing::warn!("ignoring {}: '{name}' is built in", path.display());
+                return None;
+            }
+            let text = std::fs::read_to_string(&path)
+                .map_err(|e| tracing::warn!("cannot read {}: {e}", path.display()))
+                .ok()?;
+            let command = Command::parse(name, &text);
+            if command.is_none() {
+                tracing::warn!("ignoring {}: it has no prompt", path.display());
+            }
+            command
+        })
+        .collect();
+    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn commands_are_read_from_markdown_files_named_after_them() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path();
+        std::fs::write(dir.join("review.md"), "Review the change below.\n").unwrap();
+        std::fs::write(
+            dir.join("plan-it.md"),
+            "---\nsystem-prompt: off\nargument: topic\n---\nPlan this.\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("Bad Name.md"), "x").unwrap();
+        std::fs::write(dir.join("compact.md"), "x").unwrap();
+        std::fs::write(dir.join("commit.md"), "x").unwrap();
+        std::fs::write(dir.join("empty.md"), "---\nargument: x\n---\n").unwrap();
+        std::fs::write(dir.join("notes.txt"), "x").unwrap();
+
+        let commands = read(dir);
+        let names: Vec<&str> = commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["plan-it", "review"]);
+        assert_eq!(commands[0].prompt, "Plan this.");
+        assert!(!commands[0].system_prompt);
+        assert_eq!(commands[0].argument.as_deref(), Some("topic"));
+        assert_eq!(commands[1].prompt, "Review the change below.");
+        assert!(commands[1].system_prompt);
+
+        assert!(read(&dir.join("missing")).is_empty());
+    }
 
     fn commands() -> Vec<Command> {
         vec![Command {

@@ -196,7 +196,7 @@ pub struct TurnRequest {
     /// The endpoint of `backend`, whose subscription this turn spends.
     pub endpoint: crate::agent::Endpoint,
     /// The model this turn is sent to.
-    pub spec: crate::agent::ModelSpec,
+    pub spec: crate::model_spec::ModelSpec,
     /// Endpoints, roles and models the turn's sub-agents can run on.
     pub agent: Arc<crate::agent::AgentConfig>,
     /// Model that titles and summarizes the node once its turn is done.
@@ -833,7 +833,7 @@ async fn run_own_loop(
     request: &TurnRequest,
     mcp: &crate::agent::mcp::McpTools,
     target: &crate::agent::llm::LlmTarget,
-    spec: &crate::agent::ModelSpec,
+    spec: &crate::model_spec::ModelSpec,
     recorder: &mut Recorder,
 ) -> Result<(), String> {
     use crate::agent::Message;

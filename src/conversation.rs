@@ -224,8 +224,8 @@ impl Metadata {
     }
 
     /// The model the turn ran on, when the metadata names one completely.
-    pub fn model_spec(&self) -> Option<crate::agent::ModelSpec> {
-        use crate::agent::ModelSpec;
+    pub fn model_spec(&self) -> Option<crate::model_spec::ModelSpec> {
+        use crate::model_spec::ModelSpec;
         ModelSpec::from_parts(
             self.endpoint.as_deref()?,
             self.model.as_deref()?,
@@ -512,7 +512,7 @@ impl ConversationTree {
             parent_session: parent_meta
                 .filter(|meta| {
                     !parent_is_compact
-                        && meta.kind.as_deref() == Some(crate::agent::CLAUDE_CODE_KIND)
+                        && meta.kind.as_deref() == Some(crate::config::CLAUDE_CODE_KIND)
                 })
                 .and_then(|meta| meta.session_id.clone()),
         })

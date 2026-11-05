@@ -130,7 +130,7 @@ pub struct DiscussionState {
     /// The next prompt, as typed so far.
     pub draft: crate::tui::input_line::InputLine,
     /// Model the next prompt is sent to.
-    pub model: Option<crate::agent::ModelSpec>,
+    pub model: Option<crate::model_spec::ModelSpec>,
     /// Why the last send was refused; cleared by the next edit.
     pub notice: Option<String>,
 }
@@ -243,7 +243,7 @@ pub struct ModelCatalog {
     /// Result of the last `/models` fetch of each endpoint, by endpoint name.
     pub lists: HashMap<String, Result<Vec<String>, String>>,
     /// Every `endpoint × model × effort` combination, in display order.
-    pub specs: Vec<crate::agent::ModelSpec>,
+    pub specs: Vec<crate::model_spec::ModelSpec>,
 }
 
 impl ModelCatalog {
@@ -253,8 +253,8 @@ impl ModelCatalog {
         endpoint: &str,
         result: Result<Vec<String>, String>,
     ) {
-        use crate::agent::Effort;
-        use crate::agent::ModelSpec;
+        use crate::model_spec::Effort;
+        use crate::model_spec::ModelSpec;
         self.lists.insert(endpoint.to_string(), result);
         self.specs.clear();
         for endpoint in &agent.endpoints {
@@ -408,7 +408,7 @@ pub struct AppState {
     /// Next available report window ID.
     pub next_report_id: usize,
     /// Model last picked during this run, offered to new conversations.
-    pub last_picked_model: Option<crate::agent::ModelSpec>,
+    pub last_picked_model: Option<crate::model_spec::ModelSpec>,
     /// Model Picker entries are indexes into `models.specs`.
     pub model_picker: FuzzyPickerState<usize>,
     /// What the open Model Picker is choosing a model for.

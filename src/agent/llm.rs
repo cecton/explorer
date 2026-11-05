@@ -7,7 +7,7 @@ pub struct LlmTarget {
     pub url: String,
     pub token: String,
     pub model: String,
-    pub effort: crate::agent::Effort,
+    pub effort: crate::model_spec::Effort,
 }
 
 /// A tool as advertised to the model.
@@ -69,8 +69,8 @@ fn service_target(target: &LlmTarget) -> genai::ServiceTarget {
     }
 }
 
-fn chat_options(effort: crate::agent::Effort, session: &str) -> genai::chat::ChatOptions {
-    use crate::agent::Effort;
+fn chat_options(effort: crate::model_spec::Effort, session: &str) -> genai::chat::ChatOptions {
+    use crate::model_spec::Effort;
     // opencode rejects requests without a session id; other servers ignore the header.
     let options = genai::chat::ChatOptions::default()
         .with_capture_usage(true)

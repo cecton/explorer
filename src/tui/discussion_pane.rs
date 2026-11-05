@@ -101,7 +101,7 @@ pub(crate) struct Launch {
     pub kind: TurnKind,
     /// Custom slash command the prompt was expanded from.
     pub command: Option<String>,
-    pub spec: crate::agent::ModelSpec,
+    pub spec: crate::model_spec::ModelSpec,
 }
 
 impl Launch {
@@ -111,7 +111,7 @@ impl Launch {
         tree: &crate::conversation::ConversationTree,
         node: &crate::conversation::NodeId,
         prompt: String,
-        spec: crate::agent::ModelSpec,
+        spec: crate::model_spec::ModelSpec,
     ) -> Option<Self> {
         use crate::agent::commands::Expansion;
         use crate::conversation::NodeType;
@@ -370,7 +370,7 @@ pub(crate) fn start_turn(
 }
 
 /// The model a node was run with, when its metadata names one completely.
-pub(crate) fn node_model(node: &crate::conversation::Node) -> Option<crate::agent::ModelSpec> {
+pub(crate) fn node_model(node: &crate::conversation::Node) -> Option<crate::model_spec::ModelSpec> {
     node.meta.model_spec()
 }
 
@@ -1073,7 +1073,7 @@ impl DiscussionComponent {
         state: &mut crate::tui::state::AppState,
         main_tx: crate::signal::MainTx,
         node: &crate::conversation::NodeId,
-        spec: crate::agent::ModelSpec,
+        spec: crate::model_spec::ModelSpec,
     ) {
         let launch = {
             let tree = state.conversations.read();
@@ -2557,10 +2557,10 @@ mod tests {
     /// `review` command; window 0 shows `a1` and window 1 shows `a2`.
     fn state_with_failed_child() -> (tempfile::TempDir, crate::tui::state::AppState) {
         use crate::agent::AgentConfig;
-        use crate::agent::ModelSpec;
         use crate::agent::commands::Command;
         use crate::conversation::ConversationTree;
         use crate::conversation::NodeId;
+        use crate::model_spec::ModelSpec;
         use crate::tui::state::DiscussionState;
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
@@ -2597,7 +2597,7 @@ mod tests {
 
     fn feedback_launch() -> Launch {
         use crate::agent::Mode;
-        use crate::agent::ModelSpec;
+        use crate::model_spec::ModelSpec;
         Launch {
             parent: None,
             prompt: "hello".to_string(),
@@ -3343,9 +3343,9 @@ mod tests {
     #[test]
     fn replay_keeps_parent_mode_and_command_of_the_node() {
         use crate::agent::Mode;
-        use crate::agent::ModelSpec;
         use crate::conversation::ConversationTree;
         use crate::conversation::NodeId;
+        use crate::model_spec::ModelSpec;
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let parent = root.join("a1");

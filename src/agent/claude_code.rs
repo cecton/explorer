@@ -13,7 +13,7 @@ const STEERING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(
 #[derive(Clone, Debug)]
 pub struct ClaudeTarget {
     pub model: String,
-    pub effort: crate::agent::Effort,
+    pub effort: crate::model_spec::Effort,
 }
 
 /// The session a run starts from.
@@ -217,7 +217,7 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
 }
 
 fn arguments(invocation: &Invocation<'_>) -> Vec<String> {
-    use crate::agent::Effort;
+    use crate::model_spec::Effort;
     let mut args: Vec<String> = [
         "-p",
         "--output-format",
@@ -417,7 +417,7 @@ pub async fn run(
 
 /// One answer without tools and without a saved session, for titles and summaries.
 pub async fn complete(target: &ClaudeTarget, system: &str, user: &str) -> Result<String, String> {
-    use crate::agent::Effort;
+    use crate::model_spec::Effort;
     let mut command = tokio::process::Command::new("claude");
     command
         .args(["-p", "--output-format", "text", "--no-session-persistence"])
@@ -577,8 +577,8 @@ mod tests {
 
     #[test]
     fn arguments_follow_effort_and_session() {
-        use crate::agent::Effort;
         use crate::agent::mcp::McpTools;
+        use crate::model_spec::Effort;
         let target = ClaudeTarget {
             model: "opus".to_string(),
             effort: Effort::High,
