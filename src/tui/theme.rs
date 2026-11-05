@@ -226,20 +226,24 @@ fn parse_hex_color(s: &str) -> Option<RgbValue> {
 }
 
 /// The theme scopes of a semantic token type, most specific first: the first one the
-/// theme styles gives the token its color.
+/// theme styles gives the token its color. Later entries are fallbacks for the bundled
+/// themes that style only one member of a family (`type.builtin` without `type`,
+/// `constant.numeric` without `constant`, …).
 fn lsp_token_scopes(token_type: &str) -> &'static [&'static str] {
     match token_type {
-        "keyword" => &["keyword"],
+        "keyword" => &["keyword", "keyword.control"],
         "modifier" => &["keyword.storage.modifier", "keyword"],
         "selfKeyword" | "boolean" => &["keyword", "variable.builtin"],
         "comment" => &["comment"],
-        "string" | "character" | "escapeSequence" => &["string"],
+        "string" | "character" | "escapeSequence" => &["string", "comment"],
         "number" => &["constant.numeric", "constant"],
-        "const" | "static" => &["constant"],
-        "namespace" => &["namespace", "type"],
+        "const" | "static" => &["constant", "constant.builtin", "constant.numeric"],
+        "namespace" => &["namespace", "type", "type.builtin"],
         "type" | "class" | "struct" | "enum" | "interface" | "builtinType" | "typeAlias"
-        | "typeParameter" | "constParameter" | "generic" | "toolModule" => &["type"],
-        "function" | "method" => &["function"],
+        | "typeParameter" | "constParameter" | "generic" | "toolModule" => {
+            &["type", "type.builtin"]
+        }
+        "function" | "method" => &["function", "function.method", "function.builtin"],
         "macro" | "attributeBracket" | "builtinAttribute" | "decorator" => &[
             "function.macro",
             "function.special",
@@ -247,7 +251,12 @@ fn lsp_token_scopes(token_type: &str) -> &'static [&'static str] {
             "function",
         ],
         "variable" => &["variable"],
-        "parameter" => &["variable.parameter", "variable"],
+        "parameter" => &[
+            "variable.parameter",
+            "variable",
+            "variable.other.member",
+            "variable.builtin",
+        ],
         "property" | "enumMember" => &["variable.other.member", "variable"],
         "operator" => &["operator"],
         "lifetime" => &["label", "operator"],
@@ -281,7 +290,34 @@ mod tests {
         let theme = theme("catppuccin_mocha");
         let keyword = theme.scope_fg("keyword").expect("keyword is styled");
         assert_eq!(theme.color_for_lsp_token("keyword"), Some(keyword));
+        assert_eq!(
+            theme.color_for_lsp_token("comment"),
+            theme.scope_fg("comment")
+        );
+        assert_eq!(
+            theme.color_for_lsp_token("parameter"),
+            theme.scope_fg("variable.parameter")
+        );
         assert_eq!(theme.color_for_lsp_token("nonexistentToken"), None);
+    }
+
+    /// Themes that style only one member of a family keep their color for the whole
+    /// family: `jetbrains_dark` has `type.builtin` and no `type`, `eiffel` has
+    /// `constant.numeric` and no `constant`.
+    #[test]
+    fn a_token_falls_back_to_the_member_of_its_family_a_theme_styles() {
+        let jetbrains = theme("jetbrains_dark");
+        assert_eq!(jetbrains.scope_fg("type"), None);
+        assert_eq!(
+            jetbrains.color_for_lsp_token("struct"),
+            jetbrains.scope_fg("type.builtin")
+        );
+        let eiffel = theme("eiffel");
+        assert_eq!(eiffel.scope_fg("constant"), None);
+        assert_eq!(
+            eiffel.color_for_lsp_token("static"),
+            eiffel.scope_fg("constant.builtin")
+        );
     }
 
     #[test]
