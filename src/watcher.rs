@@ -152,8 +152,7 @@ impl RRTWorker for WatcherWorker {
                         self.pending_git = true;
                         continue;
                     }
-                    let first = rel.components().next().map(|c| c.as_str());
-                    if first.is_some_and(|f| crate::loader::IGNORED_DIRS.contains(&f)) {
+                    if crate::loader::is_ignored(rel) {
                         continue;
                     }
                     let entry = self.pending.entry(utf8).or_insert(kind);
@@ -311,6 +310,31 @@ fn is_git_history_trigger(components: camino::Utf8Components<'_>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ignored_dirs_are_dropped_at_any_depth() {
+        for path in [
+            "target/debug/explorer",
+            "crates/xtask/target/debug/build.rs",
+            ".git/config",
+            "vendor/x/.git/HEAD",
+        ] {
+            assert!(
+                crate::loader::is_ignored(Utf8PathBuf::from(path).as_path()),
+                "{path}"
+            );
+        }
+        for path in [
+            "src/target_edit.rs",
+            "docs/targeting.md",
+            "xtask/src/main.rs",
+        ] {
+            assert!(
+                !crate::loader::is_ignored(Utf8PathBuf::from(path).as_path()),
+                "{path}"
+            );
+        }
+    }
 
     #[test]
     fn git_history_trigger_matches_head_refs_and_packed_refs() {

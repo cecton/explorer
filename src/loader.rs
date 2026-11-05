@@ -251,6 +251,13 @@ pub const GIT_DIR: &str = ".git";
 /// watcher's live event filter (`watcher.rs`).
 pub const IGNORED_DIRS: [&str; 2] = ["target", GIT_DIR];
 
+/// Whether a repository-relative path sits under an [`IGNORED_DIRS`] directory at any
+/// depth: the walk prunes them everywhere, so the watcher must drop their events too.
+pub fn is_ignored(rel: &Utf8Path) -> bool {
+    rel.components()
+        .any(|component| IGNORED_DIRS.contains(&component.as_str()))
+}
+
 /// Walk `root` recursively and return every regular-file path, skipping the
 /// [`IGNORED_DIRS`]. Shared by the initial load (`main.rs`) and the watcher's
 /// overflow rescan so both see the same set of files.
