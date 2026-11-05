@@ -150,7 +150,7 @@ impl InputLine {
         self.cursor = cursor;
         let anchor = grapheme_byte_offset(&self.text, pointed);
         let word = if anchor < self.text.len() {
-            crate::loader::word_bounds(&self.text, anchor)
+            crate::util::text::word_bounds(&self.text, anchor)
         } else {
             (anchor, anchor)
         };
@@ -174,7 +174,7 @@ impl InputLine {
         };
         let cursor = grapheme_byte_offset(&self.text, pointed);
         let range = if cursor < self.text.len() {
-            crate::loader::drag_range(&self.text, selection.anchor, selection.word, cursor)
+            crate::util::text::drag_range(&self.text, selection.anchor, selection.word, cursor)
         } else {
             (selection.word.0, self.text.len())
         };

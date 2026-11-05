@@ -114,15 +114,8 @@ pub struct Metadata {
 impl Metadata {
     pub fn parse(text: &str) -> Self {
         let mut meta = Self::default();
-        for line in text.lines() {
-            let Some((key, value)) = line.split_once(':') else {
-                continue;
-            };
-            let value = value.trim();
-            if value.is_empty() {
-                continue;
-            }
-            match key.trim() {
+        for (key, value) in crate::util::text::key_values(text) {
+            match key {
                 "type" => meta.node_type = NodeType::parse(value),
                 "endpoint" => meta.endpoint = Some(value.to_string()),
                 "kind" => meta.kind = Some(value.to_string()),
@@ -281,7 +274,7 @@ fn read_agents(node_dir: &camino::Utf8Path) -> Vec<AgentRecord> {
             let dir = camino::Utf8PathBuf::from_path_buf(entry.path()).ok()?;
             let title = std::fs::read_to_string(dir.join("title.md"))
                 .ok()
-                .map(|text| single_line(&text))
+                .map(|text| crate::util::text::single_line(&text))
                 .filter(|text| !text.is_empty());
             Some(AgentRecord {
                 index,
@@ -331,7 +324,7 @@ impl Node {
                 .filter(|text| !text.is_empty())
         };
         let meta = read_meta(dir);
-        let title = read_trimmed("title.md").map(|text| single_line(&text));
+        let title = read_trimmed("title.md").map(|text| crate::util::text::single_line(&text));
         let prompt_first_line = match title {
             Some(_) => None,
             None => read_trimmed("input.md")
@@ -839,7 +832,7 @@ impl ConversationTree {
         if let Some(summary) = node.summary.as_deref()
             && summary != node.display_title()
         {
-            line.push_str(&format!("  {}\n", single_line(summary)));
+            line.push_str(&format!("  {}\n", crate::util::text::single_line(summary)));
         }
         line
     }
@@ -936,10 +929,6 @@ impl ConversationTree {
 
 fn unknown_node() -> std::io::Error {
     std::io::Error::other("unknown conversation node")
-}
-
-fn single_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
 /// `<data_dir>/conversations/<repo-hash>/` for the repository at `repo_root`.

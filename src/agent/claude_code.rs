@@ -268,21 +268,6 @@ fn arguments(invocation: &Invocation<'_>) -> Vec<String> {
     args
 }
 
-/// Terminates the CLI's process group unless disarmed: a cancelled turn drops the
-/// future mid-run, and SIGTERM lets Claude Code stop its own commands.
-struct GroupTerminator(Option<u32>);
-
-impl Drop for GroupTerminator {
-    fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            // SAFETY: plain syscall on a process group this process created.
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGTERM);
-            }
-        }
-    }
-}
-
 fn spawn_error(error: std::io::Error) -> String {
     match error.kind() {
         std::io::ErrorKind::NotFound => "the `claude` command was not found on PATH".to_string(),
@@ -318,7 +303,10 @@ pub async fn run(
         .process_group(0)
         .spawn()
         .map_err(|e| RunError::Failed(spawn_error(e)))?;
-    let mut terminator = GroupTerminator(child.id());
+    // SIGTERM rather than SIGKILL: it lets Claude Code stop the commands it started.
+    let mut terminator = child
+        .id()
+        .map(|pid| crate::util::process::GroupGuard::new(pid, libc::SIGTERM));
 
     // stdin stays open for the whole run: what the user sends while the CLI works is
     // written there, and the CLI reads it as a new user message of the session. The CLI
@@ -403,7 +391,9 @@ pub async fn run(
         steering.abort();
     }
     let status = child.wait().await;
-    terminator.0 = None;
+    if let Some(terminator) = terminator.as_mut() {
+        terminator.disarm();
+    }
     let stderr = match stderr {
         Some(reader) => reader.await.unwrap_or_default(),
         None => String::new(),

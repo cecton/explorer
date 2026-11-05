@@ -927,12 +927,14 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Fi
                                 {
                                     continue;
                                 }
-                                let loc_lo_char = byte_to_char(
+                                let loc_lo_char = crate::util::text::byte_to_char(
                                     line,
                                     loc.start_byte.saturating_sub(line_byte_start),
                                 );
-                                let loc_hi_char =
-                                    byte_to_char(line, loc.end_byte - line_byte_start);
+                                let loc_hi_char = crate::util::text::byte_to_char(
+                                    line,
+                                    loc.end_byte - line_byte_start,
+                                );
                                 overlay_interval(
                                     &mut intervals,
                                     seg_start_char.max(loc_lo_char),
@@ -963,8 +965,8 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Fi
                                     crate::tui::state::SEARCH_MATCH_FG,
                                 )
                             };
-                            let m_lo = byte_to_char(line, m.start());
-                            let m_hi = byte_to_char(line, m.end());
+                            let m_lo = crate::util::text::byte_to_char(line, m.start());
+                            let m_hi = crate::util::text::byte_to_char(line, m.end());
                             overlay_interval(
                                 &mut intervals,
                                 seg_start_char.max(m_lo),
@@ -977,8 +979,14 @@ impl Component<crate::tui::state::AppState, crate::tui::state::AppSignal> for Fi
 
                     // Selection overlays last so it wins over symbol highlights.
                     if is_text_drag_single {
-                        let sel_lo = byte_to_char(line, text_drag_single_lo - line_byte_start);
-                        let sel_hi = byte_to_char(line, text_drag_single_hi - line_byte_start);
+                        let sel_lo = crate::util::text::byte_to_char(
+                            line,
+                            text_drag_single_lo - line_byte_start,
+                        );
+                        let sel_hi = crate::util::text::byte_to_char(
+                            line,
+                            text_drag_single_hi - line_byte_start,
+                        );
                         overlay_interval(
                             &mut intervals,
                             sel_lo.max(seg_start_char),
@@ -1203,11 +1211,6 @@ pub(super) fn ensure_readable_fg(fg: RgbValue, bg: RgbValue) -> RgbValue {
     } else {
         RgbValue::from_u8(235, 235, 235)
     }
-}
-
-/// Converts a byte offset within `s` to a character count.
-fn byte_to_char(s: &str, byte_offset: usize) -> usize {
-    s[..byte_offset.min(s.len())].chars().count()
 }
 
 /// Repaints `o_lo..o_hi` in `intervals` with `color`, splitting partially

@@ -911,7 +911,7 @@ impl DiscussionComponent {
         if anchor >= text.len() || !text.is_char_boundary(anchor) {
             return;
         }
-        let word = crate::loader::word_bounds(&text, anchor);
+        let word = crate::util::text::word_bounds(&text, anchor);
         // A sub-agent run has no highlights: a modified drag selects too.
         let highlighted = discussion
             .node
@@ -985,7 +985,7 @@ impl DiscussionComponent {
                 if cursor >= text.len() || !text.is_char_boundary(cursor) {
                     return;
                 }
-                crate::loader::drag_range(&text, drag.anchor, drag.word, cursor)
+                crate::util::text::drag_range(&text, drag.anchor, drag.word, cursor)
             }
             Some((part, _)) if part < drag.part => (0, drag.word.1),
             Some(_) => (drag.word.0, text.len()),
@@ -2405,12 +2405,12 @@ mod tests {
     #[test]
     fn drag_range_takes_whole_words_across_lines_in_both_directions() {
         let text = "one two\nthree four";
-        let word = crate::loader::word_bounds(text, 5);
+        let word = crate::util::text::word_bounds(text, 5);
         assert_eq!(word, (4, 7));
-        assert_eq!(crate::loader::drag_range(text, 5, word, 5), (4, 7));
-        assert_eq!(crate::loader::drag_range(text, 5, word, 15), (4, 18));
+        assert_eq!(crate::util::text::drag_range(text, 5, word, 5), (4, 7));
+        assert_eq!(crate::util::text::drag_range(text, 5, word, 15), (4, 18));
         assert_eq!(&text[4..18], "two\nthree four");
-        assert_eq!(crate::loader::drag_range(text, 5, word, 1), (0, 7));
+        assert_eq!(crate::util::text::drag_range(text, 5, word, 1), (0, 7));
     }
 
     #[test]

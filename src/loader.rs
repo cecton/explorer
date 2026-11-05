@@ -54,114 +54,15 @@ impl FileData {
             .unwrap_or(s.len())
     }
 
-    /// The [`word_bounds`] of the file's content under `cursor_byte`.
+    /// The [`crate::util::text::word_bounds`] of the file's content under `cursor_byte`.
     pub fn word_bounds(&self, cursor_byte: usize) -> (usize, usize) {
-        word_bounds(&self.content, cursor_byte)
+        crate::util::text::word_bounds(&self.content, cursor_byte)
     }
 
     pub fn line_bounds(&self, line_idx: usize) -> (usize, usize) {
         let line_byte_start = self.line_starts[line_idx];
         let line = self.line(line_idx);
         (line_byte_start, line_byte_start + line.len())
-    }
-}
-
-/// Returns the byte range `(start, end)` of the "word" under `cursor_byte`.
-///
-/// The definition of "word" depends on what the cursor is sitting on:
-///
-/// 1. **Whitespace** — the entire contiguous run of whitespace characters
-///    (spaces, tabs, newlines, etc.).
-/// 2. **URL** — if the non-whitespace span parses as a `url::Url`, the full
-///    URL is returned. URL boundaries are whitespace and the characters
-///    `"`, `)`, `]`, `}`.
-/// 3. **Alphanumeric word** — otherwise, a run of `[A-Za-z0-9_]` characters.
-///
-/// # Panics
-///
-/// Panics in debug builds if `cursor_byte` is not a valid byte index into
-/// `content` (i.e. `cursor_byte > content.len()`). Callers are
-/// expected to keep the cursor aligned to character boundaries.
-///
-/// # Edge cases
-///
-/// * Empty content → `(0, 0)`.
-/// * Cursor on punctuation that is not part of a URL → returns the single
-///   character at that position.
-pub fn word_bounds(content: &str, cursor_byte: usize) -> (usize, usize) {
-    if content.is_empty() {
-        return (0, 0);
-    }
-    debug_assert!(
-        cursor_byte <= content.len(),
-        "cursor_byte {cursor_byte} out of bounds for content of length {}",
-        content.len()
-    );
-    let cursor_byte = cursor_byte.min(content.len() - 1);
-    let c = content[cursor_byte..].chars().next().unwrap_or('\0');
-
-    macro_rules! scan_backward {
-        ($i:ident, $char:ident => $take_while:expr) => {{
-            content[..(cursor_byte + c.len_utf8())]
-                .char_indices()
-                .rev()
-                .take_while(|&($i, $char)| $take_while)
-                .last()
-                .map(|(i, _)| i)
-                .unwrap_or(cursor_byte)
-        }};
-    }
-
-    macro_rules! scan_forward {
-        ($i:ident, $char:ident => $take_while:expr) => {{
-            content[cursor_byte..]
-                .char_indices()
-                .take_while(|&($i, $char)| $take_while)
-                .last()
-                .map(|(i, c)| cursor_byte + i + c.len_utf8())
-                .unwrap_or(cursor_byte + c.len_utf8())
-        }};
-    }
-
-    if c.is_whitespace() {
-        let start = scan_backward!(_i, c => c.is_whitespace());
-        let end = scan_forward!(_i, c => c.is_whitespace());
-        (start, end)
-    } else {
-        let is_url_boundary = |c: char| c.is_whitespace() || matches!(c, '"' | ')' | ']' | '}');
-        let end = scan_forward!(_i, c => !is_url_boundary(c));
-        let mut url = None;
-        let _start = scan_backward!(i, c => {
-            let res = !is_url_boundary(c);
-            if res && content[i..end].contains("://") && url::Url::parse(&content[i..end]).is_ok() {
-                url = Some((i, end));
-            }
-            res
-        });
-        if let Some((start, end)) = url {
-            (start, end)
-        } else {
-            let is_word = |c: char| c.is_alphanumeric() || c == '_';
-            let start = scan_backward!(_i, c => is_word(c));
-            let end = scan_forward!(_i, c => is_word(c));
-            (start, end)
-        }
-    }
-}
-
-/// Range covered by a drag from `word`, clicked at `anchor`, to the word under
-/// `cursor`: whole words at both ends, whatever the rows they are on.
-pub(crate) fn drag_range(
-    text: &str,
-    anchor: usize,
-    word: (usize, usize),
-    cursor: usize,
-) -> (usize, usize) {
-    let (start, end) = word_bounds(text, cursor);
-    if cursor >= anchor {
-        (word.0, end.max(word.1))
-    } else {
-        (start.min(word.0), word.1)
     }
 }
 
@@ -350,96 +251,6 @@ mod tests {
     fn extract_text_empty() {
         let data = fd("hello");
         assert_eq!(data.extract_text(2, 2), None);
-    }
-
-    #[test]
-    fn word_bounds_whitespace() {
-        let data = fd("foo    bar");
-        let (start, end) = data.word_bounds(3);
-        assert_eq!(data.extract_text(start, end).as_deref(), Some("    "));
-
-        let data = fd("foo  \n  bar");
-        let (start, end) = data.word_bounds(3);
-        assert_eq!(data.extract_text(start, end).as_deref(), Some("  \n  "));
-
-        let data = fd("foo\t\tbar");
-        let (start, end) = data.word_bounds(3);
-        assert_eq!(data.extract_text(start, end).as_deref(), Some("\t\t"));
-    }
-
-    #[test]
-    fn word_bounds_url() {
-        let data = fd("url=file://url?foo#bar baz");
-        let (start, end) = data.word_bounds(6);
-        assert_eq!(
-            data.extract_text(start, end).as_deref(),
-            Some("file://url?foo#bar")
-        );
-
-        let data = fd("format!(\"file://root\").parse().unwrap()");
-        let (start, end) = data.word_bounds(15);
-        assert_eq!(
-            data.extract_text(start, end).as_deref(),
-            Some("file://root")
-        );
-
-        let data = fd("see also https://example.com/path?q=1");
-        let (start, end) = data.word_bounds(10);
-        assert_eq!(
-            data.extract_text(start, end).as_deref(),
-            Some("https://example.com/path?q=1")
-        );
-
-        let data = fd("[https://a.b]");
-        let (start, end) = data.word_bounds(5);
-        assert_eq!(
-            data.extract_text(start, end).as_deref(),
-            Some("https://a.b")
-        );
-
-        let data = fd("{https://a.b}");
-        let (start, end) = data.word_bounds(5);
-        assert_eq!(
-            data.extract_text(start, end).as_deref(),
-            Some("https://a.b")
-        );
-    }
-
-    #[test]
-    fn word_bounds_alphanumeric() {
-        let data = fd("fn foo_bar() {}");
-        let (start, end) = data.word_bounds(6);
-        assert_eq!(data.extract_text(start, end).as_deref(), Some("foo_bar"));
-
-        let data = fd("123abc");
-        let (start, end) = data.word_bounds(3);
-        assert_eq!(data.extract_text(start, end).as_deref(), Some("123abc"));
-
-        let data = fd("use serde_json::Value;");
-        let (start, end) = data.word_bounds(12);
-        assert_eq!(data.extract_text(start, end).as_deref(), Some("serde_json"));
-    }
-
-    #[test]
-    fn word_bounds_multibyte() {
-        let data = fd("héllo");
-        let (start, end) = data.word_bounds(3);
-        assert_eq!(data.extract_text(start, end).as_deref(), Some("héllo"));
-    }
-
-    #[test]
-    fn word_bounds_empty() {
-        let data = fd("");
-        let (start, end) = data.word_bounds(0);
-        assert_eq!(start, 0);
-        assert_eq!(end, 0);
-    }
-
-    #[test]
-    fn word_bounds_trailing_punctuation() {
-        let data = fd("foo.bar");
-        let (start, end) = data.word_bounds(3);
-        assert_eq!(data.extract_text(start, end).as_deref(), Some("."));
     }
 
     #[test]

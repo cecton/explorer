@@ -37,7 +37,7 @@ impl Role {
     /// system prompt.
     pub fn parse(name: &str, text: &str) -> Result<Self, String> {
         use crate::agent::ModelSpec;
-        let (metadata, prompt) = crate::agent::commands::split_metadata(text);
+        let (metadata, prompt) = crate::util::text::split_metadata(text);
         let prompt = prompt.trim();
         if prompt.is_empty() {
             return Err("it has no prompt".to_string());
@@ -45,15 +45,8 @@ impl Role {
         let mut description = None;
         let mut model = None;
         let mut budget = None;
-        for line in metadata.lines() {
-            let Some((key, value)) = line.split_once(':') else {
-                continue;
-            };
-            let value = value.trim();
-            if value.is_empty() {
-                continue;
-            }
-            match key.trim() {
+        for (key, value) in crate::util::text::key_values(metadata) {
+            match key {
                 "description" => description = Some(value.to_string()),
                 "model" => {
                     model = Some(ModelSpec::parse(value).ok_or_else(|| {

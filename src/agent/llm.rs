@@ -143,7 +143,7 @@ fn error_text(error: genai::Error) -> String {
 }
 
 fn one_line(text: &str) -> String {
-    let flat = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let flat = crate::util::text::single_line(text);
     if flat.chars().count() <= ERROR_MAX_CHARS {
         return flat;
     }

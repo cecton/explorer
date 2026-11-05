@@ -45,10 +45,7 @@ impl Drop for Group {
         if let Some(pid) = self.pid
             && !self.reaped.load(Ordering::SeqCst)
         {
-            // SAFETY: plain syscall on a process group this process created.
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            }
+            crate::util::process::kill_group(pid, crate::util::process::KILL);
         }
     }
 }

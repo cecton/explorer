@@ -1050,10 +1050,6 @@ fn with_compact_hint(error: String) -> String {
     }
 }
 
-fn single_line(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
 /// What the summary model reads: the prompt, the end of the reply and the commits made.
 fn title_input(prompt: &str, reply: &str, commits: &[String]) -> String {
     let reply = match reply.char_indices().nth(REPLY_MAX_CHARS) {
@@ -1079,8 +1075,11 @@ fn title_input(prompt: &str, reply: &str, commits: &[String]) -> String {
 pub(super) fn parse_title_and_summary(answer: &str) -> Option<(String, String)> {
     let answer = answer.trim();
     let (first, rest) = answer.split_once('\n').unwrap_or((answer, ""));
-    let title: String = single_line(first).chars().take(TITLE_MAX_CHARS).collect();
-    (!title.is_empty()).then(|| (title, single_line(rest)))
+    let title: String = crate::util::text::single_line(first)
+        .chars()
+        .take(TITLE_MAX_CHARS)
+        .collect();
+    (!title.is_empty()).then(|| (title, crate::util::text::single_line(rest)))
 }
 
 /// One answer without tools from the summary model.

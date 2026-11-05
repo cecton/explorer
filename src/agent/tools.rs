@@ -39,10 +39,7 @@ impl Drop for Background {
     fn drop(&mut self) {
         for leader in self.leaders.get_mut().iter() {
             if let Some(pid) = leader.id() {
-                // SAFETY: plain syscall on a process group this process created.
-                unsafe {
-                    libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-                }
+                crate::util::process::kill_group(pid, crate::util::process::KILL);
             }
         }
     }
@@ -538,21 +535,6 @@ fn grep(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, Str
     Ok(out)
 }
 
-/// Kills a command's whole process group unless disarmed: covers timeouts and a
-/// cancelled turn dropping the future mid-command.
-struct GroupKiller(Option<u32>);
-
-impl Drop for GroupKiller {
-    fn drop(&mut self) {
-        if let Some(pid) = self.0 {
-            // SAFETY: plain syscall on a process group this process created.
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            }
-        }
-    }
-}
-
 /// Keeps the head and the tail of an output that is too long.
 pub(super) fn truncate_middle(text: &str, max_bytes: usize) -> String {
     if text.len() <= max_bytes {
@@ -593,13 +575,17 @@ async fn shell(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<Stri
         .process_group(0)
         .spawn()
         .map_err(|e| format!("failed to start sh: {e}"))?;
-    let mut killer = GroupKiller(child.id());
+    let mut killer = child
+        .id()
+        .map(|pid| crate::util::process::GroupGuard::new(pid, crate::util::process::KILL));
 
     let waited = tokio::time::timeout(Duration::from_secs(timeout), child.wait_with_output()).await;
     let Ok(output) = waited else {
         return Ok(format!("command killed after {timeout}s timeout\n"));
     };
-    killer.0 = None;
+    if let Some(killer) = killer.as_mut() {
+        killer.disarm();
+    }
     let output = output.map_err(|e| e.to_string())?;
 
     let mut text = String::from_utf8_lossy(&output.stdout).into_owned();

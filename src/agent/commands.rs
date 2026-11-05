@@ -17,7 +17,7 @@ impl Command {
     /// Reads a command file: an optional metadata block of `key: value` lines between
     /// two `---` lines, then the base prompt. `None` when the prompt is empty.
     pub fn parse(name: &str, text: &str) -> Option<Self> {
-        let (metadata, prompt) = split_metadata(text);
+        let (metadata, prompt) = crate::util::text::split_metadata(text);
         let prompt = prompt.trim();
         if prompt.is_empty() {
             return None;
@@ -29,15 +29,8 @@ impl Command {
             argument: None,
             description: None,
         };
-        for line in metadata.lines() {
-            let Some((key, value)) = line.split_once(':') else {
-                continue;
-            };
-            let value = value.trim();
-            if value.is_empty() {
-                continue;
-            }
-            match key.trim() {
+        for (key, value) in crate::util::text::key_values(metadata) {
+            match key {
                 "system-prompt" => command.system_prompt = value != "off",
                 "argument" => command.argument = Some(value.to_string()),
                 "description" => command.description = Some(value.to_string()),
@@ -46,24 +39,6 @@ impl Command {
         }
         Some(command)
     }
-}
-
-/// Splits a command file into its metadata block and what follows it. The block opens
-/// with `---` on the first line; without a closing `---` the file has no metadata.
-pub(super) fn split_metadata(text: &str) -> (&str, &str) {
-    let mut offset = 0;
-    let mut block_start = None;
-    for line in text.split_inclusive('\n') {
-        let is_rule = line.trim_end() == "---";
-        match block_start {
-            None if is_rule => block_start = Some(line.len()),
-            None => break,
-            Some(start) if is_rule => return (&text[start..offset], &text[offset + line.len()..]),
-            Some(_) => {}
-        }
-        offset += line.len();
-    }
-    ("", text)
 }
 
 /// What a typed prompt becomes once a leading slash command is resolved.

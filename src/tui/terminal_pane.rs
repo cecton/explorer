@@ -659,61 +659,16 @@ fn overlay_selection(
     }
 }
 
+/// The `(start, end)` char range of the word under terminal column `cursor_col`: a
+/// terminal click names a column, `word_bounds` a byte.
 pub fn terminal_word_bounds(line: &str, cursor_col: usize) -> (usize, usize) {
-    let chars: Vec<char> = line.chars().collect();
-    if chars.is_empty() {
-        return (0, 0);
-    }
-    let cursor_col = cursor_col.min(chars.len().saturating_sub(1));
-    let c = chars[cursor_col];
-
-    let scan_backward = |take_while: &dyn Fn(char) -> bool| -> usize {
-        chars[..=cursor_col]
-            .iter()
-            .enumerate()
-            .rev()
-            .take_while(|&(_, ch)| take_while(*ch))
-            .last()
-            .map(|(i, _)| i)
-            .unwrap_or(cursor_col)
-    };
-
-    let scan_forward = |take_while: &dyn Fn(char) -> bool| -> usize {
-        chars[cursor_col..]
-            .iter()
-            .enumerate()
-            .take_while(|&(_, ch)| take_while(*ch))
-            .last()
-            .map(|(i, _)| cursor_col + i + 1)
-            .unwrap_or(cursor_col + 1)
-    };
-
-    if c.is_whitespace() {
-        let start = scan_backward(&|ch: char| ch.is_whitespace());
-        let end = scan_forward(&|ch: char| ch.is_whitespace());
-        (start, end)
-    } else {
-        let is_url_boundary = |ch: char| ch.is_whitespace() || matches!(ch, '"' | ')' | ']' | '}');
-        let end = scan_forward(&|ch: char| !is_url_boundary(ch));
-        let mut url = None;
-        for (i, _) in chars[..=cursor_col].iter().enumerate().rev() {
-            if is_url_boundary(chars[i]) {
-                break;
-            }
-            let slice: String = chars[i..end].iter().collect();
-            if slice.contains("://") && url::Url::parse(&slice).is_ok() {
-                url = Some((i, end));
-            }
-        }
-        if let Some((start, end)) = url {
-            (start, end)
-        } else {
-            let is_word = |ch: char| ch.is_alphanumeric() || ch == '_';
-            let start = scan_backward(&|ch: char| is_word(ch));
-            let end = scan_forward(&|ch: char| is_word(ch));
-            (start, end)
-        }
-    }
+    let cursor_byte = line
+        .char_indices()
+        .nth(cursor_col)
+        .or_else(|| line.char_indices().next_back())
+        .map_or(0, |(byte, _)| byte);
+    let (start, end) = crate::util::text::word_bounds(line, cursor_byte);
+    (line[..start].chars().count(), line[..end].chars().count())
 }
 
 /// Convert a PixelCharLine to a string, trimming trailing Spacer/Void cells.

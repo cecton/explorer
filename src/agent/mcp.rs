@@ -288,7 +288,7 @@ impl Server {
                 }
             }
             // A server's error message may span lines; the notice reports it on the status bar.
-            Err(reason) => Phase::Failed(reason.split_whitespace().collect::<Vec<_>>().join(" ")),
+            Err(reason) => Phase::Failed(crate::util::text::single_line(&reason)),
         };
         let kept = self.phase.send_if_modified(|phase| match phase {
             Phase::Removed => false,
@@ -418,10 +418,7 @@ impl Drop for Client {
     fn drop(&mut self) {
         self.reader.abort();
         if let Some(pid) = self.pid {
-            // SAFETY: plain syscall on a process group this process created.
-            unsafe {
-                libc::killpg(pid as libc::pid_t, libc::SIGKILL);
-            }
+            crate::util::process::kill_group(pid, crate::util::process::KILL);
         }
     }
 }
