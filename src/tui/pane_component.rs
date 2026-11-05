@@ -10,16 +10,16 @@ use std::time::Instant;
 pub struct PaneComponent {
     pub id: FlexBoxId,
     pub slot: usize,
-    picker: crate::tui::window_picker::WindowPickerComponent,
-    theme_picker: crate::tui::theme_picker::ThemePickerComponent,
-    git_log: crate::tui::git_log_pane::GitLogPaneComponent,
-    commit_diff: crate::tui::commit_diff_pane::CommitDiffPaneComponent,
-    report: crate::tui::report_pane::ReportComponent,
-    conversation_tree: crate::tui::conversation_tree_pane::ConversationTreeComponent,
-    discussion: crate::tui::discussion_pane::DiscussionComponent,
-    model_picker: crate::tui::model_picker::ModelPickerComponent,
-    preview: crate::tui::preview::FilePreviewComponent,
-    terminal: crate::tui::terminal_pane::TerminalPaneComponent,
+    picker: crate::tui::panes::pickers::window_picker::WindowPickerComponent,
+    theme_picker: crate::tui::panes::pickers::theme_picker::ThemePickerComponent,
+    git_log: crate::tui::panes::git_log_pane::GitLogPaneComponent,
+    commit_diff: crate::tui::panes::commit_diff_pane::CommitDiffPaneComponent,
+    report: crate::tui::panes::report_pane::ReportComponent,
+    conversation_tree: crate::tui::panes::conversation_tree_pane::ConversationTreeComponent,
+    discussion: crate::tui::panes::discussion_pane::DiscussionComponent,
+    model_picker: crate::tui::panes::pickers::model_picker::ModelPickerComponent,
+    preview: crate::tui::panes::preview::FilePreviewComponent,
+    terminal: crate::tui::panes::terminal_pane::TerminalPaneComponent,
     /// Origin row of the content area (below title bar), used for scrollbar mouse events.
     content_origin_row: u16,
     /// Total columns in the content area (full width including scrollbar column).
@@ -44,19 +44,21 @@ impl PaneComponent {
     pub fn new_boxed(
         slot: usize,
         id: FlexBoxId,
-        picker_results_tx: tokio::sync::mpsc::Sender<crate::tui::window_picker::PickerResultMsg>,
+        picker_results_tx: tokio::sync::mpsc::Sender<
+            crate::tui::panes::pickers::window_picker::PickerResultMsg,
+        >,
         picker_generation: Arc<AtomicU64>,
     ) -> BoxedSafeComponent<crate::tui::state::AppState, crate::signal::AppSignal> {
-        use crate::tui::commit_diff_pane::CommitDiffPaneComponent;
-        use crate::tui::conversation_tree_pane::ConversationTreeComponent;
-        use crate::tui::discussion_pane::DiscussionComponent;
-        use crate::tui::git_log_pane::GitLogPaneComponent;
-        use crate::tui::model_picker::ModelPickerComponent;
-        use crate::tui::preview::FilePreviewComponent;
-        use crate::tui::report_pane::ReportComponent;
-        use crate::tui::terminal_pane::TerminalPaneComponent;
-        use crate::tui::theme_picker::ThemePickerComponent;
-        use crate::tui::window_picker::WindowPickerComponent;
+        use crate::tui::panes::commit_diff_pane::CommitDiffPaneComponent;
+        use crate::tui::panes::conversation_tree_pane::ConversationTreeComponent;
+        use crate::tui::panes::discussion_pane::DiscussionComponent;
+        use crate::tui::panes::git_log_pane::GitLogPaneComponent;
+        use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
+        use crate::tui::panes::pickers::theme_picker::ThemePickerComponent;
+        use crate::tui::panes::pickers::window_picker::WindowPickerComponent;
+        use crate::tui::panes::preview::FilePreviewComponent;
+        use crate::tui::panes::report_pane::ReportComponent;
+        use crate::tui::panes::terminal_pane::TerminalPaneComponent;
         Box::new(Self {
             id,
             slot,
@@ -270,7 +272,7 @@ impl PaneComponent {
     }
 }
 
-impl crate::tui::title_row::TitleRow for PaneComponent {
+impl crate::tui::widgets::title_row::TitleRow for PaneComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
@@ -279,7 +281,7 @@ impl crate::tui::title_row::TitleRow for PaneComponent {
         state: &mut crate::tui::state::AppState,
     ) -> usize {
         use crate::tui::pane_manager::Window;
-        use crate::tui::title_row::TitleRow;
+        use crate::tui::widgets::title_row::TitleRow;
         let Some(window) = self.active_window(state) else {
             return 0;
         };
@@ -350,8 +352,8 @@ fn scroll_from_y(
 
 pub(super) fn drag_modifier_from_mouse(
     mouse: &MouseInput,
-) -> Option<crate::tui::preview::DragModifier> {
-    use crate::tui::preview::DragModifier;
+) -> Option<crate::tui::panes::preview::DragModifier> {
+    use crate::tui::panes::preview::DragModifier;
     let mask = mouse.maybe_modifier_keys?;
     let shift = mask.shift_key_state == KeyState::Pressed;
     let ctrl = mask.ctrl_key_state == KeyState::Pressed;
@@ -810,9 +812,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
 
                     let word_bounds = global_data.state.with_terminal(term_id, |pane| {
                         let (line, _) =
-                            crate::tui::terminal_pane::terminal_line_at_viewport_row(pane, rel_row);
+                            crate::tui::panes::terminal_pane::terminal_line_at_viewport_row(
+                                pane, rel_row,
+                            );
                         let (ws, we) =
-                            crate::tui::terminal_pane::terminal_word_bounds(&line, rel_col);
+                            crate::tui::panes::terminal_pane::terminal_word_bounds(&line, rel_col);
                         (ws, we)
                     });
 
@@ -886,11 +890,12 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                         .state
                         .with_terminal(term_id, |pane| {
                             let (line, count) =
-                                crate::tui::terminal_pane::terminal_line_at_viewport_row(
+                                crate::tui::panes::terminal_pane::terminal_line_at_viewport_row(
                                     pane, rel_row,
                                 );
-                            let wb =
-                                crate::tui::terminal_pane::terminal_word_bounds(&line, rel_col);
+                            let wb = crate::tui::panes::terminal_pane::terminal_word_bounds(
+                                &line, rel_col,
+                            );
                             let cl = click_anchor_row.filter(|&ar| ar != rel_row).map(|_| count);
                             (Some(wb), cl)
                         })
@@ -970,7 +975,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                             global_data
                                 .state
                                 .with_terminal(term_id, |pane| {
-                                    crate::tui::terminal_pane::extract_terminal_text(
+                                    crate::tui::panes::terminal_pane::extract_terminal_text(
                                         pane, sel.start, sel.end,
                                     )
                                     .filter(|t| !t.is_empty())
@@ -1084,7 +1089,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
         has_focus: &mut HasFocus,
     ) -> CommonResult {
         use crate::tui::pane_manager::Window;
-        use crate::tui::title_row::TitleRow;
+        use crate::tui::widgets::title_row::TitleRow;
         throws!({
             let mut title_ops = RenderOpIRVec::new();
             let focused = has_focus.get_id() == Some(self.id);
@@ -1312,7 +1317,7 @@ fn render_scrollbar(
     let track_rgb = theme
         .ui_bg("ui.menu.scroll")
         .or_else(|| theme.ui_bg("ui.virtual.ruler"))
-        .unwrap_or(crate::tui::title_row::DEFAULT_STATUSLINE_BG);
+        .unwrap_or(crate::tui::widgets::title_row::DEFAULT_STATUSLINE_BG);
 
     // Thumb: theme scrollbar fg -> selection -> cursorline -> default.
     let mut thumb_rgb = theme
@@ -1320,7 +1325,7 @@ fn render_scrollbar(
         .or_else(|| theme.ui_bg("ui.selection"))
         .or_else(|| theme.ui_bg("ui.cursorline.primary"))
         .or_else(|| theme.ui_bg("ui.cursorline"))
-        .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG);
+        .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG);
 
     // If thumb and track are the same, force contrast using cursor/text accent.
     if thumb_rgb == track_rgb {

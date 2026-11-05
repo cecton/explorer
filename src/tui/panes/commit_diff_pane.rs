@@ -63,7 +63,7 @@ impl CommitDiffPaneComponent {
     }
 }
 
-impl crate::tui::title_row::TitleRow for CommitDiffPaneComponent {
+impl crate::tui::widgets::title_row::TitleRow for CommitDiffPaneComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
@@ -75,7 +75,7 @@ impl crate::tui::title_row::TitleRow for CommitDiffPaneComponent {
         let Some(id) = self.active_commit(state) else {
             return 0;
         };
-        crate::tui::title_row::render_pane_title(
+        crate::tui::widgets::title_row::render_pane_title(
             ops,
             pane_box,
             &Self::title(state, id),
@@ -239,7 +239,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
             let pane_bg = state
                 .theme
                 .ui_bg("ui.background")
-                .unwrap_or(crate::tui::title_row::DEFAULT_BG);
+                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
             let bg = TuiColor::from(pane_bg);
             let bg_style = new_style!(color_bg: {bg});
 
@@ -335,7 +335,7 @@ fn paint_centered(
     fg: RgbValue,
     pane_bg: RgbValue,
 ) {
-    let text_width = crate::tui::text_layout::display_width(text);
+    let text_width = crate::tui::widgets::text_layout::display_width(text);
     let pad = pane_width.saturating_sub(text_width) / 2;
     let padded = format!("{:pad$}{}", "", text, pad = pad);
     let style = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(pane_bg)});

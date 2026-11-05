@@ -148,7 +148,7 @@ impl Entry {
 /// The global command line opened with `<leader>:`, painted over the status bar.
 #[derive(Clone)]
 pub struct CommandLine {
-    pub input: crate::tui::input_line::InputLine,
+    pub input: crate::tui::widgets::input_line::InputLine,
     /// The window focused when the command line opened: focus follows the mouse meanwhile.
     pub origin: Option<crate::tui::pane_manager::Window>,
     pub error: Option<String>,
@@ -166,7 +166,7 @@ impl CommandLine {
         origin: Option<crate::tui::pane_manager::Window>,
         text: impl Into<String>,
     ) -> Self {
-        use crate::tui::input_line::InputLine;
+        use crate::tui::widgets::input_line::InputLine;
         Self {
             input: InputLine::with_text(text),
             origin,
@@ -385,7 +385,7 @@ fn run_highlight(run: &mut CommandRun<'_>) -> Result<(), String> {
     let ranges = parse_line_ranges(run.argument, max)
         .ok_or_else(|| "highlight: expected lines like 12, 3-7 or 1-3,8".to_string())?;
     let page_size = run.state.pane_manager.window_page_size(&window);
-    let target = crate::tui::preview::compute_scroll_target(&ranges, page_size, max);
+    let target = crate::tui::pane_manager::ranges_scroll_target(&ranges, page_size);
     run.state.highlight_ranges.insert(key, ranges);
     run.state.pane_manager.set_window_scroll(&window, target);
     run.state.pane_manager.clamp_scroll(&window);
@@ -538,7 +538,7 @@ fn run_untrust(run: &mut CommandRun<'_>) -> Result<(), String> {
 /// of a large repository takes a fraction of a second, and nothing is written anywhere.
 pub(crate) fn scan_into_report(state: &mut crate::tui::state::AppState) {
     use crate::scan::Severity;
-    use crate::tui::report_pane::ReportComponent;
+    use crate::tui::panes::report_pane::ReportComponent;
     let report = crate::scan::scan(&state.root);
     let danger = report.count(Severity::Danger);
     let title = match danger {
@@ -677,7 +677,7 @@ fn command_hint(typed: &str, state: &crate::tui::state::AppState) -> Option<Stri
             match current {
                 Some(ranges) => format!(
                     "current: {}",
-                    crate::tui::preview::format_highlight_ranges(ranges)
+                    crate::tui::pane_manager::format_line_ranges(ranges)
                 ),
                 None => "[lines] 12, 3-7, 1-3,8".to_string(),
             }
@@ -747,16 +747,18 @@ pub fn render_command_line(
     else {
         return;
     };
-    let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(false, theme);
+    let (bg_rgb, fg_rgb) = crate::tui::widgets::title_row::title_bar_colors(false, theme);
     let color_bg = TuiColor::from(bg_rgb);
     let color_fg = TuiColor::from(fg_rgb);
-    let color_selection = TuiColor::from(crate::tui::title_row::title_selection_bg(false, theme));
+    let color_selection = TuiColor::from(crate::tui::widgets::title_row::title_selection_bg(
+        false, theme,
+    ));
     let placeholder = match &command_line.error {
         Some(error) => {
             let error_fg = TuiColor::from(
                 theme
                     .ui_fg("error")
-                    .unwrap_or(crate::tui::title_row::DEFAULT_ERROR_FG),
+                    .unwrap_or(crate::tui::widgets::title_row::DEFAULT_ERROR_FG),
             );
             Some((format!("  {error}"), error_fg))
         }
@@ -825,7 +827,9 @@ pub fn render_command_line(
         pipeline.push(ZOrder::Normal, ops);
         return;
     };
-    let picked_bg = TuiColor::from(crate::tui::title_row::title_selection_bg(false, theme));
+    let picked_bg = TuiColor::from(crate::tui::widgets::title_row::title_selection_bg(
+        false, theme,
+    ));
     // Keep the highlighted row in view when the list has to be cut short.
     let first = (palette.selected + 1).saturating_sub(list_rows);
     let lines: Vec<(bool, String)> = palette
@@ -846,7 +850,7 @@ pub fn render_command_line(
     for (offset, (picked, line)) in lines.iter().enumerate() {
         let bg = if *picked { picked_bg } else { color_bg };
         let style = new_style!(color_fg: {color_fg} color_bg: {bg});
-        let line = crate::tui::text_layout::truncate(line, width as usize);
+        let line = crate::tui::widgets::text_layout::truncate(line, width as usize);
         ops +=
             RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + vp_row((top + rows + offset) as u16));
         ops += RenderOpCommon::ApplyColors(Some(style));
@@ -1228,7 +1232,7 @@ mod tests {
 
     #[test]
     fn tab_and_enter_complete_to_the_highlighted_entry() {
-        use crate::tui::input_line::InputLine;
+        use crate::tui::widgets::input_line::InputLine;
         let state = state_with_aliases();
         let completed = |text: &str, selected: usize| {
             let mut line = CommandLine {

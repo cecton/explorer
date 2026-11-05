@@ -69,7 +69,7 @@ impl ReportComponent {
     }
 }
 
-impl crate::tui::title_row::TitleRow for ReportComponent {
+impl crate::tui::widgets::title_row::TitleRow for ReportComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
@@ -82,7 +82,9 @@ impl crate::tui::title_row::TitleRow for ReportComponent {
         };
         let title = Self::title(state, id);
         let theme = &state.theme;
-        crate::tui::title_row::render_pane_title(ops, pane_box, &title, false, theme, focused);
+        crate::tui::widgets::title_row::render_pane_title(
+            ops, pane_box, &title, false, theme, focused,
+        );
         1
     }
 }
@@ -192,7 +194,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
                 ops += RenderOpIR::PaintTextWithAttributes(" ".repeat(width).into(), Some(blank));
             }
 
-            let lines = crate::tui::markdown::render(&report.markdown, &state.theme, width);
+            let lines =
+                crate::tui::widgets::markdown::render(&report.markdown, &state.theme, width);
             state.pane_manager.set_window_page_size(&window, rows);
             state
                 .pane_manager
@@ -215,19 +218,21 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
                     if x >= width {
                         break;
                     }
-                    let text = if x + crate::tui::text_layout::display_width(&span.text) > width {
-                        crate::tui::text_layout::truncate(&span.text, width - x)
+                    let text = if x + crate::tui::widgets::text_layout::display_width(&span.text)
+                        > width
+                    {
+                        crate::tui::widgets::text_layout::truncate(&span.text, width - x)
                     } else {
                         span.text.clone()
                     };
-                    let style = crate::tui::discussion_pane::span_style(span, bg);
+                    let style = crate::tui::panes::discussion_pane::span_style(span, bg);
                     ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
                         vp_col(x as u16) + vp_row(row_offset as u16),
                     );
                     ops += RenderOpCommon::ApplyColors(Some(style));
                     ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                    x += crate::tui::text_layout::display_width(&span.text);
+                    x += crate::tui::widgets::text_layout::display_width(&span.text);
                 }
             }
             global_data.pipeline.push(ZOrder::Normal, ops);
@@ -259,7 +264,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn empty_state() -> crate::tui::state::AppState {
-        use crate::keymap::Keymap;
+        use crate::tui::keymap::Keymap;
         use crate::tui::state::AppState;
         use crate::tui::theme::HelixTheme;
         AppState::new(
@@ -319,7 +324,7 @@ mod tests {
     /// A report is not part of the conversation, so the session never carries one.
     #[test]
     fn a_report_is_never_saved_in_the_session() {
-        use crate::session::Session;
+        use crate::tui::session::Session;
         let mut state = empty_state();
         ReportComponent::show(&mut state, "t".to_string(), "m".to_string());
         let session = Session::from_state(&state);

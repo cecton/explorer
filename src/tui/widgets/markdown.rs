@@ -419,7 +419,7 @@ impl Renderer<'_> {
             fg: self.fg("markup.list"),
             ..self.plain
         };
-        let marker_width = crate::tui::text_layout::display_width(&marker_text);
+        let marker_width = crate::tui::widgets::text_layout::display_width(&marker_text);
         self.items.push(ItemCtx {
             marker: vec![Span::of(marker_text, style)],
             marker_width,
@@ -443,7 +443,7 @@ impl Renderer<'_> {
             return;
         };
         item.marker[0] = Span::of(glyph, style);
-        item.marker_width = crate::tui::text_layout::display_width(glyph);
+        item.marker_width = crate::tui::widgets::text_layout::display_width(glyph);
     }
 
     fn push_content(&mut self, text: &str, style: InlineStyle, src: Option<usize>) {
@@ -459,7 +459,7 @@ impl Renderer<'_> {
             ..self.plain
         };
         for (at, line) in lines_with_offsets(text) {
-            for (piece_at, piece) in crate::tui::text_layout::wrap(line, self.width) {
+            for (piece_at, piece) in crate::tui::widgets::text_layout::wrap(line, self.width) {
                 self.lines.push(MdLine {
                     spans: vec![Span {
                         src: src.map(|start| start + at + piece_at),
@@ -699,7 +699,7 @@ impl Renderer<'_> {
 fn spans_width(spans: &[Span]) -> usize {
     spans
         .iter()
-        .map(|s| crate::tui::text_layout::display_width(&s.text))
+        .map(|s| crate::tui::widgets::text_layout::display_width(&s.text))
         .sum()
 }
 
@@ -723,7 +723,7 @@ fn wrap_spans(
     use unicode_segmentation::UnicodeSegmentation;
     let cont_width: usize = cont_prefix
         .iter()
-        .map(|s| crate::tui::text_layout::display_width(&s.text))
+        .map(|s| crate::tui::widgets::text_layout::display_width(&s.text))
         .sum();
     let eff = width.saturating_sub(cont_width).max(1);
     let words = split_words(content);
@@ -733,7 +733,7 @@ fn wrap_spans(
     for word in &words {
         let word_width: usize = word
             .iter()
-            .map(|s| crate::tui::text_layout::display_width(&s.text))
+            .map(|s| crate::tui::widgets::text_layout::display_width(&s.text))
             .sum();
         let sep = usize::from(!line.is_empty());
         if used + sep + word_width <= eff {
@@ -758,7 +758,7 @@ fn wrap_spans(
             }
             for run in word {
                 for (at, grapheme) in run.text.grapheme_indices(true) {
-                    let w = crate::tui::text_layout::display_width(grapheme);
+                    let w = crate::tui::widgets::text_layout::display_width(grapheme);
                     if used + w > eff && used > 0 {
                         lines.push(std::mem::take(&mut line));
                         used = 0;
@@ -935,7 +935,7 @@ mod tests {
         for width in 1..=100 {
             for line in texts(TABLE, width) {
                 assert!(
-                    crate::tui::text_layout::display_width(&line) <= width,
+                    crate::tui::widgets::text_layout::display_width(&line) <= width,
                     "{width}: {line:?}"
                 );
             }
@@ -1036,7 +1036,7 @@ mod tests {
         for width in [10, 40, 80, 96] {
             for line in render_md(src, width) {
                 assert!(
-                    crate::tui::text_layout::display_width(&text(&line)) <= width,
+                    crate::tui::widgets::text_layout::display_width(&text(&line)) <= width,
                     "{width}: {:?}",
                     text(&line)
                 );

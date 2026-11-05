@@ -7,12 +7,12 @@ pub struct GitLogPaneComponent {
     window_id: usize,
     content_origin_row: usize,
     content_row_count: usize,
-    branch_fuzzy: crate::tui::fuzzy_picker::FuzzyPicker,
+    branch_fuzzy: crate::tui::widgets::fuzzy_picker::FuzzyPicker,
 }
 
 impl GitLogPaneComponent {
     pub fn new(id: FlexBoxId) -> Self {
-        use crate::tui::fuzzy_picker::FuzzyPicker;
+        use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
         Self {
             id,
             window_id: 0,
@@ -223,11 +223,12 @@ impl GitLogPaneComponent {
                 .bounds_size
                 .col_width
                 .as_u16();
-            let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(focused, theme);
+            let (bg_rgb, fg_rgb) = crate::tui::widgets::title_row::title_bar_colors(focused, theme);
             let color_bg = TuiColor::from(bg_rgb);
             let color_fg = TuiColor::from(fg_rgb);
-            let color_selection =
-                TuiColor::from(crate::tui::title_row::title_selection_bg(focused, theme));
+            let color_selection = TuiColor::from(
+                crate::tui::widgets::title_row::title_selection_bg(focused, theme),
+            );
             let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
             *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
             *ops += RenderOpCommon::SetBgColor(color_bg);
@@ -247,7 +248,7 @@ impl GitLogPaneComponent {
             );
             1
         } else {
-            crate::tui::title_row::render_pane_title(
+            crate::tui::widgets::title_row::render_pane_title(
                 ops,
                 pane_box,
                 &Self::title(win),
@@ -581,14 +582,14 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
             let pane_bg = state
                 .theme
                 .ui_bg("ui.background")
-                .unwrap_or(crate::tui::title_row::DEFAULT_BG);
+                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
             let bg = TuiColor::from(pane_bg);
             let bg_style = new_style!(color_bg: {bg});
             let selected_bg = TuiColor::from(
                 state
                     .theme
                     .ui_bg("ui.selection")
-                    .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG),
+                    .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG),
             );
             let normal_fg = TuiColor::from(
                 state
@@ -690,7 +691,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                 let selection_bg_rgb = state
                     .theme
                     .ui_bg("ui.selection")
-                    .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG);
+                    .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG);
                 let linenum_selected_fg_rgb = if linenum_bg_rgb == selection_bg_rgb {
                     state
                         .theme

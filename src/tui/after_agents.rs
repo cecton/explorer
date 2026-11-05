@@ -193,7 +193,7 @@ pub fn status_text(after: &AfterAgents, now: Instant) -> (String, bool) {
 pub fn hint(after: Option<&AfterAgents>) -> String {
     let first_line = |command: &str| {
         let line = command.lines().next().unwrap_or_default();
-        let cut = crate::tui::text_layout::truncate(line, 60);
+        let cut = crate::tui::widgets::text_layout::truncate(line, 60);
         if cut.len() < command.trim_end().len() {
             format!("{cut}…")
         } else {

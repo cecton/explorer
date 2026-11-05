@@ -3,12 +3,12 @@ use r3bl_tui::*;
 
 pub struct ThemePickerComponent {
     id: FlexBoxId,
-    picker: crate::tui::fuzzy_picker::FuzzyPicker,
+    picker: crate::tui::widgets::fuzzy_picker::FuzzyPicker,
 }
 
 impl ThemePickerComponent {
     pub fn new(id: FlexBoxId) -> Self {
-        use crate::tui::fuzzy_picker::FuzzyPicker;
+        use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
         Self {
             id,
             picker: FuzzyPicker::new(),
@@ -16,7 +16,7 @@ impl ThemePickerComponent {
     }
 }
 
-impl crate::tui::title_row::TitleRow for ThemePickerComponent {
+impl crate::tui::widgets::title_row::TitleRow for ThemePickerComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
@@ -39,10 +39,11 @@ impl crate::tui::title_row::TitleRow for ThemePickerComponent {
         .max(1);
         let height = state.theme_picker.query.height(None, "", width, max_rows);
 
-        let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(focused, &state.theme);
+        let (bg_rgb, fg_rgb) =
+            crate::tui::widgets::title_row::title_bar_colors(focused, &state.theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
-        let color_selection = TuiColor::from(crate::tui::title_row::title_selection_bg(
+        let color_selection = TuiColor::from(crate::tui::widgets::title_row::title_selection_bg(
             focused,
             &state.theme,
         ));

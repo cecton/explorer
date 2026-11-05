@@ -60,7 +60,7 @@ pub(crate) fn close_window(
             state.commit_diffs.remove(&id);
         }
         Window::Discussion(id) => {
-            crate::tui::discussion_pane::drop_queue_entry(state, id);
+            crate::tui::panes::discussion_pane::drop_queue_entry(state, id);
             state.discussions.remove(&id);
         }
         Window::FilePreview(key) => {
@@ -146,8 +146,8 @@ fn notify_terminal_focus_change(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keymap::Keymap;
     use crate::loader::FileKey;
+    use crate::tui::keymap::Keymap;
     use crate::tui::pane_manager::Window;
     use crate::tui::state::AppState;
     use crate::tui::state::PreviewInput;

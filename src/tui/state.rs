@@ -10,7 +10,7 @@ static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct FuzzyPickerState<T> {
-    pub query: crate::tui::input_line::InputLine,
+    pub query: crate::tui::widgets::input_line::InputLine,
     pub results: Vec<(T, Vec<u32>)>,
     pub selected: Option<T>,
 }
@@ -19,7 +19,7 @@ pub struct FuzzyPickerState<T> {
 // picker's fields (`InputLine`, `Vec`, `Option`) are all `Default` for any `T`.
 impl<T> Default for FuzzyPickerState<T> {
     fn default() -> Self {
-        use crate::tui::input_line::InputLine;
+        use crate::tui::widgets::input_line::InputLine;
         Self {
             query: InputLine::new(),
             results: Vec::new(),
@@ -63,7 +63,7 @@ pub struct GitLogWindowState {
     pub entries: Option<Arc<crate::git::LogHistory>>,
     pub error: Option<String>,
     pub selected: usize,
-    pub query: crate::tui::input_line::InputLine,
+    pub query: crate::tui::widgets::input_line::InputLine,
     /// Whether the `/` input is open in the title bar.
     pub search_active: bool,
     /// Some = query active: (entry index, nucleo match positions), relevance order.
@@ -90,7 +90,7 @@ pub struct TreeViewState {
     /// Last failure to report in the status bar, cleared by the next key.
     pub notice: Option<String>,
     /// The `/` filter: while it holds a word, the window lists the matching nodes flat.
-    pub query: crate::tui::input_line::InputLine,
+    pub query: crate::tui::widgets::input_line::InputLine,
     /// Whether the `/` input is open in the title bar.
     pub search_active: bool,
     /// Row selected when `/` was opened, given back when the filter matches nothing.
@@ -128,7 +128,7 @@ pub struct DiscussionState {
     /// False until the node's prompt and reply have been read from disk.
     pub loaded: bool,
     /// The next prompt, as typed so far.
-    pub draft: crate::tui::input_line::InputLine,
+    pub draft: crate::tui::widgets::input_line::InputLine,
     /// Model the next prompt is sent to.
     pub model: Option<crate::model_spec::ModelSpec>,
     /// Why the last send was refused; cleared by the next edit.
@@ -367,7 +367,7 @@ pub struct AppState {
     /// Next available terminal pane ID.
     pub next_terminal_id: usize,
     /// Terminal windows restored from the session that still need a PTY spawned.
-    pub pending_terminals: HashMap<usize, crate::session::TerminalRestoreInfo>,
+    pub pending_terminals: HashMap<usize, crate::tui::session::TerminalRestoreInfo>,
     /// Git log windows keyed by their unique ID.
     pub git_logs: HashMap<usize, GitLogWindowState>,
     /// Next available git log window ID.
@@ -449,7 +449,7 @@ pub struct AppState {
     /// The `<leader>:` command line, open over the status bar. Transient.
     pub command_line: Option<crate::tui::command_line::CommandLine>,
     /// Configurable top-level (leader + global) key bindings.
-    pub keymap: crate::keymap::Keymap,
+    pub keymap: crate::tui::keymap::Keymap,
     /// Which Cargo features rust-analyzer analyzes; set via `features`/`all-features`/
     /// `default-features` on the global command line, persisted per-project in the
     /// session file.
@@ -469,7 +469,7 @@ impl AppState {
     pub fn open_input(
         &mut self,
         window: &crate::tui::pane_manager::Window,
-    ) -> Option<&mut crate::tui::input_line::InputLine> {
+    ) -> Option<&mut crate::tui::widgets::input_line::InputLine> {
         use crate::tui::pane_manager::Window;
         match window {
             Window::Discussion(id) => self
@@ -551,7 +551,7 @@ impl AppState {
         files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
         root: camino::Utf8PathBuf,
         theme: crate::tui::theme::HelixTheme,
-        keymap: crate::keymap::Keymap,
+        keymap: crate::tui::keymap::Keymap,
     ) -> Self {
         use crate::agent::mcp::McpHost;
         use crate::config::CargoFeatureSelection;
@@ -683,17 +683,17 @@ pub enum SearchDirection {
 #[derive(Clone)]
 pub enum PreviewInput {
     /// Prefilled with the file's active pattern; the direction is the key that opened it.
-    Search(crate::tui::input_line::InputLine, SearchDirection),
+    Search(crate::tui::widgets::input_line::InputLine, SearchDirection),
 }
 
 impl PreviewInput {
-    pub fn line(&self) -> &crate::tui::input_line::InputLine {
+    pub fn line(&self) -> &crate::tui::widgets::input_line::InputLine {
         match self {
             Self::Search(line, _) => line,
         }
     }
 
-    pub fn line_mut(&mut self) -> &mut crate::tui::input_line::InputLine {
+    pub fn line_mut(&mut self) -> &mut crate::tui::widgets::input_line::InputLine {
         match self {
             Self::Search(line, _) => line,
         }
