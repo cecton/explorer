@@ -1,5 +1,6 @@
 use crate::git::{DiffKind, short_id};
 use crate::tui::pane_component::pane_slot;
+use crate::tui::text_layout::display_width;
 use crate::tui::*;
 
 const SCROLL_STEP: usize = 3;
@@ -331,7 +332,7 @@ fn paint_centered(
     fg: RgbValue,
     pane_bg: RgbValue,
 ) {
-    let text_width = GCStringOwned::from(text).display_width().as_usize();
+    let text_width = display_width(text);
     let pad = pane_width.saturating_sub(text_width) / 2;
     let padded = format!("{:pad$}{}", "", text, pad = pad);
     let style = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(pane_bg)});

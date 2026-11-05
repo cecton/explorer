@@ -1270,6 +1270,7 @@ dependencies = [
  "tracing-subscriber",
  "unicode-general-category",
  "unicode-segmentation",
+ "unicode-width 0.2.2",
  "url",
 ]
 

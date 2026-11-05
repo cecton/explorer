@@ -6,6 +6,7 @@ use crate::lsp::{self, LSP_RRT};
 use crate::session::save_session;
 use crate::tui::pane_component::PaneComponent;
 use crate::tui::panes_renderer::PanesRenderer;
+use crate::tui::text_layout::display_width;
 use crate::tui::*;
 use crate::watcher::{WATCHER_RRT, WatcherWorker};
 use arc_swap::ArcSwap;
@@ -2261,7 +2262,7 @@ fn render_status_bar(
             .map_or(0, |elapsed| elapsed.as_secs() as i64);
         clock_text(now, crate::conversation::local_offset_secs(now))
     };
-    let width_of = |text: &str| GCStringOwned::from(text).display_width().as_usize();
+    let width_of = display_width;
     let dirty_width = dirty.map_or(0, |(bar, label)| width_of(bar) + width_of(label));
     let usage_width: usize = usage.iter().map(|(text, _)| width_of(text)).sum();
     let after_width = after_agents.as_ref().map_or(0, |(text, _)| width_of(text));
