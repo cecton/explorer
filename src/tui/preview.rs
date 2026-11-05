@@ -1130,7 +1130,7 @@ impl crate::tui::title_row::TitleRow for FilePreviewComponent {
 fn paint_line_segment(
     render_ops: &mut RenderOpIRVec,
     data: &crate::loader::FileData,
-    colored_guard: &[crate::lsp::ColoredLine],
+    colored_guard: &[crate::highlight::ColoredLine],
     line_idx: usize,
     (seg_start_char, seg_end_char): (usize, usize),
     theme: &crate::tui::theme::HelixTheme,
@@ -1160,14 +1160,14 @@ fn paint_line_segment(
     }
 
     if let Some(spans) = colored_guard.get(line_idx) {
-        for &(span_start, span_end, token_type) in spans {
-            let overlap_start = span_start.max(seg_byte_start);
-            let overlap_end = span_end.min(seg_byte_end);
+        for span in spans {
+            let overlap_start = span.start.max(seg_byte_start);
+            let overlap_end = span.end.min(seg_byte_end);
             if overlap_start >= overlap_end {
                 continue;
             }
             let text = &line_content[overlap_start..overlap_end];
-            let fg_rgb = theme.color_for_lsp_token(token_type).unwrap_or(default_fg);
+            let fg_rgb = theme.token_color(span.kind).unwrap_or(default_fg);
             let fg_rgb = ensure_readable_fg(fg_rgb, pane_bg);
             let fg = TuiColor::from(fg_rgb);
             let style = new_style!(color_fg: {fg} color_bg: {bg});

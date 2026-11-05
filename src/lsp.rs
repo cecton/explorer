@@ -19,10 +19,7 @@ pub enum LspInput {
     },
 }
 
-pub type ColoredSpan = (usize, usize, &'static str);
-pub type ColoredLine = Vec<ColoredSpan>;
-
-static TOKEN_TYPES: OnceLock<Vec<&'static str>> = OnceLock::new();
+static TOKEN_TYPES: OnceLock<Vec<crate::highlight::TokenKind>> = OnceLock::new();
 
 const RANGE_LINES: usize = 200;
 const RANGE_THRESHOLD: usize = 100;
@@ -310,9 +307,7 @@ impl r3bl_tui::RRTWorker for LspWorker {
                         .map(|types| {
                             types
                                 .iter()
-                                .map(|t| {
-                                    Box::leak(t.as_str().to_string().into_boxed_str()) as &'static str
-                                })
+                                .map(|t| crate::highlight::TokenKind::from_name(t.as_str()))
                                 .collect::<Vec<_>>()
                         })
                         .unwrap_or_default()
@@ -1464,14 +1459,17 @@ fn request_tokens(
     Ok(())
 }
 
-type LineTokens = Vec<(usize, usize, &'static str)>;
+fn decode_tokens(
+    data: &[lsp_types::SemanticToken],
+    content: &str,
+) -> Vec<crate::highlight::ColoredLine> {
+    use crate::highlight::{ColoredLine, ColoredSpan, TokenKind};
 
-fn decode_tokens(data: &[lsp_types::SemanticToken], content: &str) -> Vec<ColoredLine> {
     let token_types = TOKEN_TYPES.get().map(Vec::as_slice).unwrap_or(&[]);
     let static_types = token_types;
 
     let lines: Vec<&str> = content.lines().collect();
-    let mut line_tokens: Vec<LineTokens> = vec![Vec::new(); lines.len()];
+    let mut line_tokens: Vec<ColoredLine> = vec![Vec::new(); lines.len()];
 
     let mut abs_line = 0usize;
     let mut abs_char = 0usize;
@@ -1493,12 +1491,15 @@ fn decode_tokens(data: &[lsp_types::SemanticToken], content: &str) -> Vec<Colore
             continue;
         }
 
-        let type_name = static_types.get(type_idx).copied().unwrap_or("");
+        let kind = static_types
+            .get(type_idx)
+            .copied()
+            .unwrap_or(TokenKind::Other);
         let line = lines[abs_line];
         let start = utf16_to_byte(line, abs_char);
         let end = utf16_to_byte(line, abs_char + length).min(line.len());
         if start < end {
-            line_tokens[abs_line].push((start, end, type_name));
+            line_tokens[abs_line].push(ColoredSpan { start, end, kind });
         }
     }
 
@@ -1508,19 +1509,31 @@ fn decode_tokens(data: &[lsp_types::SemanticToken], content: &str) -> Vec<Colore
         .map(|(i, line)| {
             let tokens = &line_tokens[i];
             if tokens.is_empty() {
-                return vec![(0, line.len(), "")];
+                return vec![ColoredSpan {
+                    start: 0,
+                    end: line.len(),
+                    kind: TokenKind::Other,
+                }];
             }
             let mut spans: ColoredLine = Vec::new();
             let mut pos = 0usize;
-            for &(start, end, type_name) in tokens {
-                if pos < start {
-                    spans.push((pos, start, ""));
+            for &span in tokens {
+                if pos < span.start {
+                    spans.push(ColoredSpan {
+                        start: pos,
+                        end: span.start,
+                        kind: TokenKind::Other,
+                    });
                 }
-                spans.push((start, end, type_name));
-                pos = end;
+                spans.push(span);
+                pos = span.end;
             }
             if pos < line.len() {
-                spans.push((pos, line.len(), ""));
+                spans.push(ColoredSpan {
+                    start: pos,
+                    end: line.len(),
+                    kind: TokenKind::Other,
+                });
             }
             spans
         })

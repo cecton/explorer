@@ -8,6 +8,7 @@ include!("../../themes/themes.rs");
 pub struct HelixTheme {
     name: String,
     styles: HashMap<String, Style>,
+    token_colors: [Option<RgbValue>; crate::highlight::TokenKind::COUNT],
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -61,10 +62,16 @@ impl HelixTheme {
             }
         }
 
-        Self {
+        let mut theme = Self {
             name: name.to_string(),
             styles,
+            token_colors: [None; crate::highlight::TokenKind::COUNT],
+        };
+        for (index, kind) in crate::highlight::TokenKind::ALL.into_iter().enumerate() {
+            theme.token_colors[index] =
+                kind.scopes().iter().find_map(|scope| theme.scope_fg(scope));
         }
+        theme
     }
 
     /// The color a scope resolves to, falling back to `ui.text` when the theme styles
@@ -86,12 +93,10 @@ impl HelixTheme {
         }
     }
 
-    /// The color of a semantic token: that of the first of its scopes the theme styles,
-    /// so a theme that sets only `keyword.control` still colors `keyword` tokens.
-    pub fn color_for_lsp_token(&self, token_type: &str) -> Option<RgbValue> {
-        lsp_token_scopes(token_type)
-            .iter()
-            .find_map(|scope| self.scope_fg(scope))
+    /// The color of a semantic token kind, `None` when the theme styles none of its
+    /// scopes.
+    pub fn token_color(&self, kind: crate::highlight::TokenKind) -> Option<RgbValue> {
+        self.token_colors[kind as usize]
     }
 
     pub fn ui_fg(&self, key: &str) -> Option<RgbValue> {
@@ -225,45 +230,6 @@ fn parse_hex_color(s: &str) -> Option<RgbValue> {
     RgbValue::try_from_hex_color(&format!("#{expanded}")).ok()
 }
 
-/// The theme scopes of a semantic token type, most specific first: the first one the
-/// theme styles gives the token its color. Later entries are fallbacks for the bundled
-/// themes that style only one member of a family (`type.builtin` without `type`,
-/// `constant.numeric` without `constant`, …).
-fn lsp_token_scopes(token_type: &str) -> &'static [&'static str] {
-    match token_type {
-        "keyword" => &["keyword", "keyword.control"],
-        "modifier" => &["keyword.storage.modifier", "keyword"],
-        "selfKeyword" | "boolean" => &["keyword", "variable.builtin"],
-        "comment" => &["comment"],
-        "string" | "character" | "escapeSequence" => &["string", "comment"],
-        "number" => &["constant.numeric", "constant"],
-        "const" | "static" => &["constant", "constant.builtin", "constant.numeric"],
-        "namespace" => &["namespace", "type", "type.builtin"],
-        "type" | "class" | "struct" | "enum" | "interface" | "builtinType" | "typeAlias"
-        | "typeParameter" | "constParameter" | "generic" | "toolModule" => {
-            &["type", "type.builtin"]
-        }
-        "function" | "method" => &["function", "function.method", "function.builtin"],
-        "macro" | "attributeBracket" | "builtinAttribute" | "decorator" => &[
-            "function.macro",
-            "function.special",
-            "attribute",
-            "function",
-        ],
-        "variable" => &["variable"],
-        "parameter" => &[
-            "variable.parameter",
-            "variable",
-            "variable.other.member",
-            "variable.builtin",
-        ],
-        "property" | "enumMember" => &["variable.other.member", "variable"],
-        "operator" => &["operator"],
-        "lifetime" => &["label", "operator"],
-        _ => &[],
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -287,18 +253,26 @@ mod tests {
 
     #[test]
     fn a_lsp_token_takes_the_first_scope_the_theme_styles() {
+        use crate::highlight::TokenKind;
+
         let theme = theme("catppuccin_mocha");
         let keyword = theme.scope_fg("keyword").expect("keyword is styled");
-        assert_eq!(theme.color_for_lsp_token("keyword"), Some(keyword));
         assert_eq!(
-            theme.color_for_lsp_token("comment"),
+            theme.token_color(TokenKind::from_name("keyword")),
+            Some(keyword)
+        );
+        assert_eq!(
+            theme.token_color(TokenKind::from_name("comment")),
             theme.scope_fg("comment")
         );
         assert_eq!(
-            theme.color_for_lsp_token("parameter"),
+            theme.token_color(TokenKind::from_name("parameter")),
             theme.scope_fg("variable.parameter")
         );
-        assert_eq!(theme.color_for_lsp_token("nonexistentToken"), None);
+        assert_eq!(
+            theme.token_color(TokenKind::from_name("nonexistentToken")),
+            None
+        );
     }
 
     /// Themes that style only one member of a family keep their color for the whole
@@ -306,18 +280,42 @@ mod tests {
     /// `constant.numeric` and no `constant`.
     #[test]
     fn a_token_falls_back_to_the_member_of_its_family_a_theme_styles() {
+        use crate::highlight::TokenKind;
+
         let jetbrains = theme("jetbrains_dark");
         assert_eq!(jetbrains.scope_fg("type"), None);
         assert_eq!(
-            jetbrains.color_for_lsp_token("struct"),
+            jetbrains.token_color(TokenKind::from_name("struct")),
             jetbrains.scope_fg("type.builtin")
         );
         let eiffel = theme("eiffel");
         assert_eq!(eiffel.scope_fg("constant"), None);
         assert_eq!(
-            eiffel.color_for_lsp_token("static"),
+            eiffel.token_color(TokenKind::from_name("static")),
             eiffel.scope_fg("constant.builtin")
         );
+    }
+
+    /// The table `build` precomputes is the scope walk it replaced: the first scope the
+    /// theme styles, and `None` — not `ui.text` — for a kind it styles nowhere.
+    #[test]
+    fn the_token_color_table_agrees_with_the_scope_walk() {
+        use crate::highlight::TokenKind;
+
+        let theme = theme("catppuccin_mocha");
+        for kind in TokenKind::ALL {
+            let expected = kind.scopes().iter().find_map(|scope| theme.scope_fg(scope));
+            assert_eq!(theme.token_color(kind), expected, "{kind:?}");
+            if expected.is_none() {
+                assert_ne!(
+                    theme.token_color(kind),
+                    theme.ui_fg("ui.text"),
+                    "{kind:?} must not fall back to ui.text",
+                );
+            }
+        }
+        assert_eq!(theme.token_color(TokenKind::Other), None);
+        assert!(theme.ui_fg("ui.text").is_some());
     }
 
     #[test]

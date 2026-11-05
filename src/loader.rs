@@ -69,7 +69,7 @@ impl FileData {
 pub struct LoadedFile {
     pub path: camino::Utf8PathBuf,
     pub data: parking_lot::RwLock<FileData>,
-    pub colored_lines: parking_lot::Mutex<Vec<crate::lsp::ColoredLine>>,
+    pub colored_lines: parking_lot::Mutex<Vec<crate::highlight::ColoredLine>>,
     pub removed: AtomicBool,
     pub needs_full_load: AtomicBool,
 }

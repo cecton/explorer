@@ -8,6 +8,7 @@ mod cli;
 mod config;
 mod conversation;
 mod git;
+mod highlight;
 mod keymap;
 mod loader;
 mod lsp;
