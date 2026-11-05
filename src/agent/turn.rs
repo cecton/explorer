@@ -1,7 +1,7 @@
 use std::collections::VecDeque;
 use std::io::Write;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 const REPLY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// How often the spinners advance one frame.
@@ -370,7 +370,7 @@ impl Recorder {
     pub(super) fn flush_reply(&mut self) {
         self.last_flush = Instant::now();
         let reply = self.live.lock().reply.clone();
-        if let Err(e) = crate::conversation::write_atomic(&self.node_dir.join("reply.md"), &reply) {
+        if let Err(e) = crate::util::fs::write_atomic(&self.node_dir.join("reply.md"), &reply) {
             tracing::warn!("failed to write reply.md: {e}");
         }
     }
@@ -584,7 +584,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
         request
             .tree
             .write()
-            .cancel_running_agents(&request.node, now_secs());
+            .cancel_running_agents(&request.node, crate::util::time::now_secs());
         let mut head_after = request.repo.as_ref().and_then(crate::git::head_id);
         // The markdown a commit turn committed is formatted into its newest commit.
         if request.mode == Mode::Commit {
@@ -1050,12 +1050,6 @@ fn with_compact_hint(error: String) -> String {
     }
 }
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |e| e.as_secs() as i64)
-}
-
 fn single_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
@@ -1158,7 +1152,7 @@ async fn title_and_summarize(
         tracing::warn!("title generation returned no title");
         return;
     };
-    if let Err(e) = crate::conversation::write_atomic(&node_dir.join("title.md"), &title) {
+    if let Err(e) = crate::util::fs::write_atomic(&node_dir.join("title.md"), &title) {
         tracing::warn!("failed to write title.md: {e}");
     }
     let signal = AppSignal::NodeTitleReady {
@@ -1173,7 +1167,7 @@ async fn title_and_summarize(
     if summary.is_empty() {
         return;
     }
-    if let Err(e) = crate::conversation::write_atomic(&node_dir.join("summary.md"), &summary) {
+    if let Err(e) = crate::util::fs::write_atomic(&node_dir.join("summary.md"), &summary) {
         tracing::warn!("failed to write summary.md: {e}");
     }
     let signal = AppSignal::NodeSummaryReady {

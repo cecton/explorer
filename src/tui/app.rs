@@ -548,10 +548,8 @@ fn spawn_dirty_check(state: &crate::tui::state::AppState, main_tx: MainTx) {
 
 /// The local minute since the epoch: the status-bar clock shows a new text when it changes.
 fn clock_minute() -> i64 {
-    let now = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs() as i64);
-    (now + i64::from(crate::conversation::local_offset_secs(now))).div_euclid(60)
+    let now = crate::util::time::now_secs();
+    (now + i64::from(crate::util::time::local_offset_secs(now))).div_euclid(60)
 }
 
 // save_session is intentionally a synchronous fast JSON write on the main thread.
@@ -2332,10 +2330,8 @@ fn render_status_bar(
         .as_ref()
         .map(|after| crate::tui::after_agents::status_text(after, Instant::now()));
     let clock = {
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs() as i64);
-        clock_text(now, crate::conversation::local_offset_secs(now))
+        let now = crate::util::time::now_secs();
+        clock_text(now, crate::util::time::local_offset_secs(now))
     };
     let width_of = crate::tui::text_layout::display_width;
     let dirty_width = dirty.map_or(0, |(bar, label)| width_of(bar) + width_of(label));
@@ -2386,8 +2382,7 @@ fn render_status_bar(
 
 /// The status-bar clock: local time of day, 24h, as a `│ HH:MM ` segment.
 fn clock_text(now: i64, offset_secs: i32) -> String {
-    let minutes = (now + i64::from(offset_secs)).rem_euclid(86_400) / 60;
-    format!("│ {:02}:{:02} ", minutes / 60, minutes % 60)
+    format!("│ {} ", crate::util::time::local_hhmm(now, offset_secs))
 }
 
 /// Percent of a subscription window from which the status bar warns about it.
@@ -2441,10 +2436,8 @@ fn focused_usage(state: &crate::tui::state::AppState) -> Vec<(String, Option<u32
         if matches!(kind, EndpointKind::OpenRouter { .. }) {
             return Some(usage.money_pieces(label));
         }
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |elapsed| elapsed.as_secs() as i64);
-        Some(usage.pieces(label, now, crate::conversation::local_offset_secs))
+        let now = crate::util::time::now_secs();
+        Some(usage.pieces(label, now, crate::util::time::local_offset_secs))
     };
     entry().unwrap_or_default()
 }
@@ -2576,7 +2569,7 @@ pub async fn run(
         let Some(dir) = tree.node_dir(node) else {
             continue;
         };
-        let _ = crate::conversation::write_atomic(&dir.join("reply.md"), &reply);
+        let _ = crate::util::fs::write_atomic(&dir.join("reply.md"), &reply);
         let _ = tree.update_meta(node, |meta| {
             meta.status = Some(status);
             meta.error = error;

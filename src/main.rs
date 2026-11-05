@@ -15,6 +15,7 @@ mod markdown_format;
 mod scan;
 mod session;
 mod tui;
+mod util;
 mod watcher;
 
 /// The `fmt-md` subcommand: prints the paths it rewrote and returns the exit code.
@@ -31,7 +32,7 @@ fn fmt_md(root: &camino::Utf8Path, paths: &[camino::Utf8PathBuf]) -> i32 {
                 let absolute = camino::Utf8PathBuf::from_path_buf(absolute)
                     .map_err(|p| format!("{} is not valid UTF-8", p.display()))?;
                 // Lexically resolves `..`, so a path leaving the repository is refused.
-                let resolved = agent::tools::resolve(root, absolute.as_str())
+                let resolved = util::fs::resolve_in(root, absolute.as_str())
                     .map_err(|_| format!("{path} is outside the repository"))?;
                 resolved
                     .strip_prefix(root)

@@ -1,4 +1,4 @@
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 const FEEDBACK_PROMPT: &str = include_str!("../../prompts/feedback.md");
 const COMMIT_PROMPT: &str = include_str!("../../prompts/commit.md");
@@ -84,10 +84,8 @@ pub fn environment_note(root: &camino::Utf8Path, head: Option<&str>, date: &str)
 /// started and when the budget expires. A run that gets no warnings from the agent
 /// loop checks the time against it with `date`.
 pub fn budget_note(budget: Duration) -> String {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs() as i64);
-    budget_note_at(budget, now, crate::conversation::local_offset_secs(now))
+    let now = crate::util::time::now_secs();
+    budget_note_at(budget, now, crate::util::time::local_offset_secs(now))
 }
 
 fn budget_note_at(budget: Duration, now: i64, offset: i32) -> String {
@@ -98,14 +96,9 @@ fn budget_note_at(budget: Duration, now: i64, offset: i32) -> String {
          the end nears; when you are warned or the time is past, finish what you are \
          doing and write your final answer. A run that gets no such warning checks \
          the time with `date` itself.]",
-        hhmm(now, offset),
-        hhmm(now + budget.as_secs() as i64, offset),
+        crate::util::time::local_hhmm(now, offset),
+        crate::util::time::local_hhmm(now + budget.as_secs() as i64, offset),
     )
-}
-
-fn hhmm(secs: i64, offset: i32) -> String {
-    let minutes = (secs + i64::from(offset)).rem_euclid(86_400) / 60;
-    format!("{:02}:{:02}", minutes / 60, minutes % 60)
 }
 
 /// The messages `transcript.jsonl` of a node holds, or `None` without a usable one.
@@ -561,12 +554,5 @@ mod tests {
         assert!(text.contains("14:32"));
         assert!(text.contains("14:47"));
         assert!(text.contains("`date`"));
-    }
-
-    #[test]
-    fn hhmm_is_local_24h_rolling_over_midnight() {
-        assert_eq!(hhmm(14 * 3600 + 32 * 60, 0), "14:32");
-        assert_eq!(hhmm(86_400 - 60, 0), "23:59");
-        assert_eq!(hhmm(86_400 + 60, 0), "00:01");
     }
 }

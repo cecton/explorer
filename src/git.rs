@@ -70,16 +70,6 @@ pub fn commit_type_prefix(summary: &str) -> Option<(&'static str, usize)> {
     }
 }
 
-pub fn format_log_time(time_secs: i64, time_offset_secs: i32) -> String {
-    let local_secs = time_secs + time_offset_secs as i64;
-    let days = local_secs.div_euclid(86_400);
-    let secs_of_day = local_secs.rem_euclid(86_400);
-    let (year, month, day) = civil_from_days(days);
-    let hour = secs_of_day / 3600;
-    let minute = (secs_of_day % 3600) / 60;
-    format!("{year:04}-{month:02}-{day:02} {hour:02}:{minute:02}")
-}
-
 pub fn classify_diff(text: &str) -> Vec<DiffLine> {
     text.lines()
         .map(|line| {
@@ -106,30 +96,6 @@ pub fn classify_diff(text: &str) -> Vec<DiffLine> {
 
 pub fn short_id(id: &[u8; 20]) -> String {
     format!("{}{:x}", hex::encode(&id[..3]), id[3] >> 4)
-}
-
-/// Days since the Unix epoch for a proleptic Gregorian date; inverse of `civil_from_days`.
-pub fn days_from_civil(year: i64, month: u32, day: u32) -> i64 {
-    let y = if month <= 2 { year - 1 } else { year };
-    let era = if y >= 0 { y } else { y - 399 } / 400;
-    let yoe = y - era * 400;
-    let mp = (month as i64 + 9) % 12;
-    let doy = (153 * mp + 2) / 5 + day as i64 - 1;
-    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
-    era * 146_097 + doe - 719_468
-}
-
-pub fn civil_from_days(z: i64) -> (i64, u32, u32) {
-    let z = z + 719_468;
-    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = (z - era * 146_097) as u64;
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let y = yoe as i64 + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
-    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
-    (if m <= 2 { y + 1 } else { y }, m, d)
 }
 
 pub fn load_log(
@@ -609,15 +575,6 @@ fn blob_data(repo: &gix::Repository, id: gix::ObjectId) -> Result<Vec<u8>, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn format_log_time_renders_local_datetime() {
-        assert_eq!(format_log_time(0, 0), "1970-01-01 00:00");
-        assert_eq!(format_log_time(1_700_000_000, 0), "2023-11-14 22:13");
-        assert_eq!(format_log_time(-1, 0), "1969-12-31 23:59");
-        assert_eq!(format_log_time(0, 7_200), "1970-01-01 02:00");
-        assert_eq!(format_log_time(0, -3_600), "1969-12-31 23:00");
-    }
 
     #[test]
     fn classify_diff_assigns_kinds_by_prefix() {

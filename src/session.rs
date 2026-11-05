@@ -607,28 +607,16 @@ pub fn save_session(
     }
     let session = Session::from_state(state);
     let content = serde_json::to_string_pretty(&session).map_err(SessionError::Serialize)?;
-    let tmp_path: camino::Utf8PathBuf = format!("{}.tmp", path.as_str()).into();
-    std::fs::write(&tmp_path, content).map_err(SessionError::Io)?;
-    std::fs::rename(&tmp_path, &path).map_err(SessionError::Io)
+    crate::util::fs::write_atomic(&path, &content).map_err(SessionError::Io)
 }
 
 pub fn session_dir() -> Option<camino::Utf8PathBuf> {
-    directories::ProjectDirs::from("", "", "explorer")
-        .and_then(|dirs| camino::Utf8PathBuf::from_path_buf(dirs.data_dir().join("sessions")).ok())
-}
-
-/// Stable 16-hex identifier of a repository, derived from its canonical root path.
-pub fn repo_hash(repo_root: &camino::Utf8Path) -> Option<String> {
-    use sha2::Digest;
-    let canonical = std::fs::canonicalize(repo_root).ok()?;
-    let canonical = camino::Utf8PathBuf::from_path_buf(canonical).ok()?;
-    let hash = sha2::Sha256::digest(canonical.as_str().as_bytes());
-    Some(hex::encode(&hash[..8]))
+    Some(crate::util::fs::data_dir()?.join("sessions"))
 }
 
 pub fn session_file_path(repo_root: &camino::Utf8Path) -> Option<camino::Utf8PathBuf> {
     let dir = session_dir()?;
-    let prefix = repo_hash(repo_root)?;
+    let prefix = crate::util::fs::repo_hash(repo_root)?;
     Some(dir.join(format!("{prefix}.json")))
 }
 

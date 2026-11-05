@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant};
 
 /// Name of the tool that calls a sub-agent.
 pub const TOOL: &str = "agent";
@@ -186,12 +186,6 @@ fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String
         .ok_or_else(|| format!("missing string argument `{key}`"))
 }
 
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs() as i64)
-}
-
 fn find_role<'a>(config: &'a crate::agent::AgentConfig, name: &str) -> Result<&'a Role, String> {
     config
         .roles
@@ -322,7 +316,7 @@ fn prepare(
     };
     let mut tree = tree.write();
     let index = tree
-        .create_agent(node, now_secs(), meta, prompt)
+        .create_agent(node, crate::util::time::now_secs(), meta, prompt)
         .map_err(|e| format!("could not record the sub-agent: {e}"))?;
     let dir = tree
         .agent_dir(node, index)
@@ -500,7 +494,7 @@ async fn prepare_retry(
     let recorded = tokio::task::spawn_blocking(move || {
         let mut tree = tree.write();
         let index = tree
-            .create_agent(&node, now_secs(), meta, &prompt)
+            .create_agent(&node, crate::util::time::now_secs(), meta, &prompt)
             .map_err(|e| format!("could not record the sub-agent: {e}"))?;
         let dir = tree
             .agent_dir(&node, index)
@@ -732,7 +726,7 @@ fn title_run(
             tracing::warn!("title generation for sub-agent {session} returned no title");
             return;
         };
-        if let Err(e) = crate::conversation::write_atomic(&dir.join("title.md"), &title) {
+        if let Err(e) = crate::util::fs::write_atomic(&dir.join("title.md"), &title) {
             tracing::warn!("failed to write the title of sub-agent {session}: {e}");
         }
         let _ = main_tx

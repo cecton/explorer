@@ -71,8 +71,7 @@ impl UsageWindow {
         }
         let local = resets_at + i64::from(offset_of(resets_at));
         let days = local.div_euclid(86_400);
-        let secs = local.rem_euclid(86_400);
-        let time = format!("{:02}:{:02}", secs / 3600, secs % 3600 / 60);
+        let time = crate::util::time::local_hhmm(resets_at, offset_of(resets_at));
         let reset = match self.span {
             Span::FiveHours => time,
             Span::Week => {
@@ -81,7 +80,7 @@ impl UsageWindow {
                 format!("{weekday} {time}")
             }
             Span::Month => {
-                let (_, _, day) = crate::git::civil_from_days(days);
+                let (_, _, day) = crate::util::time::civil_from_days(days);
                 format!("{day}{} {time}", ordinal_suffix(day))
             }
         };
@@ -196,28 +195,6 @@ struct GoWindow {
     resets_at: String,
 }
 
-/// Epoch seconds of a UTC timestamp such as `2026-10-12T15:11:32.000Z`.
-fn utc_secs(stamp: &str) -> Option<i64> {
-    let bytes = stamp.as_bytes();
-    if !stamp.ends_with('Z')
-        || bytes.get(4) != Some(&b'-')
-        || bytes.get(7) != Some(&b'-')
-        || bytes.get(10) != Some(&b'T')
-        || bytes.get(13) != Some(&b':')
-        || bytes.get(16) != Some(&b':')
-    {
-        return None;
-    }
-    let year: i64 = stamp.get(0..4)?.parse().ok()?;
-    let month: u32 = stamp.get(5..7)?.parse().ok()?;
-    let day: u32 = stamp.get(8..10)?.parse().ok()?;
-    let hour: i64 = stamp.get(11..13)?.parse().ok()?;
-    let minute: i64 = stamp.get(14..16)?.parse().ok()?;
-    let second: i64 = stamp.get(17..19)?.parse().ok()?;
-    let days = crate::git::days_from_civil(year, month, day);
-    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
-}
-
 /// The usage in the answer of OpenCode Go's `usage` request.
 fn parse_go(body: &str) -> Result<Usage, String> {
     let reply: GoReply = serde_json::from_str(body).map_err(|e| e.to_string())?;
@@ -230,7 +207,7 @@ fn parse_go(body: &str) -> Result<Usage, String> {
         let Some(window) = window else {
             continue;
         };
-        let resets_at = utc_secs(&window.resets_at)
+        let resets_at = crate::util::time::parse_utc_stamp(&window.resets_at)
             .ok_or_else(|| format!("unreadable reset time '{}'", window.resets_at))?;
         windows.push(UsageWindow {
             span,
@@ -299,7 +276,7 @@ fn parse_kimi(body: &str) -> Result<Usage, String> {
         let Some(window) = window else {
             continue;
         };
-        let resets_at = utc_secs(&window.reset_time)
+        let resets_at = crate::util::time::parse_utc_stamp(&window.reset_time)
             .ok_or_else(|| format!("unreadable reset time '{}'", window.reset_time))?;
         windows.push(UsageWindow {
             span,
@@ -333,9 +310,7 @@ pub async fn fetch_kimi(url: &str, token: &str) -> Result<Usage, String> {
 /// `<data_dir>/usage.json`: a subscription is the same in every repository, so its
 /// last known usage is not part of a repository's session.
 fn store_path() -> Option<camino::Utf8PathBuf> {
-    directories::ProjectDirs::from("", "", "explorer").and_then(|dirs| {
-        camino::Utf8PathBuf::from_path_buf(dirs.data_dir().join("usage.json")).ok()
-    })
+    Some(crate::util::fs::data_dir()?.join("usage.json"))
 }
 
 /// The last known usage of each endpoint, by endpoint name. A missing or unreadable
@@ -367,7 +342,7 @@ pub fn save(usage: &HashMap<String, Usage>) {
             if let Some(parent) = path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
-            crate::conversation::write_atomic(&path, &content)
+            crate::util::fs::write_atomic(&path, &content)
         });
     if let Err(e) = written {
         tracing::warn!("failed to write {path}: {e}");
@@ -400,7 +375,7 @@ struct ClineLimit {
 /// seconds or milliseconds.
 fn cline_reset(value: &serde_json::Value) -> Option<i64> {
     match value {
-        serde_json::Value::String(stamp) => utc_secs(stamp),
+        serde_json::Value::String(stamp) => crate::util::time::parse_utc_stamp(stamp),
         serde_json::Value::Number(number) => number.as_i64().map(|epoch| {
             if epoch > 100_000_000_000 {
                 epoch / 1000

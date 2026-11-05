@@ -16,33 +16,8 @@ impl NodeId {
 
     /// Creation time encoded in the id, as seconds since the Unix epoch (UTC).
     fn created_secs(&self) -> Option<i64> {
-        parse_stamp(&self.0)
+        crate::util::time::parse_utc_stamp(&self.0)
     }
-}
-
-/// Seconds since the Unix epoch of a `YYYY-MM-DDTHH:MM:SSZ` stamp, as in a node id
-/// (`:` written as `-`) or a `created` metadata value.
-fn parse_stamp(stamp: &str) -> Option<i64> {
-    let stamp = stamp.get(..20)?;
-    let bytes = stamp.as_bytes();
-    if bytes[4] != b'-'
-        || bytes[7] != b'-'
-        || bytes[10] != b'T'
-        || [bytes[13], bytes[16]]
-            .iter()
-            .any(|b| *b != b'-' && *b != b':')
-        || bytes[19] != b'Z'
-    {
-        return None;
-    }
-    let year: i64 = stamp.get(0..4)?.parse().ok()?;
-    let month: u32 = stamp.get(5..7)?.parse().ok()?;
-    let day: u32 = stamp.get(8..10)?.parse().ok()?;
-    let hour: i64 = stamp.get(11..13)?.parse().ok()?;
-    let minute: i64 = stamp.get(14..16)?.parse().ok()?;
-    let second: i64 = stamp.get(17..19)?.parse().ok()?;
-    let days = crate::git::days_from_civil(year, month, day);
-    Some(days * 86_400 + hour * 3600 + minute * 60 + second)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -287,7 +262,7 @@ fn read_meta(dir: &camino::Utf8Path) -> Metadata {
     if meta.status == Some(NodeStatus::Running) {
         meta.status = Some(NodeStatus::Failed);
         meta.error = Some("interrupted".to_string());
-        if let Err(e) = write_atomic(&dir.join("metadata.md"), &meta.to_text()) {
+        if let Err(e) = crate::util::fs::write_atomic(&dir.join("metadata.md"), &meta.to_text()) {
             tracing::warn!("failed to rewrite interrupted run {dir}: {e}");
         }
     }
@@ -366,7 +341,9 @@ impl Node {
         };
         let created_display = id
             .created_secs()
-            .map(|secs| crate::git::format_log_time(secs, local_offset_secs(secs)))
+            .map(|secs| {
+                crate::util::time::format_log_time(secs, crate::util::time::local_offset_secs(secs))
+            })
             .unwrap_or_default();
         Self {
             parent,
@@ -527,7 +504,7 @@ impl ConversationTree {
         prompt: &str,
         input: Option<&str>,
     ) -> std::io::Result<NodeId> {
-        let stamp = utc_stamp(now_secs);
+        let stamp = crate::util::time::utc_stamp(now_secs);
         let mut id = NodeId::new(&stamp.replace(':', "-"));
         let mut suffix = 2;
         while self.nodes.contains_key(&id) {
@@ -545,7 +522,7 @@ impl ConversationTree {
         if let Some(input) = input {
             std::fs::write(dir.join("input.md"), input)?;
         }
-        write_atomic(&dir.join("metadata.md"), &meta.to_text())?;
+        crate::util::fs::write_atomic(&dir.join("metadata.md"), &meta.to_text())?;
 
         let node = Node {
             parent: parent.cloned(),
@@ -560,7 +537,10 @@ impl ConversationTree {
                 .map(str::trim)
                 .find(|line| !line.is_empty())
                 .map(str::to_string),
-            created_display: crate::git::format_log_time(now_secs, local_offset_secs(now_secs)),
+            created_display: crate::util::time::format_log_time(
+                now_secs,
+                crate::util::time::local_offset_secs(now_secs),
+            ),
         };
         self.nodes.insert(id.clone(), node);
         match parent.and_then(|parent| self.nodes.get_mut(parent)) {
@@ -601,10 +581,10 @@ impl ConversationTree {
         let owner = self.nodes.get_mut(node).ok_or_else(unknown_node)?;
         let index = owner.agents.last().map_or(1, |agent| agent.index + 1);
         let dir = node_dir.join(AGENTS_DIR).join(index.to_string());
-        meta.created = Some(utc_stamp(now_secs));
+        meta.created = Some(crate::util::time::utc_stamp(now_secs));
         std::fs::create_dir_all(&dir)?;
         std::fs::write(dir.join("prompt.md"), prompt)?;
-        write_atomic(&dir.join("metadata.md"), &meta.to_text())?;
+        crate::util::fs::write_atomic(&dir.join("metadata.md"), &meta.to_text())?;
         owner.agents.push(AgentRecord {
             index,
             meta,
@@ -627,7 +607,7 @@ impl ConversationTree {
             .and_then(|owner| owner.agents.iter_mut().find(|agent| agent.index == index))
             .ok_or_else(unknown_node)?;
         change(&mut agent.meta);
-        write_atomic(&dir.join("metadata.md"), &agent.meta.to_text())
+        crate::util::fs::write_atomic(&dir.join("metadata.md"), &agent.meta.to_text())
     }
 
     /// Sets the title of sub-agent run `index` of `node` in memory; `title.md` is
@@ -664,7 +644,11 @@ impl ConversationTree {
                 let (status, error) = cut_short_outcome(&reply, &[]);
                 meta.status = Some(status);
                 meta.error = error;
-                if let Some(created) = meta.created.as_deref().and_then(parse_stamp) {
+                if let Some(created) = meta
+                    .created
+                    .as_deref()
+                    .and_then(crate::util::time::parse_utc_stamp)
+                {
                     meta.secs = Some((now_secs - created).max(0) as u64);
                 }
             });
@@ -724,7 +708,7 @@ impl ConversationTree {
         let dir = self.node_dir(id).ok_or_else(unknown_node)?;
         let node = self.nodes.get_mut(id).ok_or_else(unknown_node)?;
         change(&mut node.meta);
-        write_atomic(&dir.join("metadata.md"), &node.meta.to_text())
+        crate::util::fs::write_atomic(&dir.join("metadata.md"), &node.meta.to_text())
     }
 
     pub fn set_title(&mut self, id: &NodeId, title: String) {
@@ -958,44 +942,14 @@ fn single_line(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
 }
 
-/// `YYYY-MM-DDTHH:MM:SSZ` for a Unix time.
-fn utc_stamp(secs: i64) -> String {
-    let (year, month, day) = crate::git::civil_from_days(secs.div_euclid(86_400));
-    let of_day = secs.rem_euclid(86_400);
-    format!(
-        "{year:04}-{month:02}-{day:02}T{:02}:{:02}:{:02}Z",
-        of_day / 3600,
-        (of_day % 3600) / 60,
-        of_day % 60
-    )
-}
-
-pub fn write_atomic(path: &camino::Utf8Path, content: &str) -> std::io::Result<()> {
-    let tmp: camino::Utf8PathBuf = format!("{path}.tmp").into();
-    std::fs::write(&tmp, content)?;
-    std::fs::rename(&tmp, path)
-}
-
-pub(crate) fn local_offset_secs(time_secs: i64) -> i32 {
-    let time = time_secs as libc::time_t;
-    // SAFETY: `tm` is plain data that `localtime_r` fully initializes on success, and
-    // both pointers outlive the call.
-    let tm = unsafe {
-        let mut tm: libc::tm = std::mem::zeroed();
-        if libc::localtime_r(&time, &mut tm).is_null() {
-            return 0;
-        }
-        tm
-    };
-    tm.tm_gmtoff as i32
-}
-
 /// `<data_dir>/conversations/<repo-hash>/` for the repository at `repo_root`.
 pub fn conversations_dir(repo_root: &camino::Utf8Path) -> Option<camino::Utf8PathBuf> {
-    let hash = crate::session::repo_hash(repo_root)?;
-    directories::ProjectDirs::from("", "", "explorer").and_then(|dirs| {
-        camino::Utf8PathBuf::from_path_buf(dirs.data_dir().join("conversations").join(hash)).ok()
-    })
+    let hash = crate::util::fs::repo_hash(repo_root)?;
+    Some(
+        crate::util::fs::data_dir()?
+            .join("conversations")
+            .join(hash),
+    )
 }
 
 #[cfg(test)]
@@ -1570,9 +1524,5 @@ mod tests {
         assert_eq!(id.created_secs(), Some(86_401));
         assert_eq!(NodeId::new("nonsense").created_secs(), None);
         assert_eq!(NodeId::new("2026x10-05T14-32-07Z").created_secs(), None);
-        assert_eq!(parse_stamp("2026-10-21T03:51:21Z"), Some(1_792_554_681));
-        assert_eq!(parse_stamp("1970-01-02T00:00:01Z"), Some(86_401));
-        assert_eq!(parse_stamp("1970-01-02 00:00:01Z"), None);
-        assert_eq!(parse_stamp("too short"), None);
     }
 }

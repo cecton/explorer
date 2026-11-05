@@ -2,7 +2,7 @@
 use r3bl_tui::*;
 use std::borrow::Cow;
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 const SCROLL_STEP: usize = 3;
 
@@ -303,7 +303,7 @@ pub(crate) fn start_turn(
     }
 
     let head = state.repo.as_ref().and_then(crate::git::head_id);
-    let now = now_secs();
+    let now = crate::util::time::now_secs();
     let meta = Metadata {
         node_type: Some(node_type),
         endpoint: Some(spec.endpoint.clone()),
@@ -352,7 +352,7 @@ pub(crate) fn start_turn(
         root: state.root.clone(),
         repo: state.repo.clone(),
         prompt: prompt.clone(),
-        date: utc_date(now),
+        date: crate::util::time::utc_date(now),
         backend,
         endpoint,
         summary_backend,
@@ -825,17 +825,6 @@ fn row_pieces<'a>(
             }),
         })
         .collect()
-}
-
-fn now_secs() -> i64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |elapsed| elapsed.as_secs() as i64)
-}
-
-fn utc_date(secs: i64) -> String {
-    let (year, month, day) = crate::git::civil_from_days(secs.div_euclid(86_400));
-    format!("{year:04}-{month:02}-{day:02}")
 }
 
 /// Points the view of window `id` at a document that starts now: at its top, with no
@@ -2536,12 +2525,6 @@ mod tests {
 
         let (_tmp, tree, id) = node_with_metadata("endpoint: router\nmodel: m\n");
         assert!(node_model(tree.node(&id).unwrap()).is_none());
-    }
-
-    #[test]
-    fn utc_date_formats_the_day_of_a_unix_time() {
-        assert_eq!(utc_date(0), "1970-01-01");
-        assert_eq!(utc_date(86_400 * 365 + 3600), "1971-01-01");
     }
 
     #[test]

@@ -90,7 +90,11 @@ const OPENCODE_GO_URL: &str = "https://opencode.ai/zen/go/v1";
 const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 
 fn auth_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "explorer").map(|dirs| dirs.data_dir().join("auth.kdl"))
+    Some(
+        crate::util::fs::data_dir()?
+            .join("auth.kdl")
+            .into_std_path_buf(),
+    )
 }
 
 /// Endpoint tokens from `<data_dir>/auth.kdl`, one `name "token"` node per endpoint.
@@ -126,8 +130,8 @@ fn parse_auth(content: &str) -> Result<HashMap<String, String>, String> {
 
 /// Custom slash commands, from `<config_dir>/commands/<name>.md`.
 pub fn load_commands() -> Vec<crate::agent::commands::Command> {
-    directories::ProjectDirs::from("", "", "explorer")
-        .map(|dirs| read_commands(&dirs.config_dir().join("commands")))
+    crate::util::fs::config_dir()
+        .map(|dir| read_commands(&dir.join("commands").into_std_path_buf()))
         .unwrap_or_default()
 }
 
@@ -172,8 +176,8 @@ fn read_commands(dir: &Path) -> Vec<crate::agent::commands::Command> {
 
 /// Reads the sub-agent roles from `<config_dir>/agents/<name>.md`.
 pub fn load_roles() -> Vec<crate::agent::subagent::Role> {
-    directories::ProjectDirs::from("", "", "explorer")
-        .map(|dirs| read_roles(&dirs.config_dir().join("agents")))
+    crate::util::fs::config_dir()
+        .map(|dir| read_roles(&dir.join("agents").into_std_path_buf()))
         .unwrap_or_default()
 }
 
@@ -411,11 +415,11 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
 }
 
 fn config_path() -> Option<PathBuf> {
-    directories::ProjectDirs::from("", "", "explorer").map(|dirs| {
-        let mut path = dirs.config_dir().to_path_buf();
-        path.push("config.kdl");
-        path
-    })
+    Some(
+        crate::util::fs::config_dir()?
+            .join("config.kdl")
+            .into_std_path_buf(),
+    )
 }
 
 fn parse(content: &str) -> Result<Config, String> {

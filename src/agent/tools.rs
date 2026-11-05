@@ -288,37 +288,13 @@ fn usize_arg(args: &serde_json::Value, key: &str) -> Option<usize> {
         .and_then(|n| usize::try_from(n).ok())
 }
 
-/// Resolves `path` against the repository root and refuses anything outside it.
-pub fn resolve(root: &camino::Utf8Path, path: &str) -> Result<camino::Utf8PathBuf, String> {
-    let joined = if camino::Utf8Path::new(path).is_absolute() {
-        camino::Utf8PathBuf::from(path)
-    } else {
-        root.join(path)
-    };
-    let mut resolved = camino::Utf8PathBuf::new();
-    for component in joined.components() {
-        match component {
-            camino::Utf8Component::CurDir => {}
-            camino::Utf8Component::ParentDir => {
-                resolved.pop();
-            }
-            other => resolved.push(other.as_str()),
-        }
-    }
-    if resolved.starts_with(root) {
-        Ok(resolved)
-    } else {
-        Err(format!("{path} is outside the repository"))
-    }
-}
-
 fn format_markdown(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
     let relatives = match args.get("paths").and_then(serde_json::Value::as_array) {
         Some(paths) if !paths.is_empty() => paths
             .iter()
             .map(|path| {
                 let path = path.as_str().ok_or("`paths` holds a non-string")?;
-                let resolved = resolve(root, path)?;
+                let resolved = crate::util::fs::resolve_in(root, path)?;
                 resolved
                     .strip_prefix(root)
                     .map(camino::Utf8Path::to_path_buf)
@@ -338,7 +314,7 @@ fn format_markdown(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<
 }
 
 fn read(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
-    let path = resolve(root, str_arg(args, "path")?)?;
+    let path = crate::util::fs::resolve_in(root, str_arg(args, "path")?)?;
     let content = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
     let offset = usize_arg(args, "offset").unwrap_or(1).max(1);
     let limit = usize_arg(args, "limit")
@@ -426,7 +402,7 @@ fn conversation(
 }
 
 fn write(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
-    let path = resolve(root, str_arg(args, "path")?)?;
+    let path = crate::util::fs::resolve_in(root, str_arg(args, "path")?)?;
     let content = str_arg(args, "content")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{parent}: {e}"))?;
@@ -436,7 +412,7 @@ fn write(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, St
 }
 
 fn edit(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
-    let path = resolve(root, str_arg(args, "path")?)?;
+    let path = crate::util::fs::resolve_in(root, str_arg(args, "path")?)?;
     let old = str_arg(args, "old_string")?;
     let new = str_arg(args, "new_string")?;
     if old.is_empty() {
@@ -518,7 +494,7 @@ fn glob(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, Str
 fn grep(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
     let pattern = regex::Regex::new(str_arg(args, "pattern")?).map_err(|e| e.to_string())?;
     let scope = match args.get("path").and_then(serde_json::Value::as_str) {
-        Some(path) => resolve(root, path)?
+        Some(path) => crate::util::fs::resolve_in(root, path)?
             .strip_prefix(root)
             .map(camino::Utf8Path::to_owned)
             .unwrap_or_default(),
@@ -725,16 +701,6 @@ mod tests {
             name: name.into(),
             arguments,
         }
-    }
-
-    #[test]
-    fn resolve_refuses_paths_outside_the_root() {
-        let root = camino::Utf8Path::new("/repo");
-        assert_eq!(resolve(root, "src/../a.rs").unwrap(), "/repo/a.rs");
-        assert_eq!(resolve(root, "/repo/b.rs").unwrap(), "/repo/b.rs");
-        assert!(resolve(root, "../etc/passwd").is_err());
-        assert!(resolve(root, "/etc/passwd").is_err());
-        assert!(resolve(root, "src/../../x").is_err());
     }
 
     #[test]
