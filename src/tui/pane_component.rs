@@ -1370,8 +1370,64 @@ fn render_scrollbar(
     }
 }
 
+#[repr(u8)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum Id {
+    Container = 1,
+    Pane0 = 2,
+    Pane1 = 3,
+    Pane2 = 4,
+    Pane3 = 5,
+    Pane4 = 6,
+    Pane5 = 7,
+    Pane6 = 8,
+    Pane7 = 9,
+    Pane8 = 10,
+    Pane9 = 11,
+    Pane10 = 12,
+    Pane11 = 13,
+    Pane12 = 14,
+    Pane13 = 15,
+    Pane14 = 16,
+    Pane15 = 17,
+}
+
+impl Id {
+    pub fn pane(slot: usize) -> Self {
+        match slot {
+            0 => Id::Pane0,
+            1 => Id::Pane1,
+            2 => Id::Pane2,
+            3 => Id::Pane3,
+            4 => Id::Pane4,
+            5 => Id::Pane5,
+            6 => Id::Pane6,
+            7 => Id::Pane7,
+            8 => Id::Pane8,
+            9 => Id::Pane9,
+            10 => Id::Pane10,
+            11 => Id::Pane11,
+            12 => Id::Pane12,
+            13 => Id::Pane13,
+            14 => Id::Pane14,
+            _ => Id::Pane15,
+        }
+    }
+}
+
+impl From<Id> for u8 {
+    fn from(id: Id) -> u8 {
+        id as u8
+    }
+}
+
+impl From<Id> for FlexBoxId {
+    fn from(id: Id) -> FlexBoxId {
+        FlexBoxId::new(id)
+    }
+}
+
 pub(crate) fn pane_slot(id: FlexBoxId) -> Option<usize> {
-    use crate::tui::app::Id;
     match id.inner {
         x if x == Id::Pane0 as u8 => Some(0),
         x if x == Id::Pane1 as u8 => Some(1),

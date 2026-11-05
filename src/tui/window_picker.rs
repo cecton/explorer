@@ -254,7 +254,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Window
                 key: Key::SpecialKey(SpecialKey::Esc),
             }) => {
                 let state = &mut global_data.state;
-                state.pane_manager.remove_window(&Window::WindowPicker);
+                crate::tui::focus::close_window(state, Window::WindowPicker);
                 state.window_picker.reset();
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -267,41 +267,23 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Window
                 }
                 let selected = state.window_picker.resolve_selected_index();
                 if let Some(&(window, _)) = state.window_picker.results.get(selected) {
-                    let old = state.pane_manager.focused_window;
-                    match window {
-                        Window::FilePreview(key) => {
-                            if !state.pane_manager.window_states.contains_key(&window) {
-                                state.pane_manager.set_window_scroll(&window, 0);
-                            }
-                            state.pane_manager.push_window(window);
-                            state.pane_manager.focused_window = Some(window);
-                            crate::lsp::send_file_request(key.0);
-                        }
-                        Window::Terminal(id) => {
-                            state.pane_manager.push_window(window);
-                            state.pane_manager.focused_window = Some(window);
-                            // Mirror click-to-focus: grab the keyboard unless the
-                            // terminal is scrolled back into its history.
-                            let scrolled = state
-                                .with_terminal(id, |p| p.scroll_offset > 0)
-                                .unwrap_or(false);
-                            state.terminal_grabbed = !scrolled;
-                            crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
-                        }
-                        Window::GitLog(_)
-                        | Window::CommitDiff(_)
-                        | Window::Report(_)
-                        | Window::ConversationTree
-                        | Window::Discussion(_) => {
-                            state.pane_manager.push_window(window);
-                            state.pane_manager.focused_window = Some(window);
-                        }
-                        Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => {}
+                    if let Window::FilePreview(_) = window
+                        && !state.pane_manager.window_states.contains_key(&window)
+                    {
+                        state.pane_manager.set_window_scroll(&window, 0);
+                    }
+                    if let Window::FilePreview(key) = window {
+                        crate::tui::focus::focus_window(state, window);
+                        crate::lsp::send_file_request(key.0);
+                    } else if !matches!(
+                        window,
+                        Window::WindowPicker | Window::ThemePicker | Window::ModelPicker
+                    ) {
+                        crate::tui::focus::focus_window(state, window);
                     }
                 }
-                state.pane_manager.remove_window(&Window::WindowPicker);
+                crate::tui::focus::close_window(state, Window::WindowPicker);
                 state.window_picker.reset();
-                state.mark_session_dirty();
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::WithModifiers {
@@ -321,7 +303,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Window
                 if !state.pane_manager.window_stack.contains(&window) {
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                crate::tui::app::close_window(state, window);
+                crate::tui::focus::close_window(state, window);
                 if state.window_picker.query.text().is_empty() {
                     state.window_picker.results.remove(index);
                     let results = &state.window_picker.results;

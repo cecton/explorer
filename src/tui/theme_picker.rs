@@ -132,7 +132,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ThemeP
             }) => {
                 let state = &mut global_data.state;
                 state.theme = state.saved_theme.clone();
-                state.pane_manager.remove_window(&Window::ThemePicker);
+                crate::tui::focus::close_window(state, Window::ThemePicker);
                 state.theme_picker.reset();
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -141,8 +141,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ThemeP
             }) => {
                 let state = &mut global_data.state;
                 state.saved_theme = state.theme.clone();
-                state.mark_session_dirty();
-                state.pane_manager.remove_window(&Window::ThemePicker);
+                crate::tui::focus::close_window(state, Window::ThemePicker);
                 state.theme_picker.reset();
                 return Ok(EventPropagation::ConsumedRender);
             }

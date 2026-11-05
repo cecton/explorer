@@ -61,11 +61,7 @@ impl ReportComponent {
             }
         };
         let window = Window::Report(id);
-        let old = state.pane_manager.focused_window;
-        state.pane_manager.push_window(window);
-        state.pane_manager.focused_window = Some(window);
-        crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
-        crate::tui::app::sync_terminal_grabbed(state);
+        crate::tui::focus::focus_window(state, window);
         // The text is new, so it is read from its top, not from where the last one was left.
         state.pane_manager.set_window_scroll(&window, 0);
         state.reports.insert(id, ReportState { title, markdown });
@@ -115,8 +111,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Esc),
                 }) => {
-                    state.pane_manager.remove_window(&window);
-                    state.reports.remove(&id);
+                    crate::tui::focus::close_window(state, window);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Keyboard(KeyPress::Plain {
@@ -353,7 +348,7 @@ mod tests {
     /// A report is read and gone: closing its window leaves nothing in `AppState`.
     #[test]
     fn esc_closes_the_window_and_drops_the_report() {
-        use crate::tui::app::Id;
+        use crate::tui::pane_component::Id;
         use crate::tui::pane_manager::Window;
         let mut state = empty_state();
         let id = ReportComponent::show(&mut state, "t".to_string(), "m".to_string());

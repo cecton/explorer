@@ -16,7 +16,7 @@ impl SurfaceRender<crate::tui::state::AppState, crate::signal::AppSignal> for Pa
         >,
         has_focus: &mut HasFocus,
     ) -> CommonResult<()> {
-        use crate::tui::app::Id;
+        use crate::tui::pane_component::Id;
         throws!({
             const COLUMN_ID_BASE: u8 = 100;
             let container_id = FlexBoxId::from(Id::Container);
