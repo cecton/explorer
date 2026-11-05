@@ -8,7 +8,7 @@ pub(crate) type PickerResultMsg = (u64, Vec<(crate::tui::pane_manager::Window, V
 
 pub struct WindowPickerComponent {
     id: FlexBoxId,
-    picker: crate::tui::fuzzy_picker::FuzzyPicker,
+    picker: crate::tui::widgets::fuzzy_picker::FuzzyPicker,
     generation: Arc<AtomicU64>,
     results_tx: tokio::sync::mpsc::Sender<PickerResultMsg>,
 }
@@ -19,7 +19,7 @@ impl WindowPickerComponent {
         results_tx: tokio::sync::mpsc::Sender<PickerResultMsg>,
         generation: Arc<AtomicU64>,
     ) -> Self {
-        use crate::tui::fuzzy_picker::FuzzyPicker;
+        use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
         Self {
             id,
             picker: FuzzyPicker::new(),
@@ -90,7 +90,7 @@ impl WindowPickerComponent {
     }
 }
 
-impl crate::tui::title_row::TitleRow for WindowPickerComponent {
+impl crate::tui::widgets::title_row::TitleRow for WindowPickerComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
@@ -113,10 +113,11 @@ impl crate::tui::title_row::TitleRow for WindowPickerComponent {
         .max(1);
         let height = state.window_picker.query.height(None, "", width, max_rows);
 
-        let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(focused, &state.theme);
+        let (bg_rgb, fg_rgb) =
+            crate::tui::widgets::title_row::title_bar_colors(focused, &state.theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
-        let color_selection = TuiColor::from(crate::tui::title_row::title_selection_bg(
+        let color_selection = TuiColor::from(crate::tui::widgets::title_row::title_selection_bg(
             focused,
             &state.theme,
         ));
@@ -352,12 +353,12 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Window
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
-        use crate::tui::commit_diff_pane::CommitDiffPaneComponent;
-        use crate::tui::conversation_tree_pane::ConversationTreeComponent;
-        use crate::tui::discussion_pane::DiscussionComponent;
-        use crate::tui::git_log_pane::GitLogPaneComponent;
         use crate::tui::pane_manager::Window;
-        use crate::tui::report_pane::ReportComponent;
+        use crate::tui::panes::commit_diff_pane::CommitDiffPaneComponent;
+        use crate::tui::panes::conversation_tree_pane::ConversationTreeComponent;
+        use crate::tui::panes::discussion_pane::DiscussionComponent;
+        use crate::tui::panes::git_log_pane::GitLogPaneComponent;
+        use crate::tui::panes::report_pane::ReportComponent;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;

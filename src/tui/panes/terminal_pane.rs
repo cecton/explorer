@@ -53,7 +53,7 @@ impl TerminalPaneComponent {
     }
 }
 
-impl crate::tui::title_row::TitleRow for TerminalPaneComponent {
+impl crate::tui::widgets::title_row::TitleRow for TerminalPaneComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
@@ -82,7 +82,9 @@ impl crate::tui::title_row::TitleRow for TerminalPaneComponent {
         } else {
             base
         };
-        crate::tui::title_row::render_pane_title(ops, pane_box, &title, false, theme, focused);
+        crate::tui::widgets::title_row::render_pane_title(
+            ops, pane_box, &title, false, theme, focused,
+        );
         1
     }
 }
@@ -335,7 +337,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Termin
                 .state
                 .theme
                 .ui_bg("ui.selection")
-                .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG);
+                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG);
             let selection_rect = global_data.state.text_selection.as_ref().and_then(|sel| {
                 if sel.window != Window::Terminal(id) || !sel.active {
                     return None;

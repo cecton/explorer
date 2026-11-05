@@ -14,7 +14,7 @@ pub struct Config {
     /// changed by hand-editing the config file, not from the UI.
     pub theme: Option<String>,
     /// `(action-slug, key-spec)` pairs from the `keybindings` block, applied on top of the
-    /// default keymap by [`crate::keymap::Keymap::apply_overrides`].
+    /// default keymap by [`crate::tui::keymap::Keymap::apply_overrides`].
     pub keybindings: Vec<(String, String)>,
     /// The `agent { … }` block.
     pub agent: AgentSettings,

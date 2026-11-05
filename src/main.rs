@@ -9,13 +9,11 @@ mod config;
 mod conversation;
 mod git;
 mod highlight;
-mod keymap;
 mod loader;
 mod lsp;
 mod markdown_format;
 mod model_spec;
 mod scan;
-mod session;
 mod signal;
 mod tui;
 mod usage;
@@ -150,7 +148,7 @@ async fn main() {
         tui::theme::HelixTheme::default()
     };
 
-    let mut keymap = keymap::Keymap::default();
+    let mut keymap = tui::keymap::Keymap::default();
     if let Err(e) = keymap.apply_overrides(&keybindings) {
         eprintln!("invalid keybindings in config: {e}");
         std::process::exit(1);
@@ -168,7 +166,7 @@ async fn main() {
     ));
     initial_state.usage = usage::load();
 
-    if let Some(session) = session::load_session(&root) {
+    if let Some(session) = tui::session::load_session(&root) {
         session.apply(&mut initial_state);
         // Locations aren't persisted (they'd be stale) — re-resolve each restored
         // group against a running LSP worker using its saved origin identity, same

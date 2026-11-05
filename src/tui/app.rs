@@ -7,8 +7,10 @@ use std::time::{Duration, Instant};
 pub struct AppMain {
     files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
     root: camino::Utf8PathBuf,
-    picker_results_tx: tokio::sync::mpsc::Sender<crate::tui::window_picker::PickerResultMsg>,
-    picker_results_rx: tokio::sync::mpsc::Receiver<crate::tui::window_picker::PickerResultMsg>,
+    picker_results_tx:
+        tokio::sync::mpsc::Sender<crate::tui::panes::pickers::window_picker::PickerResultMsg>,
+    picker_results_rx:
+        tokio::sync::mpsc::Receiver<crate::tui::panes::pickers::window_picker::PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
     exit_tx: Arc<OnceLock<crate::signal::MainTx>>,
     terminal_event_tx: tokio::sync::mpsc::UnboundedSender<(usize, PtyOutputEvent)>,
@@ -435,7 +437,7 @@ fn maybe_save_session(state: &mut crate::tui::state::AppState, root: &camino::Ut
     if !state.session_dirty {
         return;
     }
-    match crate::session::save_session(root, state) {
+    match crate::tui::session::save_session(root, state) {
         Ok(()) => {
             state.session_dirty = false;
         }
@@ -484,8 +486,8 @@ impl App for AppMain {
         use crate::conversation::ConversationTree;
         use crate::lsp::LspConfig;
         use crate::signal::AppSignal;
-        use crate::tui::git_log_pane::GitLogPaneComponent;
         use crate::tui::pane_manager::Window;
+        use crate::tui::panes::git_log_pane::GitLogPaneComponent;
         use crate::tui::state::CommitDiffState;
         use crate::watcher::WatcherConfig;
         let notify_tx = global_data.main_thread_channel_sender.clone();
@@ -621,7 +623,7 @@ impl App for AppMain {
         }
 
         for endpoint in &global_data.state.agent.endpoints {
-            crate::tui::model_picker::fetch_models(endpoint, notify_tx.clone());
+            crate::tui::panes::pickers::model_picker::fetch_models(endpoint, notify_tx.clone());
         }
 
         // Request full tokens for session-restored file previews.
@@ -643,12 +645,12 @@ impl App for AppMain {
         >,
         has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
-        use crate::keymap::Action;
         use crate::tui::command_line::CommandLine;
-        use crate::tui::git_log_pane::GitLogPaneComponent;
-        use crate::tui::model_picker::ModelPickerComponent;
+        use crate::tui::keymap::Action;
         use crate::tui::pane_manager::ResizeDelta;
         use crate::tui::pane_manager::Window;
+        use crate::tui::panes::git_log_pane::GitLogPaneComponent;
+        use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
         use crate::tui::state::GitLogWindowState;
         use crate::tui::state::LogSource;
         use crate::tui::state::ModelPickerPurpose;
@@ -1083,11 +1085,11 @@ impl App for AppMain {
         use crate::signal::AppSignal;
         use crate::signal::SymbolRefLocation;
         use crate::tui::after_agents::AfterAgents;
-        use crate::tui::discussion_pane::DiscussionComponent;
-        use crate::tui::git_log_pane::GitLogPaneComponent;
         use crate::tui::pane_manager::Window;
+        use crate::tui::panes::discussion_pane::DiscussionComponent;
+        use crate::tui::panes::git_log_pane::GitLogPaneComponent;
+        use crate::tui::panes::pickers::window_picker::WindowPickerComponent;
         use crate::tui::state::SymbolHighlightGroup;
-        use crate::tui::window_picker::WindowPickerComponent;
         sync_has_focus(&global_data.state, _has_focus);
 
         if let AppSignal::OpenTerminal { cmd, cwd } = action {
@@ -1414,7 +1416,7 @@ impl App for AppMain {
                                 if win.selected >= count {
                                     win.selected = count.saturating_sub(1);
                                 }
-                                crate::tui::git_log_pane::apply_filter(win);
+                                crate::tui::panes::git_log_pane::apply_filter(win);
                             }
                             Err(e) => win.error = Some(e.clone()),
                         }
@@ -1534,7 +1536,7 @@ impl App for AppMain {
                                     .and_then(|agent| agent.meta.model_spec()),
                                 None => tree
                                     .node(node)
-                                    .and_then(crate::tui::discussion_pane::node_model),
+                                    .and_then(crate::tui::panes::discussion_pane::node_model),
                             };
                         }
                     }
@@ -1552,7 +1554,9 @@ impl App for AppMain {
                     {
                         let query = state.model_picker.query.text().to_string();
                         state.model_picker.results =
-                            crate::tui::model_picker::run_model_match(&query, state);
+                            crate::tui::panes::pickers::model_picker::run_model_match(
+                                &query, state,
+                            );
                     }
                 }
                 AppSignal::UsageFetched { endpoint, usage } => {
@@ -1795,7 +1799,7 @@ impl App for AppMain {
                 .state
                 .theme
                 .ui_bg("ui.background")
-                .unwrap_or(crate::tui::title_row::DEFAULT_BG);
+                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
             let bg = TuiColor::from(bg_rgb);
             let bg_style = new_style!(color_bg: {bg});
             let mut bg_ops = RenderOpIRVec::new();
@@ -1858,7 +1862,7 @@ fn create_stylesheet(theme: &crate::tui::theme::HelixTheme) -> CommonResult<TuiS
     use crate::tui::pane_component::Id;
     let bg = theme
         .ui_bg("ui.background")
-        .unwrap_or(crate::tui::title_row::DEFAULT_BG);
+        .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
     throws_with_return!({
         let mut styles = tui_stylesheet! {
             new_style!(
@@ -1892,14 +1896,14 @@ fn render_status_bar(
     state: &crate::tui::state::AppState,
     theme: &crate::tui::theme::HelixTheme,
 ) {
-    use crate::keymap::Action;
+    use crate::tui::keymap::Action;
     use crate::tui::pane_manager::Window;
     let bg_rgb = theme
         .ui_bg("ui.statusline")
-        .unwrap_or(crate::tui::title_row::DEFAULT_STATUSLINE_BG);
+        .unwrap_or(crate::tui::widgets::title_row::DEFAULT_STATUSLINE_BG);
     let fg_rgb = theme
         .ui_fg("ui.statusline")
-        .unwrap_or(crate::tui::title_row::DEFAULT_STATUSLINE_FG);
+        .unwrap_or(crate::tui::widgets::title_row::DEFAULT_STATUSLINE_FG);
     let color_bg = TuiColor::from(bg_rgb);
     let color_fg = TuiColor::from(fg_rgb);
 
@@ -1912,7 +1916,7 @@ fn render_status_bar(
         state
             .keymap
             .leader_key_for(a)
-            .map(|k| crate::keymap::hint(&k))
+            .map(|k| crate::tui::keymap::hint(&k))
             .unwrap_or_default()
     };
     // Two global keys sharing a modifier read as one chord: `Ctrl+↑/↓`, not `Ctrl+↑/Ctrl+↓`.
@@ -1997,7 +2001,7 @@ fn render_status_bar(
         (
             format!(
                 " {}: Leader ",
-                crate::keymap::hint(&state.keymap.leader_key)
+                crate::tui::keymap::hint(&state.keymap.leader_key)
             ),
             pane,
         )
@@ -2032,12 +2036,12 @@ fn render_status_bar(
     let error_fg = TuiColor::from(
         theme
             .ui_fg("error")
-            .unwrap_or(crate::tui::title_row::DEFAULT_ERROR_FG),
+            .unwrap_or(crate::tui::widgets::title_row::DEFAULT_ERROR_FG),
     );
     let warning_fg = TuiColor::from(
         theme
             .ui_fg("warning")
-            .unwrap_or(crate::tui::title_row::DEFAULT_WARNING_FG),
+            .unwrap_or(crate::tui::widgets::title_row::DEFAULT_WARNING_FG),
     );
     let dirty_style = new_style!(bold color_fg: {error_fg} color_bg: {color_bg});
     let warning_style = new_style!(color_fg: {warning_fg} color_bg: {color_bg});
@@ -2052,7 +2056,7 @@ fn render_status_bar(
         let now = crate::util::time::now_secs();
         clock_text(now, crate::util::time::local_offset_secs(now))
     };
-    let width_of = crate::tui::text_layout::display_width;
+    let width_of = crate::tui::widgets::text_layout::display_width;
     let dirty_width = dirty.map_or(0, |(bar, label)| width_of(bar) + width_of(label));
     let usage_width: usize = usage.iter().map(|(text, _)| width_of(text)).sum();
     let after_width = after_agents.as_ref().map_or(0, |(text, _)| width_of(text));
@@ -2201,7 +2205,7 @@ pub fn build_state(
     files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
     root: camino::Utf8PathBuf,
     theme: crate::tui::theme::HelixTheme,
-    keymap: crate::keymap::Keymap,
+    keymap: crate::tui::keymap::Keymap,
 ) -> crate::tui::state::AppState {
     use crate::tui::state::AppState;
     AppState::new(files, root, theme, keymap)
@@ -2299,7 +2303,7 @@ pub async fn run(
     }
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
-    if let Err(e) = crate::session::save_session(&global_data.state.root, &global_data.state) {
+    if let Err(e) = crate::tui::session::save_session(&global_data.state.root, &global_data.state) {
         tracing::warn!("Failed to save session on exit: {e}");
     }
 

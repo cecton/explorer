@@ -75,7 +75,11 @@ impl FilePreviewComponent {
             rel.as_str().to_string()
         };
         let title = if let Some(ranges) = state.highlight_ranges.get(&key) {
-            format!("{}  [{}]", base, format_highlight_ranges(ranges))
+            format!(
+                "{}  [{}]",
+                base,
+                crate::tui::pane_manager::format_line_ranges(ranges)
+            )
         } else {
             base
         };
@@ -105,7 +109,11 @@ impl FilePreviewComponent {
             rel.as_str().to_string()
         };
 
-        let title = format!("{}  [{}]", base, format_highlight_ranges(ranges));
+        let title = format!(
+            "{}  [{}]",
+            base,
+            crate::tui::pane_manager::format_line_ranges(ranges)
+        );
         let padded = format!(" {title} ");
         if padded.len() > pane_width {
             return None;
@@ -139,7 +147,7 @@ impl FilePreviewComponent {
         use crate::tui::pane_manager::Window;
         let window = Window::FilePreview(key);
         let page_size = state.pane_manager.window_page_size(&window);
-        let target = compute_single_block_scroll(lo, hi - lo + 1, page_size);
+        let target = crate::tui::pane_manager::block_scroll(lo, hi - lo + 1, page_size);
         state.pane_manager.set_window_scroll(&window, target);
         state.pane_manager.clamp_scroll(&window);
     }
@@ -256,7 +264,7 @@ impl FilePreviewComponent {
     #[allow(clippy::too_many_arguments)]
     fn render_input_title(
         ops: &mut RenderOpIRVec,
-        input: &mut crate::tui::input_line::InputLine,
+        input: &mut crate::tui::widgets::input_line::InputLine,
         prompt: &str,
         origin: VPPos,
         width: u16,
@@ -264,11 +272,12 @@ impl FilePreviewComponent {
         focused: bool,
         theme: &crate::tui::theme::HelixTheme,
     ) {
-        let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(focused, theme);
+        let (bg_rgb, fg_rgb) = crate::tui::widgets::title_row::title_bar_colors(focused, theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
-        let color_selection =
-            TuiColor::from(crate::tui::title_row::title_selection_bg(focused, theme));
+        let color_selection = TuiColor::from(crate::tui::widgets::title_row::title_selection_bg(
+            focused, theme,
+        ));
         let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
 
         for row_offset in 0..height {
@@ -442,10 +451,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
     ) -> CommonResult<EventPropagation> {
         use crate::signal::AppSignal;
         use crate::tui::command_line::CommandLine;
-        use crate::tui::input_line::InputLine;
         use crate::tui::pane_manager::Window;
         use crate::tui::state::PreviewInput;
         use crate::tui::state::SearchDirection;
+        use crate::tui::widgets::input_line::InputLine;
         throws_with_return!({
             let Some(key) = self.file_key(&global_data.state) else {
                 return Ok(EventPropagation::Propagate);
@@ -1068,7 +1077,7 @@ fn subtract_ranges(snapshot: &[(usize, usize)], lo: usize, hi: usize) -> Vec<(us
     result
 }
 
-impl crate::tui::title_row::TitleRow for FilePreviewComponent {
+impl crate::tui::widgets::title_row::TitleRow for FilePreviewComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
@@ -1116,7 +1125,7 @@ impl crate::tui::title_row::TitleRow for FilePreviewComponent {
             let (title, removed) = self
                 .title_text_render(state)
                 .unwrap_or_else(|| (String::new(), false));
-            crate::tui::title_row::render_pane_title(
+            crate::tui::widgets::title_row::render_pane_title(
                 ops, pane_box, &title, removed, theme, focused,
             );
             1
@@ -1247,60 +1256,6 @@ fn overlay_interval(
 /// Formats highlight ranges as the canonical comma-separated string (single line `N`,
 /// range `lo-hi`, joined with `, `). Used for the pane title, title-bar hit testing, and
 /// the `highlight` command's hint.
-pub(super) fn format_highlight_ranges(ranges: &[(usize, usize)]) -> String {
-    ranges
-        .iter()
-        .map(|&(lo, hi)| {
-            if lo == hi {
-                lo.to_string()
-            } else {
-                format!("{lo}-{hi}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-pub(super) fn compute_scroll_target(
-    ranges: &[(usize, usize)],
-    page_size: usize,
-    _max: usize,
-) -> usize {
-    if ranges.is_empty() || page_size == 0 {
-        return 0;
-    }
-
-    let min_start = ranges.iter().map(|&(s, _)| s).min().unwrap();
-    let max_end = ranges.iter().map(|&(_, e)| e).max().unwrap();
-    let total_span = max_end - min_start + 1;
-
-    if ranges.len() == 1 {
-        let (start, end) = ranges[0];
-        compute_single_block_scroll(start, end - start + 1, page_size)
-    } else if total_span <= page_size {
-        compute_single_block_scroll(min_start, total_span, page_size)
-    } else {
-        let (start, end) = ranges[0];
-        compute_single_block_scroll(start, end - start + 1, page_size)
-    }
-}
-
-fn compute_single_block_scroll(
-    start_1_indexed: usize,
-    block_height: usize,
-    page_size: usize,
-) -> usize {
-    if block_height <= page_size {
-        start_1_indexed
-            .saturating_sub(1)
-            .saturating_sub((page_size - block_height) / 2)
-    } else {
-        start_1_indexed
-            .saturating_sub(1)
-            .saturating_sub(page_size * 20 / 100)
-    }
-}
-
 #[cfg(test)]
 mod contrast_tests {
     use super::*;

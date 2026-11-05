@@ -214,13 +214,13 @@ impl Session {
     pub fn apply(self, state: &mut crate::tui::state::AppState) {
         use crate::conversation::NodeId;
         use crate::loader::LoadedFile;
-        use crate::tui::input_line::InputLine;
         use crate::tui::pane_manager::Window;
         use crate::tui::pane_manager::WindowState;
         use crate::tui::state::DiscussionState;
         use crate::tui::state::GitLogWindowState;
         use crate::tui::state::SymbolHighlightGroup;
         use crate::tui::theme::HelixTheme;
+        use crate::tui::widgets::input_line::InputLine;
         let canon = |p: &camino::Utf8Path| -> camino::Utf8PathBuf {
             std::fs::canonicalize(p)
                 .ok()
@@ -340,7 +340,7 @@ impl Session {
                         ..Default::default()
                     };
                     if !query.is_empty() {
-                        crate::tui::git_log_pane::apply_filter(&mut win);
+                        crate::tui::panes::git_log_pane::apply_filter(&mut win);
                     }
                     state.git_logs.insert(id, win);
                     state.pending_git_logs.push(id);
@@ -623,8 +623,8 @@ pub fn session_file_path(repo_root: &camino::Utf8Path) -> Option<camino::Utf8Pat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::keymap::Keymap;
     use crate::loader::FileKey;
+    use crate::tui::keymap::Keymap;
     use crate::tui::pane_manager::{PaneSize, Window, WindowState};
     use crate::tui::state::TerminalPane;
     use crate::tui::theme::HelixTheme;
@@ -1257,9 +1257,9 @@ mod tests {
 
     #[test]
     fn git_log_pane_round_trips_with_branch_and_query() {
-        use crate::tui::input_line::InputLine;
         use crate::tui::state::GitLogWindowState;
         use crate::tui::state::LogSource;
+        use crate::tui::widgets::input_line::InputLine;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
         state.pane_manager.window_stack = vec![Window::GitLog(7)];

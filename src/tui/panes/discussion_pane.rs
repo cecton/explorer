@@ -10,7 +10,7 @@ struct DocLine {
     /// Text the line shows a piece of; `None` for the blank line between two of them.
     part: Option<crate::tui::pane_manager::DocPart>,
     /// Each span's `src` is a byte offset in the text of `part`.
-    spans: Vec<crate::tui::markdown::Span>,
+    spans: Vec<crate::tui::widgets::markdown::Span>,
     /// Set on code block lines, painted instead of the surrounding background.
     bg: Option<RgbValue>,
 }
@@ -48,7 +48,7 @@ enum DragKind {
     /// A Shift or Ctrl drag: adds to or removes from the highlights `node` had when the
     /// drag began.
     Highlight {
-        modifier: crate::tui::preview::DragModifier,
+        modifier: crate::tui::panes::preview::DragModifier,
         node: crate::conversation::NodeId,
         snapshot: Vec<(usize, usize)>,
     },
@@ -321,7 +321,7 @@ pub(crate) fn start_turn(
         let context = tree
             .turn_context(&node)
             .ok_or_else(|| Refusal::Rejected("the new node has no directory".to_string()))?;
-        let folds = crate::tui::conversation_tree_pane::folds_on_the_way(&tree, &node);
+        let folds = crate::tui::panes::conversation_tree_pane::folds_on_the_way(&tree, &node);
         (node.clone(), tree.lineage(&node), folds, context)
     };
     let session = lineage.first().unwrap_or(&node).as_str().to_string();
@@ -451,7 +451,7 @@ fn marker_bg(theme: &crate::tui::theme::HelixTheme, pane_bg: RgbValue) -> RgbVal
 }
 
 /// Paint style for one markdown span: its fg over `bg`, with the span's attributes.
-pub(crate) fn span_style(span: &crate::tui::markdown::Span, bg: RgbValue) -> TuiStyle {
+pub(crate) fn span_style(span: &crate::tui::widgets::markdown::Span, bg: RgbValue) -> TuiStyle {
     let mut style = new_style!(
         color_fg: {TuiColor::from(span.fg)} color_bg: {TuiColor::from(bg)}
     );
@@ -700,7 +700,7 @@ fn part_text(
 /// Source offset of the cell at `col` of a row. A cell the source has no place for
 /// (marker, padding, border) or a column past the text stands for the nearest cell
 /// before it, or else after it.
-fn offset_at(spans: &[crate::tui::markdown::Span], col: usize) -> Option<usize> {
+fn offset_at(spans: &[crate::tui::widgets::markdown::Span], col: usize) -> Option<usize> {
     use unicode_segmentation::UnicodeSegmentation;
     let mut found = None;
     let mut x = 0;
@@ -712,7 +712,7 @@ fn offset_at(spans: &[crate::tui::markdown::Span], col: usize) -> Option<usize> 
                 }
                 found = Some(src + at);
             }
-            x += crate::tui::text_layout::display_width(grapheme);
+            x += crate::tui::widgets::text_layout::display_width(grapheme);
         }
     }
     found
@@ -775,17 +775,17 @@ fn remove_range(ranges: &[(usize, usize)], lo: usize, hi: usize) -> Vec<(usize, 
 /// A run of cells of one span that are all marked (selected or highlighted) or all not.
 struct Piece<'a> {
     text: &'a str,
-    span: &'a crate::tui::markdown::Span,
+    span: &'a crate::tui::widgets::markdown::Span,
     marked: bool,
 }
 
 /// Cuts the spans of a row where `marked` source ranges begin and end. Cells the source
 /// has no place for are marked when the text on both sides of them is.
 fn row_pieces<'a>(
-    spans: &'a [crate::tui::markdown::Span],
+    spans: &'a [crate::tui::widgets::markdown::Span],
     marked: &[(usize, usize)],
 ) -> Vec<Piece<'a>> {
-    use crate::tui::markdown::Span;
+    use crate::tui::widgets::markdown::Span;
     let mut runs: Vec<(&str, &Span, Option<bool>)> = Vec::with_capacity(spans.len());
     for span in spans {
         use unicode_segmentation::UnicodeSegmentation;
@@ -969,7 +969,7 @@ impl DiscussionComponent {
     /// began in: past it, it reaches that text's start or end.
     fn update_drag(&mut self, state: &mut crate::tui::state::AppState, pos: VPPos) {
         use crate::tui::pane_manager::SelPoint;
-        use crate::tui::preview::DragModifier;
+        use crate::tui::panes::preview::DragModifier;
         let Some(drag) = &self.drag else {
             return;
         };
@@ -1097,8 +1097,8 @@ impl DiscussionComponent {
         main_tx: crate::signal::MainTx,
         node: &crate::conversation::NodeId,
     ) {
-        use crate::tui::input_line::InputLine;
         use crate::tui::state::DiscussionState;
+        use crate::tui::widgets::input_line::InputLine;
         let (parent, draft, model) = {
             let tree = state.conversations.read();
             let Some(source) = tree.node(node) else {
@@ -1284,7 +1284,7 @@ impl DiscussionComponent {
     /// for any other turn is queued, and stays in the input until its turn starts. A
     /// refused send keeps the draft and explains itself in the window's notice.
     fn send(state: &mut crate::tui::state::AppState, main_tx: crate::signal::MainTx, id: usize) {
-        use crate::tui::model_picker::ModelPickerComponent;
+        use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
         use crate::tui::state::ModelPickerPurpose;
         use crate::tui::state::PendingTurn;
         if Self::inject(state, id) {
@@ -1485,8 +1485,8 @@ impl DiscussionComponent {
         theme: &crate::tui::theme::HelixTheme,
         width: usize,
     ) -> &[DocLine] {
-        use crate::tui::markdown::Span;
         use crate::tui::pane_manager::DocPart;
+        use crate::tui::widgets::markdown::Span;
         let fresh = self.cache.as_ref().is_some_and(|cache| {
             cache.window_id == self.window_id
                 && cache.width == width
@@ -1505,12 +1505,14 @@ impl DiscussionComponent {
             let dim_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
             let mut lines = Vec::new();
             if discussion.node.is_some() {
-                for (start, text) in crate::tui::text_layout::wrap(&discussion.prompt, width) {
+                for (start, text) in
+                    crate::tui::widgets::text_layout::wrap(&discussion.prompt, width)
+                {
                     lines.push(DocLine {
                         part: Some(DocPart::Prompt),
                         spans: vec![Span {
                             src: Some(start),
-                            ..crate::tui::markdown::Span::plain(text, text_fg)
+                            ..crate::tui::widgets::markdown::Span::plain(text, text_fg)
                         }],
                         bg: None,
                     });
@@ -1521,13 +1523,14 @@ impl DiscussionComponent {
                     bg: None,
                 });
                 if !discussion.thinking.is_empty() {
-                    for (start, text) in crate::tui::text_layout::wrap(&discussion.thinking, width)
+                    for (start, text) in
+                        crate::tui::widgets::text_layout::wrap(&discussion.thinking, width)
                     {
                         lines.push(DocLine {
                             part: Some(DocPart::Thinking),
                             spans: vec![Span {
                                 src: Some(start),
-                                ..crate::tui::markdown::Span::plain(text, dim_fg)
+                                ..crate::tui::widgets::markdown::Span::plain(text, dim_fg)
                             }],
                             bg: None,
                         });
@@ -1542,12 +1545,12 @@ impl DiscussionComponent {
                 if work_log_shown && !work_log_to_show.is_empty() {
                     let mut base = 0;
                     for entry in work_log_to_show {
-                        for (start, text) in crate::tui::text_layout::wrap(entry, width) {
+                        for (start, text) in crate::tui::widgets::text_layout::wrap(entry, width) {
                             lines.push(DocLine {
                                 part: Some(DocPart::WorkLog),
                                 spans: vec![Span {
                                     src: Some(base + start),
-                                    ..crate::tui::markdown::Span::plain(text, dim_fg)
+                                    ..crate::tui::widgets::markdown::Span::plain(text, dim_fg)
                                 }],
                                 bg: None,
                             });
@@ -1560,7 +1563,7 @@ impl DiscussionComponent {
                         bg: None,
                     });
                 }
-                for md in crate::tui::markdown::render(&discussion.reply, theme, width) {
+                for md in crate::tui::widgets::markdown::render(&discussion.reply, theme, width) {
                     lines.push(DocLine {
                         part: Some(DocPart::Reply),
                         spans: md.spans,
@@ -1627,7 +1630,7 @@ impl DiscussionComponent {
             .col_width
             .as_usize();
         let label = format!(" {model} ");
-        let label_width = crate::tui::text_layout::display_width(&label);
+        let label_width = crate::tui::widgets::text_layout::display_width(&label);
         let title_box = FlexBox {
             style_adjusted_bounds: VPBoundingBox::new(
                 pane_box.style_adjusted_bounds.origin_pos,
@@ -1636,10 +1639,12 @@ impl DiscussionComponent {
             ),
             ..*pane_box
         };
-        crate::tui::title_row::render_pane_title(ops, pane_box, "", false, theme, focused);
-        crate::tui::title_row::render_pane_title(ops, &title_box, &title, false, theme, focused);
+        crate::tui::widgets::title_row::render_pane_title(ops, pane_box, "", false, theme, focused);
+        crate::tui::widgets::title_row::render_pane_title(
+            ops, &title_box, &title, false, theme, focused,
+        );
         if label_width < pane_width {
-            let (bg, fg) = crate::tui::title_row::title_bar_colors(focused, theme);
+            let (bg, fg) = crate::tui::widgets::title_row::title_bar_colors(focused, theme);
             let style = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
             *ops += RenderOpCommon::MoveCursorPositionRelTo(
                 pane_box.style_adjusted_bounds.origin_pos,
@@ -1825,13 +1830,13 @@ fn progress_text(
     text
 }
 
-fn model_picker_chord(keymap: &crate::keymap::Keymap) -> String {
-    use crate::keymap::Action;
+fn model_picker_chord(keymap: &crate::tui::keymap::Keymap) -> String {
+    use crate::tui::keymap::Action;
     let key = keymap
         .leader_key_for(Action::OpenModelPicker)
-        .map(|key| crate::keymap::hint(&key))
+        .map(|key| crate::tui::keymap::hint(&key))
         .unwrap_or_default();
-    format!("{} {key}", crate::keymap::hint(&keymap.leader_key))
+    format!("{} {key}", crate::tui::keymap::hint(&keymap.leader_key))
 }
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for DiscussionComponent {
@@ -2002,11 +2007,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
         _surface_bounds: VPBoundingBox,
         has_focus: &mut HasFocus,
     ) -> CommonResult {
-        use crate::tui::markdown::Span;
         use crate::tui::pane_manager::DocPart;
         use crate::tui::pane_manager::SelPoint;
         use crate::tui::pane_manager::TextSelection;
         use crate::tui::pane_manager::Window;
+        use crate::tui::widgets::markdown::Span;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -2052,19 +2057,19 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             let theme = &state.theme;
             let pane_bg = theme
                 .ui_bg("ui.background")
-                .unwrap_or(crate::tui::title_row::DEFAULT_BG);
+                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
             let prompt_bg = theme
                 .ui_bg("ui.cursorline")
                 .or_else(|| theme.ui_bg("ui.cursorline.primary"))
                 .or_else(|| theme.ui_bg("ui.statusline"))
-                .unwrap_or(crate::tui::title_row::DEFAULT_STATUSLINE_BG);
+                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_STATUSLINE_BG);
             let text_fg = theme
                 .ui_fg("ui.text")
                 .unwrap_or(RgbValue::from_u8(170, 170, 200));
             let status_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
             let error_fg = theme
                 .ui_fg("error")
-                .unwrap_or(crate::tui::title_row::DEFAULT_ERROR_FG);
+                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_ERROR_FG);
             // A surface of its own, like Helix's help box: the input sits inside the
             // window, where the focused title colors would read as the window's own row.
             let input_bg = theme.ui_bg("ui.help").unwrap_or(pane_bg);
@@ -2211,8 +2216,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                 for piece in row_pieces(spans, marked) {
                     let truncated;
                     let text: &str =
-                        if x + crate::tui::text_layout::display_width(piece.text) > doc_width {
-                            truncated = crate::tui::text_layout::truncate(
+                        if x + crate::tui::widgets::text_layout::display_width(piece.text)
+                            > doc_width
+                        {
+                            truncated = crate::tui::widgets::text_layout::truncate(
                                 piece.text,
                                 doc_width.saturating_sub(x),
                             );
@@ -2225,7 +2232,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                         style.color_bg = Some(TuiColor::from(marked_bg));
                         if !keep_fg {
                             style.color_fg = Some(TuiColor::from(
-                                crate::tui::preview::ensure_readable_fg(piece.span.fg, marked_bg),
+                                crate::tui::panes::preview::ensure_readable_fg(
+                                    piece.span.fg,
+                                    marked_bg,
+                                ),
                             ));
                         }
                     }
@@ -2235,7 +2245,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                     );
                     *ops += RenderOpCommon::ApplyColors(Some(style));
                     *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                    x += crate::tui::text_layout::display_width(text);
+                    x += crate::tui::widgets::text_layout::display_width(text);
                 }
             };
             for row_offset in 0..doc_rows {
@@ -2271,8 +2281,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             }
             if status_rows > 0 {
                 let fg = if alert { error_fg } else { status_fg };
-                let text = crate::tui::text_layout::truncate(&status, doc_width);
-                let span = [crate::tui::markdown::Span::plain(text, fg)];
+                let text = crate::tui::widgets::text_layout::truncate(&status, doc_width);
+                let span = [crate::tui::widgets::markdown::Span::plain(text, fg)];
                 paint_row(
                     &mut render_ops,
                     doc_rows,
@@ -2347,17 +2357,17 @@ mod tests {
         assert_eq!(marker, RgbValue::from_u8(0x76, 0x6c, 0x62));
     }
 
-    fn span(text: &str, src: Option<usize>) -> crate::tui::markdown::Span {
-        use crate::tui::markdown::Span;
+    fn span(text: &str, src: Option<usize>) -> crate::tui::widgets::markdown::Span {
+        use crate::tui::widgets::markdown::Span;
         Span {
             src,
-            ..crate::tui::markdown::Span::plain(text, RgbValue::from_u8(0, 0, 0))
+            ..crate::tui::widgets::markdown::Span::plain(text, RgbValue::from_u8(0, 0, 0))
         }
     }
 
     fn doc_line(
         part: Option<crate::tui::pane_manager::DocPart>,
-        spans: Vec<crate::tui::markdown::Span>,
+        spans: Vec<crate::tui::widgets::markdown::Span>,
     ) -> DocLine {
         DocLine {
             part,
@@ -2537,7 +2547,7 @@ mod tests {
     }
 
     fn empty_state() -> crate::tui::state::AppState {
-        use crate::keymap::Keymap;
+        use crate::tui::keymap::Keymap;
         use crate::tui::state::AppState;
         use crate::tui::theme::HelixTheme;
         let files = Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new()));
@@ -2803,8 +2813,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_model_of_a_window_whose_turn_runs_cannot_be_changed() {
-        use crate::tui::model_picker::ModelPickerComponent;
         use crate::tui::pane_manager::Window;
+        use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
         use crate::tui::state::ModelPickerPurpose;
         let (_tmp, mut state) = state_with_failed_child();
         state.agent = agent_with_endpoint();
@@ -3451,8 +3461,8 @@ mod tests {
     fn global_data_with_drafts(
         drafts: &[&str],
     ) -> GlobalData<crate::tui::state::AppState, crate::signal::AppSignal> {
-        use crate::tui::input_line::InputLine;
         use crate::tui::state::DiscussionState;
+        use crate::tui::widgets::input_line::InputLine;
         let mut state = empty_state();
         for (id, draft) in drafts.iter().enumerate() {
             state.discussions.insert(
@@ -3532,9 +3542,9 @@ mod tests {
 
     #[test]
     fn a_window_input_holds_the_mouse_while_it_selects() {
-        use crate::tui::input_line::InputLine;
         use crate::tui::pane_manager::Window;
         use crate::tui::state::DiscussionState;
+        use crate::tui::widgets::input_line::InputLine;
         let mut state = empty_state();
         state.discussions.insert(
             0,

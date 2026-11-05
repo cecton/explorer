@@ -485,6 +485,56 @@ impl PaneManager {
     }
 }
 
+/// The scroll offset that brings a block of `block_height` lines starting at
+/// `start_1_indexed` into view, centered when it fits the page and a fifth from the top
+/// when it does not.
+pub(crate) fn block_scroll(start_1_indexed: usize, block_height: usize, page_size: usize) -> usize {
+    if block_height <= page_size {
+        start_1_indexed
+            .saturating_sub(1)
+            .saturating_sub((page_size - block_height) / 2)
+    } else {
+        start_1_indexed
+            .saturating_sub(1)
+            .saturating_sub(page_size * 20 / 100)
+    }
+}
+
+/// The scroll offset that brings the first of `ranges` (1-indexed, inclusive line
+/// ranges) into view: the block itself when it fits the page, its first range otherwise.
+pub(crate) fn ranges_scroll_target(ranges: &[(usize, usize)], page_size: usize) -> usize {
+    if ranges.is_empty() || page_size == 0 {
+        return 0;
+    }
+    let (first, rest) = (ranges[0], &ranges[1..]);
+    if rest.is_empty() {
+        return block_scroll(first.0, first.1 - first.0 + 1, page_size);
+    }
+    let min_start = ranges.iter().map(|&(s, _)| s).min().unwrap_or(first.0);
+    let max_end = ranges.iter().map(|&(_, e)| e).max().unwrap_or(first.1);
+    if max_end - min_start < page_size {
+        block_scroll(min_start, max_end - min_start + 1, page_size)
+    } else {
+        block_scroll(first.0, first.1 - first.0 + 1, page_size)
+    }
+}
+
+/// The 1-indexed line ranges of `ranges` as the `highlight` command writes them:
+/// `12`, `3-7`, `1-3, 8`.
+pub(crate) fn format_line_ranges(ranges: &[(usize, usize)]) -> String {
+    ranges
+        .iter()
+        .map(|&(lo, hi)| {
+            if lo == hi {
+                lo.to_string()
+            } else {
+                format!("{lo}-{hi}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -503,6 +553,43 @@ mod tests {
 
     fn size(cols: u16, rows: u16) -> VPSize {
         vp_width(cols) + vp_height(rows)
+    }
+
+    #[test]
+    fn a_block_that_fits_the_page_is_centered() {
+        assert_eq!(super::block_scroll(1, 1, 20), 0);
+        // 10 lines at line 30, a 20-line page: 5 lines of context above.
+        assert_eq!(super::block_scroll(30, 10, 20), 24);
+        // The block is the whole page: it starts at the top.
+        assert_eq!(super::block_scroll(30, 20, 20), 29);
+    }
+
+    #[test]
+    fn a_block_taller_than_the_page_starts_a_fifth_down() {
+        // 100 lines at line 30, a 20-line page: 4 lines above, the rest below.
+        assert_eq!(super::block_scroll(30, 100, 20), 25);
+        // The first line cannot scroll above 0.
+        assert_eq!(super::block_scroll(1, 100, 20), 0);
+    }
+
+    #[test]
+    fn ranges_scroll_to_the_first_of_them() {
+        assert_eq!(super::ranges_scroll_target(&[], 20), 0);
+        assert_eq!(super::ranges_scroll_target(&[(5, 5)], 0), 0);
+        // One range: the range itself.
+        assert_eq!(super::ranges_scroll_target(&[(30, 39)], 20), 24);
+        // Several close together, together within the page: the block they span.
+        assert_eq!(super::ranges_scroll_target(&[(30, 32), (40, 41)], 20), 25);
+        // Several far apart: the first, since the page cannot show them all.
+        assert_eq!(super::ranges_scroll_target(&[(30, 32), (300, 301)], 20), 21);
+    }
+
+    #[test]
+    fn line_ranges_are_formatted_as_the_command_writes_them() {
+        assert_eq!(super::format_line_ranges(&[]), "");
+        assert_eq!(super::format_line_ranges(&[(12, 12)]), "12");
+        assert_eq!(super::format_line_ranges(&[(3, 7)]), "3-7");
+        assert_eq!(super::format_line_ranges(&[(1, 3), (8, 8)]), "1-3, 8");
     }
 
     #[test]

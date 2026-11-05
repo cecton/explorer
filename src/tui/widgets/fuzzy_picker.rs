@@ -73,7 +73,7 @@ impl FuzzyPicker {
         let bg_rgb = state
             .theme
             .ui_bg("ui.background")
-            .unwrap_or(crate::tui::title_row::DEFAULT_BG);
+            .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
         let color_bg = TuiColor::from(bg_rgb);
 
         let match_rgb = state
@@ -87,7 +87,7 @@ impl FuzzyPicker {
         let selected_rgb = state
             .theme
             .ui_bg("ui.selection")
-            .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG);
+            .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG);
         let color_match_fg = TuiColor::from(match_rgb);
         let color_normal_fg = TuiColor::from(normal_rgb);
         let color_selected_bg = TuiColor::from(selected_rgb);

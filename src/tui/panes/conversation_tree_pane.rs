@@ -556,10 +556,10 @@ impl ConversationTreeComponent {
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
-        use crate::tui::discussion_pane::DiscussionComponent;
-        use crate::tui::git_log_pane::GitLogPaneComponent;
-        use crate::tui::model_picker::ModelPickerComponent;
         use crate::tui::pane_manager::Window;
+        use crate::tui::panes::discussion_pane::DiscussionComponent;
+        use crate::tui::panes::git_log_pane::GitLogPaneComponent;
+        use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
         use crate::tui::state::ModelPickerPurpose;
         use crate::tui::state::RowTarget;
         let main_tx = global_data.main_thread_channel_sender.clone();
@@ -717,10 +717,10 @@ impl ConversationTreeComponent {
                 key: Key::SpecialKey(SpecialKey::Esc),
             }) => match rows.get(index).map(|row| &row.target) {
                 Some(RowTarget::Queued { window, .. }) => {
-                    crate::tui::discussion_pane::take_back_window(state, main_tx, *window);
+                    crate::tui::panes::discussion_pane::take_back_window(state, main_tx, *window);
                 }
                 Some(RowTarget::Node(id)) => {
-                    crate::tui::discussion_pane::take_back(state, main_tx, id);
+                    crate::tui::panes::discussion_pane::take_back(state, main_tx, id);
                 }
                 Some(RowTarget::Agent { .. }) | None => {}
             },
@@ -1067,7 +1067,7 @@ impl ConversationTreeComponent {
         main_tx: crate::signal::MainTx,
         id: &crate::conversation::NodeId,
     ) {
-        use crate::tui::git_log_pane::GitLogPaneComponent;
+        use crate::tui::panes::git_log_pane::GitLogPaneComponent;
         let commits: Vec<[u8; 20]> = state
             .conversations
             .read()
@@ -1136,7 +1136,7 @@ impl ConversationTreeComponent {
     }
 }
 
-impl crate::tui::title_row::TitleRow for ConversationTreeComponent {
+impl crate::tui::widgets::title_row::TitleRow for ConversationTreeComponent {
     fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
@@ -1146,7 +1146,7 @@ impl crate::tui::title_row::TitleRow for ConversationTreeComponent {
     ) -> usize {
         if !state.tree_view.search_active {
             let title = Self::title(state);
-            crate::tui::title_row::render_pane_title(
+            crate::tui::widgets::title_row::render_pane_title(
                 ops,
                 pane_box,
                 &title,
@@ -1162,10 +1162,11 @@ impl crate::tui::title_row::TitleRow for ConversationTreeComponent {
             .bounds_size
             .col_width
             .as_u16();
-        let (bg_rgb, fg_rgb) = crate::tui::title_row::title_bar_colors(focused, &state.theme);
+        let (bg_rgb, fg_rgb) =
+            crate::tui::widgets::title_row::title_bar_colors(focused, &state.theme);
         let color_bg = TuiColor::from(bg_rgb);
         let color_fg = TuiColor::from(fg_rgb);
-        let color_selection = TuiColor::from(crate::tui::title_row::title_selection_bg(
+        let color_selection = TuiColor::from(crate::tui::widgets::title_row::title_selection_bg(
             focused,
             &state.theme,
         ));
@@ -1288,10 +1289,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
             let theme = &state.theme;
             let pane_bg = theme
                 .ui_bg("ui.background")
-                .unwrap_or(crate::tui::title_row::DEFAULT_BG);
+                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
             let selected_bg = theme
                 .ui_bg("ui.selection")
-                .unwrap_or(crate::tui::title_row::DEFAULT_SELECTION_BG);
+                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG);
             let text_fg = theme
                 .ui_fg("ui.text")
                 .unwrap_or(RgbValue::from_u8(170, 170, 200));
@@ -1312,7 +1313,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
                 .unwrap_or(RgbValue::from_u8(250, 200, 90));
             let error_fg = theme
                 .ui_fg("error")
-                .unwrap_or(crate::tui::title_row::DEFAULT_ERROR_FG);
+                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_ERROR_FG);
             let favorite_fg = theme
                 .ui_fg("ui.cursor.match")
                 .unwrap_or(RgbValue::from_u8(255, 200, 60));
@@ -1354,7 +1355,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
                 .iter()
                 .filter_map(|row| row.target.node())
                 .filter_map(|id| tree.node(id))
-                .map(|node| crate::tui::text_layout::display_width(&node.created_display))
+                .map(|node| crate::tui::widgets::text_layout::display_width(&node.created_display))
                 .max()
                 .unwrap_or(0)
                 + GUTTER_GAP.len();
@@ -1363,8 +1364,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
             let mut selected_span = (0, 0);
             for (row_idx, row) in rows.iter().enumerate() {
                 let Some(id) = row.target.node() else {
-                    let prefix_width =
-                        gutter_width + crate::tui::text_layout::display_width(&row_prefix(row));
+                    let prefix_width = gutter_width
+                        + crate::tui::widgets::text_layout::display_width(&row_prefix(row));
                     let width = pane_width.saturating_sub(prefix_width).max(1);
                     let text = match &row.target {
                         RowTarget::Agent { node, index } => tree
@@ -1378,7 +1379,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
                         row: row_idx,
                         kind: LineKind::Head,
                         offset: 0,
-                        text: crate::tui::text_layout::truncate(&text, width),
+                        text: crate::tui::widgets::text_layout::truncate(&text, width),
                     });
                     if row_idx == selected {
                         selected_span = (start, lines.len());
@@ -1388,10 +1389,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
                 let Some(node) = tree.node(id) else {
                     continue;
                 };
-                let prefix_width =
-                    gutter_width + crate::tui::text_layout::display_width(&row_prefix(row));
+                let prefix_width = gutter_width
+                    + crate::tui::widgets::text_layout::display_width(&row_prefix(row));
                 let label_width = commit_label(node).map_or(0, |label| {
-                    crate::tui::text_layout::display_width(&label) + 1
+                    crate::tui::widgets::text_layout::display_width(&label) + 1
                 });
                 let text_width = pane_width.saturating_sub(prefix_width + label_width).max(1);
                 if row_idx != selected {
@@ -1399,13 +1400,16 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
                         row: row_idx,
                         kind: LineKind::Head,
                         offset: 0,
-                        text: crate::tui::text_layout::truncate(node.display_title(), text_width),
+                        text: crate::tui::widgets::text_layout::truncate(
+                            node.display_title(),
+                            text_width,
+                        ),
                     });
                     continue;
                 }
                 let start = lines.len();
                 for (i, (offset, text)) in
-                    crate::tui::text_layout::wrap(node.display_title(), text_width)
+                    crate::tui::widgets::text_layout::wrap(node.display_title(), text_width)
                         .into_iter()
                         .enumerate()
                 {
@@ -1421,7 +1425,9 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
                     });
                 }
                 if let Some(summary) = shown_summary(node) {
-                    for (offset, text) in crate::tui::text_layout::wrap(summary, text_width) {
+                    for (offset, text) in
+                        crate::tui::widgets::text_layout::wrap(summary, text_width)
+                    {
                         lines.push(Line {
                             row: row_idx,
                             kind: LineKind::Summary,
@@ -1492,8 +1498,9 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
                     };
                 let (rail_prefix, fold_text) = row_prefix_parts(row_info);
                 let fold_column =
-                    gutter_width + crate::tui::text_layout::display_width(&rail_prefix);
-                let text_column = fold_column + crate::tui::text_layout::display_width(fold_text);
+                    gutter_width + crate::tui::widgets::text_layout::display_width(&rail_prefix);
+                let text_column =
+                    fold_column + crate::tui::widgets::text_layout::display_width(fold_text);
 
                 // A queued prompt or a sub-agent run is not a node: nothing to arm, fold
                 // or label.
@@ -1578,7 +1585,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
                         );
                         *ops += RenderOpCommon::ApplyColors(Some(style));
                         *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                        column += crate::tui::text_layout::display_width(text);
+                        column += crate::tui::widgets::text_layout::display_width(text);
                     }
                 };
 
@@ -1602,11 +1609,15 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
                         }
                         paint_text(&mut render_ops, type_fg);
                         if let Some(label) = commit_label(node) {
-                            let column = pane_width
-                                .saturating_sub(crate::tui::text_layout::display_width(&label));
+                            let column = pane_width.saturating_sub(
+                                crate::tui::widgets::text_layout::display_width(&label),
+                            );
                             paint(&mut render_ops, column, &label, hash_fg);
                             let slot = self.label_zones.last_mut().expect("pushed above");
-                            *slot = Some((column, crate::tui::text_layout::display_width(&label)));
+                            *slot = Some((
+                                column,
+                                crate::tui::widgets::text_layout::display_width(&label),
+                            ));
                         }
                     }
                     LineKind::TitleRest | LineKind::Summary => {
@@ -1642,7 +1653,7 @@ mod tests {
 
     #[test]
     fn the_title_says_the_repository_is_untrusted() {
-        use crate::keymap::Keymap;
+        use crate::tui::keymap::Keymap;
         use crate::tui::state::AppState;
         use crate::tui::theme::HelixTheme;
         let mut state = AppState::new(
@@ -1992,7 +2003,7 @@ mod tests {
     fn label_zone_hit_test_is_pane_relative() {
         let pane_width = 120;
         let label = "abc1234 +2";
-        let width = crate::tui::text_layout::display_width(label);
+        let width = crate::tui::widgets::text_layout::display_width(label);
         let column = pane_width - width;
         let zone = (column, width);
         let inside = |col: usize| (zone.0..zone.0 + zone.1).contains(&col);
