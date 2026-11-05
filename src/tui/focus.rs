@@ -1,6 +1,3 @@
-#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
-use r3bl_tui::*;
-
 /// Focuses `window`: brings it to the front, tells a terminal it lost or gained focus,
 /// and applies the grab rule.
 pub(crate) fn focus_window(
@@ -15,7 +12,7 @@ pub(crate) fn focus_window(
 }
 
 /// The focus half of a stack change the caller already made (`cycle_focus`,
-/// `send_to_back`, `remove_window`): `old` is where focus was before it.
+/// `send_to_back`, closing a window): `old` is where focus was before it.
 pub(crate) fn refocus(
     state: &mut crate::tui::state::AppState,
     old: Option<crate::tui::pane_manager::Window>,
@@ -120,7 +117,7 @@ pub(crate) fn notify_terminal_focus_change(
         if p.ofs_buf.get_terminal_mode().focus_events {
             let _ = p
                 .pty_input_tx
-                .try_send(PtyInputEvent::Write(bytes.to_vec()));
+                .try_send(r3bl_tui::PtyInputEvent::Write(bytes.to_vec()));
         }
     }
 }
