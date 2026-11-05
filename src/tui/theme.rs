@@ -67,30 +67,31 @@ impl HelixTheme {
         }
     }
 
+    /// The color a scope resolves to, falling back to `ui.text` when the theme styles
+    /// none of its dotted parents.
     pub fn color_for_scope(&self, scope: &str) -> Option<RgbValue> {
-        let mut s = scope;
-        loop {
-            if let Some(style) = self.styles.get(s)
-                && let Some(fg) = style.fg
-            {
-                return Some(fg);
-            }
-            if let Some(dot) = s.rfind('.') {
-                s = &s[..dot];
-            } else {
-                break;
-            }
-        }
-        self.styles.get("ui.text").and_then(|s| s.fg)
+        self.scope_fg(scope)
+            .or_else(|| self.styles.get("ui.text").and_then(|s| s.fg))
     }
 
-    pub fn color_for_lsp_token(&self, token_type: &str) -> Option<RgbValue> {
-        for scope in lsp_token_scopes(token_type) {
-            if let Some(color) = self.color_for_scope(scope) {
-                return Some(color);
+    /// The color the theme gives a scope or its nearest styled dotted parent, `None`
+    /// when it styles none of them.
+    fn scope_fg(&self, scope: &str) -> Option<RgbValue> {
+        let mut s = scope;
+        loop {
+            if let Some(fg) = self.styles.get(s).and_then(|style| style.fg) {
+                return Some(fg);
             }
+            s = &s[..s.rfind('.')?];
         }
-        None
+    }
+
+    /// The color of a semantic token: that of the first of its scopes the theme styles,
+    /// so a theme that sets only `keyword.control` still colors `keyword` tokens.
+    pub fn color_for_lsp_token(&self, token_type: &str) -> Option<RgbValue> {
+        lsp_token_scopes(token_type)
+            .iter()
+            .find_map(|scope| self.scope_fg(scope))
     }
 
     pub fn ui_fg(&self, key: &str) -> Option<RgbValue> {
@@ -224,31 +225,72 @@ fn parse_hex_color(s: &str) -> Option<RgbValue> {
     RgbValue::try_from_hex_color(&format!("#{expanded}")).ok()
 }
 
-fn lsp_token_scopes(token_type: &str) -> &[&str] {
+/// The theme scopes of a semantic token type, most specific first: the first one the
+/// theme styles gives the token its color.
+fn lsp_token_scopes(token_type: &str) -> &'static [&'static str] {
     match token_type {
-        "keyword" | "modifier" | "selfKeyword" | "boolean" => {
-            &["keyword", "keyword.control", "keyword.storage.modifier"]
-        }
-        "string" | "comment" | "character" | "escapeSequence" => &["string", "comment"],
-        "number" | "const" | "static" => &["constant.numeric", "constant"],
-        "type" | "class" | "struct" | "enum" | "interface" | "namespace" | "builtinType"
-        | "typeAlias" | "typeParameter" | "constParameter" | "generic" | "toolModule" => {
-            &["type", "type.builtin", "namespace"]
-        }
-        "function" | "method" => &["function", "function.method", "function.builtin"],
+        "keyword" => &["keyword"],
+        "modifier" => &["keyword.storage.modifier", "keyword"],
+        "selfKeyword" | "boolean" => &["keyword", "variable.builtin"],
+        "comment" => &["comment"],
+        "string" | "character" | "escapeSequence" => &["string"],
+        "number" => &["constant.numeric", "constant"],
+        "const" | "static" => &["constant"],
+        "namespace" => &["namespace", "type"],
+        "type" | "class" | "struct" | "enum" | "interface" | "builtinType" | "typeAlias"
+        | "typeParameter" | "constParameter" | "generic" | "toolModule" => &["type"],
+        "function" | "method" => &["function"],
         "macro" | "attributeBracket" | "builtinAttribute" | "decorator" => &[
             "function.macro",
             "function.special",
-            "function",
             "attribute",
+            "function",
         ],
-        "variable" | "parameter" | "property" | "enumMember" => &[
-            "variable",
-            "variable.parameter",
-            "variable.other.member",
-            "variable.builtin",
-        ],
-        "operator" | "lifetime" => &["operator", "label"],
+        "variable" => &["variable"],
+        "parameter" => &["variable.parameter", "variable"],
+        "property" | "enumMember" => &["variable.other.member", "variable"],
+        "operator" => &["operator"],
+        "lifetime" => &["label", "operator"],
         _ => &[],
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn theme(name: &str) -> HelixTheme {
+        HelixTheme::from_name(name).expect("bundled theme")
+    }
+
+    #[test]
+    fn a_scope_falls_back_to_its_styled_parent() {
+        let theme = theme("catppuccin_mocha");
+        assert_eq!(
+            theme.scope_fg("keyword.control.return"),
+            theme.scope_fg("keyword")
+        );
+        assert_eq!(
+            theme.color_for_scope("keyword.control.return"),
+            theme.scope_fg("keyword")
+        );
+    }
+
+    #[test]
+    fn a_lsp_token_takes_the_first_scope_the_theme_styles() {
+        let theme = theme("catppuccin_mocha");
+        let keyword = theme.scope_fg("keyword").expect("keyword is styled");
+        assert_eq!(theme.color_for_lsp_token("keyword"), Some(keyword));
+        assert_eq!(theme.color_for_lsp_token("nonexistentToken"), None);
+    }
+
+    #[test]
+    fn global_actions_resolve_an_unstyled_scope_to_ui_text() {
+        let theme = theme("catppuccin_mocha");
+        assert_eq!(
+            theme.color_for_scope("no.such.scope"),
+            theme.ui_fg("ui.text")
+        );
+        assert_eq!(theme.scope_fg("no.such.scope"), None);
     }
 }
