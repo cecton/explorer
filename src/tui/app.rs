@@ -2495,6 +2495,7 @@ pub async fn run(
             meta.status = Some(status);
             meta.error = error;
             meta.commits = commits;
+            meta.head_after = head_now.clone();
         });
     }
 

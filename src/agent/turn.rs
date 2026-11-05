@@ -1516,6 +1516,19 @@ mod tests {
     }
 
     #[test]
+    fn a_commit_turn_cut_short_keeps_its_commits() {
+        let (_tmp, root) = temp_repo();
+        let before = commit(&root, "a.txt", "1", "init");
+        let made = commit(&root, "a.txt", "2", "feat: one");
+
+        let (commits, _) = close_commit_turn(&root, "node", Some(&before), Some(&made));
+        let (status, error) = crate::conversation::cut_short_outcome("", &commits);
+        assert_eq!(commits, [made]);
+        assert_eq!(status, NodeStatus::Cancelled);
+        assert_eq!(error, None);
+    }
+
+    #[test]
     fn closing_the_first_commit_of_a_repository_lists_it() {
         let (_tmp, root) = temp_repo();
         let first = commit(&root, "a.txt", "1", "init");
