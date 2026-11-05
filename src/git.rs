@@ -334,6 +334,26 @@ pub fn commits_between(
     Ok(listed.lines().map(str::to_string).collect())
 }
 
+/// The commits made between `before` and `after`, oldest first; none when HEAD did not
+/// move. A range that cannot be listed falls back to `after` itself, so a commit that
+/// exists is never lost.
+pub fn commits_since(
+    root: &camino::Utf8Path,
+    before: Option<&str>,
+    after: Option<&str>,
+) -> Vec<String> {
+    let Some(after) = after else {
+        return Vec::new();
+    };
+    if before == Some(after) {
+        return Vec::new();
+    }
+    commits_between(root, before, after).unwrap_or_else(|e| {
+        tracing::warn!("cannot list the commits up to {after}: {e}");
+        vec![after.to_string()]
+    })
+}
+
 /// Repository-relative paths added, copied, modified or renamed from `before` to `after`.
 pub fn files_changed_between(
     root: &camino::Utf8Path,

@@ -654,12 +654,12 @@ impl ConversationTree {
             });
         for (index, dir) in running {
             let cancelled = self.update_agent_meta(node, index, |meta| {
-                if has_content(&std::fs::read_to_string(dir.join("reply.md")).unwrap_or_default()) {
-                    meta.status = Some(NodeStatus::Cancelled);
-                } else {
-                    meta.status = Some(NodeStatus::Failed);
-                    meta.error = Some(CANCELLED_ERROR.to_string());
-                }
+                // A sub-agent commits nothing: only its reply says whether it has something
+                // to show.
+                let reply = std::fs::read_to_string(dir.join("reply.md")).unwrap_or_default();
+                let (status, error) = cut_short_outcome(&reply, &[]);
+                meta.status = Some(status);
+                meta.error = error;
                 if let Some(created) = meta.created.as_deref().and_then(parse_stamp) {
                     meta.secs = Some((now_secs - created).max(0) as u64);
                 }
@@ -783,6 +783,16 @@ pub fn read_prompt_and_reply(dir: &Utf8Path) -> (String, String) {
 /// has nothing to say and nothing to build on.
 pub fn has_content(reply: &str) -> bool {
     !reply.trim().is_empty()
+}
+
+/// What a turn cut short records. One with a reply or commits is part of the
+/// discussion and stays cancelled; one with neither has nothing to show and fails.
+pub fn cut_short_outcome(reply: &str, commits: &[String]) -> (NodeStatus, Option<String>) {
+    if has_content(reply) || !commits.is_empty() {
+        (NodeStatus::Cancelled, None)
+    } else {
+        (NodeStatus::Failed, Some(CANCELLED_ERROR.to_string()))
+    }
 }
 
 /// A node's `input.md`: its prompt as typed, kept only when a slash command expanded it.

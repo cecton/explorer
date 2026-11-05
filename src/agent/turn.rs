@@ -7,7 +7,7 @@ use super::usage::{self, Usage};
 use super::{
     AgentConfig, Backend, Endpoint, EndpointKind, Message, Mode, ModelSpec, agent_loop, context,
 };
-use crate::conversation::{CANCELLED_ERROR, ConversationTree, NodeId, NodeStatus, write_atomic};
+use crate::conversation::{ConversationTree, NodeId, NodeStatus, write_atomic};
 use crate::git::discard_worktree;
 use crate::tui::AppSignal;
 use camino::{Utf8Path, Utf8PathBuf};
@@ -91,6 +91,8 @@ pub struct TurnHandle {
     pub live: Arc<Mutex<LiveTurn>>,
     pub started: Instant,
     pub mode: Mode,
+    /// HEAD when the prompt was sent: what a commit turn's commits are counted from.
+    pub head_before: Option<String>,
     cancel: Arc<watch::Sender<bool>>,
 }
 
@@ -543,16 +545,6 @@ pub fn report_usage(endpoint: Endpoint, reported: Option<Usage>, main_tx: MainTx
     });
 }
 
-/// What a turn cut short records: one with content stays cancelled, part of the
-/// discussion; one with none has nothing to show and fails.
-fn cancelled_status(reply: &str, commits: &[String]) -> (NodeStatus, Option<String>) {
-    if !crate::conversation::has_content(reply) && commits.is_empty() {
-        (NodeStatus::Failed, Some(CANCELLED_ERROR.to_string()))
-    } else {
-        (NodeStatus::Cancelled, None)
-    }
-}
-
 /// Starts the turn of a node already created on disk and returns its handle. The
 /// outcome arrives as `AppSignal::TurnFinished`.
 pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
@@ -562,6 +554,7 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
         live: Arc::clone(&live),
         started: Instant::now(),
         mode: request.mode,
+        head_before: request.head.clone(),
         cancel: Arc::new(cancel_tx),
     };
 
@@ -626,7 +619,8 @@ pub fn spawn(request: TurnRequest, main_tx: MainTx) -> TurnHandle {
         // build on: it fails. One with a reply or commits stays cancelled, part of the
         // discussion.
         if status == NodeStatus::Cancelled {
-            (status, error) = cancelled_status(&recorder.live.lock().reply, &commits);
+            (status, error) =
+                crate::conversation::cut_short_outcome(&recorder.live.lock().reply, &commits);
         }
         let (tokens_in, cached_in, session_id, reported_usage) = {
             let live = live.lock();
@@ -981,15 +975,10 @@ fn close_commit_turn(
     head_before: Option<&str>,
     head_after: Option<&str>,
 ) -> (Vec<String>, bool) {
-    let commits = match head_after {
-        Some(after) if head_before != Some(after) => {
-            crate::git::commits_between(root, head_before, after).unwrap_or_else(|e| {
-                tracing::warn!("cannot list the commits of {node}: {e}");
-                vec![after.to_string()]
-            })
-        }
-        _ => Vec::new(),
-    };
+    let commits = crate::git::commits_since(root, head_before, head_after);
+    if commits.is_empty() && head_before != head_after {
+        tracing::warn!("commit turn {node} moved HEAD but listed no commits");
+    }
     (commits, discard_turn_work(root))
 }
 
@@ -1251,13 +1240,13 @@ mod tests {
 
     #[test]
     fn a_cancel_with_content_stays_cancelled() {
-        let (status, error) = cancelled_status("a partial answer", &[]);
+        let (status, error) = crate::conversation::cut_short_outcome("a partial answer", &[]);
         assert_eq!(status, NodeStatus::Cancelled);
         assert_eq!(error, None);
-        let (status, error) = cancelled_status("", &["abc1234".to_string()]);
+        let (status, error) = crate::conversation::cut_short_outcome("", &["abc1234".to_string()]);
         assert_eq!(status, NodeStatus::Cancelled);
         assert_eq!(error, None);
-        let (status, error) = cancelled_status("  \n  ", &[]);
+        let (status, error) = crate::conversation::cut_short_outcome("  \n  ", &[]);
         assert_eq!(status, NodeStatus::Failed);
         assert_eq!(error.as_deref(), Some(crate::conversation::CANCELLED_ERROR));
     }

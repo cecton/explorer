@@ -2466,26 +2466,36 @@ pub async fn run(
             it => return it.into_err(),
         };
 
-    // Stop running turns: keep what they produced. One with a reply or commits is
-    // cancelled, part of the discussion; one without has nothing to show and fails.
+    // Stop running turns: keep what they produced. A turn with a reply or commits is
+    // cancelled, part of the discussion; it is marked through the same rule as one that
+    // ended on its own, so a commit turn's commits count.
+    let head_now = global_data
+        .state
+        .repo
+        .as_ref()
+        .and_then(crate::git::head_id);
     for (node, handle) in &global_data.state.running_turns {
         handle.cancel();
+        let reply = handle.live.lock().reply.clone();
+        let commits = match handle.mode {
+            crate::agent::Mode::Commit => crate::git::commits_since(
+                &global_data.state.root,
+                handle.head_before.as_deref(),
+                head_now.as_deref(),
+            ),
+            crate::agent::Mode::Feedback => Vec::new(),
+        };
+        let (status, error) = crate::conversation::cut_short_outcome(&reply, &commits);
         let mut tree = global_data.state.conversations.write();
-        if let Some(dir) = tree.node_dir(node) {
-            let reply = handle.live.lock().reply.clone();
-            let _ = crate::conversation::write_atomic(&dir.join("reply.md"), &reply);
-            let status = if crate::conversation::has_content(&reply) {
-                crate::conversation::NodeStatus::Cancelled
-            } else {
-                crate::conversation::NodeStatus::Failed
-            };
-            let _ = tree.update_meta(node, |meta| {
-                meta.status = Some(status);
-                if status == crate::conversation::NodeStatus::Failed {
-                    meta.error = Some(crate::conversation::CANCELLED_ERROR.to_string());
-                }
-            });
-        }
+        let Some(dir) = tree.node_dir(node) else {
+            continue;
+        };
+        let _ = crate::conversation::write_atomic(&dir.join("reply.md"), &reply);
+        let _ = tree.update_meta(node, |meta| {
+            meta.status = Some(status);
+            meta.error = error;
+            meta.commits = commits;
+        });
     }
 
     // Kill all terminal children gracefully.
