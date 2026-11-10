@@ -355,7 +355,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Window
     ) -> CommonResult {
         use crate::tui::pane_manager::Window;
         use crate::tui::panes::commit_diff_pane::CommitDiffPaneComponent;
-        use crate::tui::panes::conversation_tree_pane::ConversationTreeComponent;
+        use crate::tui::panes::conversation_tree::ConversationTreeComponent;
         use crate::tui::panes::discussion::DiscussionComponent;
         use crate::tui::panes::git_log_pane::GitLogPaneComponent;
         use crate::tui::panes::report_pane::ReportComponent;

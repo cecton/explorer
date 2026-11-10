@@ -1076,7 +1076,7 @@ mod tests {
     }
 
     #[test]
-    fn conversation_tree_pane_round_trips_with_expanded_set() {
+    fn conversation_tree_round_trips_with_its_expanded_set() {
         use crate::conversation::NodeId;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());

@@ -15,7 +15,7 @@ pub struct PaneComponent {
     git_log: crate::tui::panes::git_log_pane::GitLogPaneComponent,
     commit_diff: crate::tui::panes::commit_diff_pane::CommitDiffPaneComponent,
     report: crate::tui::panes::report_pane::ReportComponent,
-    conversation_tree: crate::tui::panes::conversation_tree_pane::ConversationTreeComponent,
+    conversation_tree: crate::tui::panes::conversation_tree::ConversationTreeComponent,
     discussion: crate::tui::panes::discussion::DiscussionComponent,
     model_picker: crate::tui::panes::pickers::model_picker::ModelPickerComponent,
     preview: crate::tui::panes::preview::FilePreviewComponent,
@@ -50,7 +50,7 @@ impl PaneComponent {
         picker_generation: Arc<AtomicU64>,
     ) -> BoxedSafeComponent<crate::tui::state::AppState, crate::signal::AppSignal> {
         use crate::tui::panes::commit_diff_pane::CommitDiffPaneComponent;
-        use crate::tui::panes::conversation_tree_pane::ConversationTreeComponent;
+        use crate::tui::panes::conversation_tree::ConversationTreeComponent;
         use crate::tui::panes::discussion::DiscussionComponent;
         use crate::tui::panes::git_log_pane::GitLogPaneComponent;
         use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
