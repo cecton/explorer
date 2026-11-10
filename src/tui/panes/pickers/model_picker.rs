@@ -28,7 +28,7 @@ impl ModelPickerComponent {
         // the turn already runs on it, and the node records the model it ran on. Once
         // the turn is over the reasoning on disk resumes on whatever is picked here.
         if let ModelPickerPurpose::Window(id) = purpose
-            && crate::tui::panes::discussion_pane::window_is_running(state, id)
+            && crate::tui::panes::discussion::launch::window_is_running(state, id)
         {
             if let Some(discussion) = state.discussions.get_mut(&id) {
                 discussion.notice =
@@ -52,7 +52,7 @@ impl ModelPickerComponent {
                 .conversations
                 .read()
                 .node(node)
-                .and_then(crate::tui::panes::discussion_pane::node_model),
+                .and_then(crate::tui::panes::discussion::launch::node_model),
         };
         state.model_picker.selected =
             current.and_then(|model| state.models.specs.iter().position(|spec| *spec == model));
@@ -230,7 +230,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ModelP
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
         use crate::tui::pane_manager::Window;
-        use crate::tui::panes::discussion_pane::DiscussionComponent;
+        use crate::tui::panes::discussion::DiscussionComponent;
         use crate::tui::state::ModelPickerPurpose;
         let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;

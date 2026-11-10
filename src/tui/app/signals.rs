@@ -14,7 +14,7 @@ pub(super) fn handle(
     use crate::signal::SymbolRefLocation;
     use crate::tui::after_agents::AfterAgents;
     use crate::tui::pane_manager::Window;
-    use crate::tui::panes::discussion_pane::DiscussionComponent;
+    use crate::tui::panes::discussion::DiscussionComponent;
     use crate::tui::panes::git_log_pane::GitLogPaneComponent;
     use crate::tui::panes::pickers::window_picker::WindowPickerComponent;
     use crate::tui::state::SymbolHighlightGroup;
@@ -319,7 +319,7 @@ pub(super) fn handle(
                                 .and_then(|agent| agent.meta.model_spec()),
                             None => tree
                                 .node(node)
-                                .and_then(crate::tui::panes::discussion_pane::node_model),
+                                .and_then(crate::tui::panes::discussion::launch::node_model),
                         };
                     }
                 }

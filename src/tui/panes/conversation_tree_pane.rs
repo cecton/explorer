@@ -557,7 +557,7 @@ impl ConversationTreeComponent {
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
         use crate::tui::pane_manager::Window;
-        use crate::tui::panes::discussion_pane::DiscussionComponent;
+        use crate::tui::panes::discussion::DiscussionComponent;
         use crate::tui::panes::git_log_pane::GitLogPaneComponent;
         use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
         use crate::tui::state::ModelPickerPurpose;
@@ -717,10 +717,10 @@ impl ConversationTreeComponent {
                 key: Key::SpecialKey(SpecialKey::Esc),
             }) => match rows.get(index).map(|row| &row.target) {
                 Some(RowTarget::Queued { window, .. }) => {
-                    crate::tui::panes::discussion_pane::take_back_window(state, main_tx, *window);
+                    crate::tui::panes::discussion::queue::take_back_window(state, main_tx, *window);
                 }
                 Some(RowTarget::Node(id)) => {
-                    crate::tui::panes::discussion_pane::take_back(state, main_tx, id);
+                    crate::tui::panes::discussion::queue::take_back(state, main_tx, id);
                 }
                 Some(RowTarget::Agent { .. }) | None => {}
             },

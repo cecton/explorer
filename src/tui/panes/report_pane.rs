@@ -225,7 +225,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
                     } else {
                         span.text.clone()
                     };
-                    let style = crate::tui::panes::discussion_pane::span_style(span, bg);
+                    let style = crate::tui::panes::discussion::status::span_style(span, bg);
                     ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
                         vp_col(x as u16) + vp_row(row_offset as u16),

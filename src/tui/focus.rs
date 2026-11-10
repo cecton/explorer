@@ -60,7 +60,7 @@ pub(crate) fn close_window(
             state.commit_diffs.remove(&id);
         }
         Window::Discussion(id) => {
-            crate::tui::panes::discussion_pane::drop_queue_entry(state, id);
+            crate::tui::panes::discussion::queue::drop_queue_entry(state, id);
             state.discussions.remove(&id);
         }
         Window::FilePreview(key) => {
