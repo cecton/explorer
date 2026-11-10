@@ -72,8 +72,8 @@ pub enum AppSignal {
     /// this many times a second, so it does nothing but render.
     TerminalOutput,
     /// Change which Cargo features rust-analyzer analyzes. rust-analyzer doesn't
-    /// hot-reload `cargo.*` settings, so applying this restarts the LSP worker
-    /// (deferred until the old one has actually exited — see `app_handle_signal`).
+    /// hot-reload `cargo.*` settings, so applying this sends `LspInput::Restart` and the
+    /// worker replaces its own process, keeping the old one on a failed handshake.
     SetCargoFeatures(crate::config::CargoFeatureSelection),
     /// Result of an async `git::load_log` run for git log window `id`.
     GitLogLoaded {
@@ -162,9 +162,9 @@ pub enum AppSignal {
     /// Repaint, nothing else.
     #[default]
     Redraw,
-    /// Every second: ticks the `after-agents` countdown, the LSP buffer and restart,
-    /// and repaints only when the clock minute changed, a countdown is active, a
-    /// terminal pane has output no signal announced or the LSP restart cleared colors.
+    /// Every second: ticks the `after-agents` countdown, and repaints only when the clock
+    /// minute changed, a countdown is active or a terminal pane has output no signal
+    /// announced.
     Tick,
     /// Every 5 seconds: session save, working-tree dirty check, LSP health log. Never
     /// repaints; the results come back as their own signals.

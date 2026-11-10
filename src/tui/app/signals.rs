@@ -54,16 +54,9 @@ pub(super) fn handle(
         );
     }
     if let AppSignal::SetCargoFeatures(selection) = action {
-        // rust-analyzer doesn't hot-reload `cargo.*` init options, so applying a
-        // new feature selection means killing the current worker and respawning
-        // with fresh `initializationOptions`. Dropping the guard here only starts
-        // the teardown; the actual resubscribe is deferred to the `Tick`
-        // handler once `health_check()` confirms the old worker has exited (see
-        // that handler for why resubscribing immediately would be racy).
         global_data.state.cargo_features = selection.clone();
         global_data.state.mark_session_dirty();
-        app.lsp_guard = None;
-        app.lsp_restart_pending = true;
+        crate::lsp::set_cargo_features(selection.clone());
         return Ok(EventPropagation::ConsumedRender);
     }
     throws_with_return!({
@@ -474,10 +467,7 @@ pub(super) fn handle(
                     let pending = pane.lock().flush_pending.swap(false, Ordering::Relaxed);
                     any | pending
                 });
-                crate::lsp::try_drain_pending_requests();
-                let restarted = app
-                    .restart_lsp_if_pending(state, global_data.main_thread_channel_sender.clone());
-                if !(countdown || minute_changed || flushed || restarted) {
+                if !(countdown || minute_changed || flushed) {
                     propagation = EventPropagation::Consumed;
                 }
             }

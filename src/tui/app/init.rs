@@ -198,5 +198,4 @@ pub(super) fn background_services(
             crate::lsp::send_file_request(key.0);
         }
     }
-    crate::lsp::try_drain_pending_requests();
 }

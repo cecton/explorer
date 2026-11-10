@@ -21,16 +21,10 @@ pub struct AppMain {
     exit_tx: Arc<OnceLock<crate::signal::MainTx>>,
     terminal_event_tx: tokio::sync::mpsc::UnboundedSender<(usize, PtyOutputEvent)>,
     terminal_event_rx: tokio::sync::mpsc::UnboundedReceiver<(usize, PtyOutputEvent)>,
-    lsp_guard: Option<SubscriberGuard<crate::lsp::LspWorker>>,
+    lsp_guard: Option<SubscriberGuard<crate::lsp::worker::LspWorker>>,
     lsp_last_gen: u8,
     /// Counts `Housekeeping` calls so the LSP health is logged only every few of them.
     lsp_health_skip: u32,
-    /// Set when a `features`/`all-features`/`default-features` command dropped
-    /// `lsp_guard` to kill the old rust-analyzer; the fresh one is only spawned once
-    /// `health_check()` confirms the old worker thread has actually exited (see the
-    /// `AppSignal::Tick` handler) since resubscribing too early would silently
-    /// rejoin the still-running old worker instead of restarting it.
-    lsp_restart_pending: bool,
     watcher_guard: Option<SubscriberGuard<crate::watcher::WatcherWorker>>,
     /// Local minute (since the epoch) the status-bar clock was last painted at.
     last_clock_minute: i64,
@@ -56,7 +50,6 @@ impl AppMain {
             lsp_guard: None,
             lsp_last_gen: 0,
             lsp_health_skip: 0,
-            lsp_restart_pending: false,
             watcher_guard: None,
             last_clock_minute: crate::tui::app::tick::clock_minute(),
         })
@@ -100,58 +93,6 @@ impl AppMain {
             }
             _ => {}
         }
-    }
-
-    /// Respawns the LSP worker once the old one has exited, after a cargo features change.
-    /// Returns whether it cleared the colors of the Rust files, which needs a repaint.
-    fn restart_lsp_if_pending(
-        &mut self,
-        state: &crate::tui::state::AppState,
-        main_tx: crate::signal::MainTx,
-    ) -> bool {
-        use crate::lsp::LspConfig;
-        use crate::lsp::LspHealth;
-        use crate::tui::pane_manager::Window;
-        if !self.lsp_restart_pending || crate::lsp::disabled() {
-            return false;
-        }
-        // A `features`/`all-features`/`default-features` command dropped `lsp_guard` to
-        // kill the old rust-analyzer; only resubscribe once the old worker thread has
-        // actually exited (`NotRunning`). Resubscribing while it's merely `Running` with
-        // 0 receivers would take the RRT framework's FastPath and silently rejoin the
-        // still-running old worker instead of spawning a fresh one with the new init
-        // options.
-        if !matches!(crate::lsp::health_check(), LspHealth::NotRunning) {
-            return false;
-        }
-        for file in self.files.load().iter() {
-            if file.path.extension() == Some("rs") {
-                file.colored_lines.lock().clear();
-            }
-        }
-        match crate::lsp::LSP_RRT.try_subscribe(LspConfig {
-            root: self.root.clone(),
-            files: Arc::clone(&self.files),
-            app_tx: main_tx,
-            cargo_features: state.cargo_features.clone(),
-        }) {
-            Ok(guard) => {
-                self.lsp_guard = Some(guard);
-                tracing::info!(
-                    "LSP worker restarted: cargo_features={:?}",
-                    state.cargo_features
-                );
-                for window in state.pane_manager.window_stack.iter() {
-                    if let Window::FilePreview(key) = window {
-                        crate::lsp::send_file_request(key.0);
-                    }
-                }
-                crate::lsp::try_drain_pending_requests();
-            }
-            Err(e) => tracing::warn!("LSP worker restart failed: {e}"),
-        }
-        self.lsp_restart_pending = false;
-        true
     }
 }
 
