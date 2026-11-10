@@ -55,11 +55,7 @@ impl GitLogPaneComponent {
                 }
             }
         }
-        let old = state.pane_manager.focused_window;
-        let window = Window::CommitDiff(id);
-        state.pane_manager.push_window(window);
-        state.pane_manager.focused_window = Some(window);
-        crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
+        crate::tui::focus::focus_window(state, Window::CommitDiff(id));
         state.mark_session_dirty();
     }
 
@@ -94,11 +90,7 @@ impl GitLogPaneComponent {
                 id
             }
         };
-        let window = Window::GitLog(id);
-        let old = state.pane_manager.focused_window;
-        state.pane_manager.push_window(window);
-        state.pane_manager.focused_window = Some(window);
-        crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
+        crate::tui::focus::focus_window(state, Window::GitLog(id));
         if let Some(source) = fresh {
             Self::reload_log(state.repo.clone(), main_tx, id, &source);
         }

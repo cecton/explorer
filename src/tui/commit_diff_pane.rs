@@ -112,9 +112,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
                 key: Key::SpecialKey(SpecialKey::Esc),
             }) = input_event
             {
-                state.pane_manager.remove_window(&window);
-                state.commit_diffs.remove(&id);
-                state.mark_session_dirty();
+                crate::tui::focus::close_window(state, window);
                 return Ok(EventPropagation::ConsumedRender);
             }
 

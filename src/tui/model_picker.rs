@@ -57,10 +57,7 @@ impl ModelPickerComponent {
         state.model_picker.selected =
             current.and_then(|model| state.models.specs.iter().position(|spec| *spec == model));
         state.model_picker_purpose = Some(purpose);
-        let old = state.pane_manager.focused_window;
-        state.pane_manager.push_window(Window::ModelPicker);
-        state.pane_manager.focused_window = Some(Window::ModelPicker);
-        crate::tui::app::notify_terminal_focus_change(state, old, Some(Window::ModelPicker));
+        crate::tui::focus::focus_window(state, Window::ModelPicker);
     }
 
     /// Closes the picker and gives the focus back to the window it was opened from.
@@ -82,6 +79,7 @@ impl ModelPickerComponent {
         {
             state.pane_manager.focused_window = Some(window);
         }
+        crate::tui::focus::refocus(state, Some(Window::ModelPicker));
         purpose
     }
 }

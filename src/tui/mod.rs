@@ -4,6 +4,7 @@ pub(crate) mod command_line;
 pub(crate) mod commit_diff_pane;
 pub(crate) mod conversation_tree_pane;
 pub(crate) mod discussion_pane;
+pub(crate) mod focus;
 pub(crate) mod fuzzy_picker;
 pub(crate) mod git_log_pane;
 pub(crate) mod input_line;

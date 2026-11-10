@@ -1059,11 +1059,7 @@ impl DiscussionComponent {
 
     pub(crate) fn show(state: &mut crate::tui::state::AppState, id: usize) {
         use crate::tui::pane_manager::Window;
-        let window = Window::Discussion(id);
-        let old = state.pane_manager.focused_window;
-        state.pane_manager.push_window(window);
-        state.pane_manager.focused_window = Some(window);
-        crate::tui::app::notify_terminal_focus_change(state, old, Some(window));
+        crate::tui::focus::focus_window(state, Window::Discussion(id));
         state.mark_session_dirty();
     }
 

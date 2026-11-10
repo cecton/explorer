@@ -4,63 +4,6 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::time::{Duration, Instant};
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Id {
-    Container = 1,
-    Pane0 = 2,
-    Pane1 = 3,
-    Pane2 = 4,
-    Pane3 = 5,
-    Pane4 = 6,
-    Pane5 = 7,
-    Pane6 = 8,
-    Pane7 = 9,
-    Pane8 = 10,
-    Pane9 = 11,
-    Pane10 = 12,
-    Pane11 = 13,
-    Pane12 = 14,
-    Pane13 = 15,
-    Pane14 = 16,
-    Pane15 = 17,
-}
-
-impl Id {
-    pub fn pane(slot: usize) -> Self {
-        match slot {
-            0 => Id::Pane0,
-            1 => Id::Pane1,
-            2 => Id::Pane2,
-            3 => Id::Pane3,
-            4 => Id::Pane4,
-            5 => Id::Pane5,
-            6 => Id::Pane6,
-            7 => Id::Pane7,
-            8 => Id::Pane8,
-            9 => Id::Pane9,
-            10 => Id::Pane10,
-            11 => Id::Pane11,
-            12 => Id::Pane12,
-            13 => Id::Pane13,
-            14 => Id::Pane14,
-            _ => Id::Pane15,
-        }
-    }
-}
-
-impl From<Id> for u8 {
-    fn from(id: Id) -> u8 {
-        id as u8
-    }
-}
-
-impl From<Id> for FlexBoxId {
-    fn from(id: Id) -> FlexBoxId {
-        FlexBoxId::new(id)
-    }
-}
-
 pub struct AppMain {
     files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
     root: camino::Utf8PathBuf,
@@ -402,7 +345,7 @@ impl AppMain {
                         .pane_size = size;
                 }
                 state.pane_manager.focused_window = Some(window);
-                notify_terminal_focus_change(state, old, Some(window));
+                crate::tui::focus::refocus(state, old);
                 state.terminal_grabbed = true;
                 state.mark_session_dirty();
             }
@@ -429,7 +372,6 @@ fn is_buffer_empty(ofs_buf: &r3bl_tui::OfsBufVT100) -> bool {
 }
 
 fn poll_terminal_output(app: &mut AppMain, state: &mut crate::tui::state::AppState) {
-    use crate::tui::pane_manager::Window;
     while let Ok((id, event)) = app.terminal_event_rx.try_recv() {
         if let PtyOutputEvent::Exit(status) = event {
             let exit_code = Some(status.exit_code());
@@ -439,32 +381,8 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut crate::tui::state::AppSta
                 .unwrap_or(false);
 
             if remove_now {
-                // Send focus-lost before removing the pane.
-                if let Some(pane) = state.terminal_panes.get(&id) {
-                    let p = pane.lock();
-                    if p.ofs_buf.get_terminal_mode().focus_events {
-                        let _ = p
-                            .pty_input_tx
-                            .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
-                    }
-                }
-                let old = state.pane_manager.focused_window;
-                if let Some(pane) = state.terminal_panes.remove(&id) {
-                    let mut p = pane.lock();
-                    if let Some(mut killer) = p.child_killer.take() {
-                        let _ = killer.kill();
-                    }
-                }
-                if let Some(file_key) = state.terminal_to_preview.remove(&id) {
-                    state
-                        .pane_manager
-                        .replace_window(&Window::Terminal(id), Window::FilePreview(file_key));
-                } else {
-                    state.pane_manager.remove_window(&Window::Terminal(id));
-                }
-                notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
+                crate::tui::focus::close_terminal(state, id);
                 state.mark_session_dirty();
-                sync_terminal_grabbed(state);
             } else {
                 state.with_terminal_mut(id, |p| {
                     p.exited = true;
@@ -535,6 +453,7 @@ impl App for AppMain {
         component_registry_map: &mut ComponentRegistryMap<Self::S, Self::AS>,
         has_focus: &mut HasFocus,
     ) {
+        use crate::tui::pane_component::Id;
         use crate::tui::pane_component::PaneComponent;
         for slot in 0..crate::tui::pane_manager::MAX_PANES {
             let pane_id = FlexBoxId::from(Id::pane(slot));
@@ -648,7 +567,7 @@ impl App for AppMain {
             };
             let _ = self.open_terminal(global_data, cmd, cwd, None, Some(id), None);
             if !global_data.state.terminal_panes.contains_key(&id) {
-                global_data.state.pane_manager.remove_window(&window);
+                crate::tui::focus::close_terminal(&mut global_data.state, id);
                 global_data.state.mark_session_dirty();
             }
         }
@@ -907,10 +826,7 @@ impl App for AppMain {
                 }
                 Some(Action::OpenWindowPicker) => {
                     let state = &mut global_data.state;
-                    let old = state.pane_manager.focused_window;
-                    state.pane_manager.push_window(Window::WindowPicker);
-                    state.pane_manager.focused_window = Some(Window::WindowPicker);
-                    notify_terminal_focus_change(state, old, Some(Window::WindowPicker));
+                    crate::tui::focus::focus_window(state, Window::WindowPicker);
                     state.window_picker.selected = None;
                     state.window_picker.query.clear();
                     return Ok(EventPropagation::ConsumedRender);
@@ -925,7 +841,6 @@ impl App for AppMain {
                 }
                 Some(Action::OpenThemePicker) => {
                     let state = &mut global_data.state;
-                    let old = state.pane_manager.focused_window;
                     if !state
                         .pane_manager
                         .window_stack
@@ -936,9 +851,7 @@ impl App for AppMain {
                     let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
                         .map(|n| (n.to_string(), Vec::new()))
                         .collect();
-                    state.pane_manager.push_window(Window::ThemePicker);
-                    state.pane_manager.focused_window = Some(Window::ThemePicker);
-                    notify_terminal_focus_change(state, old, Some(Window::ThemePicker));
+                    crate::tui::focus::focus_window(state, Window::ThemePicker);
                     state.theme_picker.selected = all_themes
                         .iter()
                         .position(|(n, _)| n == state.theme.name())
@@ -952,11 +865,7 @@ impl App for AppMain {
                     let id = state.next_git_log_id;
                     state.next_git_log_id += 1;
                     state.git_logs.insert(id, GitLogWindowState::default());
-                    let window = Window::GitLog(id);
-                    let old = state.pane_manager.focused_window;
-                    state.pane_manager.push_window(window);
-                    state.pane_manager.focused_window = Some(window);
-                    notify_terminal_focus_change(state, old, Some(window));
+                    crate::tui::focus::focus_window(state, Window::GitLog(id));
                     let main_tx = global_data.main_thread_channel_sender.clone();
                     GitLogPaneComponent::reload_log(
                         state.repo.clone(),
@@ -968,11 +877,7 @@ impl App for AppMain {
                 }
                 Some(Action::OpenConversations) => {
                     let state = &mut global_data.state;
-                    let window = Window::ConversationTree;
-                    let old = state.pane_manager.focused_window;
-                    state.pane_manager.push_window(window);
-                    state.pane_manager.focused_window = Some(window);
-                    notify_terminal_focus_change(state, old, Some(window));
+                    crate::tui::focus::focus_window(state, Window::ConversationTree);
                     state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -1030,40 +935,28 @@ impl App for AppMain {
                     let visible = global_data.state.pane_manager.layout(surface_size);
                     let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, 1);
-                    notify_terminal_focus_change(
-                        &global_data.state,
-                        old,
-                        global_data.state.pane_manager.focused_window,
-                    );
-                    sync_terminal_grabbed(&mut global_data.state);
+                    crate::tui::focus::refocus(&mut global_data.state, old);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Some(Action::FocusPrev) => {
                     let visible = global_data.state.pane_manager.layout(surface_size);
                     let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, -1);
-                    notify_terminal_focus_change(
-                        &global_data.state,
-                        old,
-                        global_data.state.pane_manager.focused_window,
-                    );
-                    sync_terminal_grabbed(&mut global_data.state);
+                    crate::tui::focus::refocus(&mut global_data.state, old);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Some(Action::ClosePane) => {
                     let state = &mut global_data.state;
                     if let Some(old) = state.pane_manager.focused_window {
-                        close_window(state, old);
+                        crate::tui::focus::close_window(state, old);
                     }
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Some(Action::SendToBack) => {
                     let state = &mut global_data.state;
                     if let Some(focused) = state.pane_manager.focused_window {
-                        let old = Some(focused);
                         state.pane_manager.send_to_back(&focused);
-                        notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
-                        sync_terminal_grabbed(state);
+                        crate::tui::focus::refocus(state, Some(focused));
                         state.mark_session_dirty();
                     }
                     return Ok(EventPropagation::ConsumedRender);
@@ -1089,24 +982,14 @@ impl App for AppMain {
                     let visible = global_data.state.pane_manager.layout(surface_size);
                     let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, 1);
-                    notify_terminal_focus_change(
-                        &global_data.state,
-                        old,
-                        global_data.state.pane_manager.focused_window,
-                    );
-                    sync_terminal_grabbed(&mut global_data.state);
+                    crate::tui::focus::refocus(&mut global_data.state, old);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Some(Action::FocusPrev) => {
                     let visible = global_data.state.pane_manager.layout(surface_size);
                     let old = global_data.state.pane_manager.focused_window;
                     global_data.state.pane_manager.cycle_focus(&visible, -1);
-                    notify_terminal_focus_change(
-                        &global_data.state,
-                        old,
-                        global_data.state.pane_manager.focused_window,
-                    );
-                    sync_terminal_grabbed(&mut global_data.state);
+                    crate::tui::focus::refocus(&mut global_data.state, old);
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 Some(Action::ResizeGrow) => {
@@ -1168,20 +1051,7 @@ impl App for AppMain {
                     {
                         let old = global_data.state.pane_manager.focused_window;
                         global_data.state.pane_manager.focused_window = Some(slot.window);
-                        notify_terminal_focus_change(&global_data.state, old, Some(slot.window));
-                        // Grab state on mouse focus change depends on pane type + scroll.
-                        match slot.window {
-                            Window::Terminal(id) => {
-                                let scrolled = global_data
-                                    .state
-                                    .with_terminal(id, |p| p.scroll_offset > 0)
-                                    .unwrap_or(false);
-                                global_data.state.terminal_grabbed = !scrolled;
-                            }
-                            _ => {
-                                global_data.state.terminal_grabbed = false;
-                            }
-                        }
+                        crate::tui::focus::focus_pointer(&mut global_data.state, old);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     break;
@@ -1638,10 +1508,7 @@ impl App for AppMain {
                                 id,
                             );
                         } else {
-                            crate::tui::discussion_pane::drop_queue_entry(state, id);
-                            state.discussions.remove(&id);
-                            state.pane_manager.remove_window(&Window::Discussion(id));
-                            state.mark_session_dirty();
+                            crate::tui::focus::close_window(state, Window::Discussion(id));
                         }
                     }
                 }
@@ -1895,8 +1762,9 @@ impl App for AppMain {
                 && !focused_is_visible
                 && let Some(first) = visible.first()
             {
+                let old = global_data.state.pane_manager.focused_window;
                 global_data.state.pane_manager.focused_window = Some(first.window);
-                sync_terminal_grabbed(&mut global_data.state);
+                crate::tui::focus::refocus(&mut global_data.state, old);
             }
             sync_has_focus(&global_data.state, has_focus);
 
@@ -1970,6 +1838,7 @@ impl App for AppMain {
 
 /// Returns the `FlexBoxId` for the pane slot that corresponds to the focused window.
 pub(super) fn focused_pane_id(state: &crate::tui::state::AppState) -> FlexBoxId {
+    use crate::tui::pane_component::Id;
     let Some(slot) = state.pane_manager.focused_slot() else {
         return FlexBoxId::from(Id::Pane0);
     };
@@ -1982,92 +1851,12 @@ fn surface_size(window_size: VPSize) -> VPSize {
     col_count + row_count
 }
 
-/// Closes `window` for good: kills a terminal's process and drops the window's state.
-pub(super) fn close_window(
-    state: &mut crate::tui::state::AppState,
-    window: crate::tui::pane_manager::Window,
-) {
-    use crate::tui::pane_manager::Window;
-    let old = state.pane_manager.focused_window;
-    match window {
-        Window::Terminal(id) => {
-            if let Some(pane) = state.terminal_panes.remove(&id) {
-                let mut p = pane.lock();
-                if old == Some(window) && p.ofs_buf.get_terminal_mode().focus_events {
-                    let _ = p
-                        .pty_input_tx
-                        .try_send(PtyInputEvent::Write(b"\x1b[O".to_vec()));
-                }
-                if let Some(mut killer) = p.child_killer.take() {
-                    let _ = killer.kill();
-                }
-            }
-            state.terminal_to_preview.remove(&id);
-        }
-        Window::GitLog(id) => {
-            state.git_logs.remove(&id);
-        }
-        Window::CommitDiff(id) => {
-            state.commit_diffs.remove(&id);
-        }
-        Window::Discussion(id) => {
-            crate::tui::discussion_pane::drop_queue_entry(state, id);
-            state.discussions.remove(&id);
-        }
-        Window::FilePreview(key) => {
-            state.preview_inputs.remove(&key);
-        }
-        Window::Report(id) => {
-            state.reports.remove(&id);
-        }
-        Window::ConversationTree
-        | Window::WindowPicker
-        | Window::ThemePicker
-        | Window::ModelPicker => {}
-    }
-    state.pane_manager.remove_window(&window);
-    notify_terminal_focus_change(state, old, state.pane_manager.focused_window);
-    sync_terminal_grabbed(state);
-    state.mark_session_dirty();
-}
-
-pub(super) fn sync_terminal_grabbed(state: &mut crate::tui::state::AppState) {
-    use crate::tui::pane_manager::Window;
-    if !matches!(state.pane_manager.focused_window, Some(Window::Terminal(_))) {
-        state.terminal_grabbed = false;
-    }
-}
-
-pub(super) fn notify_terminal_focus_change(
-    state: &crate::tui::state::AppState,
-    old: Option<crate::tui::pane_manager::Window>,
-    new: Option<crate::tui::pane_manager::Window>,
-) {
-    use crate::tui::pane_manager::Window;
-    if old == new {
-        return;
-    }
-    for (window, bytes) in [(old, b"\x1b[O" as &[u8]), (new, b"\x1b[I")] {
-        let Some(Window::Terminal(id)) = window else {
-            continue;
-        };
-        let Some(pane) = state.terminal_panes.get(&id) else {
-            continue;
-        };
-        let p = pane.lock();
-        if p.ofs_buf.get_terminal_mode().focus_events {
-            let _ = p
-                .pty_input_tx
-                .try_send(PtyInputEvent::Write(bytes.to_vec()));
-        }
-    }
-}
-
 fn sync_has_focus(state: &crate::tui::state::AppState, has_focus: &mut HasFocus) {
     has_focus.set_id(focused_pane_id(state));
 }
 
 fn create_stylesheet(theme: &crate::tui::theme::HelixTheme) -> CommonResult<TuiStylesheet> {
+    use crate::tui::pane_component::Id;
     let bg = theme
         .ui_bg("ui.background")
         .unwrap_or(crate::tui::title_row::DEFAULT_BG);

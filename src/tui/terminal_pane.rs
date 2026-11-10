@@ -116,26 +116,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Termin
                 .with_terminal(id, |p| p.exited)
                 .unwrap_or(false)
             {
-                let window = Window::Terminal(id);
-                let was_focused =
-                    global_data.state.pane_manager.focused_window.as_ref() == Some(&window);
-                if let Some(pane) = global_data.state.terminal_panes.remove(&id) {
-                    let mut p = pane.lock();
-                    if let Some(mut killer) = p.child_killer.take() {
-                        let _ = killer.kill();
-                    }
-                }
-                if let Some(file_key) = global_data.state.terminal_to_preview.remove(&id) {
-                    global_data
-                        .state
-                        .pane_manager
-                        .replace_window(&Window::Terminal(id), Window::FilePreview(file_key));
-                } else {
-                    global_data.state.pane_manager.remove_window(&window);
-                }
-                if was_focused {
-                    global_data.state.terminal_grabbed = false;
-                }
+                crate::tui::focus::close_terminal(&mut global_data.state, id);
                 global_data.state.mark_session_dirty();
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -254,14 +235,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Termin
                 }) => {
                     drop(pane);
                     let window = Window::Terminal(id);
-                    let old = Some(window);
                     global_data.state.pane_manager.send_to_back(&window);
-                    crate::tui::app::notify_terminal_focus_change(
-                        &global_data.state,
-                        old,
-                        global_data.state.pane_manager.focused_window,
-                    );
-                    crate::tui::app::sync_terminal_grabbed(&mut global_data.state);
+                    crate::tui::focus::refocus(&mut global_data.state, Some(window));
                     global_data.state.mark_session_dirty();
                     EventPropagation::ConsumedRender
                 }

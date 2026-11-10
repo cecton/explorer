@@ -1127,9 +1127,7 @@ impl ConversationTreeComponent {
             .map(|(id, _)| *id)
             .collect();
         for id in closed {
-            crate::tui::discussion_pane::drop_queue_entry(state, id);
-            state.discussions.remove(&id);
-            state.pane_manager.remove_window(&Window::Discussion(id));
+            crate::tui::focus::close_window(state, Window::Discussion(id));
         }
         let rows = Self::rows(state);
         state.tree_view.selected = None;
