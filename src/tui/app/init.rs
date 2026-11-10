@@ -122,7 +122,17 @@ pub(super) fn background_services(
         } else {
             None
         };
-        let _ = app.open_terminal(global_data, cmd, cwd, None, Some(id), None);
+        let _ = crate::tui::panes::terminal::spawn::open(
+            global_data,
+            crate::tui::panes::terminal::spawn::Request {
+                cmd,
+                cwd,
+                pane_size: None,
+                id: Some(id),
+                replace_window: None,
+                event_tx: &app.terminal_event_tx,
+            },
+        );
         if !global_data.state.terminal_panes.contains_key(&id) {
             crate::tui::focus::close_terminal(&mut global_data.state, id);
             global_data.state.mark_session_dirty();

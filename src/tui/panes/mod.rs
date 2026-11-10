@@ -5,4 +5,4 @@ pub(crate) mod git_log_pane;
 pub(crate) mod pickers;
 pub(crate) mod preview;
 pub(crate) mod report_pane;
-pub(crate) mod terminal_pane;
+pub(crate) mod terminal;

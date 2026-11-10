@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+pub(crate) mod watch;
+
 /// Stable index into the file list.
 ///
 /// The underlying `Vec<Arc<LoadedFile>>` is append-only: files are never

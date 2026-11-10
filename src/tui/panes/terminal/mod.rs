@@ -1,6 +1,8 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
 
+pub(crate) mod spawn;
+
 pub struct TerminalPaneComponent {
     id: FlexBoxId,
     slot: usize,

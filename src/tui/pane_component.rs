@@ -19,7 +19,7 @@ pub struct PaneComponent {
     discussion: crate::tui::panes::discussion_pane::DiscussionComponent,
     model_picker: crate::tui::panes::pickers::model_picker::ModelPickerComponent,
     preview: crate::tui::panes::preview::FilePreviewComponent,
-    terminal: crate::tui::panes::terminal_pane::TerminalPaneComponent,
+    terminal: crate::tui::panes::terminal::TerminalPaneComponent,
     /// Origin row of the content area (below title bar), used for scrollbar mouse events.
     content_origin_row: u16,
     /// Total columns in the content area (full width including scrollbar column).
@@ -58,7 +58,7 @@ impl PaneComponent {
         use crate::tui::panes::pickers::window_picker::WindowPickerComponent;
         use crate::tui::panes::preview::FilePreviewComponent;
         use crate::tui::panes::report_pane::ReportComponent;
-        use crate::tui::panes::terminal_pane::TerminalPaneComponent;
+        use crate::tui::panes::terminal::TerminalPaneComponent;
         Box::new(Self {
             id,
             slot,
@@ -811,12 +811,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                     let rel_col = col - origin_col;
 
                     let word_bounds = global_data.state.with_terminal(term_id, |pane| {
-                        let (line, _) =
-                            crate::tui::panes::terminal_pane::terminal_line_at_viewport_row(
-                                pane, rel_row,
-                            );
+                        let (line, _) = crate::tui::panes::terminal::terminal_line_at_viewport_row(
+                            pane, rel_row,
+                        );
                         let (ws, we) =
-                            crate::tui::panes::terminal_pane::terminal_word_bounds(&line, rel_col);
+                            crate::tui::panes::terminal::terminal_word_bounds(&line, rel_col);
                         (ws, we)
                     });
 
@@ -890,12 +889,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                         .state
                         .with_terminal(term_id, |pane| {
                             let (line, count) =
-                                crate::tui::panes::terminal_pane::terminal_line_at_viewport_row(
+                                crate::tui::panes::terminal::terminal_line_at_viewport_row(
                                     pane, rel_row,
                                 );
-                            let wb = crate::tui::panes::terminal_pane::terminal_word_bounds(
-                                &line, rel_col,
-                            );
+                            let wb =
+                                crate::tui::panes::terminal::terminal_word_bounds(&line, rel_col);
                             let cl = click_anchor_row.filter(|&ar| ar != rel_row).map(|_| count);
                             (Some(wb), cl)
                         })
@@ -975,7 +973,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                             global_data
                                 .state
                                 .with_terminal(term_id, |pane| {
-                                    crate::tui::panes::terminal_pane::extract_terminal_text(
+                                    crate::tui::panes::terminal::extract_terminal_text(
                                         pane, sel.start, sel.end,
                                     )
                                     .filter(|t| !t.is_empty())

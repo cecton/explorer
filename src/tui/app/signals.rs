@@ -10,7 +10,6 @@ pub(super) fn handle(
     use crate::agent::mcp::McpStatus;
     use crate::conversation::NodeStatus;
     use crate::loader::FileKey;
-    use crate::loader::LoadedFile;
     use crate::signal::AppSignal;
     use crate::signal::SymbolRefLocation;
     use crate::tui::after_agents::AfterAgents;
@@ -26,19 +25,32 @@ pub(super) fn handle(
     if let AppSignal::OpenTerminal { cmd, cwd } = action {
         let cmd = cmd.clone();
         let cwd = cwd.clone();
-        return app.open_terminal(global_data, cmd, Some(cwd), None, None, None);
+        return crate::tui::panes::terminal::spawn::open(
+            global_data,
+            crate::tui::panes::terminal::spawn::Request {
+                cmd,
+                cwd: Some(cwd),
+                pane_size: None,
+                id: None,
+                replace_window: None,
+                event_tx: &app.terminal_event_tx,
+            },
+        );
     }
     if let AppSignal::OpenEditor { cmd, cwd, file_key } = action {
         let cmd = cmd.clone();
         let cwd = cwd.clone();
         let key = *file_key;
-        return app.open_terminal(
+        return crate::tui::panes::terminal::spawn::open(
             global_data,
-            Some(cmd),
-            Some(cwd),
-            None,
-            None,
-            Some(Window::FilePreview(key)),
+            crate::tui::panes::terminal::spawn::Request {
+                cmd: Some(cmd),
+                cwd: Some(cwd),
+                pane_size: None,
+                id: None,
+                replace_window: Some(Window::FilePreview(key)),
+                event_tx: &app.terminal_event_tx,
+            },
         );
     }
     if let AppSignal::SetCargoFeatures(selection) = action {
@@ -65,84 +77,7 @@ pub(super) fn handle(
                     batch.created.len(),
                     batch.removed.len()
                 );
-                let snapshot = app.files.load_full();
-
-                // Index path -> position once. A rescan (post-overflow)
-                // batch can carry hundreds of thousands of paths; a linear
-                // `snapshot.iter().find()` per path would be quadratic.
-                let index: std::collections::HashMap<&camino::Utf8Path, usize> = snapshot
-                    .iter()
-                    .enumerate()
-                    .map(|(i, f)| (f.path.as_path(), i))
-                    .collect();
-
-                for path in &batch.removed {
-                    if let Some(&file_idx) = index.get(path.as_path()) {
-                        let file = &snapshot[file_idx];
-                        tracing::debug!(
-                            "FilesChanged: removed match idx={} path={}",
-                            file_idx,
-                            path
-                        );
-                        file.removed.store(true, Ordering::Relaxed);
-                        crate::lsp::send_file_request(file_idx);
-                    } else {
-                        tracing::debug!("FilesChanged: removed no match for path={}", path);
-                    }
-                }
-
-                for path in &batch.modified {
-                    match index.get(path.as_path()) {
-                        Some(&file_idx) if !snapshot[file_idx].removed.load(Ordering::Relaxed) => {
-                            tracing::debug!(
-                                "FilesChanged: modified match idx={} path={}",
-                                file_idx,
-                                path
-                            );
-                            snapshot[file_idx].reload();
-                            crate::lsp::send_file_request(file_idx);
-                        }
-                        _ => {
-                            tracing::debug!("FilesChanged: modified no match for path={}", path);
-                        }
-                    }
-                }
-
-                let mut new_files: Vec<Arc<LoadedFile>> = vec![];
-                for path in &batch.created {
-                    if let Some(&file_idx) = index.get(path.as_path()) {
-                        let file = &snapshot[file_idx];
-                        if file.removed.load(Ordering::Relaxed) {
-                            tracing::debug!(
-                                "FilesChanged: created resurrect idx={} path={}",
-                                file_idx,
-                                path
-                            );
-                            file.removed.store(false, Ordering::Relaxed);
-                        } else {
-                            tracing::debug!(
-                                "FilesChanged: created replace idx={} path={}",
-                                file_idx,
-                                path
-                            );
-                        }
-                        file.reload();
-                        crate::lsp::send_file_request(file_idx);
-                    } else if let Some(loaded) = LoadedFile::load(path.clone().into_std_path_buf())
-                    {
-                        tracing::debug!("FilesChanged: created new path={}", path);
-                        new_files.push(loaded);
-                    } else {
-                        tracing::debug!("FilesChanged: created no match for path={}", path);
-                    }
-                }
-
-                if !new_files.is_empty() {
-                    let mut next: Vec<Arc<LoadedFile>> = snapshot.iter().map(Arc::clone).collect();
-                    next.extend(new_files);
-                    app.files.store(Arc::new(next));
-                }
-
+                crate::loader::watch::apply(&app.files, batch);
                 if state
                     .pane_manager
                     .window_stack
@@ -156,67 +91,7 @@ pub(super) fn handle(
                         global_data.main_thread_channel_sender.clone(),
                     );
                 }
-
-                // Invalidate symbol highlight groups when files change.
-                let mut idx = 0;
-                while idx < state.symbol_highlights.len() {
-                    let origin_path = {
-                        let group = &state.symbol_highlights[idx];
-                        crate::loader::path_for_file_key(&snapshot, group.origin_file)
-                            .map(|p| p.to_path_buf())
-                    };
-                    let Some(ref origin_path) = origin_path else {
-                        idx += 1;
-                        continue;
-                    };
-
-                    let origin_removed = batch
-                        .removed
-                        .iter()
-                        .any(|p| p.as_path() == origin_path.as_path());
-                    if origin_removed {
-                        state.symbol_highlights.remove(idx);
-                        state.mark_session_dirty();
-                        continue;
-                    }
-
-                    let origin_changed = batch
-                        .modified
-                        .iter()
-                        .any(|p| p.as_path() == origin_path.as_path());
-                    if origin_changed {
-                        if let Some(g) = state.symbol_highlights.get_mut(idx) {
-                            g.needs_rebuild = true;
-                            g.origin_byte_start = None;
-                            g.origin_byte_end = None;
-                            g.locations.clear();
-                            crate::lsp::send_symbol_request(
-                                g.origin_file.0,
-                                g.origin_line,
-                                g.origin_char,
-                                g.origin_word.clone(),
-                                Some(idx),
-                            );
-                        }
-                    } else {
-                        let stale_paths: Vec<&camino::Utf8Path> = batch
-                            .modified
-                            .iter()
-                            .map(|p| p.as_path())
-                            .chain(batch.removed.iter().map(|p| p.as_path()))
-                            .collect();
-                        if let Some(g) = state.symbol_highlights.get_mut(idx) {
-                            g.locations.retain(|loc| {
-                                !stale_paths.iter().any(|p| {
-                                    crate::loader::path_for_file_key(&snapshot, loc.file_key)
-                                        .is_some_and(|fp| fp.as_str() == p.as_str())
-                                })
-                            });
-                        }
-                    }
-                    idx += 1;
-                }
-
+                crate::tui::symbols::files_changed(state, batch);
                 state.bump_files_version();
             }
             AppSignal::OpenTerminal { .. } => {}
@@ -242,14 +117,12 @@ pub(super) fn handle(
                     origin_locations.len(),
                     reference_locations.len(),
                 );
-                // Rebuild responses locate their group by origin position, not
-                // by the Vec index captured at send time — toggles that land
-                // while the query is in flight shift indices.
-                let target = state.symbol_highlights.iter().position(|g| {
-                    g.origin_file.0 == origin_file_idx
-                        && g.origin_line == origin_line
-                        && g.origin_char == origin_char
-                });
+                let target = crate::tui::symbols::find(
+                    &state.symbol_highlights,
+                    FileKey(origin_file_idx),
+                    origin_line,
+                    origin_char,
+                );
                 if origin_locations.is_empty() && reference_locations.is_empty() {
                     if group_id.is_some()
                         && let Some(idx) = target
@@ -274,14 +147,7 @@ pub(super) fn handle(
                     group.locations.extend(origin_locations.iter().cloned());
                     group.locations.extend(reference_locations.iter().cloned());
                     let qn = group.qualified_name.clone();
-                    let mut i = 0;
-                    while i < state.symbol_highlights.len() {
-                        if i != idx && state.symbol_highlights[i].qualified_name == qn {
-                            state.symbol_highlights.remove(i);
-                        } else {
-                            i += 1;
-                        }
-                    }
+                    crate::tui::symbols::dedup(&mut state.symbol_highlights, &qn, Some(idx));
                     state.mark_session_dirty();
                 } else {
                     let origin = origin_locations.first().cloned();
@@ -314,16 +180,9 @@ pub(super) fn handle(
                         locations,
                         needs_rebuild: false,
                     });
-                    // Dedup: remove any previous group with the same qualified_name.
+                    let keep = state.symbol_highlights.len() - 1;
                     let qn = qualified_name;
-                    let mut i = 0;
-                    while i < state.symbol_highlights.len() - 1 {
-                        if state.symbol_highlights[i].qualified_name == qn {
-                            state.symbol_highlights.remove(i);
-                        } else {
-                            i += 1;
-                        }
-                    }
+                    crate::tui::symbols::dedup(&mut state.symbol_highlights, &qn, Some(keep));
                     state.mark_session_dirty();
                 }
             }

@@ -76,7 +76,17 @@ pub(super) fn handle(
                 return Ok(EventPropagation::ConsumedRender);
             }
             Some(Action::OpenTerminal) => {
-                return app.open_terminal(global_data, None, None, None, None, None);
+                return crate::tui::panes::terminal::spawn::open(
+                    global_data,
+                    crate::tui::panes::terminal::spawn::Request {
+                        cmd: None,
+                        cwd: None,
+                        pane_size: None,
+                        id: None,
+                        replace_window: None,
+                        event_tx: &app.terminal_event_tx,
+                    },
+                );
             }
             Some(Action::OpenCommandLine) => {
                 let state = &mut global_data.state;

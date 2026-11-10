@@ -25,7 +25,10 @@ pub(super) fn render(
         global_data.state.window_picker.results = results;
     }
 
-    crate::tui::app::poll_terminal_output(app, &mut global_data.state);
+    crate::tui::panes::terminal::spawn::drain_exits(
+        &mut app.terminal_event_rx,
+        &mut global_data.state,
+    );
 
     throws!({
         let window_size = global_data.window_size;

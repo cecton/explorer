@@ -9,5 +9,6 @@ pub(crate) mod panes;
 pub(crate) mod panes_renderer;
 pub(crate) mod session;
 pub(crate) mod state;
+pub(crate) mod symbols;
 pub(crate) mod theme;
 pub(crate) mod widgets;
