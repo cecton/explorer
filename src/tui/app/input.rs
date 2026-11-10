@@ -13,7 +13,6 @@ pub(super) fn handle(
 ) -> CommonResult<EventPropagation> {
     use crate::tui::command_line::CommandLine;
     use crate::tui::keymap::Action;
-    use crate::tui::pane_manager::ResizeDelta;
     use crate::tui::pane_manager::Window;
     use crate::tui::panes::git_log_pane::GitLogPaneComponent;
     use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
@@ -167,41 +166,12 @@ pub(super) fn handle(
                 }
                 return Ok(EventPropagation::ConsumedRender);
             }
-            Some(Action::Quit) => {
-                return Ok(EventPropagation::ExitMainEventLoop);
-            }
-            Some(Action::FocusNext) => {
-                let visible = global_data.state.pane_manager.layout(surface_size);
-                let old = global_data.state.pane_manager.focused_window;
-                global_data.state.pane_manager.cycle_focus(&visible, 1);
-                crate::tui::focus::refocus(&mut global_data.state, old);
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            Some(Action::FocusPrev) => {
-                let visible = global_data.state.pane_manager.layout(surface_size);
-                let old = global_data.state.pane_manager.focused_window;
-                global_data.state.pane_manager.cycle_focus(&visible, -1);
-                crate::tui::focus::refocus(&mut global_data.state, old);
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            Some(Action::ClosePane) => {
-                let state = &mut global_data.state;
-                if let Some(old) = state.pane_manager.focused_window {
-                    crate::tui::focus::close_window(state, old);
+            Some(action) => {
+                if let Some(propagation) =
+                    crate::tui::app::input::apply_action(action, global_data, surface_size)
+                {
+                    return Ok(propagation);
                 }
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            Some(Action::SendToBack) => {
-                let state = &mut global_data.state;
-                if let Some(focused) = state.pane_manager.focused_window {
-                    state.pane_manager.send_to_back(&focused);
-                    crate::tui::focus::refocus(state, Some(focused));
-                    state.mark_session_dirty();
-                }
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            Some(Action::DismissLeader) => {
-                return Ok(EventPropagation::ConsumedRender);
             }
             _ => {}
         }
@@ -210,61 +180,17 @@ pub(super) fn handle(
     // Global shortcuts: Tab/BackTab cycles focus; Ctrl+Up/Down resize; Ctrl+Left/Right reorder.
     // Skipped for Terminal panes so Tab reaches the PTY (e.g. shell completion).
     // When a terminal is ungrabbed Tab cycles focus.
-    if (!matches!(
+    let shortcuts_reach_here = (!matches!(
         global_data.state.pane_manager.focused_window,
         Some(Window::Terminal(_))
     ) || !global_data.state.terminal_grabbed)
-        && !global_data.state.mouse_drag_active
+        && !global_data.state.mouse_drag_active;
+    if shortcuts_reach_here
+        && let Some(action) = keyboard.and_then(|kp| global_data.state.keymap.global_action(&kp))
+        && let Some(propagation) =
+            crate::tui::app::input::apply_action(action, global_data, surface_size)
     {
-        match keyboard.and_then(|kp| global_data.state.keymap.global_action(&kp)) {
-            Some(Action::FocusNext) => {
-                let visible = global_data.state.pane_manager.layout(surface_size);
-                let old = global_data.state.pane_manager.focused_window;
-                global_data.state.pane_manager.cycle_focus(&visible, 1);
-                crate::tui::focus::refocus(&mut global_data.state, old);
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            Some(Action::FocusPrev) => {
-                let visible = global_data.state.pane_manager.layout(surface_size);
-                let old = global_data.state.pane_manager.focused_window;
-                global_data.state.pane_manager.cycle_focus(&visible, -1);
-                crate::tui::focus::refocus(&mut global_data.state, old);
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            Some(Action::ResizeGrow) => {
-                global_data
-                    .state
-                    .pane_manager
-                    .resize_focused(ResizeDelta::Grow);
-                global_data.state.mark_session_dirty();
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            Some(Action::ResizeShrink) => {
-                global_data
-                    .state
-                    .pane_manager
-                    .resize_focused(ResizeDelta::Shrink);
-                global_data.state.mark_session_dirty();
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            Some(Action::MovePaneForward) => {
-                let Some(focused) = global_data.state.pane_manager.focused_window else {
-                    return Ok(EventPropagation::ConsumedRender);
-                };
-                global_data.state.pane_manager.move_forward(&focused);
-                global_data.state.mark_session_dirty();
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            Some(Action::MovePaneBackward) => {
-                let Some(focused) = global_data.state.pane_manager.focused_window else {
-                    return Ok(EventPropagation::ConsumedRender);
-                };
-                global_data.state.pane_manager.move_backward(&focused);
-                global_data.state.mark_session_dirty();
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            _ => {}
-        }
+        return Ok(propagation);
     }
 
     // Focus follows mouse: hovering over a pane makes it the focused window.
@@ -303,4 +229,74 @@ pub(super) fn handle(
         component_registry_map,
         has_focus,
     )
+}
+
+/// Runs the shortcuts that mean the same thing in both keymap contexts, so the leader and
+/// global tables share one body. Returns the propagation when it acted, `None` when the
+/// action is one only the context that resolved it may handle.
+fn apply_action(
+    action: crate::tui::keymap::Action,
+    global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
+    surface_size: VPSize,
+) -> Option<EventPropagation> {
+    use crate::tui::keymap::Action;
+    use crate::tui::pane_manager::ResizeDelta;
+    let state = &mut global_data.state;
+    match action {
+        Action::FocusNext | Action::FocusPrev => {
+            let visible = state.pane_manager.layout(surface_size);
+            let old = state.pane_manager.focused_window;
+            let direction = if action == Action::FocusNext { 1 } else { -1 };
+            state.pane_manager.cycle_focus(&visible, direction);
+            crate::tui::focus::refocus(state, old);
+        }
+        Action::ResizeGrow | Action::ResizeShrink => {
+            let delta = if action == Action::ResizeGrow {
+                ResizeDelta::Grow
+            } else {
+                ResizeDelta::Shrink
+            };
+            state.pane_manager.resize_focused(delta);
+            state.mark_session_dirty();
+        }
+        Action::MovePaneForward | Action::MovePaneBackward => {
+            let Some(focused) = state.pane_manager.focused_window else {
+                return Some(EventPropagation::ConsumedRender);
+            };
+            if action == Action::MovePaneForward {
+                state.pane_manager.move_forward(&focused);
+            } else {
+                state.pane_manager.move_backward(&focused);
+            }
+            state.mark_session_dirty();
+        }
+        Action::ClosePane => {
+            let Some(old) = state.pane_manager.focused_window else {
+                return Some(EventPropagation::ConsumedRender);
+            };
+            crate::tui::focus::close_window(state, old);
+        }
+        Action::SendToBack => {
+            let Some(focused) = state.pane_manager.focused_window else {
+                return Some(EventPropagation::ConsumedRender);
+            };
+            state.pane_manager.send_to_back(&focused);
+            crate::tui::focus::refocus(state, Some(focused));
+            state.mark_session_dirty();
+        }
+        // Only the leader table binds this, so the global path can never reach it.
+        Action::Quit => return Some(EventPropagation::ExitMainEventLoop),
+        Action::DismissLeader => {}
+        // The rest needs the context that resolved it: opening a window, or grabbing.
+        Action::GrabTerminal
+        | Action::OpenWindowPicker
+        | Action::OpenTerminal
+        | Action::OpenCommandLine
+        | Action::OpenThemePicker
+        | Action::OpenGitLog
+        | Action::OpenConversations
+        | Action::ToggleFavorite
+        | Action::OpenModelPicker => return None,
+    }
+    Some(EventPropagation::ConsumedRender)
 }
