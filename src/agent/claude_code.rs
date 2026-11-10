@@ -288,9 +288,9 @@ fn input_frame(content: &str) -> String {
 /// soon as it is known, so it survives a failure or a cancellation.
 pub async fn run(
     invocation: &Invocation<'_>,
-    recorder: &mut crate::agent::turn::Recorder,
+    recorder: &mut crate::agent::turn::live::Recorder,
 ) -> Result<(), RunError> {
-    use crate::agent::turn::Injector;
+    use crate::agent::turn::live::Injector;
     use tokio::io::AsyncBufReadExt;
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;

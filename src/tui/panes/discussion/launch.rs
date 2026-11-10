@@ -130,7 +130,7 @@ pub(crate) fn window_is_running(state: &crate::tui::state::AppState, id: usize) 
 pub(crate) fn running_agent(
     state: &crate::tui::state::AppState,
     discussion: &crate::tui::state::DiscussionState,
-) -> Option<crate::agent::turn::LiveSubagent> {
+) -> Option<crate::agent::turn::live::LiveSubagent> {
     let index = discussion.agent?;
     let handle = state.running_turns.get(discussion.node.as_ref()?)?;
     let running = handle.live.lock().subagent.clone()?;
@@ -142,7 +142,7 @@ pub(crate) fn running_agent(
 pub(crate) fn running_output(
     state: &crate::tui::state::AppState,
     discussion: &crate::tui::state::DiscussionState,
-) -> Option<Arc<parking_lot::Mutex<crate::agent::turn::LiveTurn>>> {
+) -> Option<Arc<parking_lot::Mutex<crate::agent::turn::live::LiveTurn>>> {
     match discussion.agent {
         Some(_) => running_agent(state, discussion).map(|running| running.live),
         None => {

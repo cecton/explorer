@@ -191,7 +191,7 @@ pub fn run<'a>(
     session: &'a str,
     system: &'a str,
     messages: &'a mut Vec<crate::agent::Message>,
-    recorder: &'a mut crate::agent::turn::Recorder,
+    recorder: &'a mut crate::agent::turn::live::Recorder,
     limits: Limits,
 ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
     Box::pin(run_loop(
@@ -205,7 +205,7 @@ async fn run_loop(
     session: &str,
     system: &str,
     messages: &mut Vec<crate::agent::Message>,
-    recorder: &mut crate::agent::turn::Recorder,
+    recorder: &mut crate::agent::turn::live::Recorder,
     limits: Limits,
 ) -> Result<(), String> {
     use crate::agent::Message;

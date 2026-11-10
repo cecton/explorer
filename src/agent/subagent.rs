@@ -393,12 +393,12 @@ fn prepare(
 async fn execute(
     context: &crate::agent::tools::ToolContext,
     subagents: &Subagents,
-    recorder: &mut crate::agent::turn::Recorder,
+    recorder: &mut crate::agent::turn::live::Recorder,
     launch: &Launch,
     backend: &crate::agent::Backend,
 ) -> Outcome {
     use crate::agent::Backend;
-    use crate::agent::turn::LiveSubagent;
+    use crate::agent::turn::live::LiveSubagent;
     let mut child = recorder.subagent(launch.dir.clone());
     let started = Instant::now();
     recorder.live.lock().subagent = Some(LiveSubagent {
@@ -563,7 +563,7 @@ pub async fn run(
     context: &crate::agent::tools::ToolContext,
     subagents: &Subagents,
     call: &crate::agent::ToolCall,
-    recorder: &mut crate::agent::turn::Recorder,
+    recorder: &mut crate::agent::turn::live::Recorder,
 ) -> String {
     use crate::signal::AppSignal;
     let launch = {
@@ -687,7 +687,7 @@ async fn conclude(
     subagents: &Subagents,
     repo: Option<&gix::ThreadSafeRepository>,
     outcome: &Outcome,
-    recorder: &mut crate::agent::turn::Recorder,
+    recorder: &mut crate::agent::turn::live::Recorder,
 ) {
     use crate::signal::AppSignal;
     let id = crate::conversation::agents::agent_id(&context.node, outcome.index);
@@ -736,7 +736,7 @@ fn title_run(
     tokio::spawn(async move {
         let task = crate::conversation::files::read_prompt(&dir);
         let input = run_title_input(&task, &reply);
-        let answer = match crate::agent::turn::complete(
+        let answer = match crate::agent::turn::title::complete(
             &backend,
             &session,
             crate::agent::context::SUBAGENT_TITLE_PROMPT,
@@ -750,7 +750,7 @@ fn title_run(
                 return;
             }
         };
-        let Some((title, _)) = crate::agent::turn::parse_title_and_summary(&answer) else {
+        let Some((title, _)) = crate::agent::turn::title::parse_title_and_summary(&answer) else {
             tracing::warn!("title generation for sub-agent {session} returned no title");
             return;
         };
@@ -780,7 +780,7 @@ fn run_title_input(task: &str, reply: &str) -> String {
     let reply = match reply
         .char_indices()
         .rev()
-        .nth(crate::agent::turn::REPLY_MAX_CHARS - 1)
+        .nth(crate::agent::turn::title::REPLY_MAX_CHARS - 1)
     {
         Some((start, _)) => &reply[start..],
         None => reply,
@@ -812,7 +812,7 @@ async fn run_own_loop(
     target: &crate::agent::llm::LlmTarget,
     system: &str,
     started: Instant,
-    recorder: &mut crate::agent::turn::Recorder,
+    recorder: &mut crate::agent::turn::live::Recorder,
 ) -> Result<(), String> {
     use crate::agent::Message;
     use crate::agent::Mode;
@@ -873,7 +873,7 @@ async fn run_claude_code(
     launch: &Launch,
     target: &crate::agent::claude_code::ClaudeTarget,
     system: &str,
-    recorder: &mut crate::agent::turn::Recorder,
+    recorder: &mut crate::agent::turn::live::Recorder,
 ) -> Result<(), String> {
     use crate::agent::claude_code::Invocation;
     use crate::agent::claude_code::Resume;
@@ -1078,11 +1078,11 @@ mod tests {
         ));
         assert!(input.len() < 20_000);
         // The cap counts characters, and never splices one, as the node path's does.
-        let multibyte = "é".repeat(crate::agent::turn::REPLY_MAX_CHARS + 10);
+        let multibyte = "é".repeat(crate::agent::turn::title::REPLY_MAX_CHARS + 10);
         let input = run_title_input("Task", &multibyte);
         assert_eq!(
             input.matches('é').count(),
-            crate::agent::turn::REPLY_MAX_CHARS
+            crate::agent::turn::title::REPLY_MAX_CHARS
         );
         assert_eq!(
             run_title_input("Task", "Short."),

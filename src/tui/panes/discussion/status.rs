@@ -174,7 +174,7 @@ pub(crate) fn status_line(
 /// The progress of a turn or a sub-agent run started at `started`: spinner, time,
 /// activity and context size.
 fn progress_text(
-    live: &crate::agent::turn::LiveTurn,
+    live: &crate::agent::turn::live::LiveTurn,
     started: Instant,
     spinner_tick: u8,
 ) -> String {

@@ -103,7 +103,7 @@ impl ConversationTreeComponent {
         state.tree_view.retitling.insert(id.clone());
         let root = state.root.clone();
         tokio::spawn(async move {
-            crate::agent::turn::retitle(
+            crate::agent::turn::title::retitle(
                 &id,
                 &node_dir,
                 &session,
