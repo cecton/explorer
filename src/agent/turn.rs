@@ -160,10 +160,10 @@ impl Injector {
         let appended = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
-            .open(self.node_dir.join("prompt.md"))
+            .open(self.node_dir.join(crate::conversation::files::PROMPT))
             .and_then(|mut file| write!(file, "\n\n{content}"));
         if let Err(e) = appended {
-            tracing::warn!("failed to append to prompt.md: {e}");
+            tracing::warn!("failed to append to the prompt of {}: {e}", self.node_dir);
         }
         let message = Message::User {
             content: content.to_string(),
@@ -233,7 +233,7 @@ fn message_to_send(request: &TurnRequest) -> String {
         &request.date,
     ));
     let summary = request.compacted_parent.as_ref().map(|dir| {
-        let (_, summary) = crate::conversation::read_prompt_and_reply(dir);
+        let (_, summary) = crate::conversation::files::read_prompt_and_reply(dir);
         crate::agent::context::compaction_note(&summary)
     });
     let moved = moved_note(
@@ -282,11 +282,11 @@ fn append_transcript(dir: &camino::Utf8Path, message: &crate::agent::Message) {
             let mut file = std::fs::OpenOptions::new()
                 .create(true)
                 .append(true)
-                .open(dir.join("transcript.jsonl"))?;
+                .open(dir.join(crate::conversation::files::TRANSCRIPT))?;
             writeln!(file, "{line}")
         });
     if let Err(e) = appended {
-        tracing::warn!("failed to append to transcript.jsonl: {e}");
+        tracing::warn!("failed to append to the transcript of {dir}: {e}");
     }
 }
 
@@ -295,10 +295,10 @@ fn append_work_log(dir: &camino::Utf8Path, live: &parking_lot::Mutex<LiveTurn>, 
     let appended = std::fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(dir.join("activity.md"))
+        .open(dir.join(crate::conversation::files::ACTIVITY))
         .and_then(|mut file| writeln!(file, "{entry}"));
     if let Err(e) = appended {
-        tracing::warn!("failed to append to activity.md: {e}");
+        tracing::warn!("failed to append to the work log of {dir}: {e}");
     }
     live.lock().work_log.push(entry);
 }
@@ -343,8 +343,8 @@ impl Recorder {
     pub(super) fn flush_reply(&mut self) {
         self.last_flush = Instant::now();
         let reply = self.live.lock().reply.clone();
-        if let Err(e) = crate::util::fs::write_atomic(&self.node_dir.join("reply.md"), &reply) {
-            tracing::warn!("failed to write reply.md: {e}");
+        if let Err(e) = crate::conversation::files::write_reply(&self.node_dir, &reply) {
+            tracing::warn!("failed to write the reply of {}: {e}", self.node_dir);
         }
     }
 
@@ -596,8 +596,10 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
         // build on: it fails. One with a reply or commits stays cancelled, part of the
         // discussion.
         if status == NodeStatus::Cancelled {
-            (status, error) =
-                crate::conversation::cut_short_outcome(&recorder.live.lock().reply, &commits);
+            (status, error) = crate::conversation::metadata::cut_short_outcome(
+                &recorder.live.lock().reply,
+                &commits,
+            );
         }
         let (tokens_in, cached_in, session_id, reported_usage) = {
             let live = live.lock();
@@ -608,7 +610,7 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
                 live.usage.clone(),
             )
         };
-        let outcome = crate::conversation::TurnOutcome {
+        let outcome = crate::conversation::metadata::TurnOutcome {
             status,
             error,
             secs: handle.started.elapsed().as_secs(),
@@ -1086,7 +1088,7 @@ pub async fn retitle(
     })
     .await
     .unwrap_or_default();
-    let (prompt, reply) = crate::conversation::read_prompt_and_reply(node_dir);
+    let (prompt, reply) = crate::conversation::files::read_prompt_and_reply(node_dir);
     let input = title_input(&prompt, &reply, &commits);
     title_and_summarize(node, node_dir, session, backend, &input, main_tx).await;
 }
@@ -1120,8 +1122,8 @@ async fn title_and_summarize(
         tracing::warn!("title generation returned no title");
         return;
     };
-    if let Err(e) = crate::util::fs::write_atomic(&node_dir.join("title.md"), &title) {
-        tracing::warn!("failed to write title.md: {e}");
+    if let Err(e) = crate::conversation::files::write_title(node_dir, &title) {
+        tracing::warn!("failed to write the title of {node_dir}: {e}");
     }
     crate::signal::send(
         main_tx,
@@ -1133,8 +1135,8 @@ async fn title_and_summarize(
     if summary.is_empty() {
         return;
     }
-    if let Err(e) = crate::util::fs::write_atomic(&node_dir.join("summary.md"), &summary) {
-        tracing::warn!("failed to write summary.md: {e}");
+    if let Err(e) = crate::conversation::files::write_summary(node_dir, &summary) {
+        tracing::warn!("failed to write the summary of {node_dir}: {e}");
     }
     crate::signal::send(
         main_tx,
@@ -1210,7 +1212,11 @@ mod tests {
     fn an_injected_message_joins_the_prompt_block_and_the_transcript() {
         let tmp = tempfile::tempdir().unwrap();
         let dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
-        std::fs::write(dir.join("prompt.md"), "the first prompt").unwrap();
+        std::fs::write(
+            dir.join(crate::conversation::files::PROMPT),
+            "the first prompt",
+        )
+        .unwrap();
         let live = Arc::new(parking_lot::Mutex::new(LiveTurn {
             prompt: "the first prompt".to_string(),
             ..Default::default()
@@ -1227,10 +1233,11 @@ mod tests {
             "the first prompt\n\nalso handle the parser"
         );
         assert_eq!(
-            std::fs::read_to_string(dir.join("prompt.md")).unwrap(),
+            std::fs::read_to_string(dir.join(crate::conversation::files::PROMPT)).unwrap(),
             "the first prompt\n\nalso handle the parser"
         );
-        let transcript = std::fs::read_to_string(dir.join("transcript.jsonl")).unwrap();
+        let transcript =
+            std::fs::read_to_string(dir.join(crate::conversation::files::TRANSCRIPT)).unwrap();
         assert_eq!(
             transcript,
             "{\"role\":\"user\",\"content\":\"also handle the parser\"}\n"
@@ -1240,13 +1247,15 @@ mod tests {
     #[test]
     fn a_cancel_with_content_stays_cancelled() {
         use crate::conversation::NodeStatus;
-        let (status, error) = crate::conversation::cut_short_outcome("a partial answer", &[]);
+        let (status, error) =
+            crate::conversation::metadata::cut_short_outcome("a partial answer", &[]);
         assert_eq!(status, NodeStatus::Cancelled);
         assert_eq!(error, None);
-        let (status, error) = crate::conversation::cut_short_outcome("", &["abc1234".to_string()]);
+        let (status, error) =
+            crate::conversation::metadata::cut_short_outcome("", &["abc1234".to_string()]);
         assert_eq!(status, NodeStatus::Cancelled);
         assert_eq!(error, None);
-        let (status, error) = crate::conversation::cut_short_outcome("  \n  ", &[]);
+        let (status, error) = crate::conversation::metadata::cut_short_outcome("  \n  ", &[]);
         assert_eq!(status, NodeStatus::Failed);
         assert_eq!(error.as_deref(), Some(crate::conversation::CANCELLED_ERROR));
     }
@@ -1322,9 +1331,12 @@ mod tests {
         recorder.flush_reply();
 
         let read = |name: &str| std::fs::read_to_string(node_dir.join(name)).unwrap();
-        assert_eq!(read("reply.md"), "First part.\n\nCommitted.");
         assert_eq!(
-            read("activity.md"),
+            read(crate::conversation::files::REPLY),
+            "First part.\n\nCommitted."
+        );
+        assert_eq!(
+            read(crate::conversation::files::ACTIVITY),
             "Let me look.\n- shell ls\n- read a.txt\n- shell git commit\n"
         );
         let live = recorder.live.lock();
@@ -1354,10 +1366,16 @@ mod tests {
 
         let read =
             |dir: &camino::Utf8Path, name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
-        assert_eq!(read(&agent_dir, "activity.md"), "Reading.\n- read a.txt\n");
-        assert_eq!(read(&agent_dir, "reply.md"), "Looks fine.");
         assert_eq!(
-            read(&node_dir, "activity.md"),
+            read(&agent_dir, crate::conversation::files::ACTIVITY),
+            "Reading.\n- read a.txt\n"
+        );
+        assert_eq!(
+            read(&agent_dir, crate::conversation::files::REPLY),
+            "Looks fine."
+        );
+        assert_eq!(
+            read(&node_dir, crate::conversation::files::ACTIVITY),
             "- agent reviewer: Review\n  - read a.txt\n"
         );
         assert!(recorder.live.lock().reply.is_empty());
@@ -1525,7 +1543,7 @@ mod tests {
         let made = commit(&root, "a.txt", "2", "feat: one");
 
         let (commits, _) = close_commit_turn(&root, "node", Some(&before), Some(&made));
-        let (status, error) = crate::conversation::cut_short_outcome("", &commits);
+        let (status, error) = crate::conversation::metadata::cut_short_outcome("", &commits);
         assert_eq!(commits, [made]);
         assert_eq!(status, NodeStatus::Cancelled);
         assert_eq!(error, None);

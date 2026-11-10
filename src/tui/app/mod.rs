@@ -305,18 +305,13 @@ pub async fn run(
             ),
             Mode::Feedback => Vec::new(),
         };
-        let (status, error) = crate::conversation::cut_short_outcome(&reply, &commits);
         let mut tree = global_data.state.conversations.write();
-        let Some(dir) = tree.node_dir(node) else {
-            continue;
-        };
-        let _ = crate::util::fs::write_atomic(&dir.join("reply.md"), &reply);
-        let _ = tree.update_meta(node, |meta| {
-            meta.status = Some(status);
-            meta.error = error;
-            meta.commits = commits;
-            meta.head_after = head_now.clone();
-        });
+        if let Err(e) = tree.mark_cut_short(node, &reply, &commits, head_now.as_deref()) {
+            tracing::warn!(
+                "failed to record the turn of {} cut short at exit: {e}",
+                node.as_str()
+            );
+        }
     }
 
     // Kill all terminal children gracefully.

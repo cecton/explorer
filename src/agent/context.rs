@@ -104,7 +104,7 @@ fn budget_note_at(budget: Duration, now: i64, offset: i32) -> String {
 /// The messages `transcript.jsonl` of a node holds, or `None` without a usable one.
 fn read_transcript(dir: &camino::Utf8Path) -> Option<Vec<crate::agent::Message>> {
     use crate::agent::Message;
-    let text = std::fs::read_to_string(dir.join("transcript.jsonl")).ok()?;
+    let text = std::fs::read_to_string(dir.join(crate::conversation::files::TRANSCRIPT)).ok()?;
     let messages: Vec<Message> = text
         .lines()
         .filter(|line| !line.trim().is_empty())
@@ -123,7 +123,7 @@ pub fn ancestor_messages(dir: &camino::Utf8Path) -> Vec<crate::agent::Message> {
         crate::agent::agent_loop::repair_tail(&mut messages);
         return messages;
     }
-    let (prompt, reply) = crate::conversation::read_prompt_and_reply(dir);
+    let (prompt, reply) = crate::conversation::files::read_prompt_and_reply(dir);
     let mut messages = Vec::new();
     if !prompt.trim().is_empty() {
         messages.push(Message::User {
@@ -146,7 +146,7 @@ pub fn ancestor_messages(dir: &camino::Utf8Path) -> Vec<crate::agent::Message> {
 pub fn handover_preamble(ancestor_dirs: &[camino::Utf8PathBuf]) -> Option<String> {
     let mut out = String::new();
     for dir in ancestor_dirs {
-        let (prompt, reply) = crate::conversation::read_prompt_and_reply(dir);
+        let (prompt, reply) = crate::conversation::files::read_prompt_and_reply(dir);
         if prompt.trim().is_empty() {
             continue;
         }
@@ -294,9 +294,9 @@ mod tests {
     fn ancestor_with_transcript_is_replayed_exactly() {
         use crate::agent::Message;
         let (_tmp, dir) = temp_dir();
-        std::fs::write(dir.join("prompt.md"), "ignored").unwrap();
+        std::fs::write(dir.join(crate::conversation::files::PROMPT), "ignored").unwrap();
         std::fs::write(
-            dir.join("transcript.jsonl"),
+            dir.join(crate::conversation::files::TRANSCRIPT),
             "{\"role\":\"user\",\"content\":\"[note]\\n\\nhi\"}\n\
              {\"role\":\"assistant\",\"content\":\"hello\"}\n",
         )
@@ -320,8 +320,8 @@ mod tests {
     fn ancestor_without_transcript_falls_back_to_prompt_and_reply() {
         use crate::agent::Message;
         let (_tmp, dir) = temp_dir();
-        std::fs::write(dir.join("prompt.md"), "question").unwrap();
-        std::fs::write(dir.join("reply.md"), "answer").unwrap();
+        std::fs::write(dir.join(crate::conversation::files::PROMPT), "question").unwrap();
+        std::fs::write(dir.join(crate::conversation::files::REPLY), "answer").unwrap();
         assert_eq!(
             ancestor_messages(&dir),
             [
@@ -335,7 +335,11 @@ mod tests {
                 },
             ]
         );
-        std::fs::write(dir.join("transcript.jsonl"), "not json\n").unwrap();
+        std::fs::write(
+            dir.join(crate::conversation::files::TRANSCRIPT),
+            "not json\n",
+        )
+        .unwrap();
         assert_eq!(ancestor_messages(&dir).len(), 2);
     }
 
@@ -535,9 +539,21 @@ mod tests {
         for dir in [&first, &second, &empty] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        std::fs::write(first.join("prompt.md"), "question one\n").unwrap();
-        std::fs::write(first.join("reply.md"), "answer one\n").unwrap();
-        std::fs::write(second.join("prompt.md"), "question two").unwrap();
+        std::fs::write(
+            first.join(crate::conversation::files::PROMPT),
+            "question one\n",
+        )
+        .unwrap();
+        std::fs::write(
+            first.join(crate::conversation::files::REPLY),
+            "answer one\n",
+        )
+        .unwrap();
+        std::fs::write(
+            second.join(crate::conversation::files::PROMPT),
+            "question two",
+        )
+        .unwrap();
 
         let preamble = handover_preamble(&[first, second, empty.clone()]).unwrap();
         let body =

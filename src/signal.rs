@@ -129,7 +129,7 @@ pub enum AppSignal {
     /// The turn of `node` ended.
     TurnFinished {
         node: crate::conversation::NodeId,
-        outcome: crate::conversation::TurnOutcome,
+        outcome: crate::conversation::metadata::TurnOutcome,
     },
     /// `title.md` of `node` was written.
     NodeTitleReady {

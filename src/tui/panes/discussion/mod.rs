@@ -116,9 +116,9 @@ impl DiscussionComponent {
             let dir = tree.node_dir(node);
             let prompt = dir
                 .as_ref()
-                .map(|dir| crate::conversation::read_prompt_and_reply(dir).0)
+                .map(|dir| crate::conversation::files::read_prompt_and_reply(dir).0)
                 .unwrap_or_default();
-            let input = dir.and_then(|dir| crate::conversation::read_typed_input(&dir));
+            let input = dir.and_then(|dir| crate::conversation::files::read_typed_input(&dir));
             crate::tui::panes::discussion::launch::Launch::replay(&tree, node, prompt, spec)
                 .map(|launch| crate::tui::panes::discussion::launch::Launch { input, ..launch })
         };
@@ -147,7 +147,7 @@ impl DiscussionComponent {
             };
             let draft = tree
                 .node_dir(node)
-                .map(|dir| crate::conversation::read_input(&dir))
+                .map(|dir| crate::conversation::files::read_input(&dir))
                 .unwrap_or_default();
             (
                 source.parent.clone(),
@@ -282,8 +282,8 @@ impl DiscussionComponent {
             return;
         };
         tokio::task::spawn_blocking(move || {
-            let (prompt, reply) = crate::conversation::read_prompt_and_reply(&dir);
-            let work_log = crate::conversation::read_work_log(&dir);
+            let (prompt, reply) = crate::conversation::files::read_prompt_and_reply(&dir);
+            let work_log = crate::conversation::files::read_work_log(&dir);
             crate::signal::send(
                 &main_tx,
                 AppSignal::NodeContentLoaded {
@@ -1020,7 +1020,7 @@ mod tests {
         let id = NodeId::new("2026-10-05T14-32-07Z");
         let dir = root.join(id.as_str());
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("metadata.md"), metadata).unwrap();
+        std::fs::write(dir.join(crate::conversation::files::METADATA), metadata).unwrap();
         (tmp, ConversationTree::load(&root), id)
     }
 
@@ -1251,10 +1251,22 @@ mod tests {
         let parent = root.join("a1");
         let child = parent.join("a2");
         std::fs::create_dir_all(&child).unwrap();
-        std::fs::write(parent.join("metadata.md"), "status: done\n").unwrap();
-        std::fs::write(child.join("metadata.md"), "status: failed\n").unwrap();
-        std::fs::write(child.join("prompt.md"), "Review it.\n\nfoo").unwrap();
-        std::fs::write(child.join("input.md"), "/review foo").unwrap();
+        std::fs::write(
+            parent.join(crate::conversation::files::METADATA),
+            "status: done\n",
+        )
+        .unwrap();
+        std::fs::write(
+            child.join(crate::conversation::files::METADATA),
+            "status: failed\n",
+        )
+        .unwrap();
+        std::fs::write(
+            child.join(crate::conversation::files::PROMPT),
+            "Review it.\n\nfoo",
+        )
+        .unwrap();
+        std::fs::write(child.join(crate::conversation::files::INPUT), "/review foo").unwrap();
 
         let mut state = empty_state();
         *state.conversations.write() = ConversationTree::load(&root);
@@ -1462,7 +1474,11 @@ mod tests {
             .to_path_buf();
         let dir = root.join("a1").join("a2");
         std::fs::create_dir_all(dir.join("a3")).unwrap();
-        std::fs::write(dir.join("a3").join("metadata.md"), "status: done\n").unwrap();
+        std::fs::write(
+            dir.join("a3").join(crate::conversation::files::METADATA),
+            "status: done\n",
+        )
+        .unwrap();
         *state.conversations.write() = ConversationTree::load(&root);
         assert!(
             !state
@@ -2046,7 +2062,7 @@ mod tests {
             ),
         ] {
             std::fs::create_dir_all(dir).unwrap();
-            std::fs::write(dir.join("metadata.md"), metadata).unwrap();
+            std::fs::write(dir.join(crate::conversation::files::METADATA), metadata).unwrap();
         }
         let tree = ConversationTree::load(&root);
         let spec = ModelSpec::parse("mock/m/low").unwrap();
@@ -2083,16 +2099,25 @@ mod tests {
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let dir = root.join("a1").join("a2");
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(root.join("a1").join("metadata.md"), "status: done\n").unwrap();
+        std::fs::write(
+            root.join("a1").join(crate::conversation::files::METADATA),
+            "status: done\n",
+        )
+        .unwrap();
         // No endpoint, model or effort: opening must not need them.
         let metadata = "status: failed\nerror: boom\n";
-        std::fs::write(dir.join("metadata.md"), metadata).unwrap();
-        std::fs::write(dir.join("prompt.md"), "do it").unwrap();
-        std::fs::write(dir.join("reply.md"), "partial").unwrap();
-        std::fs::write(dir.join("activity.md"), "- shell ls\n").unwrap();
-        std::fs::write(dir.join("transcript.jsonl"), "{}\n").unwrap();
-        std::fs::create_dir_all(dir.join("agents").join("1")).unwrap();
-        std::fs::create_dir_all(dir.join("processes")).unwrap();
+        std::fs::write(dir.join(crate::conversation::files::METADATA), metadata).unwrap();
+        std::fs::write(dir.join(crate::conversation::files::PROMPT), "do it").unwrap();
+        std::fs::write(dir.join(crate::conversation::files::REPLY), "partial").unwrap();
+        std::fs::write(
+            dir.join(crate::conversation::files::ACTIVITY),
+            "- shell ls\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join(crate::conversation::files::TRANSCRIPT), "{}\n").unwrap();
+        std::fs::create_dir_all(dir.join(crate::conversation::files::AGENTS_DIR).join("1"))
+            .unwrap();
+        std::fs::create_dir_all(dir.join(crate::conversation::files::PROCESSES_DIR)).unwrap();
 
         let mut state = empty_state();
         *state.conversations.write() = ConversationTree::load(&root);
@@ -2105,14 +2130,21 @@ mod tests {
         assert!(discussion.draft.text().is_empty());
         assert!(discussion.notice.is_none());
         assert!(state.running_turns.is_empty());
-        for name in ["reply.md", "activity.md", "transcript.jsonl"] {
+        for name in [
+            crate::conversation::files::REPLY,
+            crate::conversation::files::ACTIVITY,
+            crate::conversation::files::TRANSCRIPT,
+        ] {
             assert!(dir.join(name).exists(), "{name} was deleted");
         }
-        for name in ["agents", "processes"] {
+        for name in [
+            crate::conversation::files::AGENTS_DIR,
+            crate::conversation::files::PROCESSES_DIR,
+        ] {
             assert!(dir.join(name).exists(), "{name}/ was deleted");
         }
         assert_eq!(
-            std::fs::read_to_string(dir.join("metadata.md")).unwrap(),
+            std::fs::read_to_string(dir.join(crate::conversation::files::METADATA)).unwrap(),
             metadata
         );
     }

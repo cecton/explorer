@@ -24,9 +24,9 @@ pub(crate) fn described_tree(
     for (path, title, summary) in nodes {
         let dir = root.join(path);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join("title.md"), title).unwrap();
+        std::fs::write(dir.join(crate::conversation::files::TITLE), title).unwrap();
         if !summary.is_empty() {
-            std::fs::write(dir.join("summary.md"), summary).unwrap();
+            std::fs::write(dir.join(crate::conversation::files::SUMMARY), summary).unwrap();
         }
     }
     let tree = ConversationTree::load(&root);

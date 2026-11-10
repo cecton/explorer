@@ -33,7 +33,7 @@ fn queued_text(
         .to_string()
 }
 
-fn state_marker(meta: &crate::conversation::Metadata, spinner_tick: u8) -> Option<char> {
+fn state_marker(meta: &crate::conversation::metadata::Metadata, spinner_tick: u8) -> Option<char> {
     use crate::conversation::NodeStatus;
     use crate::conversation::NodeType;
     match (meta.status, meta.node_type) {

@@ -379,7 +379,7 @@ fn conversation(
         "read" => {
             let node = node_arg()?;
             let dir = tree.read().node_dir(&node).ok_or_else(|| unknown(&node))?;
-            let (prompt, reply) = crate::conversation::read_prompt_and_reply(&dir);
+            let (prompt, reply) = crate::conversation::files::read_prompt_and_reply(&dir);
             Ok(format!(
                 "# Prompt\n\n{}\n\n# Reply\n\n{}\n",
                 prompt.trim(),
@@ -620,7 +620,7 @@ fn shell_background(
     args: &serde_json::Value,
 ) -> Result<String, String> {
     let command = str_arg(args, "command")?;
-    let dir = node_dir.join(crate::conversation::PROCESSES_DIR);
+    let dir = node_dir.join(crate::conversation::files::PROCESSES_DIR);
     std::fs::create_dir_all(&dir).map_err(|e| format!("{dir}: {e}"))?;
     let mut index = 1;
     let (log, file) = loop {
@@ -1080,13 +1080,13 @@ mod tests {
         let node_dir = store.join("n1");
         std::fs::create_dir_all(node_dir.join("n2")).unwrap();
         std::fs::write(
-            node_dir.join("metadata.md"),
+            node_dir.join(crate::conversation::files::METADATA),
             "type: commit\ncommits: abcdef0123\n",
         )
         .unwrap();
-        std::fs::write(node_dir.join("title.md"), "First").unwrap();
-        std::fs::write(node_dir.join("prompt.md"), "do it\n").unwrap();
-        std::fs::write(node_dir.join("reply.md"), "done\n").unwrap();
+        std::fs::write(node_dir.join(crate::conversation::files::TITLE), "First").unwrap();
+        std::fs::write(node_dir.join(crate::conversation::files::PROMPT), "do it\n").unwrap();
+        std::fs::write(node_dir.join(crate::conversation::files::REPLY), "done\n").unwrap();
         let context = ToolContext {
             root: root.clone(),
             tree: Arc::new(parking_lot::RwLock::new(ConversationTree::load(&store))),

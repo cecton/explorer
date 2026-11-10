@@ -156,7 +156,7 @@ pub(crate) fn running_output(
 pub(crate) fn shown_meta<'a>(
     tree: &'a crate::conversation::ConversationTree,
     discussion: &crate::tui::state::DiscussionState,
-) -> Option<&'a crate::conversation::Metadata> {
+) -> Option<&'a crate::conversation::metadata::Metadata> {
     let node = discussion.node.as_ref()?;
     match discussion.agent {
         Some(index) => tree.agent(node, index).map(|agent| &agent.meta),
@@ -238,10 +238,10 @@ pub(crate) fn compose_launch(
     use crate::agent::Mode;
     use crate::agent::commands::Command;
     use crate::agent::commands::Expansion;
-    use crate::conversation::Metadata;
     use crate::conversation::Node;
     use crate::conversation::NodeStatus;
     use crate::conversation::NodeType;
+    use crate::conversation::metadata::Metadata;
     let discussion = state.discussions.get(&id)?;
     let typed = discussion.draft.text().trim().to_string();
     if typed.is_empty() {
@@ -354,9 +354,9 @@ pub(crate) fn start_turn(
 ) -> Result<crate::conversation::NodeId, Refusal> {
     use crate::agent::Mode;
     use crate::agent::turn::TurnRequest;
-    use crate::conversation::Metadata;
     use crate::conversation::NodeStatus;
     use crate::conversation::NodeType;
+    use crate::conversation::metadata::Metadata;
     use crate::tui::state::RowTarget;
     let Launch {
         parent,

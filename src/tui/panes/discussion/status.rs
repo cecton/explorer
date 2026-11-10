@@ -22,7 +22,7 @@ pub(crate) fn marker_bg(theme: &crate::tui::theme::HelixTheme, pane_bg: RgbValue
 
 /// One-line description of the outcome of a node or a sub-agent run, and whether it
 /// reports a failure.
-pub(crate) fn status_text(meta: &crate::conversation::Metadata) -> (String, bool) {
+pub(crate) fn status_text(meta: &crate::conversation::metadata::Metadata) -> (String, bool) {
     use crate::conversation::NodeStatus;
     use crate::conversation::NodeType;
     let kind = match meta.node_type {

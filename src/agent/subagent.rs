@@ -254,8 +254,8 @@ fn prepare(
 ) -> Result<Launch, String> {
     use crate::agent::EndpointKind;
     use crate::agent::Mode;
-    use crate::conversation::Metadata;
     use crate::conversation::NodeStatus;
+    use crate::conversation::metadata::Metadata;
     let config = &subagents.config;
     let description = str_arg(args, "description")?;
     let prompt = str_arg(args, "prompt")?;
@@ -343,7 +343,7 @@ fn prepare(
         description: Some(description.to_string()),
         resumed_from: resumed
             .as_ref()
-            .map(|(source, index)| crate::conversation::agent_id(source, *index)),
+            .map(|(source, index)| crate::conversation::agents::agent_id(source, *index)),
         ..Default::default()
     };
     let mut tree = tree.write();
@@ -355,8 +355,8 @@ fn prepare(
         .ok_or("the new sub-agent has no directory")?;
     let chain = source.map(|(_, chain)| chain).unwrap_or_default();
     let session = match chain.first() {
-        Some((first, first_index)) => crate::conversation::agent_id(first, *first_index),
-        None => crate::conversation::agent_id(node, index),
+        Some((first, first_index)) => crate::conversation::agents::agent_id(first, *first_index),
+        None => crate::conversation::agents::agent_id(node, index),
     };
     let claude_session = resumed
         .as_ref()
@@ -495,8 +495,8 @@ async fn prepare_retry(
     spec: &crate::model_spec::ModelSpec,
     config: &crate::agent::AgentConfig,
 ) -> Result<Launch, String> {
-    use crate::conversation::Metadata;
     use crate::conversation::NodeStatus;
+    use crate::conversation::metadata::Metadata;
     let (endpoint, backend) = (
         config.endpoint(&spec.endpoint).cloned(),
         config.backend(spec),
@@ -549,7 +549,7 @@ async fn prepare_retry(
         description: launch.description.clone(),
         message,
         chain: Vec::new(),
-        session: crate::conversation::agent_id(&context.node, index),
+        session: crate::conversation::agents::agent_id(&context.node, index),
         claude_session: None,
         mode: launch.mode,
         fallback: None,
@@ -652,7 +652,7 @@ pub async fn run(
         recorder.main_tx(),
     );
 
-    let id = crate::conversation::agent_id(&context.node, outcome.index);
+    let id = crate::conversation::agents::agent_id(&context.node, outcome.index);
     let over_budget = match launch.budget {
         Some(budget) if outcome.secs >= budget.as_secs() => format!(
             "[Note from Explorer: the sub-agent hit its {}m time budget; its answer \
@@ -690,7 +690,7 @@ async fn conclude(
     recorder: &mut crate::agent::turn::Recorder,
 ) {
     use crate::signal::AppSignal;
-    let id = crate::conversation::agent_id(&context.node, outcome.index);
+    let id = crate::conversation::agents::agent_id(&context.node, outcome.index);
     let updated = context
         .tree
         .write()
@@ -727,14 +727,14 @@ fn title_run(
         return;
     };
     let (node, index) = (context.node.clone(), outcome.index);
-    let session = crate::conversation::agent_id(&node, index);
+    let session = crate::conversation::agents::agent_id(&node, index);
     let dir = match context.tree.read().agent_dir(&node, index) {
         Some(dir) => dir,
         None => return,
     };
     let reply = outcome.reply.clone();
     tokio::spawn(async move {
-        let task = std::fs::read_to_string(dir.join("prompt.md")).unwrap_or_default();
+        let task = crate::conversation::files::read_prompt(&dir);
         let input = run_title_input(&task, &reply);
         let answer = match crate::agent::turn::complete(
             &backend,
@@ -754,7 +754,7 @@ fn title_run(
             tracing::warn!("title generation for sub-agent {session} returned no title");
             return;
         };
-        if let Err(e) = crate::util::fs::write_atomic(&dir.join("title.md"), &title) {
+        if let Err(e) = crate::conversation::files::write_title(&dir, &title) {
             tracing::warn!("failed to write the title of sub-agent {session}: {e}");
         }
         crate::signal::send(&main_tx, AppSignal::AgentTitleReady { node, index, title });
@@ -764,7 +764,7 @@ fn title_run(
 /// The backend that titles a finished run, or `None` when the run has nothing to
 /// describe or no summary model is configured.
 fn title_backend(subagents: &Subagents, outcome: &Outcome) -> Option<crate::agent::Backend> {
-    if !crate::conversation::has_content(&outcome.reply) {
+    if !crate::conversation::files::has_content(&outcome.reply) {
         return None;
     }
     subagents
@@ -1095,9 +1095,9 @@ mod tests {
     fn a_commit_caller_forks_only_a_chain_under_commit_nodes() {
         use crate::agent::Mode;
         use crate::conversation::ConversationTree;
-        use crate::conversation::Metadata;
         use crate::conversation::NodeId;
         use crate::conversation::NodeType;
+        use crate::conversation::metadata::Metadata;
         let tmp = tempfile::tempdir().unwrap();
         let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let mut tree = ConversationTree::load(&root);
