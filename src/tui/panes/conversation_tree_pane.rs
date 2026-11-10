@@ -67,53 +67,6 @@ pub(crate) fn layout_rows(
     rows
 }
 
-/// The straight run below `head`: the single replies that fold into it, then the fork
-/// ending the run, if any. Both are empty when `head` is itself a fork.
-fn thread_below<'a>(
-    tree: &'a crate::conversation::ConversationTree,
-    head: &crate::conversation::NodeId,
-) -> (
-    Vec<&'a crate::conversation::NodeId>,
-    Option<&'a crate::conversation::NodeId>,
-) {
-    let mut hidden = Vec::new();
-    let mut current = tree.node(head);
-    while let Some([only]) = current.map(|node| node.children.as_slice()) {
-        let reply = tree.node(only);
-        if reply.is_some_and(|reply| reply.children.len() > 1) {
-            return (hidden, Some(only));
-        }
-        hidden.push(only);
-        current = reply;
-    }
-    (hidden, None)
-}
-
-/// Last of the replies folded into the thread head `head`: where `Right` lands.
-pub(crate) fn thread_end(
-    tree: &crate::conversation::ConversationTree,
-    head: &crate::conversation::NodeId,
-) -> Option<crate::conversation::NodeId> {
-    thread_below(tree, head).0.last().map(|id| (*id).clone())
-}
-
-/// The nodes on the way to `node`, itself included, that can hold a fold: forks and
-/// thread heads.
-pub(crate) fn folds_on_the_way(
-    tree: &crate::conversation::ConversationTree,
-    node: &crate::conversation::NodeId,
-) -> Vec<crate::conversation::NodeId> {
-    use crate::conversation::NodeId;
-    let is_fork = |id: &NodeId| tree.node(id).is_some_and(|node| node.children.len() > 1);
-    tree.lineage(node)
-        .into_iter()
-        .filter(|id| {
-            let parent = tree.node(id).and_then(|node| node.parent.as_ref());
-            is_fork(id) || parent.is_none_or(is_fork)
-        })
-        .collect()
-}
-
 fn fold_of(foldable: bool, expanded: bool) -> Fold {
     match (foldable, expanded) {
         (false, _) => Fold::Leaf,
@@ -133,7 +86,7 @@ fn push_thread(
     let Some(node) = tree.node(head) else {
         return;
     };
-    let (hidden, fork) = thread_below(tree, head);
+    let (hidden, fork) = tree.thread_below(head);
     let is_fork = node.children.len() > 1;
     let fold = fold_of(is_fork || !hidden.is_empty(), expanded.contains(head));
     rows.push(TreeRow::node(head, rails.clone(), fold, branch));
@@ -684,7 +637,7 @@ impl ConversationTreeComponent {
                 }
                 let end = match row.fold {
                     Fold::Leaf => None,
-                    _ => thread_end(&state.conversations.read(), &id),
+                    _ => state.conversations.read().thread_end(&id),
                 };
                 if let Some(end) = end {
                     state.tree_view.selected = Some(RowTarget::Node(end));
@@ -737,10 +690,10 @@ impl ConversationTreeComponent {
                     DiscussionComponent::show(state, *window);
                 }
                 Some(RowTarget::Node(id)) => {
-                    DiscussionComponent::open(state, main_tx, id.clone());
+                    DiscussionComponent::open(state, main_tx, id.clone(), None);
                 }
                 Some(RowTarget::Agent { node, index }) => {
-                    DiscussionComponent::open_agent(state, main_tx, node.clone(), *index);
+                    DiscussionComponent::open(state, main_tx, node.clone(), Some(*index));
                 }
                 None => {}
             },
@@ -856,7 +809,7 @@ impl ConversationTreeComponent {
                             }
                             RowTarget::Agent { node, index } => {
                                 let (node, index) = (node.clone(), *index);
-                                DiscussionComponent::open_agent(state, main_tx, node, index);
+                                DiscussionComponent::open(state, main_tx, node, Some(index));
                             }
                             RowTarget::Node(_) => {}
                         }
@@ -881,7 +834,7 @@ impl ConversationTreeComponent {
                     .is_some_and(|(at, last)| last == row && now.duration_since(at) < DOUBLE_CLICK);
                 self.last_click = (!double).then_some((now, row));
                 if double {
-                    DiscussionComponent::open(state, main_tx, id);
+                    DiscussionComponent::open(state, main_tx, id, None);
                 }
             }
             InputEvent::Mouse(MouseInput {
@@ -1028,7 +981,7 @@ impl ConversationTreeComponent {
     /// Selects `target` for the unfiltered tree, opening the folds that hide its node.
     fn reveal(state: &mut crate::tui::state::AppState, target: crate::tui::state::RowTarget) {
         if let Some(id) = target.node() {
-            let folds = folds_on_the_way(&state.conversations.read(), id);
+            let folds = state.conversations.read().folds_on_the_way(id);
             state
                 .tree_view
                 .expanded
@@ -2201,7 +2154,7 @@ mod tests {
     fn thread_end_is_the_last_reply_before_a_leaf_or_a_fork() {
         use crate::conversation::NodeId;
         let (_tmp, tree) = tree_with(&["a1/a2/a3", "b1/b2/b3/c4", "b1/b2/b3/d4", "e1"]);
-        let end = |head: &str| thread_end(&tree, &NodeId::new(head));
+        let end = |head: &str| tree.thread_end(&NodeId::new(head));
         assert_eq!(end("a1"), Some(NodeId::new("a3")));
         assert_eq!(end("b1"), Some(NodeId::new("b2")));
         assert_eq!(end("b3"), None);
@@ -2212,7 +2165,7 @@ mod tests {
     fn folds_on_the_way_are_the_forks_and_thread_heads() {
         use crate::conversation::NodeId;
         let (_tmp, tree) = tree_with(&["a1/a2/a3/b4/b5", "a1/a2/a3/c4"]);
-        let folds = folds_on_the_way(&tree, &NodeId::new("b5"));
+        let folds = tree.folds_on_the_way(&NodeId::new("b5"));
         let names: Vec<&str> = folds.iter().map(NodeId::as_str).collect();
         assert_eq!(names, ["a1", "a3", "b4"]);
     }

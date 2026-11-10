@@ -20,27 +20,6 @@ pub(crate) fn marker_bg(theme: &crate::tui::theme::HelixTheme, pane_bg: RgbValue
     )
 }
 
-/// Paint style for one markdown span: its fg over `bg`, with the span's attributes.
-pub(crate) fn span_style(span: &crate::tui::widgets::markdown::Span, bg: RgbValue) -> TuiStyle {
-    let mut style = new_style!(
-        color_fg: {TuiColor::from(span.fg)} color_bg: {TuiColor::from(bg)}
-    );
-    use r3bl_tui::tui_style_attrib;
-    if span.bold {
-        style.attribs.bold = Some(tui_style_attrib::Bold);
-    }
-    if span.italic {
-        style.attribs.italic = Some(tui_style_attrib::Italic);
-    }
-    if span.underline {
-        style.attribs.underline = Some(tui_style_attrib::Underline);
-    }
-    if span.strikethrough {
-        style.attribs.strikethrough = Some(tui_style_attrib::Strikethrough);
-    }
-    style
-}
-
 /// One-line description of the outcome of a node or a sub-agent run, and whether it
 /// reports a failure.
 pub(crate) fn status_text(meta: &crate::conversation::Metadata) -> (String, bool) {

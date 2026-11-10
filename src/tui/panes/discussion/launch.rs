@@ -90,6 +90,28 @@ impl Refusal {
     }
 }
 
+/// Composes the draft of window `id`, starts its turn and points the window at the new
+/// node: `None` when there is nothing to send, `Ok(())` once the turn runs, the refusal
+/// when it cannot. A refused window is left as it was.
+pub(crate) fn launch_window(
+    state: &mut crate::tui::state::AppState,
+    main_tx: crate::signal::MainTx,
+    id: usize,
+) -> Option<Result<(), Refusal>> {
+    let launch = match compose_launch(state, id)? {
+        Ok(launch) => launch,
+        Err(refusal) => return Some(Err(refusal)),
+    };
+    let prompt = launch.prompt.clone();
+    match start_turn(state, main_tx, launch) {
+        Ok(node) => {
+            crate::tui::panes::discussion::DiscussionComponent::apply_sent(state, id, node, prompt);
+            Some(Ok(()))
+        }
+        Err(refusal) => Some(Err(refusal)),
+    }
+}
+
 /// The model a node was run with, when its metadata names one completely.
 pub(crate) fn node_model(node: &crate::conversation::Node) -> Option<crate::model_spec::ModelSpec> {
     node.meta.model_spec()
@@ -440,7 +462,7 @@ pub(crate) fn start_turn(
         let context = tree
             .turn_context(&node)
             .ok_or_else(|| Refusal::Rejected("the new node has no directory".to_string()))?;
-        let folds = crate::tui::panes::conversation_tree_pane::folds_on_the_way(&tree, &node);
+        let folds = tree.folds_on_the_way(&node);
         (node.clone(), tree.lineage(&node), folds, context)
     };
     let session = lineage.first().unwrap_or(&node).as_str().to_string();

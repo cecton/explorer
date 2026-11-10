@@ -133,25 +133,20 @@ impl crate::tui::panes::discussion::DiscussionComponent {
                 state.queued_turns.remove(0);
                 continue;
             }
-            let Some(composed) = crate::tui::panes::discussion::launch::compose_launch(state, id)
-            else {
-                state.queued_turns.remove(0);
-                continue;
-            };
-            let started = composed.and_then(|launch| {
-                let prompt = launch.prompt.clone();
-                crate::tui::panes::discussion::launch::start_turn(state, main_tx.clone(), launch)
-                    .map(|node| (node, prompt))
-            });
-            let refusal = match started {
-                Ok((node, prompt)) => {
+            let refusal = match crate::tui::panes::discussion::launch::launch_window(
+                state,
+                main_tx.clone(),
+                id,
+            ) {
+                None => {
                     state.queued_turns.remove(0);
-                    crate::tui::panes::discussion::DiscussionComponent::apply_sent(
-                        state, id, node, prompt,
-                    );
                     continue;
                 }
-                Err(refusal) => refusal,
+                Some(Ok(())) => {
+                    state.queued_turns.remove(0);
+                    continue;
+                }
+                Some(Err(refusal)) => refusal,
             };
             let held = matches!(refusal, Refusal::Busy(_) | Refusal::DirtyTree);
             let reason = refusal.into_reason();

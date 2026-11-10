@@ -204,36 +204,14 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
             let scroll = state.pane_manager.window_scroll(&window);
 
             for (row_offset, line) in lines.iter().skip(scroll).take(rows).enumerate() {
-                let bg = line.bg.unwrap_or(pane_bg);
-                let background = new_style!(color_bg: {TuiColor::from(bg)});
-                ops += RenderOpCommon::MoveCursorPositionRelTo(
+                crate::tui::widgets::markdown::paint_row(
+                    &mut ops,
                     origin,
-                    vp_col(0) + vp_row(row_offset as u16),
+                    row_offset,
+                    &line.spans,
+                    line.bg.unwrap_or(pane_bg),
+                    width,
                 );
-                ops += RenderOpCommon::ApplyColors(Some(background));
-                ops +=
-                    RenderOpIR::PaintTextWithAttributes(" ".repeat(width).into(), Some(background));
-                let mut x = 0usize;
-                for span in &line.spans {
-                    if x >= width {
-                        break;
-                    }
-                    let text = if x + crate::tui::widgets::text_layout::display_width(&span.text)
-                        > width
-                    {
-                        crate::tui::widgets::text_layout::truncate(&span.text, width - x)
-                    } else {
-                        span.text.clone()
-                    };
-                    let style = crate::tui::panes::discussion::status::span_style(span, bg);
-                    ops += RenderOpCommon::MoveCursorPositionRelTo(
-                        origin,
-                        vp_col(x as u16) + vp_row(row_offset as u16),
-                    );
-                    ops += RenderOpCommon::ApplyColors(Some(style));
-                    ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                    x += crate::tui::widgets::text_layout::display_width(&span.text);
-                }
             }
             global_data.pipeline.push(ZOrder::Normal, ops);
         })

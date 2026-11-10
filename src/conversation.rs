@@ -828,6 +828,42 @@ pub fn read_work_log(dir: &camino::Utf8Path) -> Vec<String> {
         .collect()
 }
 
+impl ConversationTree {
+    /// The straight run below `head`: the single replies that fold into it, then the fork
+    /// ending the run, if any. Both are empty when `head` is itself a fork.
+    pub fn thread_below<'a>(&'a self, head: &NodeId) -> (Vec<&'a NodeId>, Option<&'a NodeId>) {
+        let mut hidden = Vec::new();
+        let mut current = self.node(head);
+        while let Some([only]) = current.map(|node| node.children.as_slice()) {
+            let reply = self.node(only);
+            if reply.is_some_and(|reply| reply.children.len() > 1) {
+                return (hidden, Some(only));
+            }
+            hidden.push(only);
+            current = reply;
+        }
+        (hidden, None)
+    }
+
+    /// Last of the replies folded into the thread head `head`: where `Right` lands.
+    pub fn thread_end(&self, head: &NodeId) -> Option<NodeId> {
+        self.thread_below(head).0.last().map(|id| (*id).clone())
+    }
+
+    /// The nodes on the way to `node`, itself included, that can hold a fold: forks and
+    /// thread heads.
+    pub fn folds_on_the_way(&self, node: &NodeId) -> Vec<NodeId> {
+        let is_fork = |id: &NodeId| self.node(id).is_some_and(|node| node.children.len() > 1);
+        self.lineage(node)
+            .into_iter()
+            .filter(|id| {
+                let parent = self.node(id).and_then(|node| node.parent.as_ref());
+                is_fork(id) || parent.is_none_or(is_fork)
+            })
+            .collect()
+    }
+}
+
 /// Roots listed on one page of the table of contents.
 const TOC_ROOTS_PER_PAGE: usize = 30;
 /// Nodes of a straight line listed on one page before it points to the next one.

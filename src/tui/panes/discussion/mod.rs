@@ -126,7 +126,7 @@ impl DiscussionComponent {
             return;
         };
         match crate::tui::panes::discussion::launch::start_turn(state, main_tx.clone(), launch) {
-            Ok(sibling) => Self::open(state, main_tx, sibling),
+            Ok(sibling) => Self::open(state, main_tx, sibling, None),
             Err(refusal) => state.tree_view.notice = Some(refusal.into_reason()),
         }
     }
@@ -171,73 +171,42 @@ impl DiscussionComponent {
         Self::show(state, id);
     }
 
-    /// Focuses the window already showing `node`, or opens a new one and loads the
-    /// node's prompt and reply from disk. The window starts with the node's model and
-    /// an empty draft: opening never runs anything.
+    /// Focuses the window already showing `node` (or sub-agent run `index` of it), or
+    /// opens a new one and loads what it shows from disk. The window starts with the
+    /// model that ran it and an empty draft: opening never runs anything.
     pub(crate) fn open(
         state: &mut crate::tui::state::AppState,
         main_tx: crate::signal::MainTx,
         node: crate::conversation::NodeId,
+        agent: Option<u32>,
     ) {
         use crate::tui::state::DiscussionState;
         let existing = state
             .discussions
             .iter()
             .find(|(_, discussion)| {
-                discussion.node.as_ref() == Some(&node) && discussion.agent.is_none()
+                discussion.node.as_ref() == Some(&node) && discussion.agent == agent
             })
             .map(|(id, _)| *id);
         let id = existing.unwrap_or_else(|| {
             let id = state.next_discussion_id;
             state.next_discussion_id += 1;
-            let model = state
-                .conversations
-                .read()
-                .node(&node)
-                .and_then(crate::tui::panes::discussion::launch::node_model);
+            let model = {
+                let tree = state.conversations.read();
+                match agent {
+                    Some(index) => tree
+                        .agent(&node, index)
+                        .and_then(|agent| agent.meta.model_spec()),
+                    None => tree
+                        .node(&node)
+                        .and_then(crate::tui::panes::discussion::launch::node_model),
+                }
+            };
             state.discussions.insert(
                 id,
                 DiscussionState {
                     node: Some(node),
-                    model,
-                    ..Default::default()
-                },
-            );
-            Self::load_content(state, main_tx, id);
-            id
-        });
-        Self::show(state, id);
-    }
-
-    /// Focuses the window already showing sub-agent run `index` of `node`, or opens a
-    /// new one, read-only, and loads the run's task and answer from disk.
-    pub(crate) fn open_agent(
-        state: &mut crate::tui::state::AppState,
-        main_tx: crate::signal::MainTx,
-        node: crate::conversation::NodeId,
-        index: u32,
-    ) {
-        use crate::tui::state::DiscussionState;
-        let existing = state
-            .discussions
-            .iter()
-            .find(|(_, discussion)| {
-                discussion.node.as_ref() == Some(&node) && discussion.agent == Some(index)
-            })
-            .map(|(id, _)| *id);
-        let id = existing.unwrap_or_else(|| {
-            let id = state.next_discussion_id;
-            state.next_discussion_id += 1;
-            let model = state
-                .conversations
-                .read()
-                .agent(&node, index)
-                .and_then(|agent| agent.meta.model_spec());
-            state.discussions.insert(
-                id,
-                DiscussionState {
-                    node: Some(node),
-                    agent: Some(index),
+                    agent,
                     model,
                     ..Default::default()
                 },
@@ -358,18 +327,9 @@ impl DiscussionComponent {
             ModelPickerComponent::open(state, main_tx, ModelPickerPurpose::Window(id));
             return;
         }
-        let Some(composed) = crate::tui::panes::discussion::launch::compose_launch(state, id)
-        else {
-            return;
-        };
-        let started = composed.and_then(|launch| {
-            let prompt = launch.prompt.clone();
-            crate::tui::panes::discussion::launch::start_turn(state, main_tx, launch)
-                .map(|node| (node, prompt))
-        });
-        match started {
-            Ok((node, prompt)) => Self::apply_sent(state, id, node, prompt),
-            Err(Refusal::Busy(_)) => {
+        match crate::tui::panes::discussion::launch::launch_window(state, main_tx, id) {
+            None | Some(Ok(())) => {}
+            Some(Err(Refusal::Busy(_))) => {
                 let Some(discussion) = state.discussions.get_mut(&id) else {
                     return;
                 };
@@ -377,7 +337,7 @@ impl DiscussionComponent {
                 let parent = discussion.node.clone();
                 state.queued_turns.push(PendingTurn { window: id, parent });
             }
-            Err(refusal) => {
+            Some(Err(refusal)) => {
                 if let Some(discussion) = state.discussions.get_mut(&id) {
                     discussion.notice = Some(refusal.into_reason());
                 }
@@ -918,8 +878,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                         } else {
                             piece.text
                         };
-                    let mut style =
-                        crate::tui::panes::discussion::status::span_style(piece.span, bg);
+                    let mut style = crate::tui::widgets::markdown::span_style(piece.span, bg);
                     if piece.marked {
                         style.color_bg = Some(TuiColor::from(marked_bg));
                         if !keep_fg {
@@ -2138,7 +2097,7 @@ mod tests {
         let mut state = empty_state();
         *state.conversations.write() = ConversationTree::load(&root);
         let (main_tx, _main_rx) = tokio::sync::mpsc::channel(1);
-        DiscussionComponent::open(&mut state, main_tx, NodeId::new("a2"));
+        DiscussionComponent::open(&mut state, main_tx, NodeId::new("a2"), None);
 
         assert_eq!(state.discussions.len(), 1);
         let discussion = state.discussions.values().next().unwrap();

@@ -145,6 +145,64 @@ struct Renderer<'a> {
     table: Option<TableCtx>,
 }
 
+/// Paint style for one markdown span: its fg over `bg`, with the span's attributes.
+pub(crate) fn span_style(span: &Span, bg: RgbValue) -> TuiStyle {
+    let mut style = new_style!(
+        color_fg: {TuiColor::from(span.fg)} color_bg: {TuiColor::from(bg)}
+    );
+    use r3bl_tui::tui_style_attrib;
+    if span.bold {
+        style.attribs.bold = Some(tui_style_attrib::Bold);
+    }
+    if span.italic {
+        style.attribs.italic = Some(tui_style_attrib::Italic);
+    }
+    if span.underline {
+        style.attribs.underline = Some(tui_style_attrib::Underline);
+    }
+    if span.strikethrough {
+        style.attribs.strikethrough = Some(tui_style_attrib::Strikethrough);
+    }
+    style
+}
+
+/// Paints one row of markdown spans at `origin`, `row` down: the stripe behind them in
+/// `bg`, then each span at its column, cut where the row runs out of `width`.
+pub(crate) fn paint_row(
+    ops: &mut RenderOpIRVec,
+    origin: VPPos,
+    row: usize,
+    spans: &[Span],
+    bg: RgbValue,
+    width: usize,
+) {
+    let stripe = new_style!(color_bg: {TuiColor::from(bg)});
+    *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(row as u16));
+    *ops += RenderOpCommon::ApplyColors(Some(stripe));
+    *ops += RenderOpIR::PaintTextWithAttributes(" ".repeat(width).into(), Some(stripe));
+    let mut x = 0usize;
+    for span in spans {
+        if x >= width {
+            break;
+        }
+        let truncated;
+        let text: &str = if x + crate::tui::widgets::text_layout::display_width(&span.text) > width
+        {
+            truncated =
+                crate::tui::widgets::text_layout::truncate(&span.text, width.saturating_sub(x));
+            truncated.as_str()
+        } else {
+            &span.text
+        };
+        let style = span_style(span, bg);
+        *ops +=
+            RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(x as u16) + vp_row(row as u16));
+        *ops += RenderOpCommon::ApplyColors(Some(style));
+        *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+        x += crate::tui::widgets::text_layout::display_width(&span.text);
+    }
+}
+
 /// Renders markdown to styled lines fitted to `width`, colored from the theme's
 /// `markup.*` scopes. Attributes (bold, italic, …) come from the markdown element;
 /// colors come from the theme.
