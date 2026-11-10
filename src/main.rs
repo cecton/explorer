@@ -155,7 +155,7 @@ async fn main() {
     }
 
     let mut initial_state =
-        tui::app::build_state(Arc::clone(&files), root.clone(), theme.clone(), keymap);
+        tui::state::AppState::new(Arc::clone(&files), root.clone(), theme.clone(), keymap);
     initial_state.after_agents_grace = std::time::Duration::from_secs(after_agents.grace_seconds);
     initial_state.config_aliases = aliases;
     initial_state.agent = Arc::new(agent::AgentConfig::resolve(

@@ -16,10 +16,9 @@ impl SurfaceRender<crate::tui::state::AppState, crate::signal::AppSignal> for Pa
         >,
         has_focus: &mut HasFocus,
     ) -> CommonResult<()> {
-        use crate::tui::pane_component::Id;
         throws!({
             const COLUMN_ID_BASE: u8 = 100;
-            let container_id = FlexBoxId::from(Id::Container);
+            let container_id = crate::tui::pane_component::container_id();
             box_start!(
                 in: surface,
                 id: container_id,
@@ -72,7 +71,7 @@ impl SurfaceRender<crate::tui::state::AppState, crate::signal::AppSignal> for Pa
                     );
                 }
 
-                let pane_id = FlexBoxId::from(Id::pane(slot.slot));
+                let pane_id = crate::tui::pane_component::pane_id(slot.slot);
                 let height_pc = ((slot_height as i32 * 100) + surface_rows as i32 - 1)
                     .div_euclid(surface_rows as i32)
                     .max(1);

@@ -269,6 +269,142 @@ impl CommandLine {
         self.selected = 0;
     }
 
+    /// Hands an event to the line while it is open: it takes every key ahead of the leader
+    /// key, `Tab`/`Shift+Tab` walking the palette and `Enter` taking what it highlights, a
+    /// second `Enter` running the completed line. The arrows stay with the input, as
+    /// everywhere. Returns whether the line took the event.
+    pub fn handle_event(
+        input_event: &InputEvent,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
+    ) -> bool {
+        if global_data.state.command_line.is_none() {
+            return false;
+        }
+        if !matches!(input_event, InputEvent::Mouse(_))
+            && global_data
+                .state
+                .command_line
+                .as_ref()
+                .is_some_and(|command_line| command_line.input.selecting())
+        {
+            if let Some(command_line) = global_data.state.command_line.as_mut() {
+                command_line.input.cancel_select();
+            }
+            global_data.state.mouse_drag_active = false;
+        }
+        let entries = global_data
+            .state
+            .command_line
+            .as_ref()
+            .map(|command_line| {
+                crate::tui::command_line::palette_entries(
+                    command_line.input.text(),
+                    &global_data.state,
+                )
+            })
+            .unwrap_or_default();
+        match &input_event {
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Tab),
+            }) if !entries.is_empty() => {
+                if let Some(command_line) = global_data.state.command_line.as_mut() {
+                    command_line.move_selection(true, entries.len());
+                    command_line.error = None;
+                }
+                return true;
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::BackTab),
+            }) if !entries.is_empty() => {
+                if let Some(command_line) = global_data.state.command_line.as_mut() {
+                    command_line.move_selection(false, entries.len());
+                    command_line.error = None;
+                }
+                return true;
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Enter),
+            }) if !entries.is_empty() => {
+                if let Some(command_line) = global_data.state.command_line.as_mut() {
+                    command_line.accept(&entries);
+                }
+                return true;
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Enter),
+            }) => {
+                crate::tui::command_line::run_command_line(global_data);
+                return true;
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Esc),
+            }) => {
+                global_data.state.command_line = None;
+                return true;
+            }
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('c'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) => {
+                if let Some(command_line) = global_data.state.command_line.as_mut() {
+                    command_line.input.clear();
+                    command_line.error = None;
+                    command_line.selected = 0;
+                }
+                return true;
+            }
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::Character('d'),
+                mask:
+                    ModifierKeysMask {
+                        ctrl_key_state: KeyState::Pressed,
+                        shift_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) if global_data
+                .state
+                .command_line
+                .as_ref()
+                .is_some_and(|command_line| command_line.input.text().is_empty()) =>
+            {
+                global_data.state.command_line = None;
+                return true;
+            }
+            InputEvent::Keyboard(_) | InputEvent::BracketedPaste(_) => {
+                if let Some(command_line) = global_data.state.command_line.as_mut() {
+                    let before = command_line.input.text().to_string();
+                    command_line.input.handle_key(input_event);
+                    command_line.error = None;
+                    if command_line.input.text() != before {
+                        command_line.selected = 0;
+                    }
+                }
+                return true;
+            }
+            InputEvent::Mouse(mouse) => {
+                let Some(command_line) = global_data.state.command_line.as_mut() else {
+                    return true;
+                };
+                if command_line.input.handle_mouse(mouse) {
+                    global_data.state.mouse_drag_active = command_line.input.selecting();
+                    return true;
+                }
+                // A mouse event the input does not take means its release was lost.
+                if command_line.input.selecting() {
+                    command_line.input.cancel_select();
+                    global_data.state.mouse_drag_active = false;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     /// Moves the palette's highlight, wrapping, and returns whether it moved.
     pub fn move_selection(&mut self, down: bool, entries: usize) -> bool {
         if entries == 0 {

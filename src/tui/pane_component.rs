@@ -1375,81 +1375,52 @@ fn render_scrollbar(
     }
 }
 
-#[repr(u8)]
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum Id {
-    Container = 1,
-    Pane0 = 2,
-    Pane1 = 3,
-    Pane2 = 4,
-    Pane3 = 5,
-    Pane4 = 6,
-    Pane5 = 7,
-    Pane6 = 8,
-    Pane7 = 9,
-    Pane8 = 10,
-    Pane9 = 11,
-    Pane10 = 12,
-    Pane11 = 13,
-    Pane12 = 14,
-    Pane13 = 15,
-    Pane14 = 16,
-    Pane15 = 17,
+/// The id of the container box that holds every pane slot.
+const CONTAINER_ID: u8 = 1;
+
+/// The id of the first pane slot; each slot takes the next value.
+const FIRST_PANE_ID: u8 = 2;
+
+pub(crate) fn container_id() -> FlexBoxId {
+    FlexBoxId::new(CONTAINER_ID)
 }
 
-impl Id {
-    pub fn pane(slot: usize) -> Self {
-        match slot {
-            0 => Id::Pane0,
-            1 => Id::Pane1,
-            2 => Id::Pane2,
-            3 => Id::Pane3,
-            4 => Id::Pane4,
-            5 => Id::Pane5,
-            6 => Id::Pane6,
-            7 => Id::Pane7,
-            8 => Id::Pane8,
-            9 => Id::Pane9,
-            10 => Id::Pane10,
-            11 => Id::Pane11,
-            12 => Id::Pane12,
-            13 => Id::Pane13,
-            14 => Id::Pane14,
-            _ => Id::Pane15,
-        }
-    }
-}
-
-impl From<Id> for u8 {
-    fn from(id: Id) -> u8 {
-        id as u8
-    }
-}
-
-impl From<Id> for FlexBoxId {
-    fn from(id: Id) -> FlexBoxId {
-        FlexBoxId::new(id)
-    }
+pub(crate) fn pane_id(slot: usize) -> FlexBoxId {
+    FlexBoxId::new(FIRST_PANE_ID + slot.min(crate::tui::pane_manager::MAX_PANES - 1) as u8)
 }
 
 pub(crate) fn pane_slot(id: FlexBoxId) -> Option<usize> {
-    match id.inner {
-        x if x == Id::Pane0 as u8 => Some(0),
-        x if x == Id::Pane1 as u8 => Some(1),
-        x if x == Id::Pane2 as u8 => Some(2),
-        x if x == Id::Pane3 as u8 => Some(3),
-        x if x == Id::Pane4 as u8 => Some(4),
-        x if x == Id::Pane5 as u8 => Some(5),
-        x if x == Id::Pane6 as u8 => Some(6),
-        x if x == Id::Pane7 as u8 => Some(7),
-        x if x == Id::Pane8 as u8 => Some(8),
-        x if x == Id::Pane9 as u8 => Some(9),
-        x if x == Id::Pane10 as u8 => Some(10),
-        x if x == Id::Pane11 as u8 => Some(11),
-        x if x == Id::Pane12 as u8 => Some(12),
-        x if x == Id::Pane13 as u8 => Some(13),
-        x if x == Id::Pane14 as u8 => Some(14),
-        x if x == Id::Pane15 as u8 => Some(15),
-        _ => None,
+    let slot = usize::from(id.inner.checked_sub(FIRST_PANE_ID)?);
+    (slot < crate::tui::pane_manager::MAX_PANES).then_some(slot)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pane_slot_and_its_id_map_back_to_each_other() {
+        for slot in 0..crate::tui::pane_manager::MAX_PANES {
+            assert_eq!(pane_slot(pane_id(slot)), Some(slot));
+        }
+    }
+
+    #[test]
+    fn the_slot_ids_leave_room_for_the_container_and_the_columns() {
+        // Column styles start at 100, so the pane slots have to stay under it.
+        assert!(u8::from(container_id()) < u8::from(pane_id(0)));
+        assert!(u8::from(pane_id(crate::tui::pane_manager::MAX_PANES)) < 100);
+    }
+
+    #[test]
+    fn a_slot_past_the_last_pane_stays_on_the_last_pane() {
+        let last = crate::tui::pane_manager::MAX_PANES - 1;
+        assert_eq!(pane_id(last + 1), pane_id(last));
+        assert_eq!(pane_slot(pane_id(last + 1)), Some(last));
+    }
+
+    #[test]
+    fn the_container_is_no_pane_slot() {
+        assert_eq!(pane_slot(container_id()), None);
     }
 }

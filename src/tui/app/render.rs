@@ -118,14 +118,13 @@ pub(super) fn render(
 }
 
 fn create_stylesheet(theme: &crate::tui::theme::HelixTheme) -> CommonResult<TuiStylesheet> {
-    use crate::tui::pane_component::Id;
     let bg = theme
         .ui_bg("ui.background")
         .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
     throws_with_return!({
         let mut styles = tui_stylesheet! {
             new_style!(
-                id: {Id::Container}
+                id: {crate::tui::pane_component::container_id()}
                 color_bg: {TuiColor::from(bg)}
             )
         };
@@ -138,7 +137,7 @@ fn create_stylesheet(theme: &crate::tui::theme::HelixTheme) -> CommonResult<TuiS
             ))?;
         }
         for slot in 0..crate::tui::pane_manager::MAX_PANES {
-            let id = Id::pane(slot);
+            let id = crate::tui::pane_component::pane_id(slot);
             styles.add_style(new_style!(
                 id: {id}
                 padding: {0}

@@ -9,11 +9,10 @@ pub(super) fn components(
     >,
     has_focus: &mut HasFocus,
 ) {
-    use crate::tui::pane_component::Id;
     use crate::tui::pane_component::PaneComponent;
     use std::sync::Arc;
     for slot in 0..crate::tui::pane_manager::MAX_PANES {
-        let pane_id = FlexBoxId::from(Id::pane(slot));
+        let pane_id = crate::tui::pane_component::pane_id(slot);
         if let ContainsResult::DoesNotContain =
             ComponentRegistry::contains(component_registry_map, pane_id)
         {
@@ -31,7 +30,7 @@ pub(super) fn components(
     }
 
     if has_focus.get_id().is_none() {
-        has_focus.set_id(FlexBoxId::from(Id::Pane0));
+        has_focus.set_id(crate::tui::pane_component::pane_id(0));
     }
 }
 pub(super) fn background_services(

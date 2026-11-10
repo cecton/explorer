@@ -437,11 +437,10 @@ impl App for AppMain {
 
 /// Returns the `FlexBoxId` for the pane slot that corresponds to the focused window.
 pub(super) fn focused_pane_id(state: &crate::tui::state::AppState) -> FlexBoxId {
-    use crate::tui::pane_component::Id;
     let Some(slot) = state.pane_manager.focused_slot() else {
-        return FlexBoxId::from(Id::Pane0);
+        return crate::tui::pane_component::pane_id(0);
     };
-    FlexBoxId::from(Id::pane(slot))
+    crate::tui::pane_component::pane_id(slot)
 }
 
 fn sync_has_focus(state: &crate::tui::state::AppState, has_focus: &mut HasFocus) {
@@ -491,16 +490,6 @@ fn poll_terminal_output(app: &mut AppMain, state: &mut crate::tui::state::AppSta
             }
         }
     }
-}
-
-pub fn build_state(
-    files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
-    root: camino::Utf8PathBuf,
-    theme: crate::tui::theme::HelixTheme,
-    keymap: crate::tui::keymap::Keymap,
-) -> crate::tui::state::AppState {
-    use crate::tui::state::AppState;
-    AppState::new(files, root, theme, keymap)
 }
 
 pub async fn run(

@@ -353,12 +353,11 @@ mod tests {
     /// A report is read and gone: closing its window leaves nothing in `AppState`.
     #[test]
     fn esc_closes_the_window_and_drops_the_report() {
-        use crate::tui::pane_component::Id;
         use crate::tui::pane_manager::Window;
         let mut state = empty_state();
         let id = ReportComponent::show(&mut state, "t".to_string(), "m".to_string());
         let mut global_data = global_data_with_a_report(state);
-        let mut component = ReportComponent::new(FlexBoxId::from(Id::pane(0)));
+        let mut component = ReportComponent::new(crate::tui::pane_component::pane_id(0));
 
         let closed = component
             .handle_event(
