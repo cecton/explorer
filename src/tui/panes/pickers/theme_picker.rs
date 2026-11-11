@@ -8,10 +8,11 @@ pub struct ThemePickerComponent {
 
 impl ThemePickerComponent {
     pub fn new(id: FlexBoxId) -> Self {
+        use crate::tui::widgets::fuzzy::Kind;
         use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
         Self {
             id,
-            picker: FuzzyPicker::new(),
+            picker: FuzzyPicker::new(Kind::Plain),
         }
     }
 }
@@ -76,40 +77,19 @@ impl crate::tui::widgets::title_row::TitleRow for ThemePickerComponent {
     }
 }
 
-fn run_theme_name_match(query: &str) -> Vec<(String, Vec<u32>)> {
+fn run_theme_name_match(text: &str) -> Vec<String> {
     use crate::tui::theme::HelixTheme;
-    let pattern = nucleo::pattern::Pattern::parse(
-        query,
-        nucleo::pattern::CaseMatching::Smart,
-        nucleo::pattern::Normalization::Smart,
-    );
-
-    if pattern.atoms.is_empty() {
-        return HelixTheme::theme_names()
-            .map(|n| (n.to_string(), vec![]))
-            .collect();
+    use crate::tui::widgets::fuzzy::{Kind, Query};
+    let mut query = Query::new(Kind::Plain);
+    query.set(text);
+    if query.is_empty() {
+        return HelixTheme::theme_names().map(str::to_string).collect();
     }
-
-    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
-    let mut buf = Vec::new();
-    let mut scored: Vec<(String, u32, Vec<u32>)> = HelixTheme::theme_names()
-        .filter_map(|name| {
-            let haystack = nucleo::Utf32Str::new(name, &mut buf);
-            let mut indices = Vec::new();
-            pattern
-                .indices(haystack, &mut matcher, &mut indices)
-                .map(|score| {
-                    indices.sort_unstable();
-                    indices.dedup();
-                    (name.to_string(), score, indices)
-                })
-        })
+    let mut scored: Vec<(String, u32)> = HelixTheme::theme_names()
+        .filter_map(|name| query.rank(name).map(|score| (name.to_string(), score)))
         .collect();
-    scored.sort_by_key(|&(_, score, _)| std::cmp::Reverse(score));
-    scored
-        .into_iter()
-        .map(|(name, _, idx)| (name, idx))
-        .collect()
+    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
+    scored.into_iter().map(|(name, _)| name).collect()
 }
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ThemePickerComponent {
@@ -157,7 +137,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ThemeP
         {
             let query = global_data.state.theme_picker.query.text().to_string();
             global_data.state.theme_picker.results = run_theme_name_match(&query);
-            if let Some((name, _)) = global_data.state.theme_picker.results.first() {
+            if let Some(name) = global_data.state.theme_picker.results.first() {
                 global_data.state.theme_picker.selected = Some(name.clone());
                 if let Some(theme) = HelixTheme::from_name(name) {
                     global_data.state.theme = theme;

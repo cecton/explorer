@@ -4,7 +4,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
-pub(crate) type PickerResultMsg = (u64, Vec<(crate::tui::pane_manager::Window, Vec<u32>)>);
+pub(crate) type PickerResultMsg = (u64, Vec<crate::tui::pane_manager::Window>);
 
 pub struct WindowPickerComponent {
     id: FlexBoxId,
@@ -19,10 +19,11 @@ impl WindowPickerComponent {
         results_tx: tokio::sync::mpsc::Sender<PickerResultMsg>,
         generation: Arc<AtomicU64>,
     ) -> Self {
+        use crate::tui::widgets::fuzzy::Kind;
         use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
         Self {
             id,
-            picker: FuzzyPicker::new(),
+            picker: FuzzyPicker::new(Kind::Paths),
             generation,
             results_tx,
         }
@@ -67,7 +68,7 @@ impl WindowPickerComponent {
     pub(crate) fn open_windows_results(
         files: &[Arc<crate::loader::LoadedFile>],
         window_stack: &[crate::tui::pane_manager::Window],
-    ) -> Vec<(crate::tui::pane_manager::Window, Vec<u32>)> {
+    ) -> Vec<crate::tui::pane_manager::Window> {
         use crate::tui::pane_manager::Window;
         let mut seen: HashSet<Window> = HashSet::new();
         let mut results = Vec::new();
@@ -83,7 +84,7 @@ impl WindowPickerComponent {
                 Window::WindowPicker | Window::ThemePicker | Window::ModelPicker => false,
             };
             if listed && seen.insert(*window) {
-                results.push((*window, vec![]));
+                results.push(*window);
             }
         }
         results
@@ -193,46 +194,34 @@ fn row_accents(theme: &crate::tui::theme::HelixTheme) -> RowAccents {
 }
 
 fn run_file_name_match(
-    query: &str,
+    text: &str,
     files: &[Arc<crate::loader::LoadedFile>],
     root: &camino::Utf8PathBuf,
     window_stack: &[crate::tui::pane_manager::Window],
-) -> Vec<(crate::tui::pane_manager::Window, Vec<u32>)> {
+) -> Vec<crate::tui::pane_manager::Window> {
     use crate::loader::FileKey;
     use crate::tui::pane_manager::Window;
-    let pattern = nucleo::pattern::Pattern::parse(
-        query,
-        nucleo::pattern::CaseMatching::Smart,
-        nucleo::pattern::Normalization::Smart,
-    );
+    use crate::tui::widgets::fuzzy::{Kind, Query};
+    let mut query = Query::new(Kind::Paths);
+    query.set(text);
 
-    if pattern.atoms.is_empty() {
+    if query.is_empty() {
         return WindowPickerComponent::open_windows_results(files, window_stack);
     }
 
-    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT.match_paths());
-    let mut buf = Vec::new();
-    let mut scored: Vec<(FileKey, u32, Vec<u32>)> = files
+    let mut scored: Vec<(FileKey, u32)> = files
         .iter()
         .enumerate()
-        .filter(|(_, f)| !f.removed.load(Ordering::Relaxed))
+        .filter(|(_, file)| !file.removed.load(Ordering::Relaxed))
         .filter_map(|(i, file)| {
             let rel = file.path.strip_prefix(root).unwrap_or(&file.path);
-            let haystack = nucleo::Utf32Str::new(rel.as_str(), &mut buf);
-            let mut indices = Vec::new();
-            pattern
-                .indices(haystack, &mut matcher, &mut indices)
-                .map(|score| {
-                    indices.sort_unstable();
-                    indices.dedup();
-                    (FileKey(i), score, indices)
-                })
+            query.rank(rel.as_str()).map(|score| (FileKey(i), score))
         })
         .collect();
-    scored.sort_by_key(|&(_, score, _)| std::cmp::Reverse(score));
+    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
     scored
         .into_iter()
-        .map(|(key, _, idx)| (Window::FilePreview(key), idx))
+        .map(|(key, _)| Window::FilePreview(key))
         .collect()
 }
 
@@ -267,7 +256,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Window
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 let selected = state.window_picker.resolve_selected_index();
-                if let Some(&(window, _)) = state.window_picker.results.get(selected) {
+                if let Some(&window) = state.window_picker.results.get(selected) {
                     if let Window::FilePreview(_) = window
                         && !state.pane_manager.window_states.contains_key(&window)
                     {
@@ -298,7 +287,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Window
             }) => {
                 let state = &mut global_data.state;
                 let index = state.window_picker.resolve_selected_index();
-                let Some(&(window, _)) = state.window_picker.results.get(index) else {
+                let Some(&window) = state.window_picker.results.get(index) else {
                     return Ok(EventPropagation::ConsumedRender);
                 };
                 if !state.pane_manager.window_stack.contains(&window) {
@@ -308,10 +297,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Window
                 if state.window_picker.query.text().is_empty() {
                     state.window_picker.results.remove(index);
                     let results = &state.window_picker.results;
-                    state.window_picker.selected = results
-                        .get(index)
-                        .or(results.last())
-                        .map(|(window, _)| *window);
+                    state.window_picker.selected = results.get(index).or(results.last()).copied();
                 }
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -477,7 +463,7 @@ mod tests {
         ];
 
         let results = WindowPickerComponent::open_windows_results(&files, &stack);
-        let windows: Vec<Window> = results.into_iter().map(|(w, _)| w).collect();
+        let windows: Vec<Window> = results;
         assert_eq!(
             windows,
             vec![

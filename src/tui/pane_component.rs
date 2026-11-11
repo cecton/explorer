@@ -227,7 +227,7 @@ impl PaneComponent {
                     return EventPropagation::ConsumedRender;
                 }
                 let idx = target.min(scroll_max.saturating_sub(1));
-                if let Some((key, _)) = state.window_picker.results.get(idx) {
+                if let Some(key) = state.window_picker.results.get(idx) {
                     state.window_picker.selected = Some(*key);
                 }
                 EventPropagation::ConsumedRender
@@ -238,7 +238,7 @@ impl PaneComponent {
                     return EventPropagation::ConsumedRender;
                 }
                 let idx = target.min(scroll_max.saturating_sub(1));
-                if let Some((name, _)) = state.theme_picker.results.get(idx) {
+                if let Some(name) = state.theme_picker.results.get(idx) {
                     state.theme_picker.selected = Some(name.clone());
                     if let Some(theme) = HelixTheme::from_name(name) {
                         state.theme = theme;
@@ -252,7 +252,7 @@ impl PaneComponent {
                     return EventPropagation::ConsumedRender;
                 }
                 let idx = target.min(scroll_max.saturating_sub(1));
-                if let Some((key, _)) = state.model_picker.results.get(idx) {
+                if let Some(key) = state.model_picker.results.get(idx) {
                     state.model_picker.selected = Some(*key);
                 }
                 EventPropagation::ConsumedRender

@@ -8,10 +8,11 @@ pub struct ModelPickerComponent {
 
 impl ModelPickerComponent {
     pub fn new(id: FlexBoxId) -> Self {
+        use crate::tui::widgets::fuzzy::Kind;
         use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
         Self {
             id,
-            picker: FuzzyPicker::new(),
+            picker: FuzzyPicker::new(Kind::Plain),
         }
     }
 
@@ -114,43 +115,22 @@ pub(crate) fn fetch_models(endpoint: &crate::agent::Endpoint, main_tx: crate::si
     });
 }
 
-/// Fuzzy-matches `query` against every model spec; an empty query lists them all.
-pub(crate) fn run_model_match(
-    query: &str,
-    state: &crate::tui::state::AppState,
-) -> Vec<(usize, Vec<u32>)> {
-    let pattern = nucleo::pattern::Pattern::parse(
-        query,
-        nucleo::pattern::CaseMatching::Smart,
-        nucleo::pattern::Normalization::Smart,
-    );
+/// The specs matching `text`, best match first; an empty query lists them all.
+pub(crate) fn run_model_match(text: &str, state: &crate::tui::state::AppState) -> Vec<usize> {
+    use crate::tui::widgets::fuzzy::{Kind, Query};
+    let mut query = Query::new(Kind::Plain);
+    query.set(text);
     let specs = &state.models.specs;
-    if pattern.atoms.is_empty() {
-        return (0..specs.len()).map(|idx| (idx, Vec::new())).collect();
+    if query.is_empty() {
+        return (0..specs.len()).collect();
     }
-    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
-    let mut buf = Vec::new();
-    let mut scored: Vec<(usize, u32, Vec<u32>)> = specs
+    let mut scored: Vec<(usize, u32)> = specs
         .iter()
         .enumerate()
-        .filter_map(|(idx, spec)| {
-            let text = spec.to_string();
-            let haystack = nucleo::Utf32Str::new(&text, &mut buf);
-            let mut indices = Vec::new();
-            pattern
-                .indices(haystack, &mut matcher, &mut indices)
-                .map(|score| {
-                    indices.sort_unstable();
-                    indices.dedup();
-                    (idx, score, indices)
-                })
-        })
+        .filter_map(|(idx, spec)| query.rank(&spec.to_string()).map(|score| (idx, score)))
         .collect();
-    scored.sort_by_key(|&(_, score, _)| std::cmp::Reverse(score));
-    scored
-        .into_iter()
-        .map(|(idx, _, indices)| (idx, indices))
-        .collect()
+    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
+    scored.into_iter().map(|(idx, _)| idx).collect()
 }
 
 impl crate::tui::widgets::title_row::TitleRow for ModelPickerComponent {
@@ -247,7 +227,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ModelP
                 let picked = state
                     .model_picker
                     .selected
-                    .or_else(|| state.model_picker.results.first().map(|(idx, _)| *idx))
+                    .or_else(|| state.model_picker.results.first().copied())
                     .and_then(|idx| state.models.specs.get(idx).cloned());
                 let Some(spec) = picked else {
                     return Ok(EventPropagation::ConsumedRender);
@@ -273,7 +253,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ModelP
         if state.model_picker.query.handle_key(&input_event) {
             let query = state.model_picker.query.text().to_string();
             state.model_picker.results = run_model_match(&query, state);
-            state.model_picker.selected = state.model_picker.results.first().map(|(idx, _)| *idx);
+            state.model_picker.selected = state.model_picker.results.first().copied();
             return Ok(EventPropagation::ConsumedRender);
         }
 

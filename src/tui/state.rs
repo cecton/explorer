@@ -11,7 +11,9 @@ static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
 #[derive(Clone, Debug)]
 pub struct FuzzyPickerState<T> {
     pub query: crate::tui::widgets::input_line::InputLine,
-    pub results: Vec<(T, Vec<u32>)>,
+    /// The candidates the query kept, best match first. Only the keys: the chars a row
+    /// highlights are matched for the rows a frame paints, not for all of them.
+    pub results: Vec<T>,
     pub selected: Option<T>,
 }
 
@@ -42,7 +44,7 @@ impl<T: Clone + PartialEq> FuzzyPickerState<T> {
         };
         self.results
             .iter()
-            .position(|(result_key, _)| result_key == key)
+            .position(|result_key| result_key == key)
             .unwrap_or(0)
     }
 }
@@ -66,8 +68,8 @@ pub struct GitLogWindowState {
     pub query: crate::tui::widgets::input_line::InputLine,
     /// Whether the `/` input is open in the title bar.
     pub search_active: bool,
-    /// Some = query active: (entry index, nucleo match positions), relevance order.
-    pub filtered: Option<Vec<(usize, Vec<u32>)>>,
+    /// Some = query active: the entries the query kept, best match first.
+    pub filtered: Option<Vec<usize>>,
     /// Where the history walk starts.
     pub source: LogSource,
     pub branch_picking: bool,
@@ -697,13 +699,11 @@ impl AppState {
             cargo_features: CargoFeatureSelection::default(),
         };
 
-        let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
-            .map(|n| (n.to_string(), Vec::new()))
-            .collect();
+        let all_themes: Vec<String> = HelixTheme::theme_names().map(str::to_string).collect();
         state.theme_picker.selected = all_themes
             .iter()
-            .position(|(n, _)| n == state.theme.name())
-            .and_then(|i| all_themes.get(i).map(|(n, _)| n.clone()));
+            .find(|name| name.as_str() == state.theme.name())
+            .cloned();
         state.theme_picker.results = all_themes;
 
         state

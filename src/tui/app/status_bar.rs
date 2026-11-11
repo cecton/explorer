@@ -249,7 +249,7 @@ fn focused_endpoint(state: &crate::tui::state::AppState) -> Option<String> {
             let picker = &state.model_picker;
             let selected = picker
                 .selected
-                .or_else(|| picker.results.first().map(|(idx, _)| *idx))?;
+                .or_else(|| picker.results.first().copied())?;
             Some(state.models.specs.get(selected)?.endpoint.clone())
         }
         _ => None,

@@ -102,14 +102,13 @@ pub(super) fn handle(
                 {
                     state.saved_theme = state.theme.clone();
                 }
-                let all_themes: Vec<(String, Vec<u32>)> = HelixTheme::theme_names()
-                    .map(|n| (n.to_string(), Vec::new()))
-                    .collect();
+                let all_themes: Vec<String> =
+                    HelixTheme::theme_names().map(str::to_string).collect();
                 crate::tui::focus::focus_window(state, Window::ThemePicker);
                 state.theme_picker.selected = all_themes
                     .iter()
-                    .position(|(n, _)| n == state.theme.name())
-                    .and_then(|i| all_themes.get(i).map(|(n, _)| n.clone()));
+                    .find(|name| name.as_str() == state.theme.name())
+                    .cloned();
                 state.theme_picker.results = all_themes;
                 state.theme_picker.query.clear();
                 return Ok(EventPropagation::ConsumedRender);

@@ -1,14 +1,19 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
-use std::collections::HashSet;
 
 pub struct FuzzyPicker {
     pub scroll_offset: usize,
+    /// The query the painted rows are highlighted with, kept across frames so its pattern
+    /// is parsed only when the draft moves.
+    query: crate::tui::widgets::fuzzy::Query,
 }
 
 impl FuzzyPicker {
-    pub fn new() -> Self {
-        Self { scroll_offset: 0 }
+    pub fn new(kind: crate::tui::widgets::fuzzy::Kind) -> Self {
+        Self {
+            scroll_offset: 0,
+            query: crate::tui::widgets::fuzzy::Query::new(kind),
+        }
     }
 
     pub fn handle_navigation<K: Clone + PartialEq>(
@@ -56,8 +61,7 @@ impl FuzzyPicker {
             }
         };
 
-        let (key, _) = &picker_state.results[new];
-        picker_state.selected = Some(key.clone());
+        picker_state.selected = Some(picker_state.results[new].clone());
         Some(EventPropagation::ConsumedRender)
     }
 
@@ -97,6 +101,8 @@ impl FuzzyPicker {
         let selected_idx =
             Self::resolve_selected_index(&picker_state.selected, &picker_state.results);
         let result_count = picker_state.results.len();
+        self.query.set(picker_state.query.text());
+        let mut indices = Vec::new();
 
         if selected_idx < self.scroll_offset {
             self.scroll_offset = selected_idx;
@@ -147,49 +153,38 @@ impl FuzzyPicker {
                 vp_col(0) + vp_row(row_offset),
             );
 
-            let (key, matched_positions) = {
-                let (k, pos) = &picker_state.results[result_idx];
-                (k.clone(), pos.clone())
-            };
-            let (display_str, accent) = display(&key, state);
+            let (display_str, accent) = display(&picker_state.results[result_idx], state);
             // Rows that supply an accent color (e.g. terminals) render in that
             // color and bold; others use the normal text color.
             let base_fg = accent.map(TuiColor::from).unwrap_or(color_normal_fg);
             let emphasized = accent.is_some();
-            let matched_set: HashSet<u32> = matched_positions.iter().copied().collect();
+            self.query.match_indices(&display_str, &mut indices);
 
-            for (char_idx, ch) in display_str.chars().enumerate() {
-                let is_match = matched_set.contains(&(char_idx as u32));
+            let style_of = |char_idx: usize| {
+                let is_match = crate::tui::widgets::fuzzy::matched(&indices, char_idx);
                 let fg = if is_match { color_match_fg } else { base_fg };
                 // Bold for fuzzy-match characters and for accented rows;
                 // selection is carried by `row_bg`.
-                let style = if is_match || emphasized {
+                if is_match || emphasized {
                     new_style!(bold color_fg: {fg} color_bg: {row_bg})
                 } else {
                     new_style!(color_fg: {fg} color_bg: {row_bg})
-                };
-                let mut buf = [0u8; 4];
-                render_ops += RenderOpIR::PaintTextWithAttributes(
-                    ch.encode_utf8(&mut buf).to_string().into(),
-                    Some(style),
-                );
-            }
+                }
+            };
+            crate::tui::widgets::fuzzy::paint_runs(&mut render_ops, &display_str, style_of);
         }
 
         render_ops
     }
 
-    fn resolve_selected_index<K: PartialEq>(
-        selected: &Option<K>,
-        results: &[(K, Vec<u32>)],
-    ) -> usize {
+    fn resolve_selected_index<K: PartialEq>(selected: &Option<K>, results: &[K]) -> usize {
         let key = match selected {
             None => return 0,
             Some(k) => k,
         };
         results
             .iter()
-            .position(|(result_key, _)| result_key == key)
+            .position(|result_key| result_key == key)
             .unwrap_or(0)
     }
 }

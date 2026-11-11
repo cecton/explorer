@@ -8,17 +8,21 @@ pub struct GitLogPaneComponent {
     content_origin_row: usize,
     content_row_count: usize,
     branch_fuzzy: crate::tui::widgets::fuzzy_picker::FuzzyPicker,
+    /// The `/` filter's query, kept so a frame reuses its matcher instead of making one.
+    log_query: crate::tui::widgets::fuzzy::Query,
 }
 
 impl GitLogPaneComponent {
     pub fn new(id: FlexBoxId) -> Self {
+        use crate::tui::widgets::fuzzy::Kind;
         use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
         Self {
             id,
             window_id: 0,
             content_origin_row: 0,
             content_row_count: 0,
-            branch_fuzzy: FuzzyPicker::new(),
+            branch_fuzzy: FuzzyPicker::new(Kind::Plain),
+            log_query: crate::tui::widgets::fuzzy::Query::new(Kind::Plain),
         }
     }
 
@@ -136,7 +140,7 @@ impl GitLogPaneComponent {
             return;
         };
         win.branch_picker.results = run_ref_match(win.branch_picker.query.text(), refs);
-        win.branch_picker.selected = win.branch_picker.results.first().map(|(k, _)| *k);
+        win.branch_picker.selected = win.branch_picker.results.first().copied();
     }
 
     pub(crate) fn refresh_branch_results_for_window(
@@ -352,17 +356,12 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                 InputEvent::Keyboard(KeyPress::Plain {
                     key: Key::SpecialKey(SpecialKey::Enter),
                 }) => {
-                    let picked = match win.branch_picker.selected {
-                        Some(idx) => win
-                            .branch_picker
-                            .results
-                            .iter()
-                            .find(|(k, _)| *k == idx)
-                            .map(|(k, _)| *k),
-                        None => win.branch_picker.results.first().map(|(k, _)| *k),
-                    }
-                    .and_then(|k| git_refs.as_ref().and_then(|refs| refs.get(k)))
-                    .map(|git_ref| git_ref.name.clone());
+                    let picked = win
+                        .branch_picker
+                        .selected
+                        .or_else(|| win.branch_picker.results.first().copied())
+                        .and_then(|k| git_refs.as_ref().and_then(|refs| refs.get(k)))
+                        .map(|git_ref| git_ref.name.clone());
                     if let Some(name) = picked {
                         win.branch_picking = false;
                         win.branch_picker = FuzzyPickerState::default();
@@ -402,7 +401,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                         .as_usize()
                         .saturating_sub(self.content_origin_row);
                     let idx = self.branch_fuzzy.scroll_offset + rel;
-                    if let Some((k, _)) = win.branch_picker.results.get(idx) {
+                    if let Some(k) = win.branch_picker.results.get(idx) {
                         win.branch_picker.selected = Some(*k);
                     }
                     return Ok(EventPropagation::ConsumedRender);
@@ -579,6 +578,17 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                 state.pane_manager.set_window_scroll(&window, scroll);
             }
 
+            // One entry per painted row, and the chars the query matched in it: the filter
+            // ranked the whole log, only the rows on screen are matched again.
+            let row_entries: Vec<usize> = state
+                .git_logs
+                .get(&window_id)
+                .map_or(Vec::new(), |win| painted_entries(win, scroll, total_rows));
+            let row_matches: Vec<Vec<u32>> = match state.git_logs.get(&window_id) {
+                Some(win) => visible_matches(&mut self.log_query, win, &row_entries),
+                None => Vec::new(),
+            };
+
             let pane_bg = state
                 .theme
                 .ui_bg("ui.background")
@@ -721,18 +731,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                 };
                 let branch_fg = TuiColor::from(branch_fg_rgb);
                 let tag_fg = TuiColor::from(tag_fg_rgb);
-                let win_filtered = state
-                    .git_logs
-                    .get(&window_id)
-                    .and_then(|win| win.filtered.as_ref());
                 for row_offset in 0..total_rows {
                     let vis_idx = scroll + row_offset;
-                    let slot: Option<(usize, Option<Vec<u32>>)> = match win_filtered {
-                        Some(matches) => matches
-                            .get(vis_idx)
-                            .map(|&(idx, ref positions)| (idx, Some(positions.to_vec()))),
-                        None => history.entries.get(vis_idx).map(|_| (vis_idx, None)),
-                    };
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
                         vp_col(0) + vp_row(row_offset as u16),
@@ -748,12 +748,13 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                         " ".repeat(pane_width).into(),
                         Some(row_style),
                     );
-                    let Some((entry_idx, match_set)) = slot else {
+                    let Some(&entry_idx) = row_entries.get(row_offset) else {
                         continue;
                     };
                     let Some(entry) = history.entries.get(entry_idx) else {
                         continue;
                     };
+                    let matches = row_matches.get(row_offset).map_or(&[][..], Vec::as_slice);
                     let (left, summary) = log_row_parts(entry, pane_width);
                     let left_chars = left.chars().count();
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
@@ -776,28 +777,16 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                         )
                     });
 
-                    for (char_i, ch) in summary.chars().enumerate() {
+                    let background = if is_selected { selected_bg } else { bg };
+                    let style_of = |char_i: usize| {
                         let fg = match type_span.as_ref() {
                             Some((len, color)) if char_i < *len => *color,
-                            _ if match_set
-                                .as_ref()
-                                .is_some_and(|set| set.contains(&(char_i as u32))) =>
-                            {
-                                match_fg
-                            }
+                            _ if crate::tui::widgets::fuzzy::matched(matches, char_i) => match_fg,
                             _ => normal_fg,
                         };
-                        let style = if is_selected {
-                            new_style!(color_fg: {fg} color_bg: {selected_bg})
-                        } else {
-                            new_style!(color_fg: {fg} color_bg: {bg})
-                        };
-                        let mut buf = [0u8; 4];
-                        render_ops += RenderOpIR::PaintTextWithAttributes(
-                            ch.encode_utf8(&mut buf).to_string().into(),
-                            Some(style),
-                        );
-                    }
+                        new_style!(color_fg: {fg} color_bg: {background})
+                    };
+                    crate::tui::widgets::fuzzy::paint_runs(&mut render_ops, &summary, style_of);
 
                     if let Some(entry_refs) = history.refs.get(&entry.id) {
                         let available = pane_width
@@ -877,72 +866,85 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
     }
 }
 
-pub(crate) fn run_log_match(
-    query: &str,
-    entries: &[crate::git::LogEntry],
-) -> Vec<(usize, Vec<u32>)> {
-    let pattern = nucleo::pattern::Pattern::parse(
-        query,
-        nucleo::pattern::CaseMatching::Smart,
-        nucleo::pattern::Normalization::Smart,
-    );
-    if pattern.atoms.is_empty() {
-        return (0..entries.len()).map(|i| (i, Vec::new())).collect();
+/// The entries of `entries` whose summary holds the query, best match first. Only the
+/// indices: the chars a painted row highlights are matched again, for that row alone.
+pub(crate) fn run_log_match(text: &str, entries: &[crate::git::LogEntry]) -> Vec<usize> {
+    use crate::tui::widgets::fuzzy::{Kind, Query};
+    let mut query = Query::new(Kind::Plain);
+    query.set(text);
+    if query.is_empty() {
+        return (0..entries.len()).collect();
     }
-    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
-    let mut buf = Vec::new();
-    let mut scored: Vec<(usize, u32, Vec<u32>)> = entries
+    let mut scored: Vec<(usize, u32)> = entries
         .iter()
         .enumerate()
-        .filter_map(|(i, entry)| {
-            let haystack = nucleo::Utf32Str::new(&entry.summary, &mut buf);
-            let mut indices = Vec::new();
-            pattern
-                .indices(haystack, &mut matcher, &mut indices)
-                .map(|score| {
-                    indices.sort_unstable();
-                    indices.dedup();
-                    (i, score, indices)
-                })
-        })
+        .filter_map(|(i, entry)| query.rank(&entry.summary).map(|score| (i, score)))
         .collect();
-    scored.sort_by_key(|&(_, score, _)| std::cmp::Reverse(score));
-    scored
-        .into_iter()
-        .map(|(i, _, indices)| (i, indices))
-        .collect()
+    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
+    scored.into_iter().map(|(i, _)| i).collect()
 }
 
-pub(crate) fn run_ref_match(query: &str, refs: &[crate::git::GitRef]) -> Vec<(usize, Vec<u32>)> {
-    let pattern = nucleo::pattern::Pattern::parse(
-        query,
-        nucleo::pattern::CaseMatching::Smart,
-        nucleo::pattern::Normalization::Smart,
-    );
-    if pattern.atoms.is_empty() {
-        return (0..refs.len()).map(|i| (i, Vec::new())).collect();
+/// The refs of `refs` whose name holds the query, best match first.
+pub(crate) fn run_ref_match(text: &str, refs: &[crate::git::GitRef]) -> Vec<usize> {
+    use crate::tui::widgets::fuzzy::{Kind, Query};
+    let mut query = Query::new(Kind::Plain);
+    query.set(text);
+    if query.is_empty() {
+        return (0..refs.len()).collect();
     }
-    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
-    let mut buf = Vec::new();
-    let mut scored: Vec<(usize, u32, Vec<u32>)> = refs
+    let mut scored: Vec<(usize, u32)> = refs
         .iter()
         .enumerate()
-        .filter_map(|(i, git_ref)| {
-            let haystack = nucleo::Utf32Str::new(&git_ref.name, &mut buf);
-            let mut indices = Vec::new();
-            pattern
-                .indices(haystack, &mut matcher, &mut indices)
-                .map(|score| {
-                    indices.sort_unstable();
-                    indices.dedup();
-                    (i, score, indices)
-                })
-        })
+        .filter_map(|(i, git_ref)| query.rank(&git_ref.name).map(|score| (i, score)))
         .collect();
-    scored.sort_by_key(|&(_, score, _)| std::cmp::Reverse(score));
-    scored
-        .into_iter()
-        .map(|(i, _, indices)| (i, indices))
+    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
+    scored.into_iter().map(|(i, _)| i).collect()
+}
+
+/// The entries painted from `scroll` down for `rows` rows, filtered or not: a filtered
+/// window paints its matches, an unfiltered one the log itself.
+pub(crate) fn painted_entries(
+    win: &crate::tui::state::GitLogWindowState,
+    scroll: usize,
+    rows: usize,
+) -> Vec<usize> {
+    match win.filtered.as_ref() {
+        Some(matches) => matches.iter().skip(scroll).take(rows).copied().collect(),
+        None => {
+            let total = win
+                .entries
+                .as_ref()
+                .map_or(0, |history| history.entries.len());
+            (scroll..scroll + rows)
+                .take_while(|index| *index < total)
+                .collect()
+        }
+    }
+}
+
+/// The chars the query matched in each of `visible`, the entries a frame paints: the filter
+/// ranked the whole log, only the rows on screen are matched again, and the cost follows the
+/// pane's height instead of the log's length.
+pub(crate) fn visible_matches(
+    query: &mut crate::tui::widgets::fuzzy::Query,
+    win: &crate::tui::state::GitLogWindowState,
+    visible: &[usize],
+) -> Vec<Vec<u32>> {
+    if win.filtered.is_none() {
+        return Vec::new();
+    }
+    query.set(win.query.text());
+    let mut indices = Vec::new();
+    let entries = win.entries.as_ref();
+    visible
+        .iter()
+        .map(|&entry_idx| {
+            let Some(entry) = entries.and_then(|history| history.entries.get(entry_idx)) else {
+                return Vec::new();
+            };
+            query.match_indices(&entry.summary, &mut indices);
+            indices.clone()
+        })
         .collect()
 }
 
@@ -976,7 +978,7 @@ fn visible_len(win: &crate::tui::state::GitLogWindowState) -> usize {
 fn visible_entry_id(win: &crate::tui::state::GitLogWindowState) -> Option<[u8; 20]> {
     let history = win.entries.as_ref()?;
     let entry_idx = match win.filtered.as_ref() {
-        Some(matches) => matches.get(win.selected).map(|&(idx, _)| idx)?,
+        Some(matches) => *matches.get(win.selected)?,
         None => {
             if win.selected < history.entries.len() {
                 win.selected
@@ -1181,25 +1183,68 @@ mod tests {
             entry_with_summary("fix: two"),
         ];
         let results = run_log_match("", &entries);
-        assert_eq!(results, vec![(0, vec![]), (1, vec![])]);
+        assert_eq!(results, vec![0, 1]);
     }
 
     #[test]
-    fn run_log_match_ranks_and_records_positions() {
+    fn run_log_match_ranks_every_match() {
         let entries = vec![
             entry_with_summary("docs: update readme"),
             entry_with_summary("feat: readme reader"),
         ];
         let results = run_log_match("readme", &entries);
         assert_eq!(results.len(), 2);
-        assert!(results.iter().all(|&(idx, _)| idx == 0 || idx == 1));
-        let (_, positions) = &results[0];
-        assert!(!positions.is_empty());
-        let summary = entries[results[0].0].summary.clone();
-        assert!(
-            positions
-                .iter()
-                .all(|&p| { summary.chars().nth(p as usize).is_some() })
-        );
+        assert!(results.iter().all(|&idx| idx == 0 || idx == 1));
+    }
+
+    fn window_of(summaries: &[&str]) -> crate::tui::state::GitLogWindowState {
+        crate::tui::state::GitLogWindowState {
+            entries: Some(Arc::new(crate::git::LogHistory {
+                entries: summaries
+                    .iter()
+                    .map(|summary| entry_with_summary(summary))
+                    .collect(),
+                truncated: false,
+                refs: std::collections::HashMap::new(),
+            })),
+            ..crate::tui::state::GitLogWindowState::default()
+        }
+    }
+
+    #[test]
+    fn an_unfiltered_window_paints_its_own_entries_from_the_scroll() {
+        let win = window_of(&["a", "b", "c", "d"]);
+        assert_eq!(painted_entries(&win, 0, 2), [0, 1]);
+        assert_eq!(painted_entries(&win, 2, 2), [2, 3]);
+        // Past the end: no rows, never an index the log does not hold.
+        assert_eq!(painted_entries(&win, 3, 5), [3]);
+        assert_eq!(painted_entries(&win, 9, 5), Vec::<usize>::new());
+    }
+
+    #[test]
+    fn a_filtered_window_paints_its_matches_not_the_log() {
+        let mut win = window_of(&["docs: one", "feat: two", "docs: three"]);
+        win.query.set_text("docs");
+        apply_filter(&mut win);
+        // Only the two "docs" entries, in relevance order, at their own indices.
+        assert_eq!(win.filtered, Some(vec![0, 2]));
+        assert_eq!(painted_entries(&win, 0, 5), [0, 2]);
+        assert_eq!(painted_entries(&win, 1, 5), [2]);
+    }
+
+    #[test]
+    fn a_painted_row_highlights_the_chars_the_query_matched() {
+        let mut win = window_of(&["docs: update readme"]);
+        win.query.set_text("readme");
+        apply_filter(&mut win);
+        let painted_rows = painted_entries(&win, 0, 1);
+        use crate::tui::widgets::fuzzy::{Kind, Query};
+        let mut query = Query::new(Kind::Plain);
+        let matched = visible_matches(&mut query, &win, &painted_rows);
+        let highlighted: String = matched[0]
+            .iter()
+            .map(|index| "docs: update readme".chars().nth(*index as usize).unwrap())
+            .collect();
+        assert_eq!(highlighted, "readme");
     }
 }

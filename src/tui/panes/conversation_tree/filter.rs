@@ -9,20 +9,16 @@ pub(crate) struct FilterMatch {
     pub summary: Ranges,
 }
 
-/// The nodes holding every word of `query` in their title or their summary, in any
+/// The nodes holding every word of `text` in their title or their summary, in any
 /// order: best match first, then newest first.
 pub(crate) fn filter_nodes(
     tree: &crate::conversation::ConversationTree,
-    query: &str,
+    text: &str,
 ) -> Vec<FilterMatch> {
-    let pattern = nucleo::pattern::Pattern::new(
-        query,
-        nucleo::pattern::CaseMatching::Smart,
-        nucleo::pattern::Normalization::Smart,
-        nucleo::pattern::AtomKind::Substring,
-    );
-    let mut matcher = nucleo::Matcher::new(nucleo::Config::DEFAULT);
-    let mut chars = Vec::new();
+    use crate::tui::widgets::fuzzy::{Kind, Query};
+    let mut query = Query::new(Kind::Substring);
+    query.set(text);
+    let mut indices = Vec::new();
     let mut scored: Vec<(u32, FilterMatch)> = tree
         .nodes()
         .filter_map(|(id, node)| {
@@ -31,18 +27,7 @@ pub(crate) fn filter_nodes(
                 Some(summary) => format!("{title}\n{summary}"),
                 None => title.to_string(),
             };
-            // `Utf32Str::new` indexes by byte or by grapheme depending on the text.
-            chars.clear();
-            chars.extend(text.chars());
-            // Nucleo misses a substring that ends a non-ASCII haystack.
-            chars.push('\n');
-            let score = pattern.score(nucleo::Utf32Str::Unicode(&chars), &mut matcher)?;
-            let mut indices = Vec::new();
-            for atom in &pattern.atoms {
-                push_occurrences(atom, &chars, &mut matcher, &mut indices);
-            }
-            indices.sort_unstable();
-            indices.dedup();
+            let score = query.score_and_occurrences(&text, &mut indices)?;
             let (title, summary) = matched_ranges(&text, title.len(), &indices);
             Some((
                 score,
@@ -84,30 +69,6 @@ impl FilterCache {
             self.query.push_str(query);
         }
         std::sync::Arc::clone(&self.matches)
-    }
-}
-
-/// Every place `atom` matches in `chars`, as char indices: an atom alone reports only
-/// the first one.
-fn push_occurrences(
-    atom: &nucleo::pattern::Atom,
-    chars: &[char],
-    matcher: &mut nucleo::Matcher,
-    indices: &mut Vec<u32>,
-) {
-    let mut from = 0;
-    let mut found = Vec::new();
-    while from < chars.len() {
-        found.clear();
-        let rest = nucleo::Utf32Str::Unicode(&chars[from..]);
-        if atom.indices(rest, matcher, &mut found).is_none() {
-            break;
-        }
-        let Some(last) = found.iter().max().copied() else {
-            break;
-        };
-        indices.extend(found.iter().map(|index| index + from as u32));
-        from += last as usize + 1;
     }
 }
 
