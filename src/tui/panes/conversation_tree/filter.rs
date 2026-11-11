@@ -58,6 +58,35 @@ pub(crate) fn filter_nodes(
     scored.into_iter().map(|(_, found)| found).collect()
 }
 
+/// The nodes the filter kept, with what matched in them, and the query and tree revision
+/// they were found for: recomputing it costs about a millisecond over a large tree, so a
+/// frame that changes neither takes it as it stands.
+#[derive(Default)]
+pub(crate) struct FilterCache {
+    revision: Option<u64>,
+    query: String,
+    matches: std::sync::Arc<[FilterMatch]>,
+}
+
+impl FilterCache {
+    /// The matches of `query` on `tree`, running the filter only when the query or the
+    /// tree moved since the last call.
+    pub(crate) fn matches(
+        &mut self,
+        tree: &crate::conversation::ConversationTree,
+        query: &str,
+    ) -> std::sync::Arc<[FilterMatch]> {
+        let revision = tree.revision();
+        if self.revision != Some(revision) || self.query != query {
+            self.matches = filter_nodes(tree, query).into();
+            self.revision = Some(revision);
+            self.query.clear();
+            self.query.push_str(query);
+        }
+        std::sync::Arc::clone(&self.matches)
+    }
+}
+
 /// Every place `atom` matches in `chars`, as char indices: an atom alone reports only
 /// the first one.
 fn push_occurrences(
@@ -115,6 +144,30 @@ mod tests {
 
     fn matched_ids(matches: &[FilterMatch]) -> Vec<&str> {
         matches.iter().map(|found| found.node.as_str()).collect()
+    }
+
+    #[test]
+    fn a_filter_is_run_once_per_query_and_tree_revision() {
+        let (_tmp, mut tree) = described_tree(&[("a1", "Queue rows", "Esc takes it back")]);
+        let mut cache = FilterCache::default();
+
+        let first = cache.matches(&tree, "queue");
+        assert_eq!(matched_ids(&first), ["a1"]);
+        // Same query, same tree: the answer handed back is the one it holds.
+        let again = cache.matches(&tree, "queue");
+        assert!(std::sync::Arc::ptr_eq(&first, &again));
+
+        // Another query is another answer.
+        let other = cache.matches(&tree, "rows");
+        assert_eq!(matched_ids(&other), ["a1"]);
+        assert!(!std::sync::Arc::ptr_eq(&first, &other));
+
+        // So is a tree that moved, even under the same query.
+        let revised = cache.matches(&tree, "rows");
+        tree.set_title(&NodeId::new("a1"), "Something else".to_string());
+        let after = cache.matches(&tree, "rows");
+        assert_eq!(matched_ids(&revised), ["a1"]);
+        assert!(matched_ids(&after).is_empty());
     }
 
     #[test]

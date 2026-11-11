@@ -5,6 +5,15 @@ use std::time::{Duration, Instant};
 const SCROLL_STEP: usize = 3;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
+/// The rows as the event found them, with the row the selection sits on and how many rows
+/// a page covers.
+#[derive(Clone, Copy)]
+struct Shown<'a> {
+    rows: &'a [crate::tui::panes::conversation_tree::layout::TreeRow],
+    index: usize,
+    page: usize,
+}
+
 impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
     /// Routes one event: while the filter's input holds the keys it takes them all, the
     /// tree's own keys run otherwise, and a click is hit-tested against the last render.
@@ -16,8 +25,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
     ) -> EventPropagation {
         use crate::tui::pane_manager::Window;
         use crate::tui::panes::conversation_tree::layout::selected_index;
-        let (rows, _) =
-            crate::tui::panes::conversation_tree::ConversationTreeComponent::rows(state);
+        let (rows, _) = self.rows(state);
         let index = selected_index(
             &rows,
             state.tree_view.selected.as_ref(),
@@ -28,6 +36,11 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             .window_page_size(&Window::ConversationTree)
             .saturating_sub(1)
             .max(1);
+        let shown = Shown {
+            rows: &rows,
+            index,
+            page,
+        };
 
         let armed = match &input_event {
             InputEvent::Keyboard(_)
@@ -52,7 +65,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 pos,
                 ..
             }) => self.handle_click(state, main_tx, *pos, &rows),
-            input_event => Self::handle_key(state, main_tx, armed, &rows, index, page, input_event),
+            input_event => self.handle_key(state, main_tx, armed, shown, input_event),
         }
     }
 
@@ -108,7 +121,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 state.tree_view.query.handle_key(input_event);
                 if state.tree_view.query.text() != before {
                     state.tree_view.selected = if state.tree_view.filtering() {
-                        Self::rows(state).0.first().map(|row| row.target.clone())
+                        self.rows(state).0.first().map(|row| row.target.clone())
                     } else {
                         state.tree_view.before_search.clone()
                     };
@@ -120,12 +133,11 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
     }
 
     fn handle_key(
+        &mut self,
         state: &mut crate::tui::state::AppState,
         main_tx: crate::signal::MainTx,
         armed: Option<crate::conversation::NodeId>,
-        rows: &[crate::tui::panes::conversation_tree::layout::TreeRow],
-        index: usize,
-        page: usize,
+        shown: Shown<'_>,
         input_event: &InputEvent,
     ) -> EventPropagation {
         use crate::tui::pane_manager::Window;
@@ -134,6 +146,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
         use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
         use crate::tui::state::ModelPickerPurpose;
         use crate::tui::state::RowTarget;
+        let Shown { rows, index, page } = shown;
         let window = Window::ConversationTree;
         match input_event {
             InputEvent::Keyboard(KeyPress::Plain {
@@ -305,7 +318,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                     return EventPropagation::ConsumedRender;
                 };
                 if armed.as_ref() == Some(&id) {
-                    Self::delete_selected(state, rows, index);
+                    self.delete_selected(state, rows, index);
                 } else {
                     state.tree_view.selected = Some(RowTarget::Node(id.clone()));
                     state.tree_view.armed_delete = Some(id);
@@ -466,6 +479,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
     }
 
     fn delete_selected(
+        &mut self,
         state: &mut crate::tui::state::AppState,
         rows: &[crate::tui::panes::conversation_tree::layout::TreeRow],
         index: usize,
@@ -512,7 +526,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
         for id in closed {
             crate::tui::focus::close_window(state, Window::Discussion(id));
         }
-        let rows = crate::tui::panes::conversation_tree::ConversationTreeComponent::rows(state).0;
+        let rows = self.rows(state).0;
         state.tree_view.selected = None;
         Self::select(state, &rows, index);
         state.mark_session_dirty();

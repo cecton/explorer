@@ -109,6 +109,7 @@ impl crate::conversation::ConversationTree {
             meta,
             title: None,
         });
+        self.touch();
         Ok(index)
     }
 
@@ -126,7 +127,9 @@ impl crate::conversation::ConversationTree {
             .agent_mut(node, index)
             .ok_or_else(crate::conversation::unknown_node)?;
         change(&mut agent.meta);
-        crate::conversation::metadata::write(&dir, &agent.meta)
+        let written = crate::conversation::metadata::write(&dir, &agent.meta);
+        self.touch();
+        written
     }
 
     /// Sets the title of sub-agent run `index` of `node` in memory; `title.md` is
@@ -139,6 +142,7 @@ impl crate::conversation::ConversationTree {
     ) {
         if let Some(agent) = self.agent_mut(node, index) {
             agent.title = Some(title);
+            self.touch();
         }
     }
 

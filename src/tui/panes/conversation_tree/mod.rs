@@ -24,6 +24,9 @@ pub struct ConversationTreeComponent {
     shown_selection: Option<crate::tui::state::RowTarget>,
     /// Time and row of the last click, to recognize a double click.
     last_click: Option<(Instant, usize)>,
+    /// The filter's last answer, so a frame that changes neither the query nor the tree
+    /// does not run it again.
+    filter_cache: filter::FilterCache,
 }
 
 impl ConversationTreeComponent {
@@ -38,6 +41,7 @@ impl ConversationTreeComponent {
             label_zones: Vec::new(),
             shown_selection: None,
             last_click: None,
+            filter_cache: filter::FilterCache::default(),
         }
     }
 
@@ -58,10 +62,11 @@ impl ConversationTreeComponent {
 
     /// The rows the window shows, and what matched in them while a filter holds a word.
     pub(crate) fn rows(
+        &mut self,
         state: &crate::tui::state::AppState,
-    ) -> (Vec<layout::TreeRow>, Vec<filter::FilterMatch>) {
+    ) -> (Vec<layout::TreeRow>, std::sync::Arc<[filter::FilterMatch]>) {
         let tree = state.conversations.read();
-        layout::rows(state, &tree)
+        layout::rows(state, &tree, &mut self.filter_cache)
     }
 
     /// Asks the summary model again for an untitled node the cursor just landed on.

@@ -45,13 +45,15 @@ impl TreeRow {
 
 /// The rows the window shows, and what matched in them while the filter holds a word:
 /// the tree with a provisional row per queued prompt and per sub-agent run, or the
-/// matches of the filter, flat.
+/// matches of the filter, flat. `cache` keeps the filter's last answer, so a frame that
+/// changes neither the query nor the tree does not pay for it again.
 pub(crate) fn rows(
     state: &crate::tui::state::AppState,
     tree: &crate::conversation::ConversationTree,
+    cache: &mut crate::tui::panes::conversation_tree::filter::FilterCache,
 ) -> (
     Vec<TreeRow>,
-    Vec<crate::tui::panes::conversation_tree::filter::FilterMatch>,
+    std::sync::Arc<[crate::tui::panes::conversation_tree::filter::FilterMatch]>,
 ) {
     if !state.tree_view.filtering() {
         let rows = with_agents(
@@ -62,12 +64,9 @@ pub(crate) fn rows(
             tree,
             &state.tree_view.shown_agents,
         );
-        return (rows, Vec::new());
+        return (rows, std::sync::Arc::default());
     }
-    let matches = crate::tui::panes::conversation_tree::filter::filter_nodes(
-        tree,
-        state.tree_view.query.text(),
-    );
+    let matches = cache.matches(tree, state.tree_view.query.text());
     let rows = flat_rows(&matches);
     (rows, matches)
 }

@@ -160,23 +160,53 @@ pub struct TurnContext {
 
 /// The conversation tree of one repository. Holds metadata, titles and summaries
 /// only; prompts, replies and transcripts stay on disk.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Debug)]
 pub struct ConversationTree {
     dir: camino::Utf8PathBuf,
     nodes: HashMap<NodeId, Node>,
     /// Oldest first.
     roots: Vec<NodeId>,
+    revision: u64,
+}
+
+/// Handed out process-wide rather than per tree: `ConversationTree::load` replaces a tree
+/// as a whole, so a counter kept in the tree would give its successor the number of the
+/// tree it replaces and a cache of that tree would outlive it.
+static NEXT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_revision() -> u64 {
+    NEXT_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+impl Default for ConversationTree {
+    fn default() -> Self {
+        Self {
+            dir: camino::Utf8PathBuf::default(),
+            nodes: HashMap::new(),
+            roots: Vec::new(),
+            revision: next_revision(),
+        }
+    }
 }
 
 impl ConversationTree {
     pub fn load(dir: &camino::Utf8Path) -> Self {
         let mut tree = Self {
             dir: dir.to_owned(),
-            nodes: HashMap::new(),
-            roots: Vec::new(),
+            ..Self::default()
         };
         tree.roots = tree.load_children(dir, None);
         tree
+    }
+
+    /// Moves with every change to the tree, so what a reader cached of it can tell when
+    /// it is stale.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    fn touch(&mut self) {
+        self.revision = next_revision();
     }
 
     fn load_children(&mut self, dir: &camino::Utf8Path, parent: Option<&NodeId>) -> Vec<NodeId> {
@@ -289,6 +319,7 @@ impl ConversationTree {
         prompt: &str,
         input: Option<&str>,
     ) -> std::io::Result<NodeId> {
+        self.touch();
         let stamp = crate::util::time::utc_stamp(now_secs);
         let mut id = NodeId::new(&stamp.replace(':', "-"));
         let mut suffix = 2;
@@ -344,7 +375,9 @@ impl ConversationTree {
         let dir = self.node_dir(id).ok_or_else(unknown_node)?;
         let node = self.nodes.get_mut(id).ok_or_else(unknown_node)?;
         change(&mut node.meta);
-        metadata::write(&dir, &node.meta)
+        let written = metadata::write(&dir, &node.meta);
+        self.touch();
+        written
     }
 
     /// Records a turn that ended early, quitting or a signal: writes its reply and
@@ -369,12 +402,14 @@ impl ConversationTree {
     pub fn set_title(&mut self, id: &NodeId, title: String) {
         if let Some(node) = self.nodes.get_mut(id) {
             node.title = Some(title);
+            self.touch();
         }
     }
 
     pub fn set_summary(&mut self, id: &NodeId, summary: String) {
         if let Some(node) = self.nodes.get_mut(id) {
             node.summary = Some(summary);
+            self.touch();
         }
     }
 
@@ -411,6 +446,7 @@ impl ConversationTree {
                 removed.push(next);
             }
         }
+        self.touch();
         Ok(removed)
     }
 
@@ -637,6 +673,59 @@ mod tests {
             reloaded.node(&expanded).unwrap().display_title(),
             "/review foo"
         );
+    }
+
+    #[test]
+    fn every_change_moves_the_revision_and_a_reloaded_tree_never_reuses_one() {
+        use crate::conversation::metadata::Metadata;
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+        let fresh = tree.revision();
+        assert_eq!(fresh, tree.revision(), "reading it does not move it");
+
+        // The tree is replaced as a whole (`*tree.write() = ConversationTree::load(..)`)
+        // instead of changed in place, so a counter kept in the tree would hand the new
+        // one the number of the old and what was cached of that one would pass for the
+        // new one's.
+        let reloaded = ConversationTree::load(&root);
+        assert_ne!(fresh, reloaded.revision());
+        assert_ne!(fresh, ConversationTree::default().revision());
+
+        let id = tree
+            .create_node(None, 0, Metadata::default(), "p", None)
+            .unwrap();
+        let created = tree.revision();
+        tree.set_title(&id, "Titled".to_string());
+        let titled = tree.revision();
+        tree.set_summary(&id, "Summarized".to_string());
+        let summarized = tree.revision();
+        tree.toggle_favorite(&id).unwrap();
+        let favorited = tree.revision();
+        let agent = tree
+            .create_agent(&id, 0, Metadata::default(), "task")
+            .unwrap();
+        let agent_created = tree.revision();
+        tree.set_agent_title(&id, agent, "Ran".to_string());
+        let agent_titled = tree.revision();
+        tree.delete(&id).unwrap();
+        let deleted = tree.revision();
+
+        let moved = [
+            created,
+            titled,
+            summarized,
+            favorited,
+            agent_created,
+            agent_titled,
+            deleted,
+        ];
+        for (i, before) in moved.iter().enumerate() {
+            assert_ne!(*before, fresh);
+            assert!(
+                moved[i + 1..].iter().all(|after| after != before),
+                "revision {before} was handed out twice"
+            );
+        }
     }
 
     #[test]

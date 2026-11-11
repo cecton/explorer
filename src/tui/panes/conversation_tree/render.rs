@@ -175,7 +175,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             let tree_handle = std::sync::Arc::clone(&state.conversations);
             let tree = tree_handle.read();
             let filtering = state.tree_view.filtering();
-            let (rows, matches) = layout::rows(state, &tree);
+            let (rows, matches) = layout::rows(state, &tree, &mut self.filter_cache);
             let selected =
                 layout::selected_index(&rows, state.tree_view.selected.as_ref(), filtering);
             let selected_target = rows.get(selected).map(|row| row.target.clone());
