@@ -191,7 +191,9 @@ impl crate::tui::panes::discussion::DiscussionComponent {
         use crate::tui::pane_manager::SelPoint;
         use crate::tui::pane_manager::TextSelection;
         use crate::tui::pane_manager::Window;
-        let id = self.window_id;
+        let Some(id) = self.window_id(state) else {
+            return;
+        };
         let Some(discussion) = state.discussions.get(&id) else {
             return;
         };

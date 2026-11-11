@@ -425,8 +425,6 @@ pub struct AppState {
     pub repo: Option<gix::ThreadSafeRepository>,
     /// Pane stack, sizes, layout, and focus state.
     pub pane_manager: crate::tui::pane_manager::PaneManager,
-    /// Last known surface size used for on-demand layout recomputation.
-    pub last_surface_size: VPSize,
     /// Per-file highlight ranges (1-indexed, inclusive).
     pub highlight_ranges: HashMap<crate::loader::FileKey, Vec<(usize, usize)>>,
     pub leader_active: bool,
@@ -643,7 +641,6 @@ impl AppState {
             root,
             repo,
             pane_manager,
-            last_surface_size: VPSize::default(),
             highlight_ranges: HashMap::new(),
             leader_active: false,
             window_picker: FuzzyPickerState::default(),

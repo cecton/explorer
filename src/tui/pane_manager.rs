@@ -176,16 +176,14 @@ pub struct PaneManager {
     pub focused_window: Option<Window>,
     /// Per-window scroll, page-size, and pane-size state.
     pub window_states: HashMap<Window, WindowState>,
+    /// The panes of the last `relayout`, empty until the first one.
+    visible: Vec<PaneSlot>,
 }
 
 impl PaneManager {
     /// Creates a new, empty pane manager.
     pub fn new() -> Self {
-        Self {
-            window_stack: Vec::new(),
-            focused_window: None,
-            window_states: HashMap::new(),
-        }
+        Self::default()
     }
 
     /// Moves `window` to the front of the stack (index 0). If it is not present, inserts it.
@@ -271,25 +269,47 @@ impl PaneManager {
         };
     }
 
+    /// The panes laid out last, empty until the first `relayout`.
+    pub fn visible(&self) -> &[PaneSlot] {
+        &self.visible
+    }
+
+    /// The window in pane `slot`. A pane slot is its index in the stack, so this reads
+    /// the stack and not the last layout: a pane can name its window before any frame.
+    pub fn slot_window(&self, slot: usize) -> Option<Window> {
+        self.window_stack.get(slot).copied()
+    }
+
+    /// The box pane `slot` is drawn in, from the last `relayout`: only a frame asks.
+    pub fn slot_box(&self, slot: usize) -> Option<&FlexBox> {
+        self.visible.get(slot).map(|slot| &slot.box_)
+    }
+
+    /// Lays the panes out for `surface_size` and keeps the answer for the frame and the
+    /// events that follow: `slot_box` reads it.
+    pub fn relayout(&mut self, surface_size: VPSize) {
+        self.visible = self.layout(surface_size);
+    }
+
     /// Position of the focused window in the window stack, if any.
     pub fn focused_slot(&self) -> Option<usize> {
         let focused = self.focused_window.as_ref()?;
         self.window_stack.iter().position(|w| w == focused)
     }
 
-    /// Cycles focus through the visible panes.
-    pub fn cycle_focus(&mut self, visible: &[PaneSlot], direction: i32) {
-        if visible.is_empty() {
+    /// Cycles focus through the visible panes, which are the first `visible().len()`
+    /// windows of the stack.
+    pub fn cycle_focus(&mut self, direction: i32) {
+        let len = self.visible.len() as i32;
+        if len == 0 {
             return;
         }
         let current_pos = self
             .focused_window
-            .as_ref()
-            .and_then(|f| visible.iter().position(|s| &s.window == f))
+            .and_then(|f| self.visible.iter().position(|s| s.window == f))
             .unwrap_or(0);
-        let len = visible.len() as i32;
         let next_pos = ((current_pos as i32 + direction).rem_euclid(len)) as usize;
-        self.focused_window = Some(visible[next_pos].window);
+        self.focused_window = Some(self.visible[next_pos].window);
     }
 
     /// Lays out visible panes into columns and rows.
@@ -934,8 +954,8 @@ mod tests {
         ]);
         set_all_pane_sizes(&mut manager, PaneSize::Quarter);
         manager.focused_window = Some(Window::Terminal(0));
-        let visible = manager.layout(size(80, 24));
-        manager.cycle_focus(&visible, 1);
+        manager.relayout(size(80, 24));
+        manager.cycle_focus(1);
         assert_eq!(manager.focused_window, Some(Window::WindowPicker));
     }
 
@@ -948,15 +968,15 @@ mod tests {
         ]);
         set_all_pane_sizes(&mut manager, PaneSize::Quarter);
         manager.focused_window = Some(Window::WindowPicker);
-        let visible = manager.layout(size(80, 24));
-        manager.cycle_focus(&visible, -1);
+        manager.relayout(size(80, 24));
+        manager.cycle_focus(-1);
         assert_eq!(manager.focused_window, Some(Window::Terminal(0)));
     }
 
     #[test]
     fn cycle_focus_empty_visible_is_noop() {
         let mut manager = make_manager(&[Window::WindowPicker]);
-        manager.cycle_focus(&[], 1);
+        manager.cycle_focus(1);
         assert_eq!(manager.focused_window, Some(Window::WindowPicker));
     }
 
@@ -969,8 +989,8 @@ mod tests {
         ]);
         set_all_pane_sizes(&mut manager, PaneSize::Quarter);
         manager.focused_window = Some(Window::Terminal(99));
-        let visible = manager.layout(size(80, 24));
-        manager.cycle_focus(&visible, 1);
+        manager.relayout(size(80, 24));
+        manager.cycle_focus(1);
         assert_eq!(manager.focused_window, Some(Window::ThemePicker));
     }
 
@@ -1139,5 +1159,79 @@ mod tests {
         }
         let slots = manager.layout(size(400, 64));
         assert_eq!(slots.len(), MAX_PANES);
+    }
+
+    /// Every pane draws the window and the box of its own slot, so a slot that is not its
+    /// index in the window stack would draw one window into another's box. Holds for every
+    /// way `layout` can wrap, truncate or stretch panes.
+    #[test]
+    fn a_slot_is_the_index_of_its_window_in_the_stack() {
+        let mixes = [
+            vec![PaneSize::Half; 16],
+            vec![PaneSize::Quarter; 16],
+            vec![PaneSize::Full; 16],
+            vec![
+                PaneSize::Half,
+                PaneSize::Half,
+                PaneSize::Half,
+                PaneSize::Half,
+                PaneSize::Quarter,
+                PaneSize::Quarter,
+                PaneSize::Full,
+                PaneSize::Half,
+                PaneSize::Quarter,
+                PaneSize::Quarter,
+                PaneSize::Quarter,
+                PaneSize::Quarter,
+                PaneSize::Third,
+                PaneSize::Third,
+                PaneSize::Third,
+                PaneSize::Third,
+            ],
+            vec![
+                PaneSize::Full,
+                PaneSize::Half,
+                PaneSize::Full,
+                PaneSize::Half,
+                PaneSize::Full,
+                PaneSize::Half,
+                PaneSize::Full,
+                PaneSize::Half,
+                PaneSize::Full,
+                PaneSize::Half,
+                PaneSize::Full,
+                PaneSize::Half,
+                PaneSize::Full,
+                PaneSize::Half,
+                PaneSize::Full,
+                PaneSize::Half,
+            ],
+        ];
+        for count in 1..=crate::tui::pane_manager::MAX_PANES {
+            for sizes in &mixes {
+                for rows in 5u16..90 {
+                    for cols in [80u16, 240, 400, 600] {
+                        let mut manager = PaneManager::new();
+                        for i in 0..count {
+                            manager.push_window(Window::GitLog(15 - i));
+                        }
+                        for i in 0..count {
+                            let window = manager.window_stack[i];
+                            manager.window_states.get_mut(&window).unwrap().pane_size = sizes[i];
+                        }
+                        let size = VPSize {
+                            col_width: vp_width(cols),
+                            row_height: vp_height(rows),
+                        };
+                        manager.relayout(size);
+                        for (idx, slot) in manager.visible().iter().enumerate() {
+                            assert_eq!(slot.slot, idx, "{cols}x{rows}, {count} panes");
+                            assert_eq!(manager.slot_window(idx), Some(slot.window));
+                            assert_eq!(manager.window_stack[idx], slot.window);
+                        }
+                    }
+                }
+            }
+        }
     }
 }

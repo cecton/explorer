@@ -23,7 +23,7 @@ pub(super) fn handle(
     use crate::tui::theme::HelixTheme;
     crate::tui::app::sync_has_focus(&global_data.state, has_focus);
     let surface_size = crate::tui::app::surface_size(global_data.window_size);
-    global_data.state.last_surface_size = surface_size;
+    global_data.state.pane_manager.relayout(surface_size);
 
     if crate::tui::after_agents::cancel_on_input(&mut global_data.state, &input_event) {
         return Ok(EventPropagation::ConsumedRender);
@@ -176,8 +176,7 @@ pub(super) fn handle(
                 return Ok(EventPropagation::ConsumedRender);
             }
             Some(action) => {
-                if let Some(propagation) =
-                    crate::tui::app::input::apply_action(action, global_data, surface_size)
+                if let Some(propagation) = crate::tui::app::input::apply_action(action, global_data)
                 {
                     return Ok(propagation);
                 }
@@ -196,8 +195,7 @@ pub(super) fn handle(
         && !global_data.state.mouse_drag_active;
     if shortcuts_reach_here
         && let Some(action) = keyboard.and_then(|kp| global_data.state.keymap.global_action(&kp))
-        && let Some(propagation) =
-            crate::tui::app::input::apply_action(action, global_data, surface_size)
+        && let Some(propagation) = crate::tui::app::input::apply_action(action, global_data)
     {
         return Ok(propagation);
     }
@@ -210,8 +208,8 @@ pub(super) fn handle(
     }) = &input_event
         && !global_data.state.mouse_drag_active
     {
-        let layout = global_data.state.pane_manager.layout(surface_size);
-        for slot in &layout {
+        let layout = global_data.state.pane_manager.visible();
+        for slot in layout {
             let ox = slot.box_.style_adjusted_bounds.origin_pos.col_index;
             let oy = slot.box_.style_adjusted_bounds.origin_pos.row_index;
             let w = slot.box_.style_adjusted_bounds.bounds_size.col_width;
@@ -221,9 +219,10 @@ pub(super) fn handle(
                 && pos.row_index >= oy
                 && pos.row_index < oy + h
             {
-                if global_data.state.pane_manager.focused_window.as_ref() != Some(&slot.window) {
+                let window = slot.window;
+                if global_data.state.pane_manager.focused_window != Some(window) {
                     let old = global_data.state.pane_manager.focused_window;
-                    global_data.state.pane_manager.focused_window = Some(slot.window);
+                    global_data.state.pane_manager.focused_window = Some(window);
                     crate::tui::focus::focus_pointer(&mut global_data.state, old);
                     return Ok(EventPropagation::ConsumedRender);
                 }
@@ -246,17 +245,15 @@ pub(super) fn handle(
 fn apply_action(
     action: crate::tui::keymap::Action,
     global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
-    surface_size: VPSize,
 ) -> Option<EventPropagation> {
     use crate::tui::keymap::Action;
     use crate::tui::pane_manager::ResizeDelta;
     let state = &mut global_data.state;
     match action {
         Action::FocusNext | Action::FocusPrev => {
-            let visible = state.pane_manager.layout(surface_size);
             let old = state.pane_manager.focused_window;
             let direction = if action == Action::FocusNext { 1 } else { -1 };
-            state.pane_manager.cycle_focus(&visible, direction);
+            state.pane_manager.cycle_focus(direction);
             crate::tui::focus::refocus(state, old);
         }
         Action::ResizeGrow | Action::ResizeShrink => {

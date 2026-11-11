@@ -15,8 +15,8 @@ impl CommitDiffPaneComponent {
     fn active_commit(&self, state: &crate::tui::state::AppState) -> Option<[u8; 20]> {
         use crate::tui::pane_manager::Window;
         let slot = crate::tui::pane_component::pane_slot(self.id)?;
-        match state.pane_manager.window_stack.get(slot)? {
-            Window::CommitDiff(id) => Some(*id),
+        match state.pane_manager.slot_window(slot)? {
+            Window::CommitDiff(id) => Some(id),
             _ => None,
         }
     }

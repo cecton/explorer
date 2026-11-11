@@ -19,10 +19,9 @@ impl ReportComponent {
         use crate::tui::pane_manager::Window;
         match state
             .pane_manager
-            .window_stack
-            .get(crate::tui::pane_component::pane_slot(self.id)?)?
+            .slot_window(crate::tui::pane_component::pane_slot(self.id)?)?
         {
-            Window::Report(id) => Some(*id),
+            Window::Report(id) => Some(id),
             _ => None,
         }
     }

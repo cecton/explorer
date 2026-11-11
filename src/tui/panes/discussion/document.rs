@@ -187,6 +187,7 @@ fn ends_with_blank(lines: &[DocLine]) -> bool {
 pub(crate) fn doc_lines<'a>(
     component: &'a mut crate::tui::panes::discussion::DiscussionComponent,
     discussion: &crate::tui::state::DiscussionState,
+    window_id: usize,
     work_log_shown: bool,
     theme: &crate::tui::theme::HelixTheme,
     width: usize,
@@ -201,8 +202,8 @@ pub(crate) fn doc_lines<'a>(
     let width_changed = cache.width != width;
     // A text replaced as a whole may have the length of what it replaced: only the
     // revision tells them apart, and every section is laid out again for it.
-    let replaced = cache.content_revision != discussion.content_revision
-        || cache.window_id != component.window_id;
+    let replaced =
+        cache.content_revision != discussion.content_revision || cache.window_id != window_id;
 
     if width_changed
         || replaced
@@ -305,7 +306,7 @@ pub(crate) fn doc_lines<'a>(
         }
     }
 
-    cache.window_id = component.window_id;
+    cache.window_id = window_id;
     cache.width = width;
     cache.content_revision = discussion.content_revision;
     cache.doc.refresh();
@@ -333,7 +334,9 @@ mod tests {
     use crate::tui::state::DiscussionState;
 
     fn component() -> crate::tui::panes::discussion::DiscussionComponent {
-        crate::tui::panes::discussion::DiscussionComponent::new(FlexBoxId::from(1))
+        crate::tui::panes::discussion::DiscussionComponent::new(
+            crate::tui::pane_component::pane_id(0),
+        )
     }
 
     fn discussion(prompt: &str, reply: &str) -> DiscussionState {
@@ -353,7 +356,7 @@ mod tests {
         width: usize,
     ) -> (usize, usize) {
         let theme = crate::tui::theme::HelixTheme::default();
-        let rows = doc_lines(component, discussion, true, &theme, width).len();
+        let rows = doc_lines(component, discussion, 0, true, &theme, width).len();
         let laid_out = component.cache.as_ref().unwrap().rebuilds;
         (rows, laid_out)
     }

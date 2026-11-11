@@ -327,10 +327,10 @@ impl FilePreviewComponent {
     ) -> Option<crate::loader::FileKey> {
         use crate::tui::pane_manager::Window;
         let slot = crate::tui::pane_component::pane_slot(self.id)?;
-        let Window::FilePreview(key) = state.pane_manager.window_stack.get(slot)? else {
+        let Window::FilePreview(key) = state.pane_manager.slot_window(slot)? else {
             return None;
         };
-        Some(*key)
+        Some(key)
     }
 
     pub fn start_drag(

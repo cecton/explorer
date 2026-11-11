@@ -5,8 +5,8 @@ use std::sync::atomic::AtomicU64;
 use std::time::Instant;
 
 /// Dispatcher component for a single pane slot. Holds both inner component types and
-/// delegates to the correct one based on which `Window` is currently assigned to this slot
-/// by `state.pane_manager.layout(state.last_surface_size)`.
+/// delegates to the correct one based on the window its slot holds in `window_stack`, whose
+/// box is the one `PaneManager::relayout` computed for the frame.
 pub struct PaneComponent {
     pub id: FlexBoxId,
     pub slot: usize,
@@ -90,12 +90,7 @@ impl PaneComponent {
         &self,
         state: &crate::tui::state::AppState,
     ) -> Option<crate::tui::pane_manager::Window> {
-        state
-            .pane_manager
-            .layout(state.last_surface_size)
-            .into_iter()
-            .find(|slot| slot.slot == self.slot)
-            .map(|slot| slot.window)
+        state.pane_manager.slot_window(self.slot)
     }
 
     fn handle_scrollbar(
@@ -298,18 +293,16 @@ impl crate::tui::widgets::title_row::TitleRow for PaneComponent {
             Window::Terminal(_) => {
                 TitleRow::render_title_row(&self.terminal, ops, pane_box, focused, state)
             }
-            Window::GitLog(id) => self
-                .git_log
-                .render_title_row(ops, pane_box, focused, state, id),
+            Window::GitLog(_) => self.git_log.render_title_row(ops, pane_box, focused, state),
             Window::CommitDiff(_) => {
                 TitleRow::render_title_row(&self.commit_diff, ops, pane_box, focused, state)
             }
             Window::ConversationTree => {
                 TitleRow::render_title_row(&self.conversation_tree, ops, pane_box, focused, state)
             }
-            Window::Discussion(id) => self
+            Window::Discussion(_) => self
                 .discussion
-                .render_title_row(ops, pane_box, focused, state, id),
+                .render_title_row(ops, pane_box, focused, state),
             Window::Report(_) => {
                 TitleRow::render_title_row(&self.report, ops, pane_box, focused, state)
             }
@@ -1033,15 +1026,12 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                 input_event,
                 has_focus,
             ),
-            Some(Window::GitLog(id)) => {
-                self.git_log.set_window_id(id);
-                r3bl_tui::Component::handle_event(
-                    &mut self.git_log,
-                    global_data,
-                    input_event,
-                    has_focus,
-                )
-            }
+            Some(Window::GitLog(_)) => r3bl_tui::Component::handle_event(
+                &mut self.git_log,
+                global_data,
+                input_event,
+                has_focus,
+            ),
             Some(Window::CommitDiff(_)) => r3bl_tui::Component::handle_event(
                 &mut self.commit_diff,
                 global_data,
@@ -1054,15 +1044,12 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                 input_event,
                 has_focus,
             ),
-            Some(Window::Discussion(id)) => {
-                self.discussion.set_window_id(id);
-                r3bl_tui::Component::handle_event(
-                    &mut self.discussion,
-                    global_data,
-                    input_event,
-                    has_focus,
-                )
-            }
+            Some(Window::Discussion(_)) => r3bl_tui::Component::handle_event(
+                &mut self.discussion,
+                global_data,
+                input_event,
+                has_focus,
+            ),
             Some(Window::Report(_)) => r3bl_tui::Component::handle_event(
                 &mut self.report,
                 global_data,
@@ -1211,8 +1198,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                     self.terminal
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
-                Some(Window::GitLog(id)) => {
-                    self.git_log.set_window_id(id);
+                Some(Window::GitLog(_)) => {
                     self.git_log
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
@@ -1226,8 +1212,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                     surface_bounds,
                     has_focus,
                 )?,
-                Some(Window::Discussion(id)) => {
-                    self.discussion.set_window_id(id);
+                Some(Window::Discussion(_)) => {
                     self.discussion
                         .render(global_data, content_box, surface_bounds, has_focus)?
                 }

@@ -1,11 +1,9 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
 
-pub(super) struct PanesRenderer<'a> {
-    pub(super) visible: &'a [crate::tui::pane_manager::PaneSlot],
-}
+pub(super) struct PanesRenderer;
 
-impl SurfaceRender<crate::tui::state::AppState, crate::signal::AppSignal> for PanesRenderer<'_> {
+impl SurfaceRender<crate::tui::state::AppState, crate::signal::AppSignal> for PanesRenderer {
     fn render_in_surface(
         &mut self,
         surface: &mut Surface,
@@ -33,7 +31,9 @@ impl SurfaceRender<crate::tui::state::AppState, crate::signal::AppSignal> for Pa
             let mut col_idx = 0usize;
             let mut column_id;
 
-            for slot in self.visible {
+            // The frame's layout, computed once by `AppMain::render`.
+            for slot_idx in 0..global_data.state.pane_manager.visible().len() {
+                let slot = &global_data.state.pane_manager.visible()[slot_idx];
                 let slot_origin_col = slot
                     .box_
                     .style_adjusted_bounds

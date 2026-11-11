@@ -33,8 +33,9 @@ pub(super) fn render(
     throws!({
         let window_size = global_data.window_size;
         let surface_size = crate::tui::app::surface_size(window_size);
-        global_data.state.last_surface_size = surface_size;
-        let visible = global_data.state.pane_manager.layout(surface_size);
+        // One layout for the frame: every pane below reads its window and its box from it.
+        global_data.state.pane_manager.relayout(surface_size);
+        let visible = global_data.state.pane_manager.visible();
 
         // Sync focused window with actual visible windows: if the currently focused
         // window is not visible, focus the frontmost visible one.
@@ -61,7 +62,7 @@ pub(super) fn render(
                 size: surface_size,
             })?;
 
-            PanesRenderer { visible: &visible }.render_in_surface(
+            PanesRenderer.render_in_surface(
                 &mut it,
                 global_data,
                 component_registry_map,

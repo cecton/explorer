@@ -4,7 +4,6 @@ use std::sync::Arc;
 
 pub struct GitLogPaneComponent {
     id: FlexBoxId,
-    window_id: usize,
     content_origin_row: usize,
     content_row_count: usize,
     branch_fuzzy: crate::tui::widgets::fuzzy_picker::FuzzyPicker,
@@ -18,7 +17,6 @@ impl GitLogPaneComponent {
         use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
         Self {
             id,
-            window_id: 0,
             content_origin_row: 0,
             content_row_count: 0,
             branch_fuzzy: FuzzyPicker::new(Kind::Plain),
@@ -26,8 +24,14 @@ impl GitLogPaneComponent {
         }
     }
 
-    pub fn set_window_id(&mut self, window_id: usize) {
-        self.window_id = window_id;
+    /// The git log this pane slot shows, read from the window stack.
+    fn window_id(&self, state: &crate::tui::state::AppState) -> Option<usize> {
+        use crate::tui::pane_manager::Window;
+        let slot = crate::tui::pane_component::pane_slot(self.id)?;
+        match state.pane_manager.slot_window(slot)? {
+            Window::GitLog(id) => Some(id),
+            _ => None,
+        }
     }
 
     pub(crate) fn open_commit_diff(
@@ -207,9 +211,11 @@ impl GitLogPaneComponent {
         pane_box: &FlexBox,
         focused: bool,
         state: &mut crate::tui::state::AppState,
-        window_id: usize,
     ) -> usize {
         let theme = &state.theme;
+        let Some(window_id) = self.window_id(state) else {
+            return 0;
+        };
         let Some(win) = state.git_logs.get_mut(&window_id) else {
             return 0;
         };
@@ -283,9 +289,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
         use crate::tui::state::AppState;
         use crate::tui::state::FuzzyPickerState;
         use crate::tui::state::LogSource;
-        let window_id = self.window_id;
         let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;
+        let Some(window_id) = self.window_id(state) else {
+            return Ok(EventPropagation::Propagate);
+        };
         if !state.git_logs.contains_key(&window_id) {
             return Ok(EventPropagation::Propagate);
         }
@@ -541,7 +549,9 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
         use crate::git::RefKind;
         use crate::tui::pane_manager::Window;
         throws!({
-            let window_id = self.window_id;
+            let Some(window_id) = self.window_id(&global_data.state) else {
+                return Ok(());
+            };
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
             let total_rows = bounds.row_height.as_usize();
@@ -1246,5 +1256,36 @@ mod tests {
             .map(|index| "docs: update readme".chars().nth(*index as usize).unwrap())
             .collect();
         assert_eq!(highlighted, "readme");
+    }
+
+    /// Each pane reads the window of its own slot out of the stack, so two git logs in two
+    /// slots and a discussion in a third each see their own, never a neighbour's.
+    #[test]
+    fn each_pane_names_its_own_window() {
+        use crate::tui::pane_component::pane_id;
+        use crate::tui::pane_manager::PaneManager;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::panes::git_log_pane::GitLogPaneComponent;
+        use crate::tui::state::AppState;
+        let mut state = AppState {
+            pane_manager: PaneManager::new(),
+            ..Default::default()
+        };
+        state.pane_manager.push_window(Window::GitLog(7));
+        state.pane_manager.push_window(Window::GitLog(3));
+        state.pane_manager.push_window(Window::ConversationTree);
+        state.pane_manager.push_window(Window::Discussion(5));
+        let named: Vec<Option<usize>> = (0..4)
+            .map(|slot| GitLogPaneComponent::new(pane_id(slot)).window_id(&state))
+            .collect();
+        assert_eq!(named, vec![None, None, Some(3), Some(7)]);
+        // A pane draws whatever its slot holds, not the window it was created for.
+        let second = GitLogPaneComponent::new(pane_id(2));
+        state.pane_manager.send_to_back(&Window::ConversationTree);
+        assert_eq!(
+            second.window_id(&state),
+            Some(7),
+            "slot 2 now shows the git log that trailed the conversation tree"
+        );
     }
 }

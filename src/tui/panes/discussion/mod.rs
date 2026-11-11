@@ -19,7 +19,6 @@ struct Drag {
 
 pub struct DiscussionComponent {
     id: FlexBoxId,
-    window_id: usize,
     cache: Option<crate::tui::panes::discussion::document::DocCache>,
     /// Screen row and column of the document area at last render, and its height, used
     /// for mouse event handling.
@@ -34,7 +33,6 @@ impl DiscussionComponent {
     pub fn new(id: FlexBoxId) -> Self {
         Self {
             id,
-            window_id: 0,
             cache: None,
             doc_origin: (0, 0),
             doc_rows: 0,
@@ -44,8 +42,14 @@ impl DiscussionComponent {
         }
     }
 
-    pub fn set_window_id(&mut self, window_id: usize) {
-        self.window_id = window_id;
+    /// The discussion this pane slot shows, read from the window stack.
+    fn window_id(&self, state: &crate::tui::state::AppState) -> Option<usize> {
+        use crate::tui::pane_manager::Window;
+        let slot = crate::tui::pane_component::pane_slot(self.id)?;
+        match state.pane_manager.slot_window(slot)? {
+            Window::Discussion(id) => Some(id),
+            _ => None,
+        }
     }
 
     /// Drops the drag in progress, if any, and its selection.
@@ -424,9 +428,11 @@ impl DiscussionComponent {
         pane_box: &FlexBox,
         focused: bool,
         state: &mut crate::tui::state::AppState,
-        window_id: usize,
     ) -> usize {
         let theme = &state.theme;
+        let Some(window_id) = self.window_id(state) else {
+            return 0;
+        };
         let title = Self::title(state, window_id);
         let model = state
             .discussions
@@ -493,8 +499,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
     ) -> CommonResult<EventPropagation> {
         use crate::tui::pane_manager::Window;
         let main_tx = global_data.main_thread_channel_sender.clone();
+        let Some(id) = self.window_id(&global_data.state) else {
+            return Ok(EventPropagation::Propagate);
+        };
         let state = &mut global_data.state;
-        let id = self.window_id;
         let window = Window::Discussion(id);
         if self.drag.as_ref().is_some_and(|drag| drag.window_id != id) {
             self.cancel_drag(state);
@@ -658,29 +666,29 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             let pane_width = bounds.col_width.as_usize();
             // The pane's scrollbar takes the last column, down to the status line.
             let doc_width = pane_width.saturating_sub(1);
-            let window = Window::Discussion(self.window_id);
+            let Some(window_id) = self.window_id(&global_data.state) else {
+                return Ok(());
+            };
+            let window = Window::Discussion(window_id);
             let focused = has_focus.get_id() == Some(self.id);
             let state = &mut global_data.state;
 
             // A running turn's reply lives in its handle; mirror it when it changed.
-            let output = state
-                .discussions
-                .get(&self.window_id)
-                .and_then(|discussion| {
-                    crate::tui::panes::discussion::launch::running_output(state, discussion)
-                });
+            let output = state.discussions.get(&window_id).and_then(|discussion| {
+                crate::tui::panes::discussion::launch::running_output(state, discussion)
+            });
             let (log_start_before, content_revision_before) = state
                 .discussions
-                .get(&self.window_id)
+                .get(&window_id)
                 .map_or((0, 0), |discussion| {
                     (discussion.log_start, discussion.content_revision)
                 });
             if let Some(output) = &output
-                && let Some(discussion) = state.discussions.get_mut(&self.window_id)
+                && let Some(discussion) = state.discussions.get_mut(&window_id)
             {
                 let live = output.lock();
                 discussion.mirror(&live);
-            } else if let Some(discussion) = state.discussions.get_mut(&self.window_id)
+            } else if let Some(discussion) = state.discussions.get_mut(&window_id)
                 && discussion.log_start != 0
             {
                 // Once the turn is over, its whole work log is on screen again.
@@ -688,17 +696,13 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             }
             // The work log on screen is other text now, so a drag through it no longer
             // means what it did.
-            if state
-                .discussions
-                .get(&self.window_id)
-                .is_some_and(|discussion| {
-                    discussion.log_start != log_start_before
-                        || discussion.content_revision != content_revision_before
-                })
-            {
-                self.clear_work_log_selection(state, self.window_id);
+            if state.discussions.get(&window_id).is_some_and(|discussion| {
+                discussion.log_start != log_start_before
+                    || discussion.content_revision != content_revision_before
+            }) {
+                self.clear_work_log_selection(state, window_id);
             }
-            let Some(discussion) = state.discussions.get(&self.window_id) else {
+            let Some(discussion) = state.discussions.get(&window_id) else {
                 return Ok(());
             };
 
@@ -727,11 +731,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                 .unwrap_or(RgbValue::from_u8(50, 50, 90));
             let marker = crate::tui::panes::discussion::status::marker_bg(theme, pane_bg);
 
-            let (status, alert) = crate::tui::panes::discussion::status::status_line(
-                state,
-                self.window_id,
-                discussion,
-            );
+            let (status, alert) =
+                crate::tui::panes::discussion::status::status_line(state, window_id, discussion);
             let read_only = discussion.agent.is_some();
             let hint =
                 crate::agent::commands::placeholder(discussion.draft.text(), &state.agent.commands)
@@ -830,7 +831,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             );
             let running = output.is_some();
             let doc = crate::tui::panes::discussion::document::doc_lines(
-                self, discussion, shown, theme, doc_width,
+                self, discussion, window_id, shown, theme, doc_width,
             );
             let line_count = doc.len();
             let max_scroll = line_count.saturating_sub(doc_rows);
@@ -959,7 +960,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                 .pane_manager
                 .set_window_scroll_max(&window, line_count);
             state.pane_manager.set_window_scroll(&window, scroll);
-            if !read_only && let Some(discussion) = state.discussions.get_mut(&self.window_id) {
+            if !read_only && let Some(discussion) = state.discussions.get_mut(&window_id) {
                 discussion.draft.render(
                     &mut input_ops,
                     hint.as_deref()
@@ -1480,8 +1481,7 @@ mod tests {
         use crate::tui::state::DiscussionState;
         let mut state = empty_state();
         state.discussions.insert(0, DiscussionState::default());
-        let mut component = DiscussionComponent::new(FlexBoxId::from(1));
-        component.set_window_id(0);
+        let mut component = DiscussionComponent::new(crate::tui::pane_component::pane_id(0));
         component.drag = Some(crate::tui::panes::discussion::Drag {
             window_id: 0,
             kind: DragKind::Select,
@@ -1518,8 +1518,7 @@ mod tests {
         use crate::tui::state::DiscussionState;
         let mut state = empty_state();
         state.discussions.insert(0, DiscussionState::default());
-        let mut component = DiscussionComponent::new(FlexBoxId::from(1));
-        component.set_window_id(0);
+        let mut component = DiscussionComponent::new(crate::tui::pane_component::pane_id(0));
         let point = |offset| SelPoint::Discussion {
             part: DocPart::Reply,
             offset,
@@ -2277,14 +2276,22 @@ mod tests {
         InputEvent::Keyboard(KeyPress::Plain { key })
     }
 
-    /// Sends `events` to `window` through `component`, as the pane slot showing it would.
+    /// Sends `events` to `window` through `component`, as the pane slot showing it would:
+    /// the window has to sit in the slot the component is drawn in.
     fn type_into(
         component: &mut DiscussionComponent,
         global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         window: usize,
         events: &[InputEvent],
     ) {
-        component.set_window_id(window);
+        use crate::tui::pane_manager::Window;
+        let slot = crate::tui::pane_component::pane_slot(r3bl_tui::Component::get_id(component))
+            .expect("a pane id");
+        let stack = &mut global_data.state.pane_manager.window_stack;
+        while stack.len() <= slot {
+            stack.push(Window::Discussion(window));
+        }
+        stack[slot] = Window::Discussion(window);
         for event in events {
             component
                 .handle_event(global_data, event.clone(), &mut HasFocus::default())
@@ -2322,8 +2329,8 @@ mod tests {
     #[test]
     fn the_input_cursor_follows_its_window_to_another_pane_slot() {
         let mut global_data = global_data_with_drafts(&["hello world"]);
-        let mut first_slot = DiscussionComponent::new(FlexBoxId::from(1));
-        let mut second_slot = DiscussionComponent::new(FlexBoxId::from(2));
+        let mut first_slot = DiscussionComponent::new(crate::tui::pane_component::pane_id(0));
+        let mut second_slot = DiscussionComponent::new(crate::tui::pane_component::pane_id(1));
         let left = key(Key::SpecialKey(SpecialKey::Left));
 
         let moves = [left.clone(), left.clone(), left.clone(), left.clone(), left];
@@ -2353,7 +2360,7 @@ mod tests {
     #[test]
     fn two_windows_of_one_pane_slot_keep_their_own_input_cursors() {
         let mut global_data = global_data_with_drafts(&["hello world", "other"]);
-        let mut slot = DiscussionComponent::new(FlexBoxId::from(1));
+        let mut slot = DiscussionComponent::new(crate::tui::pane_component::pane_id(0));
         let left = key(Key::SpecialKey(SpecialKey::Left));
         let home = key(Key::SpecialKey(SpecialKey::Home));
 

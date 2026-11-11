@@ -27,30 +27,21 @@ impl TerminalPaneComponent {
     fn terminal_id(&self, state: &crate::tui::state::AppState) -> Option<usize> {
         use crate::tui::pane_manager::Window;
         let slot = crate::tui::pane_component::pane_slot(self.id)?;
-        let Window::Terminal(id) = state.pane_manager.window_stack.get(slot)? else {
+        let Window::Terminal(id) = state.pane_manager.slot_window(slot)? else {
             return None;
         };
-        Some(*id)
+        Some(id)
     }
 
     fn pane_height(
         &self,
         global_data: &GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
     ) -> usize {
-        let slot = self.slot;
-        let state = &global_data.state;
-        state
+        global_data
+            .state
             .pane_manager
-            .layout(state.last_surface_size)
-            .iter()
-            .find(|s| s.slot == slot)
-            .map(|s| {
-                s.box_
-                    .style_adjusted_bounds
-                    .bounds_size
-                    .row_height
-                    .as_usize()
-            })
+            .slot_box(self.slot)
+            .map(|b| b.style_adjusted_bounds.bounds_size.row_height.as_usize())
             .unwrap_or(0)
     }
 }
