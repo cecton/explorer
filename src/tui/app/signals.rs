@@ -299,10 +299,7 @@ pub(super) fn handle(
                 if let Some(discussion) = state.discussions.get_mut(window_id)
                     && discussion.node.as_ref() == Some(node)
                 {
-                    discussion.prompt = prompt.clone();
-                    discussion.reply = reply.clone();
-                    discussion.work_log = work_log.clone();
-                    discussion.thinking.clear();
+                    discussion.show_content(prompt.clone(), reply.clone(), work_log.clone());
                     discussion.loaded = true;
                     if discussion.model.is_none() {
                         let tree = state.conversations.read();
@@ -376,8 +373,7 @@ pub(super) fn handle(
                     };
                     for (id, discussion) in state.discussions.iter_mut() {
                         if discussion.node.as_ref() == Some(node) && discussion.agent.is_none() {
-                            discussion.reply.clone_from(&reply);
-                            discussion.work_log.clone_from(&work_log);
+                            discussion.show_finished_turn(&reply, &work_log);
                             if outcome.status == NodeStatus::Done {
                                 discussion.thinking.clear();
                                 state

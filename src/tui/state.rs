@@ -122,6 +122,11 @@ pub struct DiscussionState {
     pub log_start: usize,
     /// Thinking of the running turn, streamed dimmed; empty once the turn is over.
     pub thinking: String,
+    /// Revision of the running turn's live texts the fields above were copied from.
+    pub live_revision: u64,
+    /// Bumped whenever the texts are replaced as a whole (content read from disk, a
+    /// prompt sent, a turn finished), which no length tells apart.
+    pub content_revision: u64,
     /// Whether the work log is shown, once toggled with Ctrl+O; `None` shows it only
     /// while the node has no finished reply.
     pub show_work_log: Option<bool>,
@@ -197,6 +202,71 @@ impl DiscussionState {
         } else {
             &self.work_log[self.log_start.min(self.work_log.len())..]
         }
+    }
+
+    /// Takes what the running turn has produced since the last frame. The texts only
+    /// grow over a turn and its work-log entries are never rewritten, so the copy
+    /// appends what is new instead of taking the whole texts again; a text that shrank
+    /// or was rewritten is taken whole, which the layout cache has to know.
+    pub fn mirror(&mut self, live: &crate::agent::turn::live::LiveTurn) {
+        if live.revision() == self.live_revision {
+            return;
+        }
+        let reply_replaced = append_str(&mut self.reply, &live.reply);
+        let thinking_replaced = append_str(&mut self.thinking, &live.thinking);
+        let work_log_replaced = if live.work_log.len() >= self.work_log.len()
+            && live.work_log.starts_with(&self.work_log)
+        {
+            self.work_log
+                .extend_from_slice(&live.work_log[self.work_log.len()..]);
+            false
+        } else {
+            self.work_log.clone_from(&live.work_log);
+            true
+        };
+        if reply_replaced || thinking_replaced || work_log_replaced {
+            self.content_revision += 1;
+        }
+        if self.prompt != live.prompt {
+            self.prompt.clone_from(&live.prompt);
+        }
+        self.log_start = live.log_start();
+        self.live_revision = live.revision();
+    }
+
+    /// Replaces what the window shows with the texts of a node or sub-agent run read
+    /// from disk.
+    pub fn show_content(&mut self, prompt: String, reply: String, work_log: Vec<String>) {
+        self.prompt = prompt;
+        self.reply = reply;
+        self.work_log = work_log;
+        self.thinking.clear();
+        self.log_start = 0;
+        self.content_revision += 1;
+    }
+
+    /// The texts a finished turn left, which the window still showed live.
+    pub fn show_finished_turn(&mut self, reply: &str, work_log: &[String]) {
+        self.reply.clear();
+        self.reply.push_str(reply);
+        self.work_log.clear();
+        self.work_log.extend_from_slice(work_log);
+        self.content_revision += 1;
+    }
+}
+
+/// `text` takes `live` as a whole: what is new is appended, and a text that is not an
+/// extension of it — a reply rewritten, a node swapped under the window — is copied and
+/// reports `true`, since only a revision tells the layout cache such a change apart.
+fn append_str(text: &mut String, live: &str) -> bool {
+    if live.len() >= text.len() && live.starts_with(text.as_str()) {
+        let added = live[text.len()..].to_string();
+        text.push_str(&added);
+        false
+    } else {
+        text.clear();
+        text.push_str(live);
+        true
     }
 }
 

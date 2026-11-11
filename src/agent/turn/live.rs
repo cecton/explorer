@@ -12,6 +12,14 @@ const REPLY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 pub const TOOL_LINE_PREFIX: &str = "- ";
 /// Sets a sub-agent's tool calls apart in the work log of the turn that called it.
 const SUBAGENT_INDENT: &str = "  ";
+/// Handed out to every change of the texts a window copies, across turns: a window
+/// compares the revision of one turn against the one it holds, and a resumed turn must
+/// not reach the number its predecessor stopped at.
+static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+fn next_revision() -> u64 {
+    REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
 
 /// What a running turn has produced so far, read by Discussion windows at render time.
 #[derive(Default)]
@@ -48,6 +56,27 @@ pub struct LiveTurn {
     pub injected: VecDeque<String>,
     /// The turn takes no more messages: the Claude Code driver closed the CLI's stdin.
     pub closed: bool,
+    /// The change that last touched a text a window copies: a window takes them only
+    /// when this moved. The stamps come from one counter for the whole process, so two
+    /// turns never meet on the same number.
+    revision: u64,
+}
+
+#[cfg(test)]
+impl LiveTurn {
+    /// A turn whose texts are `reply`, `work_log`, `thinking` and `prompt`, with the
+    /// revision they would carry.
+    pub(crate) fn for_test(reply: &str, work_log: &[&str], thinking: &str, prompt: &str) -> Self {
+        let mut live = Self {
+            reply: reply.to_string(),
+            work_log: work_log.iter().map(|entry| (*entry).to_string()).collect(),
+            thinking: thinking.to_string(),
+            prompt: prompt.to_string(),
+            ..Self::default()
+        };
+        live.touch();
+        live
+    }
 }
 
 /// A sub-agent run in progress, as the turn that called it sees it.
@@ -62,6 +91,16 @@ impl LiveTurn {
     /// Index of the first work log entry of the current answer in progress.
     pub fn log_start(&self) -> usize {
         self.log_start.min(self.work_log.len())
+    }
+
+    /// The revision of the texts a window copies: it changes with any of them.
+    pub fn revision(&self) -> u64 {
+        self.revision
+    }
+
+    /// Records that a text a window copies changed.
+    fn touch(&mut self) {
+        self.revision = next_revision();
     }
 
     /// Takes what the user sent while the turn was working.
@@ -130,6 +169,7 @@ impl Injector {
                 live.prompt.push_str("\n\n");
             }
             live.prompt.push_str(content);
+            live.touch();
         }
         let appended = std::fs::OpenOptions::new()
             .create(true)
@@ -198,7 +238,9 @@ fn append_work_log(dir: &camino::Utf8Path, live: &parking_lot::Mutex<LiveTurn>, 
     if let Err(e) = appended {
         tracing::warn!("failed to append to the work log of {dir}: {e}");
     }
-    live.lock().work_log.push(entry);
+    let mut live = live.lock();
+    live.work_log.push(entry);
+    live.touch();
 }
 
 impl Recorder {
@@ -256,6 +298,7 @@ impl Recorder {
                 "\n\n"
             };
             live.reply.push_str(missing);
+            live.touch();
         }
         self.answer_start = live.reply.len();
         self.thinking_start = live.thinking.len();
@@ -267,11 +310,14 @@ impl Recorder {
         {
             let mut live = self.live.lock();
             live.thinking.truncate(self.thinking_start);
+            live.touch();
         }
         let text = {
             let mut live = self.live.lock();
             let start = self.answer_start.min(live.reply.len());
-            live.reply.split_off(start)
+            let text = live.reply.split_off(start);
+            live.touch();
+            text
         };
         let text = text.trim();
         if !text.is_empty() {
@@ -281,6 +327,7 @@ impl Recorder {
         {
             let mut live = self.live.lock();
             live.log_start = live.work_log.len();
+            live.touch();
         }
     }
 
@@ -320,7 +367,11 @@ impl Recorder {
     }
 
     pub fn text(&mut self, chunk: &str) {
-        self.live.lock().reply.push_str(chunk);
+        {
+            let mut live = self.live.lock();
+            live.reply.push_str(chunk);
+            live.touch();
+        }
         if self.last_flush.elapsed() >= REPLY_FLUSH_INTERVAL {
             self.flush_reply();
         }
@@ -328,7 +379,9 @@ impl Recorder {
 
     /// Thinking of the answer in progress; shown dimmed and never recorded.
     pub fn reasoning(&mut self, chunk: &str) {
-        self.live.lock().thinking.push_str(chunk);
+        let mut live = self.live.lock();
+        live.thinking.push_str(chunk);
+        live.touch();
     }
 
     /// Appends one message to `transcript.jsonl`.
@@ -569,6 +622,33 @@ mod tests {
         assert_eq!(live.reply, "Done.");
         assert_eq!(live.work_log.len() - live.log_start(), 1);
         assert_eq!(live.log_start, 1);
+    }
+
+    #[test]
+    fn every_change_to_a_text_a_window_copies_bumps_the_revision() {
+        let (_tmp, node_dir) = temp_dir();
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
+        let live = Arc::default();
+        let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
+        let revision = |live: &Arc<parking_lot::Mutex<LiveTurn>>| live.lock().revision();
+
+        let start = revision(&live);
+        recorder.begin_answer();
+        recorder.text("hi");
+        assert!(revision(&live) > start, "the reply grew");
+        let after_reply = revision(&live);
+        recorder.reasoning("thinking");
+        assert!(revision(&live) > after_reply, "the thinking grew");
+        let after_thinking = revision(&live);
+        recorder.tool_call("read a.txt".to_string());
+        assert!(revision(&live) > after_thinking, "the work log grew");
+        let after_tool = revision(&live);
+        recorder.answer_calls_tools();
+        assert!(revision(&live) > after_tool, "the reply moved to the log");
+        let after_move = revision(&live);
+        recorder.begin_answer();
+        recorder.text("Done.");
+        assert!(revision(&live) > after_move);
     }
 
     #[test]

@@ -2,6 +2,8 @@
 use r3bl_tui::*;
 use std::borrow::Cow;
 pub(crate) const SCROLL_STEP: usize = 3;
+/// The texts a window shows, in the order it shows them.
+const SECTIONS: usize = 4;
 
 pub(crate) struct DocLine {
     /// Text the line shows a piece of; `None` for the blank line between two of them.
@@ -12,34 +14,115 @@ pub(crate) struct DocLine {
     pub(crate) bg: Option<RgbValue>,
 }
 
-/// Wrapped prompt, thinking, work log and reply of one window, reused while the texts and view hold.
+/// The document of one window: the wrapped lines of each text, in the order the window
+/// shows them. Each text is laid out on its own, so a running turn re-wraps what it
+/// changes and leaves the rest of the document alone.
+#[derive(Default)]
+pub(crate) struct Doc {
+    prompt: Vec<DocLine>,
+    thinking: Vec<DocLine>,
+    work_log: Vec<DocLine>,
+    reply: Vec<DocLine>,
+    /// Row the lines of each section start at.
+    starts: [usize; SECTIONS],
+    rows: usize,
+}
+
+impl Doc {
+    pub(crate) fn len(&self) -> usize {
+        self.rows
+    }
+
+    /// The line at `row` of the document.
+    pub(crate) fn line(&self, row: usize) -> Option<&DocLine> {
+        // Sections are cumulative, so the one holding `row` is the last that starts at
+        // or before it; an empty section holds nothing and the search goes on.
+        self.starts
+            .iter()
+            .enumerate()
+            .rev()
+            .filter(|(_, start)| **start <= row)
+            .find_map(|(index, start)| self.section(index).get(row - start))
+    }
+
+    /// The last line before `row` that shows text.
+    pub(crate) fn text_before(&self, row: usize) -> Option<&DocLine> {
+        (0..row.min(self.rows))
+            .rev()
+            .find_map(|row| self.line(row).filter(|line| !line.spans.is_empty()))
+    }
+
+    /// The first line after `row` that shows text.
+    pub(crate) fn text_after(&self, row: usize) -> Option<&DocLine> {
+        (row + 1..self.rows).find_map(|row| self.line(row).filter(|line| !line.spans.is_empty()))
+    }
+
+    fn section(&self, index: usize) -> &[DocLine] {
+        match index {
+            0 => &self.prompt,
+            1 => &self.thinking,
+            2 => &self.work_log,
+            _ => &self.reply,
+        }
+    }
+
+    fn refresh(&mut self) {
+        let lens = [
+            self.prompt.len(),
+            self.thinking.len(),
+            self.work_log.len(),
+            self.reply.len(),
+        ];
+        let mut at = 0;
+        for (index, len) in lens.into_iter().enumerate() {
+            self.starts[index] = at;
+            at += len;
+        }
+        self.rows = at;
+    }
+}
+
+/// The lines a window was laid out from, so that a frame at the same width with the same
+/// texts takes the document as it is.
+#[derive(Default)]
 pub(crate) struct DocCache {
     window_id: usize,
     width: usize,
+    content_revision: u64,
+    node_shown: bool,
     prompt_len: usize,
+    thinking_len: usize,
     reply_len: usize,
     work_log_len: usize,
     log_start: usize,
-    thinking_len: usize,
     show_work_log: Option<bool>,
     work_log_shown: bool,
-    pub(crate) lines: Vec<DocLine>,
+    /// Work-log entries laid out, and the source offset the next one starts at.
+    work_log_entries: usize,
+    work_log_base: usize,
+    /// How many texts were laid out again, for the tests that pin the caching.
+    #[cfg(test)]
+    rebuilds: usize,
+    pub(crate) doc: Doc,
 }
 
 impl DocCache {
-    /// Whether the lines were laid out from the texts and view settings `discussion` has now.
+    /// Whether the document was laid out from the texts and view settings `discussion`
+    /// has now.
     pub(crate) fn shows(
         &self,
         window_id: usize,
         discussion: &crate::tui::state::DiscussionState,
     ) -> bool {
         self.window_id == window_id
+            && self.content_revision == discussion.content_revision
+            && self.node_shown == discussion.node.is_some()
             && self.prompt_len == discussion.prompt.len()
             && self.reply_len == discussion.reply.len()
+            && self.thinking_len == discussion.thinking.len()
             && self.work_log_len == discussion.work_log.len()
             && self.log_start == discussion.log_start
             && self.show_work_log == discussion.show_work_log
-            && self.thinking_len == discussion.thinking.len()
     }
 }
 
@@ -67,109 +150,301 @@ pub(crate) fn start_view(state: &mut crate::tui::state::AppState, id: usize) {
     state.pane_manager.set_window_scroll_max(&window, 0);
 }
 
+/// Wraps `text` into the lines of `part`, whose source offsets start at `base`.
+fn push_wrapped(
+    lines: &mut Vec<DocLine>,
+    text: &str,
+    base: usize,
+    width: usize,
+    part: crate::tui::pane_manager::DocPart,
+    fg: RgbValue,
+) {
+    use crate::tui::widgets::markdown::Span;
+    for (start, text) in crate::tui::widgets::text_layout::wrap(text, width) {
+        lines.push(DocLine {
+            part: Some(part),
+            spans: vec![Span {
+                src: Some(base + start),
+                ..Span::plain(text, fg)
+            }],
+            bg: None,
+        });
+    }
+}
+
+fn blank_line() -> DocLine {
+    DocLine {
+        part: None,
+        spans: Vec::new(),
+        bg: None,
+    }
+}
+
+fn ends_with_blank(lines: &[DocLine]) -> bool {
+    lines.last().is_some_and(|line| line.part.is_none())
+}
+
 pub(crate) fn doc_lines<'a>(
     component: &'a mut crate::tui::panes::discussion::DiscussionComponent,
     discussion: &crate::tui::state::DiscussionState,
     work_log_shown: bool,
     theme: &crate::tui::theme::HelixTheme,
     width: usize,
-) -> &'a [DocLine] {
+) -> &'a Doc {
     use crate::tui::pane_manager::DocPart;
-    use crate::tui::widgets::markdown::Span;
-    let fresh = component.cache.as_ref().is_some_and(|cache| {
-        cache.window_id == component.window_id
-            && cache.width == width
-            && cache.prompt_len == discussion.prompt.len()
-            && cache.reply_len == discussion.reply.len()
-            && cache.work_log_len == discussion.work_log.len()
-            && cache.log_start == discussion.log_start
-            && cache.show_work_log == discussion.show_work_log
-            && cache.thinking_len == discussion.thinking.len()
-            && cache.work_log_shown == work_log_shown
-    });
-    if !fresh {
-        let text_fg = theme
-            .ui_fg("ui.text")
-            .unwrap_or(RgbValue::from_u8(170, 170, 200));
-        let dim_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
-        let mut lines = Vec::new();
-        if discussion.node.is_some() {
-            for (start, text) in crate::tui::widgets::text_layout::wrap(&discussion.prompt, width) {
-                lines.push(DocLine {
-                    part: Some(DocPart::Prompt),
-                    spans: vec![Span {
-                        src: Some(start),
-                        ..crate::tui::widgets::markdown::Span::plain(text, text_fg)
-                    }],
-                    bg: None,
-                });
-            }
-            lines.push(DocLine {
-                part: None,
-                spans: Vec::new(),
-                bg: None,
-            });
-            if !discussion.thinking.is_empty() {
-                for (start, text) in
-                    crate::tui::widgets::text_layout::wrap(&discussion.thinking, width)
-                {
-                    lines.push(DocLine {
-                        part: Some(DocPart::Thinking),
-                        spans: vec![Span {
-                            src: Some(start),
-                            ..crate::tui::widgets::markdown::Span::plain(text, dim_fg)
-                        }],
-                        bg: None,
-                    });
-                }
-                lines.push(DocLine {
-                    part: None,
-                    spans: Vec::new(),
-                    bg: None,
-                });
-            }
-            let work_log_to_show = discussion.shown_work_log();
-            if work_log_shown && !work_log_to_show.is_empty() {
-                let mut base = 0;
-                for entry in work_log_to_show {
-                    for (start, text) in crate::tui::widgets::text_layout::wrap(entry, width) {
-                        lines.push(DocLine {
-                            part: Some(DocPart::WorkLog),
-                            spans: vec![Span {
-                                src: Some(base + start),
-                                ..crate::tui::widgets::markdown::Span::plain(text, dim_fg)
-                            }],
-                            bg: None,
-                        });
-                    }
-                    base += entry.len() + 1;
-                }
-                lines.push(DocLine {
-                    part: None,
-                    spans: Vec::new(),
-                    bg: None,
-                });
-            }
-            for md in crate::tui::widgets::markdown::render(&discussion.reply, theme, width) {
-                lines.push(DocLine {
-                    part: Some(DocPart::Reply),
-                    spans: md.spans,
-                    bg: md.bg,
-                });
-            }
+    let mut cache = component.cache.take().unwrap_or_default();
+    let text_fg = theme
+        .ui_fg("ui.text")
+        .unwrap_or(RgbValue::from_u8(170, 170, 200));
+    let dim_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
+    let shown = discussion.node.is_some();
+    let width_changed = cache.width != width;
+    // A text replaced as a whole may have the length of what it replaced: only the
+    // revision tells them apart, and every section is laid out again for it.
+    let replaced = cache.content_revision != discussion.content_revision
+        || cache.window_id != component.window_id;
+
+    if width_changed
+        || replaced
+        || cache.node_shown != shown
+        || cache.prompt_len != discussion.prompt.len()
+    {
+        cache.doc.prompt.clear();
+        if shown {
+            push_wrapped(
+                &mut cache.doc.prompt,
+                &discussion.prompt,
+                0,
+                width,
+                DocPart::Prompt,
+                text_fg,
+            );
+            cache.doc.prompt.push(blank_line());
         }
-        component.cache = Some(DocCache {
-            window_id: component.window_id,
-            width,
-            prompt_len: discussion.prompt.len(),
-            reply_len: discussion.reply.len(),
-            work_log_len: discussion.work_log.len(),
-            log_start: discussion.log_start,
-            show_work_log: discussion.show_work_log,
-            thinking_len: discussion.thinking.len(),
-            work_log_shown,
-            lines,
-        });
+        cache.node_shown = shown;
+        cache.prompt_len = discussion.prompt.len();
+        #[cfg(test)]
+        {
+            cache.rebuilds += 1;
+        }
     }
-    component.cache.as_ref().map_or(&[], |cache| &cache.lines)
+
+    if width_changed || replaced || cache.thinking_len != discussion.thinking.len() {
+        cache.doc.thinking.clear();
+        if shown && !discussion.thinking.is_empty() {
+            push_wrapped(
+                &mut cache.doc.thinking,
+                &discussion.thinking,
+                0,
+                width,
+                DocPart::Thinking,
+                dim_fg,
+            );
+            cache.doc.thinking.push(blank_line());
+        }
+        cache.thinking_len = discussion.thinking.len();
+        #[cfg(test)]
+        {
+            cache.rebuilds += 1;
+        }
+    }
+
+    if width_changed
+        || replaced
+        || cache.log_start != discussion.log_start
+        || cache.show_work_log != discussion.show_work_log
+        || cache.work_log_shown != work_log_shown
+        || cache.work_log_entries > discussion.shown_work_log().len()
+    {
+        cache.doc.work_log.clear();
+        cache.work_log_entries = 0;
+        cache.work_log_base = 0;
+        cache.log_start = discussion.log_start;
+        cache.show_work_log = discussion.show_work_log;
+        cache.work_log_shown = work_log_shown;
+        #[cfg(test)]
+        {
+            cache.rebuilds += 1;
+        }
+    }
+    let entries = discussion.shown_work_log();
+    if work_log_shown && !entries.is_empty() {
+        // The entries are append-only, so only those not laid out yet are wrapped.
+        if ends_with_blank(&cache.doc.work_log) {
+            cache.doc.work_log.pop();
+        }
+        for entry in &entries[cache.work_log_entries..] {
+            push_wrapped(
+                &mut cache.doc.work_log,
+                entry,
+                cache.work_log_base,
+                width,
+                DocPart::WorkLog,
+                dim_fg,
+            );
+            cache.work_log_base += entry.len() + 1;
+        }
+        cache.work_log_entries = entries.len();
+        cache.doc.work_log.push(blank_line());
+    }
+    cache.work_log_len = discussion.work_log.len();
+
+    if width_changed || replaced || cache.reply_len != discussion.reply.len() {
+        cache.doc.reply = crate::tui::widgets::markdown::render(&discussion.reply, theme, width)
+            .into_iter()
+            .map(|line| DocLine {
+                part: Some(DocPart::Reply),
+                spans: line.spans,
+                bg: line.bg,
+            })
+            .collect();
+        cache.reply_len = discussion.reply.len();
+        #[cfg(test)]
+        {
+            cache.rebuilds += 1;
+        }
+    }
+
+    cache.window_id = component.window_id;
+    cache.width = width;
+    cache.content_revision = discussion.content_revision;
+    cache.doc.refresh();
+    component.cache = Some(cache);
+    &component.cache.as_ref().unwrap().doc
+}
+
+#[cfg(test)]
+impl Doc {
+    /// A document of a prompt and a reply, for the selection tests.
+    pub(crate) fn of(prompt: Vec<DocLine>, reply: Vec<DocLine>) -> Self {
+        let mut doc = Self {
+            prompt,
+            reply,
+            ..Self::default()
+        };
+        doc.refresh();
+        doc
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::state::DiscussionState;
+
+    fn component() -> crate::tui::panes::discussion::DiscussionComponent {
+        crate::tui::panes::discussion::DiscussionComponent::new(FlexBoxId::from(1))
+    }
+
+    fn discussion(prompt: &str, reply: &str) -> DiscussionState {
+        DiscussionState {
+            node: Some(crate::conversation::NodeId::new("2026-11-11T10-00-00Z")),
+            prompt: prompt.to_string(),
+            reply: reply.to_string(),
+            show_work_log: Some(true),
+            ..Default::default()
+        }
+    }
+
+    /// The document of `discussion` at `width`, and how many texts this laid out again.
+    fn layout(
+        component: &mut crate::tui::panes::discussion::DiscussionComponent,
+        discussion: &DiscussionState,
+        width: usize,
+    ) -> (usize, usize) {
+        let theme = crate::tui::theme::HelixTheme::default();
+        let rows = doc_lines(component, discussion, true, &theme, width).len();
+        let laid_out = component.cache.as_ref().unwrap().rebuilds;
+        (rows, laid_out)
+    }
+
+    #[test]
+    fn a_frame_with_the_same_texts_lays_nothing_out_again() {
+        let mut component = component();
+        let discussion = discussion("do it", "done");
+        layout(&mut component, &discussion, 40);
+        let (_, laid_out) = layout(&mut component, &discussion, 40);
+        assert_eq!(laid_out, 4, "one per text, on the first frame only");
+    }
+
+    #[test]
+    fn each_text_is_laid_out_again_only_when_it_changes() {
+        let mut component = component();
+        let mut discussion = discussion("do it", "");
+        discussion.work_log = vec!["one".to_string()];
+        layout(&mut component, &discussion, 40);
+        assert_eq!(component.cache.as_ref().unwrap().rebuilds, 4);
+
+        // A work-log entry appends its lines to the ones already laid out.
+        discussion.work_log.push("two".to_string());
+        layout(&mut component, &discussion, 40);
+        assert_eq!(
+            component.cache.as_ref().unwrap().rebuilds,
+            4,
+            "the work log alone"
+        );
+
+        discussion.reply.push_str("the answer\n\nin two paragraphs");
+        layout(&mut component, &discussion, 40);
+        assert_eq!(
+            component.cache.as_ref().unwrap().rebuilds,
+            5,
+            "the reply alone"
+        );
+
+        layout(&mut component, &discussion, 20);
+        assert_eq!(
+            component.cache.as_ref().unwrap().rebuilds,
+            9,
+            "a new width lays every text out again"
+        );
+    }
+
+    #[test]
+    fn a_text_replaced_with_one_of_the_same_length_is_laid_out_again() {
+        let mut component = component();
+        let mut discussion = discussion("do it", "first");
+        layout(&mut component, &discussion, 40);
+
+        discussion.show_content("do it".to_string(), "other".to_string(), Vec::new());
+        layout(&mut component, &discussion, 40);
+        assert_eq!(component.cache.as_ref().unwrap().rebuilds, 8);
+        use crate::tui::pane_manager::DocPart;
+        let doc = &component.cache.as_ref().unwrap().doc;
+        let reply = (0..doc.len())
+            .filter_map(|row| doc.line(row))
+            .filter(|line| line.part == Some(DocPart::Reply))
+            .flat_map(|line| line.spans.iter())
+            .map(|span| span.text.as_str())
+            .collect::<String>();
+        assert_eq!(reply, "other");
+    }
+
+    #[test]
+    fn the_work_log_lines_carry_the_offsets_of_the_joined_entries() {
+        let mut component = component();
+        let mut discussion = discussion("do it", "");
+        discussion.work_log = vec!["one".to_string(), "two".to_string()];
+        let (_, _) = layout(&mut component, &discussion, 40);
+        use crate::tui::pane_manager::DocPart;
+        let doc = &component.cache.as_ref().unwrap().doc;
+        let offsets: Vec<usize> = (0..doc.len())
+            .filter_map(|row| doc.line(row))
+            .filter(|line| line.part == Some(DocPart::WorkLog))
+            .filter_map(|line| line.spans.first())
+            .filter_map(|span| span.src)
+            .collect();
+        // `part_text` joins the entries with a newline: "one\ntwo".
+        assert_eq!(offsets, [0, 4]);
+    }
+
+    #[test]
+    fn a_row_past_the_end_of_a_document_has_no_line() {
+        let mut component = component();
+        let discussion = discussion("do it", "");
+        let (rows, _) = layout(&mut component, &discussion, 40);
+        let doc = &component.cache.as_ref().unwrap().doc;
+        assert!(doc.line(rows).is_none());
+        assert!(doc.line(0).is_some());
+    }
 }

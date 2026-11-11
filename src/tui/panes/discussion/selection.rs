@@ -41,11 +41,11 @@ pub(crate) fn offset_at(
 /// text (blank line, rule) stands for the end of the text above it, or else the start
 /// of the text below.
 pub(crate) fn locate(
-    lines: &[crate::tui::panes::discussion::document::DocLine],
+    doc: &crate::tui::panes::discussion::document::Doc,
     row: usize,
     col: usize,
 ) -> Option<(crate::tui::pane_manager::DocPart, usize)> {
-    let last = lines.len().checked_sub(1)?;
+    let last = doc.len().checked_sub(1)?;
     let (row, col) = if row > last {
         (last, usize::MAX)
     } else {
@@ -54,14 +54,9 @@ pub(crate) fn locate(
     let on = |line: &crate::tui::panes::discussion::document::DocLine, col: usize| {
         Some((line.part?, offset_at(&line.spans, col)?))
     };
-    on(&lines[row], col)
-        .or_else(|| {
-            lines[..row]
-                .iter()
-                .rev()
-                .find_map(|line| on(line, usize::MAX))
-        })
-        .or_else(|| lines[row + 1..].iter().find_map(|line| on(line, 0)))
+    on(doc.line(row)?, col)
+        .or_else(|| doc.text_before(row).and_then(|line| on(line, usize::MAX)))
+        .or_else(|| doc.text_after(row).and_then(|line| on(line, 0)))
 }
 
 /// `ranges` with `lo..hi` added, overlapping and touching ranges merged.
@@ -145,7 +140,46 @@ pub(crate) fn row_pieces<'a>(
         .collect()
 }
 
+/// Whether the selection in progress lies in the work log of window `window_id`.
+fn holds_work_log_selection(state: &crate::tui::state::AppState, window_id: usize) -> bool {
+    use crate::tui::pane_manager::DocPart;
+    use crate::tui::pane_manager::SelPoint;
+    use crate::tui::pane_manager::TextSelection;
+    use crate::tui::pane_manager::Window;
+    matches!(
+        &state.text_selection,
+        Some(TextSelection {
+            window: Window::Discussion(id),
+            start: SelPoint::Discussion {
+                part: DocPart::WorkLog,
+                ..
+            },
+            ..
+        }) if *id == window_id
+    )
+}
+
 impl crate::tui::panes::discussion::DiscussionComponent {
+    /// Drops the drag and the selection a work log held, when the window shows other
+    /// entries: the offsets no longer name the text the user saw.
+    pub(crate) fn clear_work_log_selection(
+        &mut self,
+        state: &mut crate::tui::state::AppState,
+        window_id: usize,
+    ) {
+        use crate::tui::pane_manager::DocPart;
+        if self
+            .drag
+            .as_ref()
+            .is_some_and(|drag| drag.window_id == window_id && drag.part == DocPart::WorkLog)
+        {
+            self.cancel_drag(state);
+        }
+        if holds_work_log_selection(state, window_id) {
+            state.text_selection = None;
+        }
+    }
+
     /// Starts a drag on the word under the mouse: a selection, or with Shift or Ctrl a
     /// change to the highlights of the node shown.
     pub(crate) fn begin_drag(

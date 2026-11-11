@@ -94,7 +94,7 @@ impl DiscussionComponent {
         let scroll = state
             .pane_manager
             .window_scroll(&Window::Discussion(window_id));
-        crate::tui::panes::discussion::selection::locate(&cache.lines, scroll + row, col)
+        crate::tui::panes::discussion::selection::locate(&cache.doc, scroll + row, col)
     }
 
     pub(crate) fn show(state: &mut crate::tui::state::AppState, id: usize) {
@@ -396,6 +396,7 @@ impl DiscussionComponent {
         discussion.draft.clear();
         discussion.loaded = true;
         discussion.notice = None;
+        discussion.content_revision += 1;
         crate::tui::panes::discussion::document::start_view(state, id);
     }
 
@@ -661,34 +662,41 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             let focused = has_focus.get_id() == Some(self.id);
             let state = &mut global_data.state;
 
-            // A running turn's reply lives in its handle; mirror it while it grows.
+            // A running turn's reply lives in its handle; mirror it when it changed.
             let output = state
                 .discussions
                 .get(&self.window_id)
                 .and_then(|discussion| {
                     crate::tui::panes::discussion::launch::running_output(state, discussion)
                 });
+            let (log_start_before, content_revision_before) = state
+                .discussions
+                .get(&self.window_id)
+                .map_or((0, 0), |discussion| {
+                    (discussion.log_start, discussion.content_revision)
+                });
             if let Some(output) = &output
                 && let Some(discussion) = state.discussions.get_mut(&self.window_id)
             {
                 let live = output.lock();
-                if live.reply.len() != discussion.reply.len()
-                    || live.work_log.len() != discussion.work_log.len()
-                    || live.log_start() != discussion.log_start
-                    || live.thinking.len() != discussion.thinking.len()
-                    || live.prompt.len() != discussion.prompt.len()
-                {
-                    discussion.reply.clone_from(&live.reply);
-                    discussion.work_log.clone_from(&live.work_log);
-                    discussion.log_start = live.log_start();
-                    discussion.thinking.clone_from(&live.thinking);
-                    discussion.prompt.clone_from(&live.prompt);
-                }
+                discussion.mirror(&live);
             } else if let Some(discussion) = state.discussions.get_mut(&self.window_id)
                 && discussion.log_start != 0
             {
                 // Once the turn is over, its whole work log is on screen again.
                 discussion.log_start = 0;
+            }
+            // The work log on screen is other text now, so a drag through it no longer
+            // means what it did.
+            if state
+                .discussions
+                .get(&self.window_id)
+                .is_some_and(|discussion| {
+                    discussion.log_start != log_start_before
+                        || discussion.content_revision != content_revision_before
+                })
+            {
+                self.clear_work_log_selection(state, self.window_id);
             }
             let Some(discussion) = state.discussions.get(&self.window_id) else {
                 return Ok(());
@@ -821,10 +829,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                 discussion,
             );
             let running = output.is_some();
-            let lines = crate::tui::panes::discussion::document::doc_lines(
+            let doc = crate::tui::panes::discussion::document::doc_lines(
                 self, discussion, shown, theme, doc_width,
             );
-            let line_count = lines.len();
+            let line_count = doc.len();
             let max_scroll = line_count.saturating_sub(doc_rows);
             let stored = state.pane_manager.window_scroll(&window);
             let old_max = state
@@ -900,7 +908,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                 }
             };
             for row_offset in 0..doc_rows {
-                match lines.get(scroll + row_offset) {
+                match doc.line(scroll + row_offset) {
                     Some(line) => {
                         let bg = match line.part {
                             Some(DocPart::Prompt) => prompt_bg,
@@ -1074,20 +1082,26 @@ mod tests {
     #[test]
     fn locate_sends_a_row_without_text_to_the_text_around_it() {
         use crate::tui::pane_manager::DocPart;
-        let lines = [
-            doc_line(Some(DocPart::Prompt), vec![span("hi", Some(0))]),
-            doc_line(None, Vec::new()),
-            doc_line(Some(DocPart::Reply), vec![span("one", Some(0))]),
-            doc_line(Some(DocPart::Reply), Vec::new()),
-            doc_line(Some(DocPart::Reply), vec![span("two", Some(5))]),
-        ];
-        assert_eq!(locate(&lines, 0, 1), Some((DocPart::Prompt, 1)));
-        assert_eq!(locate(&lines, 1, 0), Some((DocPart::Prompt, 1)));
-        assert_eq!(locate(&lines, 3, 0), Some((DocPart::Reply, 2)));
-        assert_eq!(locate(&lines, 4, 1), Some((DocPart::Reply, 6)));
-        assert_eq!(locate(&lines, 99, 0), Some((DocPart::Reply, 7)));
-        assert_eq!(locate(&lines[1..2], 0, 0), None);
-        assert_eq!(locate(&[], 0, 0), None);
+        use crate::tui::panes::discussion::document::Doc;
+        let doc = Doc::of(
+            vec![
+                doc_line(Some(DocPart::Prompt), vec![span("hi", Some(0))]),
+                doc_line(None, Vec::new()),
+            ],
+            vec![
+                doc_line(Some(DocPart::Reply), vec![span("one", Some(0))]),
+                doc_line(Some(DocPart::Reply), Vec::new()),
+                doc_line(Some(DocPart::Reply), vec![span("two", Some(5))]),
+            ],
+        );
+        assert_eq!(locate(&doc, 0, 1), Some((DocPart::Prompt, 1)));
+        assert_eq!(locate(&doc, 1, 0), Some((DocPart::Prompt, 1)));
+        assert_eq!(locate(&doc, 3, 0), Some((DocPart::Reply, 2)));
+        assert_eq!(locate(&doc, 4, 1), Some((DocPart::Reply, 6)));
+        assert_eq!(locate(&doc, 99, 0), Some((DocPart::Reply, 7)));
+        let blank = Doc::of(vec![doc_line(None, Vec::new())], Vec::new());
+        assert_eq!(locate(&blank, 0, 0), None);
+        assert_eq!(locate(&Doc::default(), 0, 0), None);
     }
 
     #[test]
@@ -1456,6 +1470,73 @@ mod tests {
         assert_eq!(state.discussions[&0].draft.text(), "again");
     }
 
+    #[test]
+    fn a_drag_through_the_work_log_ends_when_the_window_shows_other_entries() {
+        use crate::tui::pane_manager::DocPart;
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::pane_manager::TextSelection;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::panes::discussion::selection::DragKind;
+        use crate::tui::state::DiscussionState;
+        let mut state = empty_state();
+        state.discussions.insert(0, DiscussionState::default());
+        let mut component = DiscussionComponent::new(FlexBoxId::from(1));
+        component.set_window_id(0);
+        component.drag = Some(crate::tui::panes::discussion::Drag {
+            window_id: 0,
+            kind: DragKind::Select,
+            part: DocPart::WorkLog,
+            anchor: 0,
+            word: (0, 3),
+        });
+        let point = |offset| SelPoint::Discussion {
+            part: DocPart::WorkLog,
+            offset,
+        };
+        state.text_selection = Some(TextSelection {
+            window: Window::Discussion(0),
+            start: point(0),
+            end: point(3),
+            click_anchor: Some(point(0)),
+            click_word: Some((point(0), point(3))),
+            active: true,
+        });
+        state.mouse_drag_active = true;
+
+        component.clear_work_log_selection(&mut state, 0);
+        assert!(state.text_selection.is_none());
+        assert!(!state.mouse_drag_active);
+        assert!(component.drag.is_none());
+    }
+
+    #[test]
+    fn a_drag_outside_the_work_log_survives_it() {
+        use crate::tui::pane_manager::DocPart;
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::pane_manager::TextSelection;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::DiscussionState;
+        let mut state = empty_state();
+        state.discussions.insert(0, DiscussionState::default());
+        let mut component = DiscussionComponent::new(FlexBoxId::from(1));
+        component.set_window_id(0);
+        let point = |offset| SelPoint::Discussion {
+            part: DocPart::Reply,
+            offset,
+        };
+        state.text_selection = Some(TextSelection {
+            window: Window::Discussion(0),
+            start: point(0),
+            end: point(3),
+            click_anchor: Some(point(0)),
+            click_word: Some((point(0), point(3))),
+            active: true,
+        });
+
+        component.clear_work_log_selection(&mut state, 0);
+        assert!(state.text_selection.is_some());
+    }
+
     #[tokio::test]
     async fn a_resume_is_allowed_on_an_interrupted_node_that_already_has_children() {
         use crate::conversation::ConversationTree;
@@ -1594,6 +1675,49 @@ mod tests {
         assert_eq!(part_text(&discussion, DocPart::WorkLog), "new");
         discussion.show_work_log = Some(true);
         assert_eq!(part_text(&discussion, DocPart::WorkLog), "old\nnew");
+    }
+
+    #[test]
+    fn a_window_takes_what_the_turn_produced_since_the_last_frame() {
+        use crate::agent::turn::live::LiveTurn;
+        use crate::tui::state::DiscussionState;
+        let mut discussion = DiscussionState {
+            reply: "one".to_string(),
+            work_log: vec!["a".to_string()],
+            ..DiscussionState::default()
+        };
+        let live = LiveTurn::for_test("one two", &["a", "b"], "thinking", "do it");
+
+        discussion.mirror(&live);
+        assert_eq!(discussion.reply, "one two");
+        assert_eq!(discussion.work_log, ["a", "b"]);
+        assert_eq!(discussion.thinking, "thinking");
+        assert_eq!(discussion.prompt, "do it");
+        assert_eq!(discussion.live_revision, live.revision());
+
+        // A frame with nothing new copies nothing and leaves the texts as they are.
+        let revision = discussion.content_revision;
+        discussion.mirror(&live);
+        assert_eq!(discussion.content_revision, revision);
+        assert_eq!(discussion.reply, "one two");
+    }
+
+    #[test]
+    fn texts_replaced_as_a_whole_are_taken_whole() {
+        use crate::agent::turn::live::LiveTurn;
+        use crate::tui::state::DiscussionState;
+        let mut discussion = DiscussionState {
+            reply: "the first reply".to_string(),
+            ..DiscussionState::default()
+        };
+        let live = LiveTurn::for_test("a different answer", &[], "", "");
+
+        discussion.mirror(&live);
+        assert_eq!(discussion.reply, "a different answer");
+        assert_eq!(
+            discussion.content_revision, 1,
+            "the layout is laid out again"
+        );
     }
 
     #[test]
