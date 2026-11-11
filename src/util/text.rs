@@ -128,11 +128,6 @@ pub(crate) fn key_values(metadata: &str) -> impl Iterator<Item = (&str, &str)> {
     })
 }
 
-/// Converts a byte offset within `s` to a character count.
-pub(crate) fn byte_to_char(s: &str, byte_offset: usize) -> usize {
-    s[..byte_offset.min(s.len())].chars().count()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -196,11 +191,5 @@ mod tests {
     fn key_values_skips_blank_and_valueless_lines() {
         let pairs: Vec<(&str, &str)> = key_values("a: 1\nno value\nb:  \nc: two words\n").collect();
         assert_eq!(pairs, vec![("a", "1"), ("c", "two words")]);
-    }
-
-    #[test]
-    fn byte_to_char_past_the_end_is_the_length() {
-        assert_eq!(byte_to_char("héllo", 3), 2);
-        assert_eq!(byte_to_char("héllo", 99), 5);
     }
 }

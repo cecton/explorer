@@ -838,11 +838,28 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                 text_drag_single_hi = 0;
             }
 
+            // The symbol highlight ranges of this file, once per frame rather than once per
+            // wrapped sub-row: absolute byte ranges with the colour of their group.
+            let symbol_ranges: Vec<(usize, usize, RgbValue)> = state
+                .symbol_highlights
+                .iter()
+                .flat_map(|group| {
+                    group
+                        .locations
+                        .iter()
+                        .filter(|loc| loc.file_key == file_key)
+                        .map(move |loc| (loc.start_byte, loc.end_byte, group.color))
+                })
+                .collect();
+
+            let mut overlays: Vec<(usize, usize, RgbValue, Option<RgbValue>)> = Vec::new();
+            let mut intervals: Vec<(usize, usize, RgbValue, Option<RgbValue>)> =
+                Vec::with_capacity(8);
             let mut rendered = 0usize;
             'rendered: for line_idx in scroll..total_lines {
                 let line = data.line(line_idx);
-                let char_len = line.chars().count();
-                let mut seg_start_char = 0_usize;
+                let line_byte_start = data.line_starts[line_idx];
+                let line_byte_end = line_byte_start + line.len();
                 let is_text_drag_multi = has_text_selection
                     && !text_drag_single
                     && line_idx >= text_drag_lo
@@ -866,9 +883,59 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                 } else {
                     pane_bg
                 };
+
+                // What this line paints over its default background, once per line rather than
+                // once per sub-row: symbol highlights, then search matches (which win over them),
+                // then the selection (which wins over both). Left empty for a fully selected row
+                // so the selection's background stays uniform. Line-local bytes.
+                overlays.clear();
+                if !is_text_drag_multi {
+                    for &(start, end, color) in &symbol_ranges {
+                        if end <= line_byte_start || start >= line_byte_end {
+                            continue;
+                        }
+                        overlays.push((
+                            start.max(line_byte_start) - line_byte_start,
+                            end.min(line_byte_end) - line_byte_start,
+                            color,
+                            None,
+                        ));
+                    }
+                    if let Some(search) = state.search.get(&file_key) {
+                        for m in search.regex.find_iter(line) {
+                            if m.start() >= m.end() {
+                                continue;
+                            }
+                            let is_current = search.current == Some((line_idx, m.start()));
+                            let (bg, fg) = if is_current {
+                                (
+                                    crate::tui::state::SEARCH_CURRENT,
+                                    crate::tui::state::SEARCH_CURRENT_FG,
+                                )
+                            } else {
+                                (
+                                    crate::tui::state::SEARCH_MATCH,
+                                    crate::tui::state::SEARCH_MATCH_FG,
+                                )
+                            };
+                            overlays.push((m.start(), m.end(), bg, Some(fg)));
+                        }
+                    }
+                    if is_text_drag_single {
+                        overlays.push((
+                            text_drag_single_lo.saturating_sub(line_byte_start),
+                            text_drag_single_hi.saturating_sub(line_byte_start),
+                            hl_rgb,
+                            None,
+                        ));
+                    }
+                }
+
+                let mut seg_start = 0usize;
+                let line_is_ascii = line.is_ascii();
                 loop {
-                    let seg_end_char = (seg_start_char + content_width).min(char_len);
-                    let is_first_sub = seg_start_char == 0;
+                    let seg_end = segment_end(line, seg_start, content_width, line_is_ascii);
+                    let is_first_sub = seg_start == 0;
 
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
@@ -911,99 +978,22 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                         origin,
                         vp_col(content_start_col) + vp_row(rendered),
                     );
-                    // Build color intervals for this sub-row segment.
-                    // Each interval is (start_char, end_char, bg_color, fg_override). A `Some`
-                    // fg_override paints a fixed foreground (search matches); `None` defers to
-                    // syntax colors via `ensure_readable_fg`.
-                    // Priority: text selection > search match > symbol highlight > row default.
-                    let line_byte_start = data.line_starts[line_idx];
-                    let mut intervals: Vec<(usize, usize, RgbValue, Option<RgbValue>)> =
-                        vec![(seg_start_char, seg_end_char, content_bg, None)];
-
-                    // Symbol highlight backgrounds. Skipped for fully selected rows
-                    // (multi-line selection) so selection feedback stays visible.
-                    if !is_text_drag_multi {
-                        for group in &state.symbol_highlights {
-                            for loc in &group.locations {
-                                if loc.file_key != file_key {
-                                    continue;
-                                }
-                                let line_byte_end = line_byte_start + line.len();
-                                if loc.end_byte <= line_byte_start
-                                    || loc.start_byte >= line_byte_end
-                                {
-                                    continue;
-                                }
-                                let loc_lo_char = crate::util::text::byte_to_char(
-                                    line,
-                                    loc.start_byte.saturating_sub(line_byte_start),
-                                );
-                                let loc_hi_char = crate::util::text::byte_to_char(
-                                    line,
-                                    loc.end_byte - line_byte_start,
-                                );
-                                overlay_interval(
-                                    &mut intervals,
-                                    seg_start_char.max(loc_lo_char),
-                                    seg_end_char.min(loc_hi_char),
-                                    group.color,
-                                    None,
-                                );
-                            }
-                        }
-                    }
-
-                    // Search matches overlay after symbol highlights (search wins over them) but
-                    // before selection (selection still wins). Only the visible line is scanned.
-                    if !is_text_drag_multi && let Some(search) = state.search.get(&file_key) {
-                        for m in search.regex.find_iter(line) {
-                            if m.start() >= m.end() {
-                                continue;
-                            }
-                            let is_current = search.current == Some((line_idx, m.start()));
-                            let (bg, fg) = if is_current {
-                                (
-                                    crate::tui::state::SEARCH_CURRENT,
-                                    crate::tui::state::SEARCH_CURRENT_FG,
-                                )
-                            } else {
-                                (
-                                    crate::tui::state::SEARCH_MATCH,
-                                    crate::tui::state::SEARCH_MATCH_FG,
-                                )
-                            };
-                            let m_lo = crate::util::text::byte_to_char(line, m.start());
-                            let m_hi = crate::util::text::byte_to_char(line, m.end());
-                            overlay_interval(
-                                &mut intervals,
-                                seg_start_char.max(m_lo),
-                                seg_end_char.min(m_hi),
-                                bg,
-                                Some(fg),
-                            );
-                        }
-                    }
-
-                    // Selection overlays last so it wins over symbol highlights.
-                    if is_text_drag_single {
-                        let sel_lo = crate::util::text::byte_to_char(
-                            line,
-                            text_drag_single_lo - line_byte_start,
-                        );
-                        let sel_hi = crate::util::text::byte_to_char(
-                            line,
-                            text_drag_single_hi - line_byte_start,
-                        );
+                    // Each interval is (start, end, bg_color, fg_override), in line-local bytes.
+                    // A `Some` fg_override paints a fixed foreground (search matches); `None`
+                    // defers to syntax colors via `ensure_readable_fg`. The overlays land in the
+                    // order built above, so the later ones win.
+                    intervals.clear();
+                    intervals.push((seg_start, seg_end, content_bg, None));
+                    for &(lo, hi, color, fg) in &overlays {
                         overlay_interval(
                             &mut intervals,
-                            sel_lo.max(seg_start_char),
-                            sel_hi.min(seg_end_char),
-                            hl_rgb,
-                            None,
+                            seg_start.max(lo),
+                            seg_end.min(hi),
+                            color,
+                            fg,
                         );
                     }
 
-                    // Paint each interval.
                     for &(i_lo, i_hi, bg_color, fg_override) in &intervals {
                         if i_lo >= i_hi {
                             continue;
@@ -1024,8 +1014,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                     if rendered >= visible_rows {
                         break 'rendered;
                     }
-                    seg_start_char += content_width;
-                    if seg_start_char >= char_len {
+                    seg_start = seg_end;
+                    if seg_start >= line.len() {
                         break;
                     }
                 }
@@ -1139,12 +1129,12 @@ fn paint_line_segment(
     data: &crate::loader::FileData,
     colored_guard: &[crate::highlight::ColoredLine],
     line_idx: usize,
-    (seg_start_char, seg_end_char): (usize, usize),
+    (seg_start_byte, seg_end_byte): (usize, usize),
     theme: &crate::tui::theme::HelixTheme,
     pane_bg: RgbValue,
     fg_override: Option<RgbValue>,
 ) {
-    if seg_start_char >= seg_end_char {
+    if seg_start_byte >= seg_end_byte {
         return;
     }
     let default_fg = theme
@@ -1152,13 +1142,11 @@ fn paint_line_segment(
         .unwrap_or(RgbValue::from_u8(212, 212, 212));
     let bg = TuiColor::from(pane_bg);
     let line_content = data.line(line_idx);
-    let seg_byte_start = data.char_to_byte(line_idx, seg_start_char);
-    let seg_byte_end = data.char_to_byte(line_idx, seg_end_char);
 
     // A fixed foreground (search matches) paints the whole segment as one run, ignoring syntax
     // spans and the `ensure_readable_fg` auto-contrast so the match text color is uniform.
     if let Some(fg_rgb) = fg_override {
-        let text = &line_content[seg_byte_start..seg_byte_end];
+        let text = &line_content[seg_start_byte..seg_end_byte];
         let fg = TuiColor::from(fg_rgb);
         let style = new_style!(color_fg: {fg} color_bg: {bg});
         *render_ops += RenderOpCommon::ApplyColors(Some(style));
@@ -1168,8 +1156,8 @@ fn paint_line_segment(
 
     if let Some(spans) = colored_guard.get(line_idx) {
         for span in spans {
-            let overlap_start = span.start.max(seg_byte_start);
-            let overlap_end = span.end.min(seg_byte_end);
+            let overlap_start = span.start.max(seg_start_byte);
+            let overlap_end = span.end.min(seg_end_byte);
             if overlap_start >= overlap_end {
                 continue;
             }
@@ -1184,12 +1172,32 @@ fn paint_line_segment(
         return;
     }
 
-    let text = &line_content[seg_byte_start..seg_byte_end];
+    let text = &line_content[seg_start_byte..seg_end_byte];
     let fg_rgb = ensure_readable_fg(default_fg, pane_bg);
     let fg = TuiColor::from(fg_rgb);
     let style = new_style!(color_fg: {fg} color_bg: {bg});
     *render_ops += RenderOpCommon::ApplyColors(Some(style));
     *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+}
+
+/// Where the sub-row starting at the byte offset `start` of `line` ends: `width` cells on,
+/// by bytes on an ASCII line and by whole chars otherwise, clamped to the line. The caller
+/// passes the answer to `line.is_ascii()`, which is linear in the line and so must not be
+/// asked once per sub-row of a long one.
+fn segment_end(line: &str, start: usize, width: usize, line_is_ascii: bool) -> usize {
+    if line_is_ascii {
+        (start + width).min(line.len())
+    } else {
+        advance_chars(line, start, width)
+    }
+}
+
+/// The byte offset `chars` characters past `from`, clamped to the end of `line`.
+fn advance_chars(line: &str, from: usize, chars: usize) -> usize {
+    match line[from..].char_indices().nth(chars) {
+        Some((offset, _)) => from + offset,
+        None => line.len(),
+    }
 }
 
 /// Perceived brightness on a 0-255 scale (standard luma weights). Good enough for
@@ -1296,5 +1304,235 @@ mod contrast_tests {
             ensure_readable_fg(RgbValue::from_u8(50, 50, 50), RgbValue::from_u8(30, 30, 30),),
             RgbValue::from_u8(235, 235, 235)
         );
+    }
+}
+
+#[cfg(test)]
+mod segment_tests {
+    use super::*;
+
+    /// How a line is cut into painted rows at `width` cells: the byte ranges of its segments.
+    fn segments(line: &str, width: usize) -> Vec<(usize, usize)> {
+        let mut segments = Vec::new();
+        let line_is_ascii = line.is_ascii();
+        let mut start = 0usize;
+        loop {
+            let end = segment_end(line, start, width, line_is_ascii);
+            segments.push((start, end));
+            if start >= line.len() || end >= line.len() {
+                break;
+            }
+            start = end;
+        }
+        segments
+    }
+
+    const LINES: [&str; 7] = [
+        "plain ascii line",
+        "héllo wörld ünicode",
+        "日本語のテキストです",
+        "e\u{301} combining accent",
+        "👨‍👩‍👧‍👦 family emoji and more",
+        "",
+        "x",
+    ];
+
+    #[test]
+    fn segments_partition_the_line_and_never_split_a_char() {
+        for line in LINES {
+            for width in [1, 2, 3, 5, 7, 80] {
+                let segments = segments(line, width);
+                assert_eq!(
+                    segments.first().map(|s| s.0),
+                    Some(0),
+                    "{line:?} at {width}"
+                );
+                assert_eq!(
+                    segments.last().map(|s| s.1),
+                    Some(line.len()),
+                    "{line:?} at {width}"
+                );
+                for window in segments.windows(2) {
+                    assert_eq!(window[0].1, window[1].0, "{line:?} at {width}: a gap");
+                }
+                for &(start, end) in &segments {
+                    assert!(
+                        start <= end,
+                        "{line:?} at {width}: {start}..{end} is backwards"
+                    );
+                    assert!(
+                        start < end || line.is_empty(),
+                        "{line:?} at {width}: {start}..{end} is empty"
+                    );
+                    assert!(line.is_char_boundary(start), "{line:?} at {width}: {start}");
+                    assert!(line.is_char_boundary(end), "{line:?} at {width}: {end}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_width_past_the_line_paints_it_in_one_segment() {
+        for line in LINES {
+            assert_eq!(segments(line, 200), vec![(0, line.len())], "{line:?}");
+        }
+    }
+
+    #[test]
+    fn a_segment_of_a_multibyte_line_holds_whole_chars() {
+        let line = "héllo wörld";
+        for &(start, end) in &segments(line, 3) {
+            let text = &line[start..end];
+            assert!(
+                !text.is_empty() || line.is_empty(),
+                "{start}..{end} of {line:?} is empty"
+            );
+            // a split char would have made the slice panic above; this pins the widths
+            assert!(
+                line[start..end].chars().count() <= 3,
+                "{line:?}: {start}..{end}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_overlay_splits_the_segment_it_lands_in() {
+        let marked = RgbValue::from_u8(1, 2, 3);
+        let plain = RgbValue::default();
+        let mut intervals = vec![(4, 9, plain, None)];
+        overlay_interval(&mut intervals, 6, 20, marked, None);
+        assert_eq!(intervals, vec![(4, 6, plain, None), (6, 9, marked, None)]);
+    }
+
+    #[test]
+    fn an_overlay_that_misses_the_segment_leaves_it_alone() {
+        let marked = RgbValue::from_u8(1, 2, 3);
+        let plain = RgbValue::default();
+        let mut intervals = vec![(0, 4, plain, None)];
+        overlay_interval(&mut intervals, 4, 9, marked, None);
+        assert_eq!(intervals, vec![(0, 4, plain, None)]);
+    }
+
+    #[test]
+    fn a_later_overlay_wins_over_an_earlier_one() {
+        let symbol = RgbValue::from_u8(1, 2, 3);
+        let search = RgbValue::from_u8(4, 5, 6);
+        let plain = RgbValue::default();
+        let mut intervals = vec![(0, 10, plain, None)];
+        overlay_interval(&mut intervals, 2, 8, symbol, None);
+        overlay_interval(&mut intervals, 4, 6, search, Some(search));
+        assert_eq!(
+            intervals,
+            vec![
+                (0, 2, plain, None),
+                (2, 4, symbol, None),
+                (4, 6, search, Some(search)),
+                (6, 8, symbol, None),
+                (8, 10, plain, None),
+            ]
+        );
+    }
+}
+#[cfg(test)]
+mod paint_tests {
+    use super::*;
+
+    fn painted_text(ops: &RenderOpIRVec) -> Vec<String> {
+        ops.list
+            .iter()
+            .filter_map(|op| match op {
+                RenderOpIR::PaintTextWithAttributes(text, _) => Some(text.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn data(content: &str) -> crate::loader::FileData {
+        let mut line_starts = vec![0usize];
+        for (i, &byte) in content.as_bytes().iter().enumerate() {
+            if byte == b'\n' && i + 1 < content.len() {
+                line_starts.push(i + 1);
+            }
+        }
+        crate::loader::FileData {
+            content: content.to_string(),
+            line_starts,
+        }
+    }
+
+    #[test]
+    fn a_multibyte_segment_paints_whole_chars_and_their_text() {
+        let file = data("héllo wörld ünicode");
+        let theme = crate::tui::theme::HelixTheme::default();
+        let mut ops = RenderOpIRVec::new();
+        // the segments the render loop cuts at width 5, painted one after the other
+        let line = file.line(0);
+        let line_is_ascii = line.is_ascii();
+        let mut start = 0usize;
+        while start < line.len() {
+            let end = segment_end(line, start, 5, line_is_ascii);
+            paint_line_segment(
+                &mut ops,
+                &file,
+                &[],
+                0,
+                (start, end),
+                &theme,
+                RgbValue::from_u8(0, 0, 0),
+                None,
+            );
+            start = end;
+        }
+        let text = painted_text(&ops).concat();
+        assert_eq!(text, "héllo wörld ünicode");
+    }
+
+    #[test]
+    fn a_search_match_paints_its_text_in_one_run() {
+        let file = data("fn main() { target(); }");
+        let theme = crate::tui::theme::HelixTheme::default();
+        let mut ops = RenderOpIRVec::new();
+        let before = "fn main() { ".len();
+        paint_line_segment(
+            &mut ops,
+            &file,
+            &[],
+            0,
+            (0, before),
+            &theme,
+            RgbValue::from_u8(0, 0, 0),
+            None,
+        );
+        paint_line_segment(
+            &mut ops,
+            &file,
+            &[],
+            0,
+            (before, before + "target".len()),
+            &theme,
+            RgbValue::from_u8(0, 0, 0),
+            Some(RgbValue::from_u8(255, 255, 0)),
+        );
+        assert_eq!(painted_text(&ops).concat(), "fn main() { target");
+        // the match is one run, the plain text another
+        assert_eq!(painted_text(&ops).len(), 2);
+    }
+
+    #[test]
+    fn an_empty_segment_paints_nothing() {
+        let file = data("some text");
+        let theme = crate::tui::theme::HelixTheme::default();
+        let mut ops = RenderOpIRVec::new();
+        paint_line_segment(
+            &mut ops,
+            &file,
+            &[],
+            0,
+            (3, 3),
+            &theme,
+            RgbValue::from_u8(0, 0, 0),
+            None,
+        );
+        assert!(ops.list.is_empty());
     }
 }
