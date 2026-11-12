@@ -1,5 +1,4 @@
 use std::env;
-use std::fs;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
@@ -126,15 +125,53 @@ impl LoadedFile {
     }
 }
 
+/// Bytes of a file checked before the rest of it is read: a file whose head is not UTF-8 is
+/// not text, and the rest of it is never read.
+///
+/// Not the NUL rule [`crate::scan`] counts binaries by. A NUL is valid UTF-8 and legal inside
+/// a Rust string literal, so a repository's own fixtures may hold one (`rust`'s
+/// `tests/ui/raw-str.rs` does); what makes a file unreadable here is not being UTF-8 at all.
+const TEXT_SNIFF_BYTES: usize = 1024;
+
 /// Reads a file into what [`LoadedFile`] holds, or `None` when it is not readable as text.
 /// The reading half of [`LoadedFile::load`], for a caller that reads before it publishes.
 pub(crate) fn read_file_data(path: &camino::Utf8Path) -> Option<FileData> {
-    let content = fs::read_to_string(path).ok()?;
+    use std::io::Read;
+
+    let mut file = std::fs::File::open(path).ok()?;
+    let size = file.metadata().ok()?.len() as usize;
+    // The head is read before the rest is reserved, so a large binary costs one read of a
+    // page rather than an allocation the size of the file.
+    let mut bytes = Vec::with_capacity(size.min(TEXT_SNIFF_BYTES) + 1);
+    file.by_ref()
+        .take(TEXT_SNIFF_BYTES as u64)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    match std::str::from_utf8(&bytes) {
+        Ok(_) => {}
+        // Cut inside a character: the head cannot tell, so the rest of the file decides.
+        Err(error) if error.error_len().is_none() => {}
+        Err(_) => return None,
+    }
+    bytes.reserve(size.saturating_sub(bytes.len()));
+    file.read_to_end(&mut bytes).ok()?;
+    let content = String::from_utf8(bytes).ok()?;
     let line_starts = compute_line_starts(&content);
     Some(FileData {
         content,
         line_starts,
     })
+}
+
+/// Loads every text file of `root`, in the order [`walk_repo_files`] answers them, so a
+/// [`FileKey`] still names the file the walk put it at. Reads on every core: the walk was
+/// always parallel, and the reading is what startup spends its time on.
+pub fn load_repo(root: &camino::Utf8Path) -> Vec<Arc<LoadedFile>> {
+    use rayon::iter::{IntoParallelIterator, ParallelIterator};
+    walk_repo_files(root)
+        .into_par_iter()
+        .filter_map(LoadedFile::load)
+        .collect()
 }
 
 fn compute_line_starts(content: &str) -> Vec<usize> {
@@ -186,7 +223,7 @@ pub fn is_ignored(rel: &camino::Utf8Path) -> bool {
 }
 
 /// Walk `root` recursively and return every regular-file path, skipping the
-/// [`IGNORED_DIRS`]. Shared by the initial load (`main.rs`) and the watcher's
+/// [`IGNORED_DIRS`]. Shared by the initial load ([`load_repo`]) and the watcher's
 /// overflow rescan so both see the same set of files.
 pub fn walk_repo_files(root: &camino::Utf8Path) -> Vec<PathBuf> {
     jwalk::WalkDir::new(root)
@@ -301,6 +338,92 @@ mod tests {
         let data = fd("— dash\n");
         assert_eq!(data.line_bounds(7), data.line_bounds(0));
         assert_eq!(data.line_bounds(0), (0, data.content.len()));
+    }
+
+    fn temp_root() -> (tempfile::TempDir, camino::Utf8PathBuf) {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8");
+        (tmp, root)
+    }
+
+    /// Every text file of the tree is loaded, in the order the walk answers them, so a
+    /// [`FileKey`] taken from the list names the path the walk put there.
+    #[test]
+    fn load_repo_reads_the_text_files_in_walk_order() {
+        let (_tmp, root) = temp_root();
+        std::fs::create_dir(root.join("sub").as_std_path()).expect("mkdir");
+        std::fs::write(root.join("b.txt").as_std_path(), "two\nlines").expect("write");
+        std::fs::write(root.join("a.rs").as_std_path(), "fn main() {}").expect("write");
+        std::fs::write(root.join("sub/c.md").as_std_path(), "# c").expect("write");
+        std::fs::write(root.join("blob.bin").as_std_path(), b"PNG\xff\xfe").expect("write");
+
+        let files = load_repo(&root);
+        let paths: Vec<&camino::Utf8Path> = files.iter().map(|file| file.path.as_ref()).collect();
+        let walked: Vec<camino::Utf8PathBuf> = walk_repo_files(&root)
+            .into_iter()
+            .filter_map(|path| camino::Utf8PathBuf::from_path_buf(path).ok())
+            .filter(|path| path != &root.join("blob.bin"))
+            .collect();
+
+        assert_eq!(paths, walked);
+        assert_eq!(files.len(), 3);
+    }
+
+    /// A file whose head is not UTF-8 is refused without reading the rest, and a head cut
+    /// inside a character is undecided rather than refused.
+    #[test]
+    fn the_head_decides_what_is_text() {
+        let (_tmp, root) = temp_root();
+        std::fs::write(root.join("invalid.bin").as_std_path(), b"a\xffb").expect("write");
+
+        // `é` starts at byte 1023 and its second byte is the 1024th, so the head ends inside it.
+        let mut cut = "a".repeat(TEXT_SNIFF_BYTES - 1);
+        cut.push('é');
+        std::fs::write(root.join("cut.txt").as_std_path(), &cut).expect("write");
+
+        assert!(read_file_data(&root.join("invalid.bin")).is_none());
+        let data = read_file_data(&root.join("cut.txt")).expect("undecided head is read");
+        assert_eq!(data.content, cut);
+        assert_eq!(data.content.len(), TEXT_SNIFF_BYTES + 1);
+    }
+
+    /// A NUL is valid UTF-8 and legal inside a Rust string literal, so a file holding one is
+    /// text: `rust`'s own `tests/ui/raw-str.rs` is one, and the loader still reads it.
+    #[test]
+    fn a_nul_is_text_where_a_nul_is_allowed() {
+        let (_tmp, root) = temp_root();
+        let source = "fn main() { assert_eq!(r\"null:'\0'\", \"null:'\\0'\"); }";
+        std::fs::write(root.join("raw.rs").as_std_path(), source.as_bytes()).expect("write");
+
+        let data = read_file_data(&root.join("raw.rs")).expect("a NUL is not a binary file");
+        assert_eq!(data.content, source);
+        assert_eq!(data.line(0), source);
+    }
+
+    /// The rest of the file still decides: a head that is UTF-8 says nothing about what
+    /// follows it.
+    #[test]
+    fn an_invalid_byte_past_the_head_is_still_refused() {
+        let (_tmp, root) = temp_root();
+        let mut bytes = vec![b'a'; TEXT_SNIFF_BYTES + 8];
+        bytes[TEXT_SNIFF_BYTES + 4] = 0xff;
+        std::fs::write(root.join("late.bin").as_std_path(), &bytes).expect("write");
+
+        assert!(read_file_data(&root.join("late.bin")).is_none());
+    }
+
+    /// The file is read once, so a head that was read and then found to be text is the head
+    /// the content starts with, not a copy of it read twice.
+    #[test]
+    fn the_content_starts_with_the_head_that_was_read() {
+        let (_tmp, root) = temp_root();
+        let body: String = (0..2000).map(|i| format!("line {i}\n")).collect();
+        std::fs::write(root.join("long.txt").as_std_path(), &body).expect("write");
+
+        let data = read_file_data(&root.join("long.txt")).expect("text");
+        assert_eq!(data.content, body);
+        assert_eq!(data.line_starts.len(), 2000);
+        assert_eq!(data.line(1999), "line 1999\n");
     }
 
     #[test]

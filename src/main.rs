@@ -108,12 +108,7 @@ async fn main() {
         std::process::exit(fmt_md(&root, paths));
     }
 
-    let files: Vec<Arc<loader::LoadedFile>> = loader::walk_repo_files(&root)
-        .into_iter()
-        .filter_map(loader::LoadedFile::load)
-        .collect();
-
-    let files = Arc::new(arc_swap::ArcSwap::from_pointee(files));
+    let files = Arc::new(arc_swap::ArcSwap::from_pointee(loader::load_repo(&root)));
 
     let config = match config::Config::load() {
         Ok(c) => c,

@@ -15,6 +15,7 @@ directories = "5"
 hex = "0.4"
 gix = { version = "0.87", features = ["blob-diff"] }
 jwalk = "0.8"
+rayon = "1"
 libc = "0.2"
 miette = "7"
 notify = "8"

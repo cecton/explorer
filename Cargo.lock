@@ -1256,6 +1256,7 @@ dependencies = [
  "pico-args",
  "pulldown-cmark",
  "r3bl_tui",
+ "rayon",
  "regex",
  "reqwest 0.13.5",
  "rustix 0.38.44",
