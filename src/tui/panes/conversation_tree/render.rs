@@ -267,7 +267,9 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                             .agent(node, *index)
                             .map(|agent| agent.title())
                             .unwrap_or_default(),
-                        RowTarget::Node(_) | RowTarget::Queued { .. } => queued_text(state, row),
+                        RowTarget::Node(_) | RowTarget::Queued { .. } => {
+                            std::borrow::Cow::Owned(queued_text(state, row))
+                        }
                     };
                     let start = lines.len();
                     lines.push(Line {

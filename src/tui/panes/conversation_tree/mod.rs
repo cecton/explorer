@@ -92,7 +92,7 @@ impl ConversationTreeComponent {
             };
             let has_reply = node.title.is_none()
                 && crate::conversation::files::has_content(
-                    &crate::conversation::files::read_prompt_and_reply(&node_dir).1,
+                    &crate::conversation::files::read_reply(&node_dir),
                 );
             if !needs_retitle(&id, node, has_reply, &state.tree_view.retitling) {
                 return;

@@ -412,7 +412,9 @@ impl DiscussionComponent {
             .and_then(|discussion| {
                 let node = discussion.node.as_ref()?;
                 match discussion.agent {
-                    Some(index) => tree.agent(node, index).map(|agent| agent.title()),
+                    Some(index) => tree
+                        .agent(node, index)
+                        .map(|agent| agent.title().into_owned()),
                     None => tree.node(node).map(|node| {
                         let marker = if node.meta.favorite { "* " } else { "" };
                         format!("{marker}{}", node.display_title())

@@ -1022,12 +1022,11 @@ fn commit_type_color(theme: &crate::tui::theme::HelixTheme, ty: &str) -> RgbValu
 }
 
 fn log_row_parts(entry: &crate::git::LogEntry, pane_width: usize) -> (String, String) {
-    let date = crate::util::time::format_log_time(entry.time_secs, entry.time_offset_secs);
     let gap = "   ";
     let max_chars = pane_width.saturating_sub(1);
-    let summary_max = max_chars.saturating_sub(date.chars().count() + gap.len());
+    let summary_max = max_chars.saturating_sub(entry.date.chars().count() + gap.len());
     let summary: String = entry.summary.chars().take(summary_max).collect();
-    (format!("{date}{gap}"), summary)
+    (format!("{}{gap}", entry.date), summary)
 }
 
 fn layout_refs(
@@ -1069,9 +1068,8 @@ mod tests {
         use crate::git::LogEntry;
         LogEntry {
             id: [0u8; 20],
-            time_secs: 0,
-            time_offset_secs: 0,
             summary: summary.to_string(),
+            date: crate::util::time::format_log_time(0, 0),
         }
     }
 

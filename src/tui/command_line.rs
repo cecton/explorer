@@ -292,48 +292,57 @@ impl CommandLine {
             }
             global_data.state.mouse_drag_active = false;
         }
-        let entries = global_data
-            .state
-            .command_line
-            .as_ref()
-            .map(|command_line| {
-                crate::tui::command_line::palette_entries(
-                    command_line.input.text(),
-                    &global_data.state,
-                )
-            })
-            .unwrap_or_default();
+        let entries =
+            |global_data: &GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>| {
+                global_data
+                    .state
+                    .command_line
+                    .as_ref()
+                    .map(|command_line| {
+                        crate::tui::command_line::palette_entries(
+                            command_line.input.text(),
+                            &global_data.state,
+                        )
+                    })
+                    .unwrap_or_default()
+            };
+        // Only the keys that walk or take the palette look for its entries: a mouse move
+        // over the line repaints it, and matching every command and alias for that is
+        // work a frame does not need.
         match &input_event {
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Tab),
-            }) if !entries.is_empty() => {
-                if let Some(command_line) = global_data.state.command_line.as_mut() {
-                    command_line.move_selection(true, entries.len());
-                    command_line.error = None;
+            }) => {
+                let entries = entries(global_data);
+                if !entries.is_empty() {
+                    if let Some(command_line) = global_data.state.command_line.as_mut() {
+                        command_line.move_selection(true, entries.len());
+                        command_line.error = None;
+                    }
+                    return true;
                 }
-                return true;
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::BackTab),
-            }) if !entries.is_empty() => {
-                if let Some(command_line) = global_data.state.command_line.as_mut() {
-                    command_line.move_selection(false, entries.len());
-                    command_line.error = None;
+            }) => {
+                let entries = entries(global_data);
+                if !entries.is_empty() {
+                    if let Some(command_line) = global_data.state.command_line.as_mut() {
+                        command_line.move_selection(false, entries.len());
+                        command_line.error = None;
+                    }
+                    return true;
                 }
-                return true;
-            }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Enter),
-            }) if !entries.is_empty() => {
-                if let Some(command_line) = global_data.state.command_line.as_mut() {
-                    command_line.accept(&entries);
-                }
-                return true;
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Enter),
             }) => {
-                crate::tui::command_line::run_command_line(global_data);
+                let entries = entries(global_data);
+                if entries.is_empty() {
+                    crate::tui::command_line::run_command_line(global_data);
+                } else if let Some(command_line) = global_data.state.command_line.as_mut() {
+                    command_line.accept(&entries);
+                }
                 return true;
             }
             InputEvent::Keyboard(KeyPress::Plain {

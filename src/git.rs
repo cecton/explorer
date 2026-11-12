@@ -19,9 +19,10 @@ pub struct DiffLine {
 #[derive(Clone, Debug)]
 pub struct LogEntry {
     pub id: [u8; 20],
-    pub time_secs: i64,
-    pub time_offset_secs: i32,
     pub summary: String,
+    /// The commit's own time at its own offset, as the log pane spells it. Formatted
+    /// once here because the pane draws every visible row again on every frame.
+    pub date: String,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -156,9 +157,8 @@ pub fn load_log(
         id.copy_from_slice(info.id.as_bytes());
         entries.push(LogEntry {
             id,
-            time_secs: time.seconds,
-            time_offset_secs: time.offset,
             summary: String::from_utf8_lossy(first_line).into_owned(),
+            date: crate::util::time::format_log_time(time.seconds, time.offset),
         });
     }
     let refs = collect_refs(&repo)?;

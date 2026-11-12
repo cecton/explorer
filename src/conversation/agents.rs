@@ -13,10 +13,12 @@ pub struct AgentRecord {
 impl AgentRecord {
     /// What the summary model called the finished run; without one,
     /// `agent reviewer: description`, or `agent: description` for the default role —
-    /// the run as the work log of its node names it.
-    pub fn title(&self) -> String {
+    /// the run as the work log of its node names it. Borrowed when the model named it,
+    /// since the tree asks for one per painted row per frame.
+    pub fn title(&self) -> std::borrow::Cow<'_, str> {
+        use std::borrow::Cow;
         if let Some(title) = &self.title {
-            return title.clone();
+            return Cow::Borrowed(title);
         }
         let description = self
             .meta
@@ -24,8 +26,8 @@ impl AgentRecord {
             .as_deref()
             .unwrap_or("(no description)");
         match &self.meta.role {
-            Some(role) => format!("agent {role}: {description}"),
-            None => format!("agent: {description}"),
+            Some(role) => Cow::Owned(format!("agent {role}: {description}")),
+            None => Cow::Owned(format!("agent: {description}")),
         }
     }
 }

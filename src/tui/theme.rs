@@ -24,9 +24,23 @@ struct RawTheme {
 }
 
 impl HelixTheme {
+    /// The theme `name` names, built once and handed out as a copy from then on: parsing
+    /// a theme and the parents it inherits takes about 270 µs, and the Theme Picker asks
+    /// for one on every arrow press as it previews.
     pub fn from_name(name: &str) -> Option<Self> {
+        use std::sync::{Mutex, OnceLock};
+        static BUILT: OnceLock<Mutex<HashMap<String, HelixTheme>>> = OnceLock::new();
+        let mut built = BUILT
+            .get_or_init(|| Mutex::new(HashMap::new()))
+            .lock()
+            .expect("theme cache");
+        if let Some(theme) = built.get(name) {
+            return Some(theme.clone());
+        }
         let (_, toml_str) = THEMES.iter().find(|(n, _)| *n == name)?;
-        Some(Self::build(name, toml_str))
+        let theme = Self::build(name, toml_str);
+        built.insert(name.to_string(), theme.clone());
+        Some(theme)
     }
 
     pub fn default() -> Self {
@@ -236,6 +250,17 @@ mod tests {
 
     fn theme(name: &str) -> HelixTheme {
         HelixTheme::from_name(name).expect("bundled theme")
+    }
+
+    /// A theme keeps what it was built with, so the copy the cache hands out is the same
+    /// theme and an unknown name is still a miss.
+    #[test]
+    fn a_theme_is_built_once_and_handed_out_as_a_copy() {
+        let first = theme("adwaita-dark");
+        let second = theme("adwaita-dark");
+        assert_eq!(first, second);
+        assert_eq!(second.name(), "adwaita-dark");
+        assert!(HelixTheme::from_name("no such theme").is_none());
     }
 
     #[test]
