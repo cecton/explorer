@@ -88,6 +88,9 @@ impl Doc {
 pub(crate) struct DocCache {
     window_id: usize,
     width: usize,
+    /// Name of the theme the lines were laid out with: every span carries the color it
+    /// was rendered with, so a new theme is a new document.
+    theme: String,
     content_revision: u64,
     node_shown: bool,
     prompt_len: usize,
@@ -201,9 +204,11 @@ pub(crate) fn doc_lines<'a>(
     let shown = discussion.node.is_some();
     let width_changed = cache.width != width;
     // A text replaced as a whole may have the length of what it replaced: only the
-    // revision tells them apart, and every section is laid out again for it.
-    let replaced =
-        cache.content_revision != discussion.content_revision || cache.window_id != window_id;
+    // revision tells them apart, and every section is laid out again for it. A new theme
+    // is the same kind of change, since every span carries the color it was given.
+    let replaced = cache.content_revision != discussion.content_revision
+        || cache.window_id != window_id
+        || cache.theme != theme.name();
 
     if width_changed
         || replaced
@@ -308,6 +313,10 @@ pub(crate) fn doc_lines<'a>(
 
     cache.window_id = window_id;
     cache.width = width;
+    if cache.theme != theme.name() {
+        cache.theme.clear();
+        cache.theme.push_str(theme.name());
+    }
     cache.content_revision = discussion.content_revision;
     cache.doc.refresh();
     component.cache = Some(cache);
@@ -439,6 +448,42 @@ mod tests {
             .collect();
         // `part_text` joins the entries with a newline: "one\ntwo".
         assert_eq!(offsets, [0, 4]);
+    }
+
+    #[test]
+    fn a_new_theme_lays_the_document_out_again() {
+        use crate::tui::theme::HelixTheme;
+        let mocha = HelixTheme::from_name("catppuccin_mocha").expect("bundled theme");
+        let light = HelixTheme::from_name("adwaita-light").expect("bundled theme");
+        assert_ne!(
+            mocha.ui_fg("ui.text"),
+            light.ui_fg("ui.text"),
+            "the two themes paint body text differently"
+        );
+        let colors = |component: &crate::tui::panes::discussion::DiscussionComponent| {
+            let doc = &component.cache.as_ref().unwrap().doc;
+            (0..doc.len())
+                .filter_map(|row| doc.line(row))
+                .flat_map(|line| line.spans.iter().map(|span| span.fg))
+                .collect::<Vec<_>>()
+        };
+
+        let mut component = component();
+        let discussion = discussion("do it", "**done**");
+        doc_lines(&mut component, &discussion, 0, true, &mocha, 40);
+        let before = colors(&component);
+
+        doc_lines(&mut component, &discussion, 0, true, &light, 40);
+        assert_eq!(component.cache.as_ref().unwrap().rebuilds, 8);
+        assert_ne!(
+            before,
+            colors(&component),
+            "a new theme repaints the document it was laid out from"
+        );
+
+        // And the same theme again is not a change.
+        doc_lines(&mut component, &discussion, 0, true, &light, 40);
+        assert_eq!(component.cache.as_ref().unwrap().rebuilds, 8);
     }
 
     #[test]

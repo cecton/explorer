@@ -145,6 +145,17 @@ pub struct DiscussionState {
 pub struct ReportState {
     pub title: String,
     pub markdown: String,
+    /// Moves whenever the report is replaced, which no length tells apart.
+    pub revision: u64,
+}
+
+/// Handed out process-wide for the same reason as `ConversationTree`'s: a report is
+/// replaced by a whole new one in the same window, and a counter kept in the report would
+/// let the next one take the number of the one it replaces.
+static NEXT_REPORT_REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+pub(crate) fn next_report_revision() -> u64 {
+    NEXT_REPORT_REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
 }
 
 /// A prompt waiting for the running turn to end. Its text is not copied: it stays the

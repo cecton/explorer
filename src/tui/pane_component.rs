@@ -367,6 +367,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
         self.theme_picker.reset();
         self.git_log.reset();
         self.commit_diff.reset();
+        self.report.reset();
         self.conversation_tree.reset();
         self.discussion.reset();
         self.model_picker.reset();

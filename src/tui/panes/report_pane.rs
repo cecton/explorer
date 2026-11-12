@@ -8,11 +8,61 @@ const SCROLL_STEP: isize = 3;
 /// nothing behind when it closes.
 pub struct ReportComponent {
     id: FlexBoxId,
+    /// The markdown of the report last laid out, kept so a frame at the same width with
+    /// the same report does not render it again. Laying out a long one costs milliseconds.
+    cache: Option<ReportCache>,
+    /// How many times the markdown was laid out, for the test that pins the caching.
+    #[cfg(test)]
+    renders: usize,
+}
+
+struct ReportCache {
+    id: usize,
+    revision: u64,
+    width: usize,
+    theme: String,
+    lines: Vec<crate::tui::widgets::markdown::MdLine>,
 }
 
 impl ReportComponent {
     pub fn new(id: FlexBoxId) -> Self {
-        Self { id }
+        Self {
+            id,
+            cache: None,
+            #[cfg(test)]
+            renders: 0,
+        }
+    }
+
+    /// The rendered lines of `report` at `width`, laid out only when the report, the width
+    /// or the theme moved since the last frame.
+    fn lines<'a>(
+        &'a mut self,
+        id: usize,
+        report: &crate::tui::state::ReportState,
+        width: usize,
+        theme: &crate::tui::theme::HelixTheme,
+    ) -> &'a [crate::tui::widgets::markdown::MdLine] {
+        let stale = self.cache.as_ref().is_none_or(|cache| {
+            cache.id != id
+                || cache.revision != report.revision
+                || cache.width != width
+                || cache.theme != theme.name()
+        });
+        if stale {
+            #[cfg(test)]
+            {
+                self.renders += 1;
+            }
+            self.cache = Some(ReportCache {
+                id,
+                revision: report.revision,
+                width,
+                theme: theme.name().to_string(),
+                lines: crate::tui::widgets::markdown::render(&report.markdown, theme, width),
+            });
+        }
+        &self.cache.as_ref().expect("just laid out").lines
     }
 
     fn active_report(&self, state: &crate::tui::state::AppState) -> Option<usize> {
@@ -63,7 +113,14 @@ impl ReportComponent {
         crate::tui::focus::focus_window(state, window);
         // The text is new, so it is read from its top, not from where the last one was left.
         state.pane_manager.set_window_scroll(&window, 0);
-        state.reports.insert(id, ReportState { title, markdown });
+        state.reports.insert(
+            id,
+            ReportState {
+                title,
+                markdown,
+                revision: crate::tui::state::next_report_revision(),
+            },
+        );
         id
     }
 }
@@ -89,7 +146,9 @@ impl crate::tui::widgets::title_row::TitleRow for ReportComponent {
 }
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ReportComponent {
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.cache = None;
+    }
 
     fn get_id(&self) -> FlexBoxId {
         self.id
@@ -166,10 +225,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
                 return Ok(());
             };
             let state = &mut global_data.state;
-            let Some(report) = state.reports.get(&id) else {
-                return Ok(());
-            };
-            let window = Window::Report(id);
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
             let rows = bounds.row_height.as_usize();
@@ -177,6 +232,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
             if rows == 0 || width == 0 {
                 return Ok(());
             }
+            let Some(report) = state.reports.get(&id) else {
+                return Ok(());
+            };
+            let lines = self.lines(id, report, width, &state.theme);
+            let window = Window::Report(id);
             let pane_bg = state
                 .theme
                 .ui_bg("ui.background")
@@ -193,8 +253,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
                 ops += RenderOpIR::PaintTextWithAttributes(" ".repeat(width).into(), Some(blank));
             }
 
-            let lines =
-                crate::tui::widgets::markdown::render(&report.markdown, &state.theme, width);
             state.pane_manager.set_window_page_size(&window, rows);
             state
                 .pane_manager
@@ -352,5 +410,126 @@ mod tests {
                 .window_stack
                 .contains(&Window::Report(id))
         );
+    }
+
+    /// The markdown is laid out once, not on every frame that paints the report.
+    #[test]
+    fn a_frame_lays_the_markdown_out_again_only_when_the_report_or_the_width_moves() {
+        let mut state = empty_state();
+        let id = ReportComponent::show(&mut state, "t".to_string(), "# one\n\n- a".to_string());
+        let mut global_data = global_data_with_a_report(state);
+        let mut component = ReportComponent::new(crate::tui::pane_component::pane_id(0));
+        let laid_out = |component: &ReportComponent| component.renders;
+
+        component
+            .render(
+                &mut global_data,
+                frame_box(80, 24),
+                VPBoundingBox::new(vp_col(0) + vp_row(0), vp_width(80) + vp_height(24)),
+                &mut HasFocus::default(),
+            )
+            .unwrap();
+        let first = laid_out(&component);
+        assert_eq!(first, 1, "a frame renders the markdown");
+        component
+            .render(
+                &mut global_data,
+                frame_box(80, 24),
+                VPBoundingBox::new(vp_col(0) + vp_row(0), vp_width(80) + vp_height(24)),
+                &mut HasFocus::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            laid_out(&component),
+            first,
+            "a second frame at the same width keeps the rendered lines"
+        );
+
+        component
+            .render(
+                &mut global_data,
+                frame_box(12, 24),
+                VPBoundingBox::new(vp_col(0) + vp_row(0), vp_width(12) + vp_height(24)),
+                &mut HasFocus::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            laid_out(&component),
+            first + 1,
+            "a new width lays the markdown out again"
+        );
+
+        // Back at the first width, so the replacement below is told apart by the report
+        // alone.
+        component
+            .render(
+                &mut global_data,
+                frame_box(80, 24),
+                VPBoundingBox::new(vp_col(0) + vp_row(0), vp_width(80) + vp_height(24)),
+                &mut HasFocus::default(),
+            )
+            .unwrap();
+        assert_eq!(laid_out(&component), first + 2, "the width moved back");
+
+        // A new report of the same length in the same window is a new layout, which no
+        // length would tell apart.
+        ReportComponent::show(
+            &mut global_data.state,
+            "t".to_string(),
+            "# two\n\n- b".to_string(),
+        );
+        component
+            .render(
+                &mut global_data,
+                frame_box(80, 24),
+                VPBoundingBox::new(vp_col(0) + vp_row(0), vp_width(80) + vp_height(24)),
+                &mut HasFocus::default(),
+            )
+            .unwrap();
+        let second = laid_out(&component);
+        assert_eq!(second, first + 3, "a replaced report is laid out again");
+        component
+            .render(
+                &mut global_data,
+                frame_box(80, 24),
+                VPBoundingBox::new(vp_col(0) + vp_row(0), vp_width(80) + vp_height(24)),
+                &mut HasFocus::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            laid_out(&component),
+            second,
+            "the frame after a replacement keeps the lines it laid out"
+        );
+        assert_eq!(global_data.state.reports[&id].markdown, "# two\n\n- b");
+
+        // Every span carries the color it was laid out with, so a new theme is a new layout.
+        global_data.state.theme =
+            crate::tui::theme::HelixTheme::from_name("adwaita-light").expect("bundled theme");
+        for (expected, why) in [
+            (second + 1, "a new theme lays the markdown out again"),
+            (second + 1, "the same theme keeps the lines it laid out"),
+        ] {
+            component
+                .render(
+                    &mut global_data,
+                    frame_box(80, 24),
+                    VPBoundingBox::new(vp_col(0) + vp_row(0), vp_width(80) + vp_height(24)),
+                    &mut HasFocus::default(),
+                )
+                .unwrap();
+            assert_eq!(laid_out(&component), expected, "{why}");
+        }
+    }
+
+    /// The box a pane of `cols` columns and `rows` rows is given, at the terminal's top left.
+    fn frame_box(cols: u16, rows: u16) -> FlexBox {
+        FlexBox {
+            style_adjusted_bounds: VPBoundingBox::new(
+                vp_col(0) + vp_row(0),
+                vp_width(cols) + vp_height(rows),
+            ),
+            ..FlexBox::default()
+        }
     }
 }
