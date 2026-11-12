@@ -834,16 +834,23 @@ impl InputLine {
                 vp_col(prompt_width as u16) + vp_row(screen_row as u16),
             );
             let mut pen = None;
+            let mut run = String::new();
+            let mut run_style = None;
             for (column, gr) in graphemes[visual.start..visual.start + visual.len]
                 .iter()
                 .enumerate()
             {
                 let style = style_at(visual.start + column);
-                if pen != Some(style) {
-                    ops += RenderOpCommon::ApplyColors(Some(style));
-                    pen = Some(style);
+                if Some(style) != run_style {
+                    if let Some(style) = run_style {
+                        paint_run(ops, &mut run, style, &mut pen);
+                    }
+                    run_style = Some(style);
                 }
-                ops += RenderOpIR::PaintTextWithAttributes((*gr).into(), Some(style));
+                run.push_str(gr);
+            }
+            if let Some(style) = run_style {
+                paint_run(ops, &mut run, style, &mut pen);
             }
             if focused && row_idx == cursor_row && cursor == visual.start + visual.len {
                 ops += RenderOpCommon::MoveCursorPositionRelTo(
@@ -856,6 +863,21 @@ impl InputLine {
             }
         }
     }
+}
+
+/// A frame is composed op by op, so one op per run of one style rather than one per
+/// grapheme is what keeps a long input cheap to paint.
+fn paint_run(
+    ops: &mut RenderOpIRVec,
+    run: &mut String,
+    style: TuiStyle,
+    pen: &mut Option<TuiStyle>,
+) {
+    if *pen != Some(style) {
+        *ops += RenderOpCommon::ApplyColors(Some(style));
+        *pen = Some(style);
+    }
+    *ops += RenderOpIR::PaintTextWithAttributes(std::mem::take(run).into(), Some(style));
 }
 
 fn grapheme_byte_offset(text: &str, grapheme_idx: usize) -> usize {
@@ -882,16 +904,20 @@ mod cursor_render_tests {
         )
     }
 
-    /// Returns the `ApplyColors` style immediately preceding the first
-    /// `PaintTextWithAttributes(text)` op, or `None`.
-    fn pen_before_paint(ops: &RenderOpIRVec, text: &str) -> Option<TuiStyle> {
-        let idx = ops.iter().position(
-            |op| matches!(op, RenderOpIR::PaintTextWithAttributes(s, _) if s.as_str() == text),
-        )?;
-        match ops.get(idx.checked_sub(1)?)? {
-            RenderOpIR::Common(RenderOpCommon::ApplyColors(Some(style))) => Some(*style),
-            _ => None,
+    /// The pen in force when the first op painted from `needle` runs. One op may carry a
+    /// whole run of graphemes, so the needle is looked for inside each op's text.
+    fn pen_before_paint(ops: &RenderOpIRVec, needle: &str) -> Option<TuiStyle> {
+        let mut pen = None;
+        for op in ops.iter() {
+            match op {
+                RenderOpIR::Common(RenderOpCommon::ApplyColors(Some(style))) => pen = Some(*style),
+                RenderOpIR::PaintTextWithAttributes(text, _) if text.as_str().contains(needle) => {
+                    return pen;
+                }
+                _ => {}
+            }
         }
+        None
     }
 
     // The cursor cell must be preceded by an explicit `ApplyColors` that sets the pen to
@@ -920,16 +946,20 @@ mod cursor_render_tests {
         assert_eq!(pen.color_bg, Some(color_text));
     }
 
-    /// Text and foreground of every paint op, in order.
+    /// Text and foreground of every painted cell, in order: an op may paint a run of
+    /// graphemes at one style, so it is split back into them.
     fn painted(ops: &RenderOpIRVec) -> Vec<(String, Option<TuiColor>)> {
-        ops.iter()
-            .filter_map(|op| match op {
-                RenderOpIR::PaintTextWithAttributes(text, style) => {
-                    Some((text.to_string(), style.and_then(|style| style.color_fg)))
+        use unicode_segmentation::UnicodeSegmentation;
+        let mut cells = Vec::new();
+        for op in ops.iter() {
+            if let RenderOpIR::PaintTextWithAttributes(text, style) = op {
+                let fg = style.and_then(|style| style.color_fg);
+                for gr in text.as_str().graphemes(true) {
+                    cells.push((gr.to_string(), fg));
                 }
-                _ => None,
-            })
-            .collect()
+            }
+        }
+        cells
     }
 
     #[test]
@@ -1350,7 +1380,10 @@ mod selection_tests {
                     pen = style.color_bg;
                 }
                 RenderOpIR::PaintTextWithAttributes(text, _) => {
-                    cells.push((text.to_string(), pen));
+                    use unicode_segmentation::UnicodeSegmentation;
+                    for gr in text.as_str().graphemes(true) {
+                        cells.push((gr.to_string(), pen));
+                    }
                 }
                 _ => {}
             }
