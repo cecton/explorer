@@ -109,7 +109,6 @@ impl r3bl_tui::RRTWorker for WatcherWorker {
         _sender: &tokio::sync::broadcast::Sender<r3bl_tui::RRTEvent<Self::Output>>,
     ) -> r3bl_tui::Continuation {
         use crate::signal::AppSignal;
-        use crate::signal::FilesChanged;
         match self.rx.recv_timeout(DEBOUNCE) {
             Ok(Ok(event)) => {
                 // Event-queue overflow: the kernel dropped events, so per-path
@@ -182,11 +181,7 @@ impl r3bl_tui::RRTWorker for WatcherWorker {
                 if self.pending.is_empty() && !self.pending_rescan {
                     return r3bl_tui::Continuation::Continue;
                 }
-                let mut batch = FilesChanged {
-                    modified: vec![],
-                    created: vec![],
-                    removed: vec![],
-                };
+                let mut batch = crate::loader::watch::Batch::default();
                 for (path, kind) in self.pending.drain() {
                     match kind {
                         RawKind::Created => batch.created.push(path),
@@ -204,7 +199,12 @@ impl r3bl_tui::RRTWorker for WatcherWorker {
                     batch.created.len(),
                     batch.removed.len()
                 );
-                let signal = AppSignal::FilesChanged(Arc::new(batch));
+                // Read here rather than on the main thread: a checkout or a rebase rewrites
+                // hundreds of files, and the UI would freeze for as long as reading them takes.
+                // The reading touches nothing; publishing waits for the main thread, which
+                // invalidates the offsets the new content makes stale in the same turn.
+                let changes = crate::loader::watch::read(&self.files, &batch);
+                let signal = AppSignal::FilesChanged(Arc::new(changes));
                 if self
                     .app_tx
                     .blocking_send(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
@@ -227,7 +227,7 @@ impl WatcherWorker {
     /// files on disk but not active in the list become `created` (the app
     /// handler resurrects a `removed` entry or appends a genuinely-new one),
     /// and active entries whose path is gone from disk become `removed`.
-    fn reconcile_into(&self, batch: &mut crate::signal::FilesChanged) {
+    fn reconcile_into(&self, batch: &mut crate::loader::watch::Batch) {
         let on_disk: HashSet<camino::Utf8PathBuf> = crate::loader::walk_repo_files(&self.root)
             .into_iter()
             .filter_map(|p| camino::Utf8PathBuf::from_path_buf(p).ok())

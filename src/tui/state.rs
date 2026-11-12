@@ -3,10 +3,8 @@ use r3bl_tui::*;
 use std::collections::{HashMap, HashSet};
 use std::fmt::{Debug, Display, Formatter};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::AtomicBool;
 use std::time::Duration;
-
-static FILES_VERSION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Debug)]
 pub struct FuzzyPickerState<T> {
@@ -415,8 +413,10 @@ impl Debug for TerminalPane {
 
 #[derive(Clone, Default)]
 pub struct AppState {
+    /// The repository's files, in the order the walk found them and append-only, so a
+    /// `FileKey` stays valid for the life of the state. Contended by every reader that
+    /// shows a file and the watcher thread, which is the only one that writes it.
     pub files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
-    pub files_version: u64,
     pub root: camino::Utf8PathBuf,
     /// Shared git repository handle, opened once at startup and cheaply cloned
     /// for each background git operation instead of re-opening `root` every
@@ -527,10 +527,6 @@ pub struct AppState {
 }
 
 impl AppState {
-    pub fn bump_files_version(&mut self) {
-        self.files_version = FILES_VERSION.fetch_add(1, Ordering::Relaxed) + 1;
-    }
-
     pub fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
     }
@@ -637,7 +633,6 @@ impl AppState {
 
         let mut state = Self {
             files,
-            files_version: 0,
             root,
             repo,
             pane_manager,

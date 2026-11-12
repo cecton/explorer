@@ -40,32 +40,28 @@ pub(crate) fn find(
 
 /// Invalidates what a changed repository made stale: a group whose origin went away goes
 /// with it, one whose origin changed asks for its uses again, and one whose uses moved has
-/// the vanished ones dropped.
+/// the vanished ones dropped. Works in keys alone: the watcher already turned its paths into
+/// them.
 pub(crate) fn files_changed(
     state: &mut crate::tui::state::AppState,
-    batch: &crate::signal::FilesChanged,
+    touched: &crate::signal::FilesChanged,
 ) {
-    let snapshot = state.files.load_full();
-    let stale: Vec<&camino::Utf8Path> = batch
+    use crate::loader::FileKey;
+    let stale: std::collections::HashSet<FileKey> = touched
         .modified
         .iter()
-        .map(|path| path.as_path())
-        .chain(batch.removed.iter().map(|path| path.as_path()))
+        .chain(&touched.removed)
+        .copied()
         .collect();
     let mut idx = 0;
     while idx < state.symbol_highlights.len() {
         let origin = state.symbol_highlights[idx].origin_file;
-        let Some(origin_path) = crate::loader::path_for_file_key(&snapshot, origin) else {
-            idx += 1;
-            continue;
-        };
-        let origin_path = origin_path.to_path_buf();
-        if batch.removed.iter().any(|path| path == &origin_path) {
+        if touched.removed.contains(&origin) {
             state.symbol_highlights.remove(idx);
             state.mark_session_dirty();
             continue;
         }
-        if batch.modified.iter().any(|path| path == &origin_path) {
+        if touched.modified.contains(&origin) {
             let group = &mut state.symbol_highlights[idx];
             group.needs_rebuild = true;
             group.origin_byte_start = None;
@@ -79,10 +75,9 @@ pub(crate) fn files_changed(
                 Some(idx),
             );
         } else {
-            state.symbol_highlights[idx].locations.retain(|location| {
-                !crate::loader::path_for_file_key(&snapshot, location.file_key)
-                    .is_some_and(|path| stale.contains(&path))
-            });
+            state.symbol_highlights[idx]
+                .locations
+                .retain(|location| !stale.contains(&location.file_key));
         }
         idx += 1;
     }
@@ -138,5 +133,95 @@ mod tests {
         let mut groups = vec![group("a"), group("b"), group("a")];
         dedup(&mut groups, "a", None);
         assert_eq!(names(&groups), ["b"]);
+    }
+
+    fn state() -> crate::tui::state::AppState {
+        use crate::tui::keymap::Keymap;
+        use crate::tui::theme::HelixTheme;
+        use std::sync::Arc;
+        crate::tui::state::AppState::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+            camino::Utf8PathBuf::from("/tmp/nowhere"),
+            HelixTheme::default(),
+            Keymap::default(),
+        )
+    }
+
+    fn location(key: usize) -> crate::signal::SymbolRefLocation {
+        crate::signal::SymbolRefLocation {
+            file_key: crate::loader::FileKey(key),
+            start_byte: 0,
+            end_byte: 1,
+        }
+    }
+
+    fn touching(removed: &[usize], modified: &[usize]) -> crate::signal::FilesChanged {
+        let keys = |keys: &[usize]| {
+            keys.iter()
+                .map(|&key| crate::loader::FileKey(key))
+                .collect::<Vec<_>>()
+        };
+        crate::signal::FilesChanged {
+            modified: keys(modified),
+            created: Vec::new(),
+            removed: keys(removed),
+        }
+    }
+
+    /// The file a group starts in is gone, so the group goes with it.
+    #[test]
+    fn a_group_whose_origin_was_removed_goes() {
+        let mut state = state();
+        state.symbol_highlights = vec![group("a"), group("b")];
+        state.symbol_highlights[1].origin_file = crate::loader::FileKey(3);
+
+        files_changed(&mut state, &touching(&[0], &[]));
+
+        assert_eq!(names(&state.symbol_highlights), ["b"]);
+    }
+
+    /// A file the group starts in changed: its name and location have to be resolved again.
+    #[test]
+    fn a_group_whose_origin_changed_is_asked_for_again() {
+        let mut state = state();
+        let mut changed = group("a");
+        changed.locations = vec![location(1), location(2)];
+        changed.origin_byte_start = Some(4);
+        state.symbol_highlights = vec![changed];
+
+        files_changed(&mut state, &touching(&[], &[0]));
+
+        let group = &state.symbol_highlights[0];
+        assert!(group.needs_rebuild);
+        assert!(group.locations.is_empty());
+        assert_eq!(group.origin_byte_start, None);
+    }
+
+    /// A file only a group's uses are in: the uses in it vanish, the group stays and keeps
+    /// the ones elsewhere, and nothing is re-resolved.
+    #[test]
+    fn a_group_loses_the_uses_of_a_file_that_changed() {
+        let mut state = state();
+        let mut group = group("a");
+        group.locations = vec![location(1), location(5)];
+        state.symbol_highlights = vec![group];
+
+        files_changed(&mut state, &touching(&[], &[5]));
+
+        assert_eq!(state.symbol_highlights[0].locations, [location(1)]);
+        assert!(!state.symbol_highlights[0].needs_rebuild);
+    }
+
+    /// A batch that touched no file leaves every group as it was.
+    #[test]
+    fn an_empty_batch_leaves_the_groups_alone() {
+        let mut state = state();
+        let mut group = group("a");
+        group.locations = vec![location(1)];
+        state.symbol_highlights = vec![group];
+
+        files_changed(&mut state, &touching(&[], &[]));
+
+        assert_eq!(state.symbol_highlights[0].locations, [location(1)]);
     }
 }

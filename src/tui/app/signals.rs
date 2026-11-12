@@ -63,14 +63,16 @@ pub(super) fn handle(
         let state = &mut global_data.state;
         let mut propagation = EventPropagation::ConsumedRender;
         match action {
-            AppSignal::FilesChanged(batch) => {
+            AppSignal::FilesChanged(changes) => {
+                // The reads already happened on the watcher thread; this is the one turn that
+                // publishes them, and it invalidates the offsets they make stale right after.
+                let touched = crate::loader::watch::swap_in(&app.files, changes);
                 tracing::info!(
                     "FilesChanged: {} modified, {} created, {} removed",
-                    batch.modified.len(),
-                    batch.created.len(),
-                    batch.removed.len()
+                    touched.modified.len(),
+                    touched.created.len(),
+                    touched.removed.len()
                 );
-                crate::loader::watch::apply(&app.files, batch);
                 if state
                     .pane_manager
                     .window_stack
@@ -84,8 +86,7 @@ pub(super) fn handle(
                         global_data.main_thread_channel_sender.clone(),
                     );
                 }
-                crate::tui::symbols::files_changed(state, batch);
-                state.bump_files_version();
+                crate::tui::symbols::files_changed(state, &touched);
             }
             AppSignal::OpenTerminal { .. } => {}
             AppSignal::OpenEditor { .. } => {

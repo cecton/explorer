@@ -34,18 +34,41 @@ impl FileData {
         &self.content[start..end.min(self.content.len())]
     }
 
+    /// The text between two byte offsets, or `None` when there is none there.
+    ///
+    /// The offsets can come from a selection made before the file was rewritten under it, so
+    /// both are moved onto character boundaries first: a stale one can land inside a
+    /// character, and slicing there would panic.
     pub fn extract_text(&self, start_byte: usize, end_byte: usize) -> Option<String> {
         let (start_byte, end_byte) = if start_byte > end_byte {
             (end_byte, start_byte)
         } else {
             (start_byte, end_byte)
         };
+        let start_byte = self.char_boundary_at_or_before(start_byte);
+        let end_byte = self.char_boundary_at_or_after(end_byte);
         let result = self.content[start_byte..end_byte].to_string();
         if result.is_empty() {
             None
         } else {
             Some(result)
         }
+    }
+
+    fn char_boundary_at_or_before(&self, offset: usize) -> usize {
+        let mut offset = offset.min(self.content.len());
+        while !self.content.is_char_boundary(offset) {
+            offset -= 1;
+        }
+        offset
+    }
+
+    fn char_boundary_at_or_after(&self, offset: usize) -> usize {
+        let mut offset = offset.min(self.content.len());
+        while offset < self.content.len() && !self.content.is_char_boundary(offset) {
+            offset += 1;
+        }
+        offset
     }
 
     pub(crate) fn char_to_byte(&self, line_idx: usize, char_idx: usize) -> usize {
@@ -61,8 +84,13 @@ impl FileData {
         crate::util::text::word_bounds(&self.content, cursor_byte)
     }
 
+    /// The byte range of a line, clamped to the last one: a selection made before the file
+    /// was rewritten under it can name a line the new content does not have.
     pub fn line_bounds(&self, line_idx: usize) -> (usize, usize) {
-        let line_byte_start = self.line_starts[line_idx];
+        let line_idx = line_idx.min(self.line_starts.len().saturating_sub(1));
+        let Some(&line_byte_start) = self.line_starts.get(line_idx) else {
+            return (0, 0);
+        };
         let line = self.line(line_idx);
         (line_byte_start, line_byte_start + line.len())
     }
@@ -79,34 +107,34 @@ pub struct LoadedFile {
 impl LoadedFile {
     pub fn load(path: PathBuf) -> Option<Arc<Self>> {
         let path = camino::Utf8PathBuf::from_path_buf(path).ok()?;
-        let content = fs::read_to_string(&path).ok()?;
-        let line_starts = compute_line_starts(&content);
+        let data = read_file_data(&path)?;
         Some(Arc::new(Self {
             path,
-            data: parking_lot::RwLock::new(FileData {
-                content,
-                line_starts,
-            }),
+            data: parking_lot::RwLock::new(data),
             colored_lines: parking_lot::Mutex::new(vec![]),
             removed: AtomicBool::new(false),
             needs_full_load: AtomicBool::new(false),
         }))
     }
 
-    /// Re-reads the file from disk, updates content and line_starts, clears colored_lines.
-    /// Returns false if the file could not be read.
-    pub fn reload(&self) -> bool {
-        let Ok(content) = fs::read_to_string(&self.path) else {
-            return false;
-        };
-        let line_starts = compute_line_starts(&content);
-        let mut data = self.data.write();
-        data.content = content;
-        data.line_starts = line_starts;
-        drop(data);
+    /// Publishes data read ahead of time, dropping the colors computed against the old one.
+    /// The content and the line starts that name into it change under one write lock, so no
+    /// reader holds one without the other.
+    pub fn replace_data(&self, data: FileData) {
+        *self.data.write() = data;
         *self.colored_lines.lock() = vec![];
-        true
     }
+}
+
+/// Reads a file into what [`LoadedFile`] holds, or `None` when it is not readable as text.
+/// The reading half of [`LoadedFile::load`], for a caller that reads before it publishes.
+pub(crate) fn read_file_data(path: &camino::Utf8Path) -> Option<FileData> {
+    let content = fs::read_to_string(path).ok()?;
+    let line_starts = compute_line_starts(&content);
+    Some(FileData {
+        content,
+        line_starts,
+    })
 }
 
 fn compute_line_starts(content: &str) -> Vec<usize> {
@@ -253,6 +281,26 @@ mod tests {
     fn extract_text_empty() {
         let data = fd("hello");
         assert_eq!(data.extract_text(2, 2), None);
+    }
+
+    /// A selection made before the file was rewritten under it carries offsets that can land
+    /// inside a character of the new content; taking the text has to cut at one, not panic.
+    #[test]
+    fn extract_text_stays_on_character_boundaries() {
+        let data = fd("— dash");
+        assert_eq!(data.extract_text(0, 1), Some("—".to_string()));
+        assert_eq!(data.extract_text(1, 2), Some("—".to_string()));
+        assert_eq!(data.extract_text(1, 10), Some("— dash".to_string()));
+        assert_eq!(data.extract_text(4, 10), Some("dash".to_string()));
+    }
+
+    /// A line taken from a selection made before the content was swapped in can name a line
+    /// the new content does not have: it is cut at the last one rather than panicking.
+    #[test]
+    fn a_stale_line_is_cut_at_the_content_it_lands_in() {
+        let data = fd("— dash\n");
+        assert_eq!(data.line_bounds(7), data.line_bounds(0));
+        assert_eq!(data.line_bounds(0), (0, data.content.len()));
     }
 
     #[test]

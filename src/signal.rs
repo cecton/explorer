@@ -1,11 +1,12 @@
 use std::sync::Arc;
 
-/// The files a watcher batch touched, by kind.
-#[derive(Debug, Clone, Default)]
+/// The files a watcher batch touched, by kind, as by the keys the file list holds them
+/// under: what the symbol groups check themselves against.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FilesChanged {
-    pub modified: Vec<camino::Utf8PathBuf>,
-    pub created: Vec<camino::Utf8PathBuf>,
-    pub removed: Vec<camino::Utf8PathBuf>,
+    pub modified: Vec<crate::loader::FileKey>,
+    pub created: Vec<crate::loader::FileKey>,
+    pub removed: Vec<crate::loader::FileKey>,
 }
 
 /// The answer to a symbol request: where a name is defined and everywhere it is used.
@@ -22,7 +23,7 @@ pub struct SymbolHighlight {
 }
 
 /// One place a symbol appears, as byte offsets into a file.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SymbolRefLocation {
     pub file_key: crate::loader::FileKey,
     pub start_byte: usize,
@@ -54,7 +55,9 @@ pub fn try_send(tx: &MainTx, signal: AppSignal) {
 #[derive(Default, Clone, Debug)]
 #[non_exhaustive]
 pub enum AppSignal {
-    FilesChanged(Arc<FilesChanged>),
+    /// What a watcher batch read, for the main thread to publish: the reads happened on the
+    /// watcher's own thread, and the swap-in invalidates what they made stale.
+    FilesChanged(Arc<crate::loader::watch::Changes>),
     /// Open a terminal pane. `cmd = None` means an interactive shell; `cmd = Some(s)` runs
     /// `/bin/sh -c s`. `cwd` is the working directory for the child process.
     OpenTerminal {

@@ -1137,11 +1137,19 @@ fn paint_line_segment(
     if seg_start_byte >= seg_end_byte {
         return;
     }
+    let line_content = data.line(line_idx);
+    // An offset can outlive the content it was computed against: a highlight of a file an
+    // external editor just rewrote reaches this frame still holding the old bytes. Clamping to
+    // the line's length is not enough, a stale offset can land inside a character.
+    let seg_start_byte = floor_to_char(line_content, seg_start_byte);
+    let seg_end_byte = ceil_to_char(line_content, seg_end_byte);
+    if seg_start_byte >= seg_end_byte {
+        return;
+    }
     let default_fg = theme
         .ui_fg("ui.text")
         .unwrap_or(RgbValue::from_u8(212, 212, 212));
     let bg = TuiColor::from(pane_bg);
-    let line_content = data.line(line_idx);
 
     // A fixed foreground (search matches) paints the whole segment as one run, ignoring syntax
     // spans and the `ensure_readable_fg` auto-contrast so the match text color is uniform.
@@ -1156,8 +1164,8 @@ fn paint_line_segment(
 
     if let Some(spans) = colored_guard.get(line_idx) {
         for span in spans {
-            let overlap_start = span.start.max(seg_start_byte);
-            let overlap_end = span.end.min(seg_end_byte);
+            let overlap_start = floor_to_char(line_content, span.start.max(seg_start_byte));
+            let overlap_end = ceil_to_char(line_content, span.end.min(seg_end_byte));
             if overlap_start >= overlap_end {
                 continue;
             }
@@ -1178,6 +1186,25 @@ fn paint_line_segment(
     let style = new_style!(color_fg: {fg} color_bg: {bg});
     *render_ops += RenderOpCommon::ApplyColors(Some(style));
     *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+}
+
+/// `offset` moved back to the start of the character it falls inside.
+fn floor_to_char(line: &str, offset: usize) -> usize {
+    let mut offset = offset.min(line.len());
+    while !line.is_char_boundary(offset) {
+        offset -= 1;
+    }
+    offset
+}
+
+/// `offset` moved past the character it falls inside, so a range whose ends both fall within
+/// one character still covers it rather than collapsing to nothing.
+fn ceil_to_char(line: &str, offset: usize) -> usize {
+    let mut offset = offset.min(line.len());
+    while offset < line.len() && !line.is_char_boundary(offset) {
+        offset += 1;
+    }
+    offset
 }
 
 /// Where the sub-row starting at the byte offset `start` of `line` ends: `width` cells on,
@@ -1534,5 +1561,75 @@ mod paint_tests {
             None,
         );
         assert!(ops.list.is_empty());
+    }
+
+    /// A highlight computed against an older content of the line reaches the frame holding
+    /// offsets that no longer name character boundaries. Painting has to cut at one rather
+    /// than panic: this is what an external edit does to a highlighted file, and 1..2 are
+    /// both inside the three bytes of an em dash.
+    #[test]
+    fn an_offset_inside_a_character_paints_rather_than_panicking() {
+        use crate::highlight::TokenKind;
+        let file = data("— dash");
+        let theme = crate::tui::theme::HelixTheme::default();
+
+        let mut ops = RenderOpIRVec::new();
+        paint_line_segment(
+            &mut ops,
+            &file,
+            &[],
+            0,
+            (0, 1),
+            &theme,
+            RgbValue::from_u8(0, 0, 0),
+            None,
+        );
+        assert_eq!(painted_text(&ops).concat(), "—");
+
+        let mut ops = RenderOpIRVec::new();
+        paint_line_segment(
+            &mut ops,
+            &file,
+            &[],
+            0,
+            (1, 2),
+            &theme,
+            RgbValue::from_u8(0, 0, 0),
+            None,
+        );
+        assert_eq!(painted_text(&ops).concat(), "—");
+
+        // a search match, which paints its segment as one fixed-foreground run
+        let mut ops = RenderOpIRVec::new();
+        paint_line_segment(
+            &mut ops,
+            &file,
+            &[],
+            0,
+            (0, 1),
+            &theme,
+            RgbValue::from_u8(0, 0, 0),
+            Some(RgbValue::from_u8(255, 255, 0)),
+        );
+        assert_eq!(painted_text(&ops).concat(), "—");
+
+        // a syntax span whose offsets came from the server for an older content
+        let spans = [vec![crate::highlight::ColoredSpan {
+            start: 1,
+            end: 2,
+            kind: TokenKind::Keyword,
+        }]];
+        let mut ops = RenderOpIRVec::new();
+        paint_line_segment(
+            &mut ops,
+            &file,
+            &spans,
+            0,
+            (0, file.content.len()),
+            &theme,
+            RgbValue::from_u8(0, 0, 0),
+            None,
+        );
+        assert_eq!(painted_text(&ops).concat(), "—");
     }
 }
