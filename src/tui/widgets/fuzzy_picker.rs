@@ -65,6 +65,19 @@ impl FuzzyPicker {
         Some(EventPropagation::ConsumedRender)
     }
 
+    /// What the last paint showed, for the scrollbar and the paging keys.
+    pub fn publish_geometry(
+        &self,
+        pane_manager: &mut crate::tui::pane_manager::PaneManager,
+        window: &crate::tui::pane_manager::Window,
+        result_count: usize,
+        rows: usize,
+    ) {
+        pane_manager.set_window_scroll(window, self.scroll_offset);
+        pane_manager.set_window_scroll_max(window, result_count);
+        pane_manager.set_window_page_size(window, rows);
+    }
+
     pub fn render_results<K: Clone + PartialEq>(
         &mut self,
         state: &crate::tui::state::AppState,

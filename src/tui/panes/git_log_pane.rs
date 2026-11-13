@@ -227,36 +227,9 @@ impl GitLogPaneComponent {
             None
         };
         if let Some((input_line, prompt)) = input_mode {
-            let origin = pane_box.style_adjusted_bounds.origin_pos;
-            let width = pane_box
-                .style_adjusted_bounds
-                .bounds_size
-                .col_width
-                .as_u16();
-            let (bg_rgb, fg_rgb) = crate::tui::widgets::title_row::title_bar_colors(focused, theme);
-            let color_bg = TuiColor::from(bg_rgb);
-            let color_fg = TuiColor::from(fg_rgb);
-            let color_selection = TuiColor::from(
-                crate::tui::widgets::title_row::title_selection_bg(focused, theme),
-            );
-            let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
-            *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
-            *ops += RenderOpCommon::SetBgColor(color_bg);
-            *ops += RenderOpIR::PaintTextWithAttributes(
-                " ".repeat(width as usize).as_str().into(),
-                Some(bg_style),
-            );
-            input_line.render(
-                ops,
-                None,
-                prompt,
-                origin,
-                width,
-                1,
-                focused,
-                (color_bg, color_fg, color_selection),
-            );
-            1
+            crate::tui::widgets::title_row::render_input_title(
+                ops, pane_box, input_line, prompt, focused, theme, 1,
+            )
         } else {
             crate::tui::widgets::title_row::render_pane_title(
                 ops,

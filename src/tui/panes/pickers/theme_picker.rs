@@ -25,55 +25,15 @@ impl crate::tui::widgets::title_row::TitleRow for ThemePickerComponent {
         focused: bool,
         state: &mut crate::tui::state::AppState,
     ) -> usize {
-        let origin = pane_box.style_adjusted_bounds.origin_pos;
-        let width = pane_box
-            .style_adjusted_bounds
-            .bounds_size
-            .col_width
-            .as_u16();
-        let max_rows = (pane_box
-            .style_adjusted_bounds
-            .bounds_size
-            .row_height
-            .as_usize()
-            / 2)
-        .max(1);
-        let height = state.theme_picker.query.height(None, "", width, max_rows);
-
-        let (bg_rgb, fg_rgb) =
-            crate::tui::widgets::title_row::title_bar_colors(focused, &state.theme);
-        let color_bg = TuiColor::from(bg_rgb);
-        let color_fg = TuiColor::from(fg_rgb);
-        let color_selection = TuiColor::from(crate::tui::widgets::title_row::title_selection_bg(
+        crate::tui::widgets::title_row::render_input_title(
+            ops,
+            pane_box,
+            &mut state.theme_picker.query,
+            "",
             focused,
             &state.theme,
-        ));
-        let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
-        let query = &mut state.theme_picker.query;
-
-        for row_offset in 0..height {
-            *ops += RenderOpCommon::MoveCursorPositionRelTo(
-                origin,
-                vp_col(0) + vp_row(row_offset as u16),
-            );
-            *ops += RenderOpCommon::SetBgColor(color_bg);
-            *ops += RenderOpIR::PaintTextWithAttributes(
-                " ".repeat(width as usize).as_str().into(),
-                Some(bg_style),
-            );
-        }
-        query.render(
-            ops,
-            None,
-            "",
-            origin,
-            width,
-            height,
-            focused,
-            (color_bg, color_fg, color_selection),
-        );
-
-        height
+            crate::tui::widgets::title_row::half_height(pane_box),
+        )
     }
 }
 
@@ -194,18 +154,12 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ThemeP
             );
             let result_count = global_data.state.theme_picker.results.len();
 
-            global_data
-                .state
-                .pane_manager
-                .set_window_scroll(&Window::ThemePicker, self.picker.scroll_offset);
-            global_data
-                .state
-                .pane_manager
-                .set_window_scroll_max(&Window::ThemePicker, result_count);
-            global_data
-                .state
-                .pane_manager
-                .set_window_page_size(&Window::ThemePicker, total_rows);
+            self.picker.publish_geometry(
+                &mut global_data.state.pane_manager,
+                &Window::ThemePicker,
+                result_count,
+                total_rows,
+            );
 
             global_data.pipeline.push(ZOrder::Normal, result_ops);
         });

@@ -144,38 +144,15 @@ impl crate::tui::widgets::title_row::TitleRow for ConversationTreeComponent {
             );
             return 1;
         }
-        let origin = pane_box.style_adjusted_bounds.origin_pos;
-        let width = pane_box
-            .style_adjusted_bounds
-            .bounds_size
-            .col_width
-            .as_u16();
-        let (bg_rgb, fg_rgb) =
-            crate::tui::widgets::title_row::title_bar_colors(focused, &state.theme);
-        let color_bg = TuiColor::from(bg_rgb);
-        let color_fg = TuiColor::from(fg_rgb);
-        let color_selection = TuiColor::from(crate::tui::widgets::title_row::title_selection_bg(
+        crate::tui::widgets::title_row::render_input_title(
+            ops,
+            pane_box,
+            &mut state.tree_view.query,
+            "/",
             focused,
             &state.theme,
-        ));
-        let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
-        *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
-        *ops += RenderOpCommon::SetBgColor(color_bg);
-        *ops += RenderOpIR::PaintTextWithAttributes(
-            " ".repeat(width as usize).as_str().into(),
-            Some(bg_style),
-        );
-        state.tree_view.query.render(
-            ops,
-            None,
-            "/",
-            origin,
-            width,
             1,
-            focused,
-            (color_bg, color_fg, color_selection),
-        );
-        1
+        )
     }
 }
 

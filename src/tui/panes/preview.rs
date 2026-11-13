@@ -261,48 +261,6 @@ impl FilePreviewComponent {
         state.mark_session_dirty();
     }
 
-    #[allow(clippy::too_many_arguments)]
-    fn render_input_title(
-        ops: &mut RenderOpIRVec,
-        input: &mut crate::tui::widgets::input_line::InputLine,
-        prompt: &str,
-        origin: VPPos,
-        width: u16,
-        height: usize,
-        focused: bool,
-        theme: &crate::tui::theme::HelixTheme,
-    ) {
-        let (bg_rgb, fg_rgb) = crate::tui::widgets::title_row::title_bar_colors(focused, theme);
-        let color_bg = TuiColor::from(bg_rgb);
-        let color_fg = TuiColor::from(fg_rgb);
-        let color_selection = TuiColor::from(crate::tui::widgets::title_row::title_selection_bg(
-            focused, theme,
-        ));
-        let label_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
-
-        for row_offset in 0..height {
-            *ops += RenderOpCommon::MoveCursorPositionRelTo(
-                origin,
-                vp_col(0) + vp_row(row_offset as u16),
-            );
-            *ops += RenderOpCommon::SetBgColor(color_bg);
-            *ops += RenderOpIR::PaintTextWithAttributes(
-                " ".repeat(width as usize).as_str().into(),
-                Some(label_style),
-            );
-        }
-        input.render(
-            ops,
-            None,
-            prompt,
-            origin,
-            width,
-            height,
-            focused,
-            (color_bg, color_fg, color_selection),
-        );
-    }
-
     fn is_line_highlighted(
         state: &crate::tui::state::AppState,
         file_key: crate::loader::FileKey,
@@ -986,31 +944,15 @@ impl crate::tui::widgets::title_row::TitleRow for FilePreviewComponent {
                 PreviewInput::Search(_, SearchDirection::Forward) => "/",
                 PreviewInput::Search(_, SearchDirection::Backward) => "?",
             };
-            let origin = pane_box.style_adjusted_bounds.origin_pos;
-            let width = pane_box
-                .style_adjusted_bounds
-                .bounds_size
-                .col_width
-                .as_u16();
-            let max_rows = (pane_box
-                .style_adjusted_bounds
-                .bounds_size
-                .row_height
-                .as_usize()
-                / 2)
-            .max(1);
-            let height = input.line().height(None, prompt, width, max_rows);
-            Self::render_input_title(
+            crate::tui::widgets::title_row::render_input_title(
                 ops,
+                pane_box,
                 input.line_mut(),
                 prompt,
-                origin,
-                width,
-                height,
                 focused,
                 theme,
-            );
-            height
+                crate::tui::widgets::title_row::half_height(pane_box),
+            )
         } else {
             let (title, removed) = self
                 .title_text_render(state)

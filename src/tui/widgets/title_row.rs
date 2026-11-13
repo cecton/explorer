@@ -74,6 +74,61 @@ pub(crate) fn title_selection_bg(focused: bool, theme: &crate::tui::theme::Helix
     title_bar_colors(!focused, theme).0
 }
 
+/// Half the rows of `pane_box`, at least one: the most a title-bar input may grow to.
+pub(crate) fn half_height(pane_box: &FlexBox) -> usize {
+    (pane_box
+        .style_adjusted_bounds
+        .bounds_size
+        .row_height
+        .as_usize()
+        / 2)
+    .max(1)
+}
+
+/// Paints `input` on the title colors in at most `max_rows` rows; answers the rows taken.
+pub(crate) fn render_input_title(
+    ops: &mut RenderOpIRVec,
+    pane_box: &FlexBox,
+    input: &mut crate::tui::widgets::input_line::InputLine,
+    prompt: &str,
+    focused: bool,
+    theme: &crate::tui::theme::HelixTheme,
+    max_rows: usize,
+) -> usize {
+    let origin = pane_box.style_adjusted_bounds.origin_pos;
+    let width = pane_box
+        .style_adjusted_bounds
+        .bounds_size
+        .col_width
+        .as_u16();
+    let height = input.height(None, prompt, width, max_rows);
+    let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
+    let color_bg = TuiColor::from(bg_rgb);
+    let color_fg = TuiColor::from(fg_rgb);
+    let color_selection = TuiColor::from(title_selection_bg(focused, theme));
+    let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+    for row_offset in 0..height {
+        *ops +=
+            RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(row_offset as u16));
+        *ops += RenderOpCommon::SetBgColor(color_bg);
+        *ops += RenderOpIR::PaintTextWithAttributes(
+            " ".repeat(width as usize).as_str().into(),
+            Some(bg_style),
+        );
+    }
+    input.render(
+        ops,
+        None,
+        prompt,
+        origin,
+        width,
+        height,
+        focused,
+        (color_bg, color_fg, color_selection),
+    );
+    height
+}
+
 pub(crate) fn render_pane_title(
     mut render_ops: &mut RenderOpIRVec,
     pane_box: &FlexBox,
