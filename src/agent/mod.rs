@@ -84,6 +84,22 @@ pub enum Backend {
     ClaudeCode(claude_code::ClaudeTarget),
 }
 
+impl Backend {
+    /// One answer without tools and without a saved session: what the title and summary
+    /// of a finished node are made of, which never reach the conversation tree.
+    pub async fn complete(
+        &self,
+        session: &str,
+        system: &str,
+        user: &str,
+    ) -> Result<String, String> {
+        match self {
+            Backend::OpenAi(target) => llm::complete(target, session, system, user).await,
+            Backend::ClaudeCode(target) => claude_code::complete(target, system, user).await,
+        }
+    }
+}
+
 /// Review rounds of a commit when the `agent` block sets none.
 pub const DEFAULT_REVIEW_ROUNDS: u32 = 3;
 

@@ -37,22 +37,6 @@ pub(crate) fn parse_title_and_summary(answer: &str) -> Option<(String, String)> 
     (!title.is_empty()).then(|| (title, crate::util::text::single_line(rest)))
 }
 
-/// One answer without tools from the summary model.
-pub(crate) async fn complete(
-    backend: &crate::agent::Backend,
-    session: &str,
-    system: &str,
-    user: &str,
-) -> Result<String, String> {
-    use crate::agent::Backend;
-    match backend {
-        Backend::OpenAi(target) => crate::agent::llm::complete(target, session, system, user).await,
-        Backend::ClaudeCode(target) => {
-            crate::agent::claude_code::complete(target, system, user).await
-        }
-    }
-}
-
 /// Writes the title and summary of a node from its prompt, reply and commits.
 #[allow(clippy::too_many_arguments)]
 pub async fn retitle(
@@ -88,13 +72,9 @@ async fn title_and_summarize(
     main_tx: &crate::signal::MainTx,
 ) {
     use crate::signal::AppSignal;
-    let answer = match complete(
-        backend,
-        session,
-        crate::agent::context::TITLE_SUMMARY_PROMPT,
-        input,
-    )
-    .await
+    let answer = match backend
+        .complete(session, crate::agent::context::TITLE_SUMMARY_PROMPT, input)
+        .await
     {
         Ok(answer) => answer,
         Err(e) => {

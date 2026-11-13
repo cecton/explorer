@@ -12,9 +12,6 @@ use std::time::{Duration, Instant};
 /// How often the spinners advance one frame.
 pub const SPINNER_INTERVAL: Duration = Duration::from_millis(100);
 pub const SPINNER: [char; 10] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-/// Times a commit turn is asked to commit what it left behind before Explorer discards it.
-const MAX_NUDGES: usize = 2;
-
 /// The spinner character for the shared animation step `tick`.
 pub fn spinner_char(tick: u8) -> char {
     SPINNER[tick as usize % SPINNER.len()]
@@ -288,6 +285,23 @@ fn fork_source(mode: crate::agent::Mode, parent_session: Option<&str>) -> Option
     parent_session.filter(|_| mode == Mode::Feedback)
 }
 
+/// The session a turn's first run starts from.
+///
+/// A continue turn starts from the node's own session, which holds its thinking and its
+/// tool state. It forks rather than appending in place: two resumes of one interrupted
+/// node are two independent branches of the tree, and a fork keeps them from reading each
+/// other's work. Feedback turns fork the parent's session when there is one; commit turns
+/// start fresh so they never see the replayed feedback history. Every fork that is gone,
+/// and every fresh start, opens with the ancestors as plain text (`Run::from`).
+fn start_session(request: &TurnRequest) -> crate::agent::claude_code::Resume<'_> {
+    use crate::agent::claude_code::Resume;
+    match &request.continue_session {
+        Some(session) => Resume::Fork(session),
+        None => fork_source(request.mode, request.parent_session.as_deref())
+            .map_or(Resume::Fresh, Resume::Fork),
+    }
+}
+
 async fn run_claude_code(
     request: &TurnRequest,
     mcp: &crate::agent::mcp::McpTools,
@@ -296,150 +310,51 @@ async fn run_claude_code(
 ) -> Result<(), String> {
     use crate::agent::Message;
     use crate::agent::Mode;
-    use crate::agent::claude_code::Resume;
-    use crate::agent::claude_code::RunError;
-    let (system, message, preamble) = {
+    use crate::agent::claude_code::Run;
+    let (system, message) = {
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
             let system = crate::agent::context::claude_system_prompt(
                 request.system_prompt.then_some(request.mode),
                 request.agent.review_rounds,
             );
-            let preamble = crate::agent::context::handover_preamble(&request.ancestor_dirs);
-            (system, message_to_send(&request), preamble)
+            (system, message_to_send(&request))
         })
         .await
         .map_err(|e| e.to_string())?
     };
-    // A continue turn starts from the node's own session, which holds its thinking and
-    // its tool state. It forks rather than appending in place: two resumes of one
-    // interrupted node are two independent branches of the tree, and a fork keeps them
-    // from reading each other's work. When the session is gone, a fresh one opens with
-    // the ancestors as plain text.
-    if let Some(continue_session) = &request.continue_session {
-        let run = crate::agent::claude_code::run(
-            &invocation(
-                request,
-                mcp,
-                target,
-                &system,
-                &message,
-                Resume::Fork(continue_session),
-            ),
-            recorder,
-        )
-        .await;
-        match run {
-            Ok(()) => {}
-            Err(RunError::SessionGone) => {
-                let opening = match preamble {
-                    Some(preamble) => format!("{preamble}\n\n{message}"),
-                    None => message,
-                };
-                crate::agent::claude_code::run(
-                    &invocation(request, mcp, target, &system, &opening, Resume::Fresh),
-                    recorder,
-                )
-                .await
-                .map_err(run_error_text)?;
-            }
-            Err(RunError::Failed(error)) => return Err(error),
-        }
-    } else {
-        // Feedback turns fork the parent's session when there is one; commit turns start
-        // fresh so they never see the replayed feedback history. A fork that is gone, or
-        // no parent, starts a fresh session that opens with the ancestors as plain text.
-        let forked = match fork_source(request.mode, request.parent_session.as_deref()) {
-            Some(session) => {
-                match crate::agent::claude_code::run(
-                    &invocation(
-                        request,
-                        mcp,
-                        target,
-                        &system,
-                        &message,
-                        Resume::Fork(session),
-                    ),
-                    recorder,
-                )
-                .await
-                {
-                    Ok(()) => true,
-                    Err(RunError::SessionGone) => false,
-                    Err(RunError::Failed(error)) => return Err(error),
-                }
-            }
-            None => false,
-        };
-        if !forked {
-            let opening = match preamble {
-                Some(preamble) => format!("{preamble}\n\n{message}"),
-                None => message,
-            };
-            crate::agent::claude_code::run(
-                &invocation(request, mcp, target, &system, &opening, Resume::Fresh),
-                recorder,
-            )
-            .await
-            .map_err(run_error_text)?;
-        }
-    }
+    let run = Run {
+        target,
+        root: &request.root,
+        system: &system,
+        mcp,
+    };
+    run.from(
+        &message,
+        start_session(request),
+        &request.ancestor_dirs,
+        recorder,
+    )
+    .await?;
     if request.mode == Mode::Feedback {
         return Ok(());
     }
-    for _ in 0..MAX_NUDGES {
-        let Some(status) = close::uncommitted(request).await? else {
-            break;
-        };
+    // A commit turn is not over while the working tree is dirty: stay in the loop and
+    // ask for the commit. The nudge joins the turn's own CLI session, which is the only
+    // place this backend keeps it, so a session that is gone fails the turn rather than
+    // opening one that has never read what the nudge refers to.
+    let mut sent = 0;
+    while let Some(nudge) = crate::agent::context::next_commit_nudge(&request.root, sent).await? {
+        sent += 1;
         let Some(session) = recorder.live.lock().session_id.clone() else {
             break;
         };
-        let Message::User { content: nudge, .. } = crate::agent::context::commit_nudge(&status)
-        else {
+        let Message::User { content: nudge, .. } = nudge else {
             break;
         };
-        crate::agent::claude_code::run(
-            &invocation(
-                request,
-                mcp,
-                target,
-                &system,
-                &nudge,
-                Resume::Continue(&session),
-            ),
-            recorder,
-        )
-        .await
-        .map_err(run_error_text)?;
+        run.resume(&nudge, &session, recorder).await?;
     }
     Ok(())
-}
-
-fn invocation<'a>(
-    request: &'a TurnRequest,
-    mcp: &'a crate::agent::mcp::McpTools,
-    target: &'a crate::agent::claude_code::ClaudeTarget,
-    system: &'a str,
-    prompt: &'a str,
-    resume: crate::agent::claude_code::Resume<'a>,
-) -> crate::agent::claude_code::Invocation<'a> {
-    use crate::agent::claude_code::Invocation;
-    Invocation {
-        target,
-        root: &request.root,
-        system,
-        prompt,
-        resume,
-        mcp,
-    }
-}
-
-fn run_error_text(error: crate::agent::claude_code::RunError) -> String {
-    use crate::agent::claude_code::RunError;
-    match error {
-        RunError::SessionGone => "the Claude Code session of this turn is gone".to_string(),
-        RunError::Failed(error) => error,
-    }
 }
 
 async fn run_own_loop(
@@ -550,11 +465,9 @@ async fn run_own_loop(
     }
     // A commit turn is not over while the working tree is dirty: stay in the loop and
     // ask for the commit. The nudge goes in the transcript but is never shown.
-    for _ in 0..MAX_NUDGES {
-        let Some(status) = close::uncommitted(request).await? else {
-            break;
-        };
-        let nudge = crate::agent::context::commit_nudge(&status);
+    let mut sent = 0;
+    while let Some(nudge) = crate::agent::context::next_commit_nudge(&request.root, sent).await? {
+        sent += 1;
         recorder.message(&nudge);
         messages.push(nudge);
         crate::agent::agent_loop::run(
@@ -623,6 +536,71 @@ mod tests {
         assert_eq!(fork_source(Mode::Commit, Some("abc")), None);
         assert_eq!(fork_source(Mode::Feedback, None), None);
         assert_eq!(fork_source(Mode::Commit, None), None);
+    }
+
+    #[test]
+    fn a_continue_turn_starts_from_the_node_and_anything_else_from_its_parent() {
+        use crate::agent::Backend;
+        use crate::agent::Endpoint;
+        use crate::agent::EndpointKind;
+        use crate::agent::Mode;
+        use crate::agent::claude_code::Resume;
+        use crate::conversation::NodeId;
+        use crate::model_spec::Effort;
+        let request =
+            |mode, parent_session: Option<&str>, continue_session: Option<&str>| TurnRequest {
+                mode,
+                system_prompt: true,
+                node: NodeId::new("1"),
+                node_dir: camino::Utf8PathBuf::new(),
+                ancestor_dirs: Vec::new(),
+                parent_head: None,
+                head: None,
+                root: camino::Utf8PathBuf::new(),
+                repo: None,
+                prompt: "go".to_string(),
+                date: "2026-11-13".to_string(),
+                backend: Backend::ClaudeCode(crate::agent::claude_code::ClaudeTarget {
+                    model: "opus".to_string(),
+                    effort: Effort::Default,
+                }),
+                endpoint: Endpoint {
+                    name: "claude".to_string(),
+                    kind: EndpointKind::ClaudeCode { models: vec![] },
+                },
+                spec: crate::model_spec::ModelSpec::parse("claude/opus").unwrap(),
+                agent: std::sync::Arc::new(crate::agent::AgentConfig::default()),
+                summary_backend: None,
+                session: "root".to_string(),
+                parent_session: parent_session.map(str::to_string),
+                continue_session: continue_session.map(str::to_string),
+                compact: None,
+                compacted_parent: None,
+                tree: std::sync::Arc::new(parking_lot::RwLock::new(
+                    crate::conversation::ConversationTree::default(),
+                )),
+                mcp: std::sync::Arc::new(crate::agent::mcp::McpHost::default()),
+            };
+        // A continue turn must fork its node's session: continuing it in place would make
+        // two resumes of one node read each other's work.
+        let forked = |resume: Resume<'_>| match resume {
+            Resume::Fresh => None,
+            Resume::Continue(session) => panic!("continued {session} in place"),
+            Resume::Fork(session) => Some(session.to_string()),
+        };
+
+        // A continue turn replays the node's own session, whatever its parent and mode.
+        let continuing = request(Mode::Feedback, Some("parent"), Some("node"));
+        assert_eq!(forked(start_session(&continuing)), Some("node".to_string()));
+        let continuing = request(Mode::Commit, None, Some("node"));
+        assert_eq!(forked(start_session(&continuing)), Some("node".to_string()));
+        // A fresh child forks its parent's session only in a feedback turn.
+        let child = request(Mode::Feedback, Some("parent"), None);
+        assert_eq!(forked(start_session(&child)), Some("parent".to_string()));
+        let commit = request(Mode::Commit, Some("parent"), None);
+        assert_eq!(forked(start_session(&commit)), None);
+        let root = request(Mode::Feedback, None, None);
+        assert_eq!(forked(start_session(&root)), None);
     }
 
     #[test]

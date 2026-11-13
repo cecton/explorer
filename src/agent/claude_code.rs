@@ -37,6 +37,91 @@ pub struct Invocation<'a> {
     pub mcp: &'a crate::agent::mcp::McpTools,
 }
 
+/// What every run of one turn has in common: only the prompt and the session it starts
+/// from differ between a turn's first run, a sub-agent's run and a commit nudge.
+#[derive(Clone, Copy)]
+pub struct Run<'a> {
+    pub target: &'a ClaudeTarget,
+    pub root: &'a camino::Utf8Path,
+    pub system: &'a str,
+    pub mcp: &'a crate::agent::mcp::McpTools,
+}
+
+impl Run<'_> {
+    /// Runs `prompt` from `start`. A `start` whose session is gone is not an error: the
+    /// run opens a fresh session instead. A fresh session opens with `ancestors` as plain
+    /// text, since it has none of their history; they are read only when such a run is
+    /// about to happen, so a fork that works costs no file read.
+    pub async fn from(
+        self,
+        prompt: &str,
+        start: Resume<'_>,
+        ancestors: &[camino::Utf8PathBuf],
+        recorder: &mut crate::agent::turn::live::Recorder,
+    ) -> Result<(), String> {
+        let mut opening = prompt.to_string();
+        let mut resume = start;
+        let mut anchored = false;
+        loop {
+            if !anchored && matches!(resume, Resume::Fresh) {
+                opening = open_fresh(ancestors, &opening).await?;
+                anchored = true;
+            }
+            let attempt = run(&self.invocation(&opening, resume), recorder).await;
+            match attempt {
+                Ok(()) => return Ok(()),
+                Err(RunError::Failed(error)) => return Err(error),
+                // A fresh run never reports a missing session: this retries at most once.
+                Err(RunError::SessionGone) => resume = Resume::Fresh,
+            }
+        }
+    }
+
+    /// Runs `prompt` as a new message of `session`. A session that is gone is an error
+    /// here: the message only makes sense to a model that has read the turn.
+    pub async fn resume(
+        self,
+        prompt: &str,
+        session: &str,
+        recorder: &mut crate::agent::turn::live::Recorder,
+    ) -> Result<(), String> {
+        run(
+            &self.invocation(prompt, Resume::Continue(session)),
+            recorder,
+        )
+        .await
+        .map_err(|error| match error {
+            RunError::SessionGone => "the Claude Code session of this turn is gone".to_string(),
+            RunError::Failed(error) => error,
+        })
+    }
+
+    fn invocation<'a>(&'a self, prompt: &'a str, resume: Resume<'a>) -> Invocation<'a> {
+        Invocation {
+            target: self.target,
+            root: self.root,
+            system: self.system,
+            prompt,
+            resume,
+            mcp: self.mcp,
+        }
+    }
+}
+
+/// `prompt`, preceded by the ancestors as plain text when any of them has something to
+/// say.
+async fn open_fresh(ancestors: &[camino::Utf8PathBuf], prompt: &str) -> Result<String, String> {
+    let ancestors = ancestors.to_vec();
+    let preamble =
+        tokio::task::spawn_blocking(move || crate::agent::context::handover_preamble(&ancestors))
+            .await
+            .map_err(|e| e.to_string())?;
+    Ok(match preamble {
+        Some(preamble) => format!("{preamble}\n\n{prompt}"),
+        None => prompt.to_string(),
+    })
+}
+
 pub enum RunError {
     /// The session to resume no longer exists; nothing was run.
     SessionGone,

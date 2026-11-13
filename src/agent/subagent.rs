@@ -736,13 +736,13 @@ fn title_run(
     tokio::spawn(async move {
         let task = crate::conversation::files::read_prompt(&dir);
         let input = run_title_input(&task, &reply);
-        let answer = match crate::agent::turn::title::complete(
-            &backend,
-            &session,
-            crate::agent::context::SUBAGENT_TITLE_PROMPT,
-            &input,
-        )
-        .await
+        let answer = match backend
+            .complete(
+                &session,
+                crate::agent::context::SUBAGENT_TITLE_PROMPT,
+                &input,
+            )
+            .await
         {
             Ok(answer) => answer,
             Err(e) => {
@@ -875,47 +875,22 @@ async fn run_claude_code(
     system: &str,
     recorder: &mut crate::agent::turn::live::Recorder,
 ) -> Result<(), String> {
-    use crate::agent::claude_code::Invocation;
     use crate::agent::claude_code::Resume;
-    use crate::agent::claude_code::RunError;
-    let invocation = |prompt, resume| Invocation {
+    use crate::agent::claude_code::Run;
+    let run = Run {
         target,
         root: &context.root,
         system,
-        prompt,
-        resume,
         mcp: &context.mcp,
     };
-    // Fork the session of the run continued; when it is gone, start a fresh one that
-    // opens with the earlier runs as plain text.
-    if let Some(session) = launch.claude_session.as_deref() {
-        match crate::agent::claude_code::run(
-            &invocation(&launch.message, Resume::Fork(session)),
-            recorder,
-        )
+    // A resumed run forks the session of the run it continues; one whose session is gone
+    // opens fresh, with the chain as plain text, which `from` handles either way.
+    let start = launch
+        .claude_session
+        .as_deref()
+        .map_or(Resume::Fresh, Resume::Fork);
+    run.from(&launch.message, start, &launch.chain, recorder)
         .await
-        {
-            Ok(()) => return Ok(()),
-            Err(RunError::SessionGone) => {}
-            Err(RunError::Failed(error)) => return Err(error),
-        }
-    }
-    let preamble = {
-        let chain = launch.chain.clone();
-        tokio::task::spawn_blocking(move || crate::agent::context::handover_preamble(&chain))
-            .await
-            .map_err(|e| e.to_string())?
-    };
-    let opening = match preamble {
-        Some(preamble) => format!("{preamble}\n\n{}", launch.message),
-        None => launch.message.clone(),
-    };
-    crate::agent::claude_code::run(&invocation(&opening, Resume::Fresh), recorder)
-        .await
-        .map_err(|error| match error {
-            RunError::SessionGone => "the Claude Code session to continue is gone".to_string(),
-            RunError::Failed(error) => error,
-        })
 }
 
 #[cfg(test)]

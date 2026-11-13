@@ -35,17 +35,6 @@ pub(super) async fn close(
     }
 }
 
-/// The working tree status when a commit turn still has something to commit.
-pub(super) async fn uncommitted(
-    request: &crate::agent::turn::TurnRequest,
-) -> Result<Option<String>, String> {
-    let root = request.root.clone();
-    let status = tokio::task::spawn_blocking(move || crate::git::status_short(&root))
-        .await
-        .map_err(|e| e.to_string())??;
-    Ok((!status.trim().is_empty()).then_some(status))
-}
-
 /// The commits a commit turn made; what it left uncommitted is discarded.
 fn close_commit_turn(
     root: &camino::Utf8Path,

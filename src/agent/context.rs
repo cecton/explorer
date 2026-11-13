@@ -16,6 +16,9 @@ const REVIEW_ROUNDS_PLACEHOLDER: &str = "{review_rounds}";
 /// Commits listed in a repository-moved note before it says there are more.
 pub const NOTE_MAX_COMMITS: usize = 20;
 
+/// Times a commit turn is asked to commit what it left behind before Explorer discards it.
+const MAX_COMMIT_NUDGES: usize = 2;
+
 /// The system prompt of a turn: mode instructions and the project's own instructions.
 /// Without a `mode`, the mode instructions are left out. `review_rounds` is the most
 /// review rounds of each commit, from the configuration. It holds nothing that changes
@@ -264,6 +267,23 @@ pub fn with_notes(notes: &[Option<String>], prompt: &str) -> String {
     let mut parts: Vec<&str> = notes.iter().flatten().map(String::as_str).collect();
     parts.push(prompt);
     parts.join("\n\n")
+}
+
+/// Hidden message asking a commit turn to commit what it left uncommitted, or `None` once
+/// it has been asked [`MAX_COMMIT_NUDGES`] times or the tree is clean. The one place both
+/// backends close a commit turn through.
+pub async fn next_commit_nudge(
+    root: &camino::Utf8Path,
+    sent: usize,
+) -> Result<Option<crate::agent::Message>, String> {
+    if sent >= MAX_COMMIT_NUDGES {
+        return Ok(None);
+    }
+    let root = root.to_path_buf();
+    let status = tokio::task::spawn_blocking(move || crate::git::status_short(&root))
+        .await
+        .map_err(|e| e.to_string())??;
+    Ok((!status.trim().is_empty()).then(|| commit_nudge(&status)))
 }
 
 /// Hidden message sent when a commit turn stops while the working tree is still dirty.
