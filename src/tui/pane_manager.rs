@@ -5,6 +5,9 @@ use std::collections::HashMap;
 /// Maximum number of panes the layout engine may render at once.
 pub const MAX_PANES: usize = 16;
 
+/// Rows one wheel notch scrolls.
+pub const WHEEL_STEP: usize = 3;
+
 /// A pane that can appear in the window stack.
 ///
 /// Each variant is unique: there is at most one `WindowPicker`, one `ThemePicker`, one
@@ -485,6 +488,43 @@ impl PaneManager {
         self.window_states.entry(*window).or_default().scroll_max = scroll_max;
     }
 
+    /// Scrolls `window` for a key or wheel event and answers whether the event was one:
+    /// Up/Down by a row, PageUp/PageDown by a page, Home/End and Ctrl+A/Ctrl+E to the
+    /// ends, the wheel by `WHEEL_STEP`.
+    pub fn scroll_for_input(&mut self, window: &Window, input_event: &InputEvent) -> bool {
+        let current = self.window_scroll(window);
+        let page = self.window_page_size(window).max(1);
+        let target = match input_event {
+            InputEvent::Keyboard(KeyPress::Plain { key }) => match key {
+                Key::SpecialKey(SpecialKey::Up) => current.saturating_sub(1),
+                Key::SpecialKey(SpecialKey::Down) => current.saturating_add(1),
+                Key::SpecialKey(SpecialKey::PageUp) => current.saturating_sub(page),
+                Key::SpecialKey(SpecialKey::PageDown) => current.saturating_add(page),
+                Key::SpecialKey(SpecialKey::Home) => 0,
+                Key::SpecialKey(SpecialKey::End) => usize::MAX,
+                _ => return false,
+            },
+            InputEvent::Keyboard(KeyPress::WithModifiers { key, mask })
+                if *mask == ModifierKeysMask::new().with_ctrl() =>
+            {
+                match key {
+                    Key::Character('a') => 0,
+                    Key::Character('e') => usize::MAX,
+                    _ => return false,
+                }
+            }
+            InputEvent::Mouse(mouse) => match mouse.kind {
+                MouseInputKind::ScrollUp => current.saturating_sub(WHEEL_STEP),
+                MouseInputKind::ScrollDown => current.saturating_add(WHEEL_STEP),
+                _ => return false,
+            },
+            _ => return false,
+        };
+        self.set_window_scroll(window, target);
+        self.clamp_scroll(window);
+        true
+    }
+
     /// Clamps `window`'s scroll offset so the visible page stays within the content.
     pub fn clamp_scroll(&mut self, window: &Window) {
         let Some(state) = self.window_states.get_mut(window) else {
@@ -573,6 +613,39 @@ mod tests {
 
     fn size(cols: u16, rows: u16) -> VPSize {
         vp_width(cols) + vp_height(rows)
+    }
+
+    #[test]
+    fn scroll_for_input_moves_by_row_page_and_end_and_clamps() {
+        let window = Window::GitLog(1);
+        let mut manager = make_manager(&[window]);
+        manager.set_window_page_size(&window, 10);
+        manager.set_window_scroll_max(&window, 100);
+        let plain = |key| InputEvent::Keyboard(KeyPress::Plain { key });
+        let wheel = |kind| {
+            InputEvent::Mouse(MouseInput {
+                pos: VPPos::default(),
+                kind,
+                maybe_modifier_keys: None,
+            })
+        };
+        assert!(manager.scroll_for_input(&window, &plain(Key::SpecialKey(SpecialKey::Down))));
+        assert_eq!(manager.window_scroll(&window), 1);
+        assert!(manager.scroll_for_input(&window, &plain(Key::SpecialKey(SpecialKey::PageDown))));
+        assert_eq!(manager.window_scroll(&window), 11);
+        assert!(manager.scroll_for_input(&window, &wheel(MouseInputKind::ScrollUp)));
+        assert_eq!(manager.window_scroll(&window), 11 - WHEEL_STEP);
+        assert!(manager.scroll_for_input(&window, &plain(Key::SpecialKey(SpecialKey::End))));
+        assert_eq!(manager.window_scroll(&window), 90);
+        assert!(manager.scroll_for_input(&window, &plain(Key::SpecialKey(SpecialKey::Down))));
+        assert_eq!(manager.window_scroll(&window), 90);
+        let ctrl_a = InputEvent::Keyboard(KeyPress::WithModifiers {
+            key: Key::Character('a'),
+            mask: ModifierKeysMask::new().with_ctrl(),
+        });
+        assert!(manager.scroll_for_input(&window, &ctrl_a));
+        assert_eq!(manager.window_scroll(&window), 0);
+        assert!(!manager.scroll_for_input(&window, &plain(Key::Character('x'))));
     }
 
     #[test]

@@ -2,7 +2,6 @@
 use r3bl_tui::*;
 use std::time::{Duration, Instant};
 
-const SCROLL_STEP: usize = 3;
 const DOUBLE_CLICK: Duration = Duration::from_millis(400);
 
 /// The rows as the event found them, with the row the selection sits on and how many rows
@@ -329,9 +328,10 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 ..
             }) => {
                 let scroll = state.pane_manager.window_scroll(&window);
-                state
-                    .pane_manager
-                    .set_window_scroll(&window, scroll.saturating_sub(SCROLL_STEP));
+                state.pane_manager.set_window_scroll(
+                    &window,
+                    scroll.saturating_sub(crate::tui::pane_manager::WHEEL_STEP),
+                );
             }
             InputEvent::Mouse(MouseInput {
                 kind: MouseInputKind::ScrollDown,
@@ -340,7 +340,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 let scroll = state.pane_manager.window_scroll(&window);
                 state
                     .pane_manager
-                    .set_window_scroll(&window, scroll + SCROLL_STEP);
+                    .set_window_scroll(&window, scroll + crate::tui::pane_manager::WHEEL_STEP);
                 state.pane_manager.clamp_scroll(&window);
             }
             _ => return EventPropagation::Propagate,

@@ -1,8 +1,6 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
 
-const SCROLL_STEP: isize = 3;
-
 /// A window that shows markdown to read and nothing else: no input, no model, nothing
 /// saved. A report is not part of the conversation, so it lives in no node and leaves
 /// nothing behind when it closes.
@@ -180,33 +178,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
                     state.pane_manager.send_to_back(&window);
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::PageUp),
-                }) => {
-                    scroll_by(state, &window, -(page_size(state, &window) as isize));
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::PageDown),
-                }) => {
-                    scroll_by(state, &window, page_size(state, &window) as isize);
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                InputEvent::Mouse(MouseInput {
-                    kind: MouseInputKind::ScrollUp,
-                    ..
-                }) => {
-                    scroll_by(state, &window, -SCROLL_STEP);
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                InputEvent::Mouse(MouseInput {
-                    kind: MouseInputKind::ScrollDown,
-                    ..
-                }) => {
-                    scroll_by(state, &window, SCROLL_STEP);
-                    return Ok(EventPropagation::ConsumedRender);
-                }
                 _ => {}
+            }
+            if state.pane_manager.scroll_for_input(&window, &input_event) {
+                return Ok(EventPropagation::ConsumedRender);
             }
             EventPropagation::Propagate
         });
@@ -273,24 +248,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
             global_data.pipeline.push(ZOrder::Normal, ops);
         })
     }
-}
-
-fn page_size(
-    state: &crate::tui::state::AppState,
-    window: &crate::tui::pane_manager::Window,
-) -> usize {
-    state.pane_manager.window_page_size(window).max(1)
-}
-
-fn scroll_by(
-    state: &mut crate::tui::state::AppState,
-    window: &crate::tui::pane_manager::Window,
-    delta: isize,
-) {
-    let current = state.pane_manager.window_scroll(window) as isize;
-    let target = (current + delta).max(0) as usize;
-    state.pane_manager.set_window_scroll(window, target);
-    state.pane_manager.clamp_scroll(window);
 }
 
 #[cfg(test)]

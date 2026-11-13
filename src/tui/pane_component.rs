@@ -181,11 +181,11 @@ impl PaneComponent {
                 EventPropagation::ConsumedRender
             }
             MouseInputKind::ScrollUp => {
-                let target = scroll.saturating_sub(3);
+                let target = scroll.saturating_sub(crate::tui::pane_manager::WHEEL_STEP);
                 self.apply_scroll(state, window, target)
             }
             MouseInputKind::ScrollDown => {
-                let target = scroll.saturating_add(3);
+                let target = scroll.saturating_add(crate::tui::pane_manager::WHEEL_STEP);
                 self.apply_scroll(state, window, target)
             }
             _ => EventPropagation::ConsumedRender,

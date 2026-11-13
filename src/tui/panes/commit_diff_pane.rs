@@ -1,8 +1,6 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
 
-const SCROLL_STEP: usize = 3;
-
 pub struct CommitDiffPaneComponent {
     id: FlexBoxId,
 }
@@ -125,77 +123,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
                 return Ok(EventPropagation::ConsumedRender);
             }
 
-            let mut consumed = false;
-            if let InputEvent::Mouse(mouse) = &input_event {
-                match mouse.kind {
-                    MouseInputKind::ScrollUp => {
-                        consumed = true;
-                        let current = state.pane_manager.window_scroll(&window);
-                        state
-                            .pane_manager
-                            .set_window_scroll(&window, current.saturating_sub(SCROLL_STEP));
-                        state.pane_manager.clamp_scroll(&window);
-                    }
-                    MouseInputKind::ScrollDown => {
-                        consumed = true;
-                        let current = state.pane_manager.window_scroll(&window);
-                        state
-                            .pane_manager
-                            .set_window_scroll(&window, current + SCROLL_STEP);
-                        state.pane_manager.clamp_scroll(&window);
-                    }
-                    _ => {}
-                }
-            }
-            if let InputEvent::Keyboard(KeyPress::Plain { key: kb_key }) = input_event {
-                match kb_key {
-                    Key::SpecialKey(SpecialKey::PageUp) => {
-                        consumed = true;
-                        let page = state.pane_manager.window_page_size(&window);
-                        let current = state.pane_manager.window_scroll(&window);
-                        state
-                            .pane_manager
-                            .set_window_scroll(&window, current.saturating_sub(page));
-                        state.pane_manager.clamp_scroll(&window);
-                    }
-                    Key::SpecialKey(SpecialKey::PageDown) => {
-                        consumed = true;
-                        let page = state.pane_manager.window_page_size(&window);
-                        let current = state.pane_manager.window_scroll(&window);
-                        state
-                            .pane_manager
-                            .set_window_scroll(&window, current.saturating_add(page));
-                        state.pane_manager.clamp_scroll(&window);
-                    }
-                    Key::SpecialKey(SpecialKey::Up) => {
-                        consumed = true;
-                        let current = state.pane_manager.window_scroll(&window);
-                        state
-                            .pane_manager
-                            .set_window_scroll(&window, current.saturating_sub(1));
-                        state.pane_manager.clamp_scroll(&window);
-                    }
-                    Key::SpecialKey(SpecialKey::Down) => {
-                        consumed = true;
-                        let current = state.pane_manager.window_scroll(&window);
-                        state
-                            .pane_manager
-                            .set_window_scroll(&window, current.saturating_add(1));
-                        state.pane_manager.clamp_scroll(&window);
-                    }
-                    Key::SpecialKey(SpecialKey::Home) => {
-                        consumed = true;
-                        state.pane_manager.set_window_scroll(&window, 0);
-                    }
-                    Key::SpecialKey(SpecialKey::End) => {
-                        consumed = true;
-                        let max = state.pane_manager.window_scroll_max(&window);
-                        state.pane_manager.set_window_scroll(&window, max);
-                        state.pane_manager.clamp_scroll(&window);
-                    }
-                    _ => {}
-                }
-            }
+            let consumed = state.pane_manager.scroll_for_input(&window, &input_event);
             if consumed {
                 EventPropagation::ConsumedRender
             } else {

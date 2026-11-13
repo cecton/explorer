@@ -1,7 +1,7 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
 use std::borrow::Cow;
-pub(crate) const SCROLL_STEP: usize = 3;
+
 /// The texts a window shows, in the order it shows them.
 const SECTIONS: usize = 4;
 

@@ -630,11 +630,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             InputEvent::Mouse(MouseInput {
                 kind: MouseInputKind::ScrollUp,
                 ..
-            }) => scroll.saturating_sub(crate::tui::panes::discussion::document::SCROLL_STEP),
+            }) => scroll.saturating_sub(crate::tui::pane_manager::WHEEL_STEP),
             InputEvent::Mouse(MouseInput {
                 kind: MouseInputKind::ScrollDown,
                 ..
-            }) => scroll + crate::tui::panes::discussion::document::SCROLL_STEP,
+            }) => scroll + crate::tui::pane_manager::WHEEL_STEP,
             _ => {
                 if !read_only && discussion.draft.handle_key(&input_event) {
                     discussion.notice = None;
