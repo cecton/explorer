@@ -21,6 +21,15 @@ mod usage;
 mod util;
 mod watcher;
 
+/// A reader that closes the pipe early (`| head`) got what it asked for: not an error.
+fn print_ignoring_broken_pipe(text: &str) -> std::io::Result<()> {
+    use std::io::Write;
+    match std::io::stdout().lock().write_all(text.as_bytes()) {
+        Err(error) if error.kind() != std::io::ErrorKind::BrokenPipe => Err(error),
+        _ => Ok(()),
+    }
+}
+
 /// The `fmt-md` subcommand: prints the paths it rewrote and returns the exit code.
 fn fmt_md(root: &camino::Utf8Path, paths: &[camino::Utf8PathBuf]) -> i32 {
     let relatives = if paths.is_empty() {
@@ -49,18 +58,14 @@ fn fmt_md(root: &camino::Utf8Path, paths: &[camino::Utf8PathBuf]) -> i32 {
         .and_then(|relatives| markdown_format::format_files(root, &relatives));
     match result {
         Ok(changed) => {
-            use std::io::Write;
-            let mut stdout = std::io::stdout().lock();
-            for path in changed {
-                // A reader that closes the pipe early (a `| head`) got what it asked for.
-                if let Err(error) = writeln!(stdout, "{path}")
-                    && error.kind() != std::io::ErrorKind::BrokenPipe
-                {
+            let lines: String = changed.iter().map(|path| format!("{path}\n")).collect();
+            match print_ignoring_broken_pipe(&lines) {
+                Ok(()) => 0,
+                Err(error) => {
                     eprintln!("failed to print the changed paths: {error}");
-                    return 1;
+                    1
                 }
             }
-            0
         }
         Err(error) => {
             eprintln!("{error}");
@@ -92,13 +97,8 @@ async fn main() {
         .expect("repository root path is not valid UTF-8");
 
     if args.scan {
-        use std::io::Write;
         let report = scan::scan(&root).to_markdown();
-        let mut stdout = std::io::stdout().lock();
-        // A reader that closes the pipe early (a `| head`) got what it asked for.
-        if let Err(error) = write!(stdout, "{report}")
-            && error.kind() != std::io::ErrorKind::BrokenPipe
-        {
+        if let Err(error) = print_ignoring_broken_pipe(&report) {
             eprintln!("failed to print the scan report: {error}");
             std::process::exit(1);
         }
@@ -119,18 +119,7 @@ async fn main() {
         }
     };
 
-    let (config_theme, keybindings, agent_settings, after_agents, aliases) = match config {
-        Some(c) => (c.theme, c.keybindings, c.agent, c.after_agents, c.aliases),
-        None => (
-            None,
-            Vec::new(),
-            config::AgentSettings::default(),
-            config::AfterAgentsConfig::default(),
-            Vec::new(),
-        ),
-    };
-
-    let theme_name = args.theme.clone().or(config_theme).unwrap_or_else(|| {
+    let theme_name = args.theme.clone().or(config.theme).unwrap_or_else(|| {
         tui::theme::HelixTheme::theme_names()
             .next()
             .unwrap_or("catppuccin_mocha")
@@ -145,17 +134,18 @@ async fn main() {
     };
 
     let mut keymap = tui::keymap::Keymap::default();
-    if let Err(e) = keymap.apply_overrides(&keybindings) {
+    if let Err(e) = keymap.apply_overrides(&config.keybindings) {
         eprintln!("invalid keybindings in config: {e}");
         std::process::exit(1);
     }
 
     let mut initial_state =
         tui::state::AppState::new(Arc::clone(&files), root.clone(), theme.clone(), keymap);
-    initial_state.after_agents_grace = std::time::Duration::from_secs(after_agents.grace_seconds);
-    initial_state.config_aliases = aliases;
+    initial_state.after_agents_grace =
+        std::time::Duration::from_secs(config.after_agents.grace_seconds);
+    initial_state.config_aliases = config.aliases;
     initial_state.agent = Arc::new(agent::AgentConfig::resolve(
-        agent_settings,
+        config.agent,
         &config::load_auth(),
         agent::commands::load(),
         agent::subagent::load_roles(),

@@ -8,6 +8,7 @@ pub struct Alias {
     pub command: String,
 }
 
+#[derive(Debug, Default, PartialEq, Eq)]
 pub struct Config {
     /// Fallback theme used only when a project has no session (or no session-saved
     /// theme) yet. Theme selection normally lives in the session; this can only be
@@ -67,11 +68,11 @@ pub struct AgentSettings {
 }
 
 impl Config {
-    pub fn load() -> Result<Option<Self>, String> {
+    pub fn load() -> Result<Self, String> {
         let path = config_path().ok_or("could not determine config directory")?;
         let content = match std::fs::read_to_string(&path) {
             Ok(c) => c,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             Err(e) => {
                 return Err(format!(
                     "error reading config file '{}': {e}",
@@ -80,7 +81,7 @@ impl Config {
             }
         };
 
-        parse(&content).map(Some)
+        parse(&content)
     }
 }
 
@@ -488,6 +489,11 @@ mod config_tests {
     #[test]
     fn keybinding_without_key_argument_is_an_error() {
         assert!(parse("keybindings {\n quit\n }").is_err());
+    }
+
+    #[test]
+    fn default_config_matches_an_empty_file() {
+        assert_eq!(Config::default(), parse("").unwrap());
     }
 
     #[test]
