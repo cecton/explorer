@@ -32,7 +32,7 @@ pub enum RefKind {
     Tag,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub struct GitRef {
     pub kind: RefKind,
     pub name: String,
@@ -188,8 +188,11 @@ fn classify_ref_name(bytes: &[u8]) -> Option<(RefKind, String)> {
     None
 }
 
-fn collect_refs(repo: &gix::Repository) -> Result<HashMap<[u8; 20], Vec<GitRef>>, String> {
-    let mut refs: HashMap<[u8; 20], Vec<GitRef>> = HashMap::new();
+/// Calls `visit` with every branch, remote branch and tag, in the repository's order.
+fn each_ref(
+    repo: &gix::Repository,
+    mut visit: impl FnMut(GitRef, &mut gix::Reference<'_>),
+) -> Result<(), String> {
     let platform = repo
         .references()
         .map_err(|e| format!("list references: {e}"))?;
@@ -198,42 +201,34 @@ fn collect_refs(repo: &gix::Repository) -> Result<HashMap<[u8; 20], Vec<GitRef>>
         .map_err(|e| format!("list references: {e}"))?;
     for reference in iter {
         let mut reference = reference.map_err(|e| format!("read reference: {e}"))?;
-        let Some((kind, name)) = classify_ref_name(reference.name().as_bstr()) else {
-            continue;
-        };
-        // A dangling symref (e.g. a stale origin/HEAD) must not fail the whole log;
-        // git itself only warns about it.
-        let Ok(id) = reference.peel_to_id() else {
-            continue;
-        };
-        let Ok(id20) = <[u8; 20]>::try_from(id.as_bytes()) else {
-            continue;
-        };
-        refs.entry(id20).or_default().push(GitRef { kind, name });
+        if let Some((kind, name)) = classify_ref_name(reference.name().as_bstr()) {
+            visit(GitRef { kind, name }, &mut reference);
+        }
     }
+    Ok(())
+}
+
+fn collect_refs(repo: &gix::Repository) -> Result<HashMap<[u8; 20], Vec<GitRef>>, String> {
+    let mut refs: HashMap<[u8; 20], Vec<GitRef>> = HashMap::new();
+    each_ref(repo, |git_ref, reference| {
+        // A dangling symref (a stale origin/HEAD) must not fail the whole log.
+        let Ok(id) = reference.peel_to_id() else {
+            return;
+        };
+        if let Ok(id20) = <[u8; 20]>::try_from(id.as_bytes()) {
+            refs.entry(id20).or_default().push(git_ref);
+        }
+    })?;
     for list in refs.values_mut() {
-        list.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
+        list.sort();
     }
     Ok(refs)
 }
 
 pub fn load_refs(repo: &gix::ThreadSafeRepository) -> Result<Vec<GitRef>, String> {
-    let repo = repo.to_thread_local();
-    let platform = repo
-        .references()
-        .map_err(|e| format!("list references: {e}"))?;
-    let iter = platform
-        .all()
-        .map_err(|e| format!("list references: {e}"))?;
     let mut refs = Vec::new();
-    for reference in iter {
-        let reference = reference.map_err(|e| format!("read reference: {e}"))?;
-        let Some((kind, name)) = classify_ref_name(reference.name().as_bstr()) else {
-            continue;
-        };
-        refs.push(GitRef { kind, name });
-    }
-    refs.sort_by(|a, b| a.kind.cmp(&b.kind).then_with(|| a.name.cmp(&b.name)));
+    each_ref(&repo.to_thread_local(), |git_ref, _| refs.push(git_ref))?;
+    refs.sort();
     Ok(refs)
 }
 
@@ -248,19 +243,13 @@ pub fn head_id(repo: &gix::ThreadSafeRepository) -> Option<String> {
 /// `<short hash> <title>` of the commits reachable from `to` and not from `from`,
 /// newest first, at most `cap`. Shells out to `git`; empty on any failure.
 pub fn log_oneline(root: &camino::Utf8Path, from: &str, to: &str, cap: usize) -> Vec<String> {
-    let output = std::process::Command::new("git")
-        .current_dir(root)
-        .args(["log", "--format=%h %s", "-n"])
-        .arg(cap.to_string())
-        .arg(format!("{from}..{to}"))
-        .output();
-    match output {
-        Ok(output) if output.status.success() => String::from_utf8_lossy(&output.stdout)
-            .lines()
-            .map(str::to_string)
-            .collect(),
-        _ => Vec::new(),
-    }
+    let range = format!("{from}..{to}");
+    git_output(
+        root,
+        &["log", "--format=%h %s", "-n", &cap.to_string(), &range],
+    )
+    .map(|out| out.lines().map(str::to_string).collect())
+    .unwrap_or_default()
 }
 
 fn git_output(root: &camino::Utf8Path, args: &[&str]) -> Result<String, String> {
@@ -274,6 +263,10 @@ fn git_output(root: &camino::Utf8Path, args: &[&str]) -> Result<String, String> 
         return Err(format!("git {}: {}", args.join(" "), stderr.trim()));
     }
     Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+}
+
+fn has_head(root: &camino::Utf8Path) -> bool {
+    git_output(root, &["rev-parse", "--verify", "HEAD"]).is_ok()
 }
 
 /// `git status --short`, untracked files included. Empty means a clean working tree.
@@ -339,7 +332,7 @@ pub fn files_changed_between(
 /// Paths changed since HEAD, untracked included; without a commit, the staged ones.
 pub fn working_tree_changes(root: &camino::Utf8Path) -> Result<Vec<camino::Utf8PathBuf>, String> {
     let mut paths: Vec<camino::Utf8PathBuf> = Vec::new();
-    if git_output(root, &["rev-parse", "--verify", "HEAD"]).is_ok() {
+    if has_head(root) {
         let tracked = git_output(
             root,
             &["diff", "-z", "--name-only", "--diff-filter=d", "HEAD"],
@@ -406,7 +399,7 @@ pub fn amend_all(root: &camino::Utf8Path) -> Result<(), String> {
 /// Hard-resets tracked files and removes untracked ones. Ignored files are kept.
 /// Works on a repository without commits, where there is nothing to reset.
 pub fn discard_worktree(root: &camino::Utf8Path) -> Result<(), String> {
-    if git_output(root, &["rev-parse", "--verify", "HEAD"]).is_ok() {
+    if has_head(root) {
         git_output(root, &["reset", "--hard", "HEAD"])?;
     }
     git_output(root, &["clean", "-fd"]).map(|_| ())
