@@ -83,31 +83,23 @@ pub struct TurnRequest {
 }
 
 /// The text to send for `request`: what the turn asks, preceded by the notes Explorer
-/// adds — the state of the repository, the summary of a compacted parent, and what
-/// moved since the parent's turn. Reads files and runs git.
+/// adds. Reads files and runs git.
 fn message_to_send(request: &TurnRequest) -> String {
     use crate::agent::Mode;
-    let environment = Some(crate::agent::context::environment_note(
-        &request.root,
-        request.head.as_deref(),
-        &request.date,
-    ));
-    let summary = request.compacted_parent.as_ref().map(|dir| {
-        let (_, summary) = crate::conversation::files::read_prompt_and_reply(dir);
-        crate::agent::context::compaction_note(&summary)
-    });
-    let moved = moved_note(
-        &request.root,
-        request.parent_head.as_deref(),
-        request.head.as_deref(),
-    );
-    let workspace =
-        (request.mode == Mode::Feedback).then(|| crate::agent::context::WORKSPACE_NOTE.to_string());
+    use crate::agent::context::Notes;
+    let notes = Notes {
+        root: &request.root,
+        head: request.head.as_deref(),
+        date: &request.date,
+        compacted_parent: request.compacted_parent.as_deref(),
+        parent_head: request.parent_head.as_deref(),
+        workspace: request.mode == Mode::Feedback,
+    };
     let ask = match &request.compact {
         Some(instructions) => crate::agent::context::compact_request(instructions),
         None => request.prompt.clone(),
     };
-    crate::agent::context::with_notes(&[environment, summary, moved, workspace], &ask)
+    notes.message(&ask)
 }
 
 /// Tells the UI what the spending behind `endpoint` is: what the CLI last `reported`
@@ -482,25 +474,6 @@ async fn run_own_loop(
         .await?;
     }
     Ok(())
-}
-
-/// The repository-moved note, when HEAD is no longer where the parent's turn left it.
-pub(super) fn moved_note(
-    root: &camino::Utf8Path,
-    parent_head: Option<&str>,
-    head: Option<&str>,
-) -> Option<String> {
-    let (parent_head, head) = (parent_head?, head?);
-    if parent_head == head {
-        return None;
-    }
-    let commits = crate::git::log_oneline(
-        root,
-        parent_head,
-        head,
-        crate::agent::context::NOTE_MAX_COMMITS + 1,
-    );
-    Some(crate::agent::context::repository_moved_note(&commits))
 }
 
 /// Points to `/compact` when an endpoint refuses a request for being too long.

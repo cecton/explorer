@@ -321,38 +321,30 @@ fn prepare(
     };
 
     let head = subagents.repo.as_ref().and_then(crate::git::head_id);
-    let environment = Some(crate::agent::context::environment_note(
+    use crate::agent::context::Notes;
+    let notes = Notes {
         root,
-        head.as_deref(),
-        &subagents.date,
-    ));
-    let moved = source.as_ref().and_then(|(meta, _)| {
-        crate::agent::turn::moved_note(root, meta.head_after.as_deref(), head.as_deref())
-    });
-    let workspace = (subagents.mode == Mode::Feedback)
-        .then(|| crate::agent::context::WORKSPACE_NOTE.to_string());
-    let message = crate::agent::context::with_notes(&[environment, moved, workspace], prompt);
+        head: head.as_deref(),
+        date: &subagents.date,
+        compacted_parent: None,
+        parent_head: source
+            .as_ref()
+            .and_then(|(meta, _)| meta.head_after.as_deref()),
+        workspace: subagents.mode == Mode::Feedback,
+    };
+    let message = notes.message(prompt);
 
     let meta = Metadata {
-        endpoint: Some(spec.endpoint.clone()),
-        kind: Some(endpoint.kind.label().to_string()),
-        model: Some(spec.model.clone()),
-        effort: Some(spec.effort.as_str().to_string()),
         status: Some(NodeStatus::Running),
         role: role.map(|role| role.name.clone()),
         description: Some(description.to_string()),
         resumed_from: resumed
             .as_ref()
             .map(|(source, index)| crate::conversation::agents::agent_id(source, *index)),
-        ..Default::default()
+        ..recorded_on(&endpoint, &spec)
     };
     let mut tree = tree.write();
-    let index = tree
-        .create_agent(node, crate::util::time::now_secs(), meta, prompt)
-        .map_err(|e| format!("could not record the sub-agent: {e}"))?;
-    let dir = tree
-        .agent_dir(node, index)
-        .ok_or("the new sub-agent has no directory")?;
+    let (index, dir) = record_run(&mut tree, node, meta, prompt)?;
     let chain = source.map(|(_, chain)| chain).unwrap_or_default();
     let session = match chain.first() {
         Some((first, first_index)) => crate::conversation::agents::agent_id(first, *first_index),
@@ -395,7 +387,6 @@ async fn execute(
     subagents: &Subagents,
     recorder: &mut crate::agent::turn::live::Recorder,
     launch: &Launch,
-    backend: &crate::agent::Backend,
 ) -> Outcome {
     use crate::agent::Backend;
     use crate::agent::turn::live::LiveSubagent;
@@ -416,7 +407,7 @@ async fn execute(
         ),
         None => launch.system.clone(),
     };
-    let result = match backend {
+    let result = match &launch.backend {
         Backend::OpenAi(target) => {
             run_own_loop(
                 context, subagents, launch, target, &system, started, &mut child,
@@ -485,6 +476,38 @@ impl Outcome {
     }
 }
 
+/// The metadata fields that describe the model a run landed on, which a first run and its
+/// fallback rerun both record.
+fn recorded_on(
+    endpoint: &crate::agent::Endpoint,
+    spec: &crate::model_spec::ModelSpec,
+) -> crate::conversation::metadata::Metadata {
+    use crate::conversation::metadata::Metadata;
+    Metadata {
+        endpoint: Some(spec.endpoint.clone()),
+        kind: Some(endpoint.kind.label().to_string()),
+        model: Some(spec.model.clone()),
+        effort: Some(spec.effort.as_str().to_string()),
+        ..Default::default()
+    }
+}
+
+/// Creates the directory of a new run and returns its index and path.
+fn record_run(
+    tree: &mut crate::conversation::ConversationTree,
+    node: &crate::conversation::NodeId,
+    meta: crate::conversation::metadata::Metadata,
+    prompt: &str,
+) -> Result<(u32, camino::Utf8PathBuf), String> {
+    let index = tree
+        .create_agent(node, crate::util::time::now_secs(), meta, prompt)
+        .map_err(|e| format!("could not record the sub-agent: {e}"))?;
+    let dir = tree
+        .agent_dir(node, index)
+        .ok_or("the new sub-agent has no directory")?;
+    Ok((index, dir))
+}
+
 /// The fallback run of a failed OpenAI-backed launch: a fresh record on `spec`'s
 /// backend, same role, prompt and notes, keeping no chain. Reads and writes only the
 /// tree, like `prepare` does; the backend resolution happens on the caller's side,
@@ -507,35 +530,19 @@ async fn prepare_retry(
             spec.endpoint
         ));
     };
-    let tree = Arc::clone(&context.tree);
-    let node = context.node.clone();
-    let spec = spec.clone();
     let meta = Metadata {
-        endpoint: Some(spec.endpoint.clone()),
-        kind: Some(endpoint.kind.label().to_string()),
-        model: Some(spec.model.clone()),
-        effort: Some(spec.effort.as_str().to_string()),
         status: Some(NodeStatus::Running),
         role: launch.role.clone(),
         description: Some(launch.description.clone()),
-        ..Default::default()
+        ..recorded_on(&endpoint, spec)
     };
+    let tree = Arc::clone(&context.tree);
+    let node = context.node.clone();
     let prompt = launch.prompt.clone();
-    let message = launch.message.clone();
-    let system = launch.system.clone();
-    let recorded = tokio::task::spawn_blocking(move || {
-        let mut tree = tree.write();
-        let index = tree
-            .create_agent(&node, crate::util::time::now_secs(), meta, &prompt)
-            .map_err(|e| format!("could not record the sub-agent: {e}"))?;
-        let dir = tree
-            .agent_dir(&node, index)
-            .ok_or("the new sub-agent has no directory")?;
-        Ok::<_, String>((index, dir))
-    })
-    .await
-    .map_err(|e| e.to_string())?;
-    let (index, dir) = recorded?;
+    let (index, dir) =
+        tokio::task::spawn_blocking(move || record_run(&mut tree.write(), &node, meta, &prompt))
+            .await
+            .map_err(|e| e.to_string())??;
     Ok(Launch {
         index,
         dir,
@@ -543,11 +550,11 @@ async fn prepare_retry(
         endpoint,
         spec: spec.clone(),
         role: launch.role.clone(),
-        system,
+        system: launch.system.clone(),
         budget: launch.budget,
         prompt: launch.prompt.clone(),
         description: launch.description.clone(),
-        message,
+        message: launch.message.clone(),
         chain: Vec::new(),
         session: crate::conversation::agents::agent_id(&context.node, index),
         claude_session: None,
@@ -585,36 +592,21 @@ pub async fn run(
         node: context.node.clone(),
     });
 
-    let mut outcome = execute(context, subagents, recorder, &launch, &launch.backend).await;
+    let mut outcome = execute(context, subagents, recorder, &launch).await;
     // A failed run is concluded at once, so a cancel mid-retry cannot leave it Running;
     // the combined error is only what the caller model reads, never a record's.
     let first_error = outcome.result.as_ref().err().cloned();
     match (first_error.as_deref(), launch.fallback.as_ref()) {
         (Some(error), Some(spec)) => {
-            conclude(
-                context,
-                subagents,
-                subagents.repo.as_ref(),
-                &outcome,
-                recorder,
-            )
-            .await;
+            conclude(context, subagents, &outcome, recorder).await;
             match prepare_retry(context, &launch, spec, &subagents.config).await {
                 Ok(retry) => {
                     recorder.log(format!(
                         "first run on {} failed ({error}); retrying on {}",
                         launch.spec, retry.spec
                     ));
-                    let retried =
-                        execute(context, subagents, recorder, &retry, &retry.backend).await;
-                    conclude(
-                        context,
-                        subagents,
-                        subagents.repo.as_ref(),
-                        &retried,
-                        recorder,
-                    )
-                    .await;
+                    let retried = execute(context, subagents, recorder, &retry).await;
+                    conclude(context, subagents, &retried, recorder).await;
                     let retry_spec = retried.spec.clone();
                     let retry_error = retried.result.as_ref().err().cloned();
                     outcome = match retry_error {
@@ -635,16 +627,7 @@ pub async fn run(
                 }
             }
         }
-        _ => {
-            conclude(
-                context,
-                subagents,
-                subagents.repo.as_ref(),
-                &outcome,
-                recorder,
-            )
-            .await
-        }
+        _ => conclude(context, subagents, &outcome, recorder).await,
     }
     crate::agent::turn::report_usage(
         outcome.endpoint.clone(),
@@ -685,7 +668,6 @@ pub async fn run(
 async fn conclude(
     context: &crate::agent::tools::ToolContext,
     subagents: &Subagents,
-    repo: Option<&gix::ThreadSafeRepository>,
     outcome: &Outcome,
     recorder: &mut crate::agent::turn::live::Recorder,
 ) {
@@ -698,7 +680,7 @@ async fn conclude(
             meta.status = Some(outcome.status());
             meta.error = outcome.error().map(str::to_string);
             meta.secs = Some(outcome.secs);
-            meta.head_after = repo.and_then(crate::git::head_id);
+            meta.head_after = subagents.repo.as_ref().and_then(crate::git::head_id);
             meta.tokens_in = outcome.tokens_in;
             meta.cached_in = outcome.cached_in;
             meta.session_id = outcome.session_id.clone();

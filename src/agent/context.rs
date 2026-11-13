@@ -269,6 +269,49 @@ pub fn with_notes(notes: &[Option<String>], prompt: &str) -> String {
     parts.join("\n\n")
 }
 
+/// The notes that open a message rather than its system prompt, because HEAD moves on
+/// every commit and anything that changes ahead of the replayed ancestors throws the
+/// endpoint's prefix cache away. Only the fields a caller has apply. Reads files and runs
+/// git.
+pub struct Notes<'a> {
+    pub root: &'a camino::Utf8Path,
+    /// HEAD when this message is sent.
+    pub head: Option<&'a str>,
+    /// `YYYY-MM-DD`, the day the message is sent.
+    pub date: &'a str,
+    /// Directory of a compacted parent, whose reply stands in for what came before.
+    pub compacted_parent: Option<&'a camino::Utf8Path>,
+    /// HEAD when the turn or run this message continues ended.
+    pub parent_head: Option<&'a str>,
+    /// Whether the turn is a feedback one, which may not commit.
+    pub workspace: bool,
+}
+
+impl Notes<'_> {
+    /// The message: the notes, then the prompt.
+    pub fn message(&self, prompt: &str) -> String {
+        let environment = Some(environment_note(self.root, self.head, self.date));
+        let summary = self.compacted_parent.map(|dir| {
+            let (_, summary) = crate::conversation::files::read_prompt_and_reply(dir);
+            compaction_note(&summary)
+        });
+        let moved = self.moved_note();
+        let workspace = self.workspace.then(|| WORKSPACE_NOTE.to_string());
+        with_notes(&[environment, summary, moved, workspace], prompt)
+    }
+
+    /// What changed in the repository since the message this one continues, when HEAD
+    /// moved.
+    fn moved_note(&self) -> Option<String> {
+        let (parent_head, head) = (self.parent_head?, self.head?);
+        if parent_head == head {
+            return None;
+        }
+        let commits = crate::git::log_oneline(self.root, parent_head, head, NOTE_MAX_COMMITS + 1);
+        Some(repository_moved_note(&commits))
+    }
+}
+
 /// Hidden message asking a commit turn to commit what it left uncommitted, or `None` once
 /// it has been asked [`MAX_COMMIT_NUDGES`] times or the tree is clean. The one place both
 /// backends close a commit turn through.
@@ -391,6 +434,44 @@ mod tests {
         ];
         assert_eq!(with_notes(&notes, "do it"), "[summary]\n\n[moved]\n\ndo it");
         assert_eq!(with_notes(&[None], "do it"), "do it");
+    }
+
+    #[test]
+    fn a_message_opens_with_the_notes_its_fields_ask_for() {
+        let root = camino::Utf8Path::new("/repo");
+        let bare = |workspace| Notes {
+            root,
+            head: Some("aaa"),
+            date: "2026-11-13",
+            compacted_parent: None,
+            parent_head: None,
+            workspace,
+        };
+        // The state of the repository opens every message, and a feedback turn adds its
+        // own note; nothing else applies when no HEAD moved and no parent was compacted.
+        let feedback = bare(true).message("do it");
+        assert!(feedback.starts_with("[Note from Explorer: the state of the repository"));
+        assert!(feedback.contains("- Repository root: /repo"));
+        assert!(feedback.contains(WORKSPACE_NOTE));
+        assert!(feedback.ends_with("do it"));
+        assert!(!bare(false).message("do it").contains(WORKSPACE_NOTE));
+
+        // The moved note only appears when HEAD is not where the continued message left
+        // it: a same-HEAD parent adds nothing, since there is nothing to list.
+        let moved = Notes {
+            parent_head: Some("bbb"),
+            ..bare(false)
+        };
+        assert!(
+            moved
+                .message("do it")
+                .contains("the repository has changed")
+        );
+        let same = Notes {
+            parent_head: Some("aaa"),
+            ..bare(false)
+        };
+        assert!(!same.message("do it").contains("the repository has changed"));
     }
 
     #[test]
