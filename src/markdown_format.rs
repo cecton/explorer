@@ -50,6 +50,9 @@ pub fn format_paths(
         paths
             .iter()
             .map(|path| {
+                if path.is_empty() {
+                    return Err("a path is empty".to_string());
+                }
                 let resolved = crate::util::fs::resolve_in(root, path)?;
                 resolved
                     .strip_prefix(root)
@@ -346,5 +349,13 @@ mod tests {
         );
         let outside = format_paths(root, &["../x.md"]).unwrap_err();
         assert!(outside.contains("outside the repository"), "{outside}");
+    }
+
+    #[test]
+    fn format_paths_refuses_an_empty_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(dir.path()).unwrap();
+        let error = format_paths(root, &[""]).unwrap_err();
+        assert!(error.contains("empty"), "{error}");
     }
 }

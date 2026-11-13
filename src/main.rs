@@ -35,6 +35,10 @@ fn fmt_md(root: &camino::Utf8Path, paths: &[camino::Utf8PathBuf]) -> i32 {
     let result = paths
         .iter()
         .map(|path| {
+            // Joined onto the cwd, an empty path becomes "cwd/", which passes format_paths.
+            if path.as_str().is_empty() {
+                return Err("a path is empty".to_string());
+            }
             let absolute = std::env::current_dir()
                 .map_err(|e| e.to_string())
                 .map(|cwd| cwd.join(path))?;
