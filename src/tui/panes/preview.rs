@@ -1,8 +1,39 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 const GUTTER_GAP: &str = "   ";
+
+/// Two clicks on the same cell in under this make a double click.
+const MULTI_CLICK: Duration = Duration::from_millis(300);
+
+/// Counts the clicks that follow each other on one cell.
+#[derive(Default)]
+struct ClickTracker {
+    last: Option<(Instant, VPPos)>,
+    count: u8,
+}
+
+impl ClickTracker {
+    /// Notes a click at `pos` and answers its place in the run of quick clicks on that cell.
+    fn register(&mut self, pos: VPPos, now: Instant) -> u8 {
+        let repeated = self
+            .last
+            .is_some_and(|(at, last_pos)| last_pos == pos && now.duration_since(at) < MULTI_CLICK);
+        self.count = if repeated {
+            self.count.saturating_add(1)
+        } else {
+            1
+        };
+        self.last = Some((now, pos));
+        self.count
+    }
+
+    fn clear(&mut self) {
+        *self = Self::default();
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum DragModifier {
@@ -21,6 +52,10 @@ pub struct FilePreviewComponent {
     content_origin_col: usize,
     content_col_count: usize,
     content_row_count: usize,
+    /// A drag that moves a highlight range, started with `Shift` or `Ctrl`.
+    preview_drag_active: bool,
+    text_drag_active: bool,
+    clicks: ClickTracker,
 }
 
 /// How long an error or notice of the file preview's title bar stays up.
@@ -38,6 +73,9 @@ impl FilePreviewComponent {
             content_origin_col: 0,
             content_col_count: 0,
             content_row_count: 0,
+            preview_drag_active: false,
+            text_drag_active: false,
+            clicks: ClickTracker::default(),
         }
     }
 
@@ -335,10 +373,290 @@ impl FilePreviewComponent {
         self.drag_modifier = None;
     }
 
+    /// Takes the mouse on the content of file `key`: selection, symbol highlights, range drags.
+    pub(crate) fn handle_mouse(
+        &mut self,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
+        mouse: MouseInput,
+        key: crate::loader::FileKey,
+    ) -> bool {
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::pane_manager::TextSelection;
+        use crate::tui::pane_manager::Window;
+        let col = mouse.pos.col_index.as_usize();
+        let row = mouse.pos.row_index.as_usize();
+        let origin_row = self.content_origin_row;
+        let origin_col = self.content_origin_col;
+        let col_count = self.content_col_count;
+        let row_count = self.content_row_count;
+
+        let in_content_rows = row >= origin_row && row < origin_row + row_count;
+        let in_content_cols = col >= origin_col && col < origin_col + col_count;
+
+        match mouse.kind {
+            MouseInputKind::MouseDown(Button::Left) if in_content_rows && in_content_cols => {
+                if let Some(modifier) = crate::tui::pane_component::drag_modifier_from_mouse(&mouse)
+                {
+                    let state = &mut global_data.state;
+                    let window = Window::FilePreview(key);
+                    let scroll = state.pane_manager.window_scroll(&window);
+                    let scroll_max = state.pane_manager.window_scroll_max(&window);
+                    let rel_y = row.saturating_sub(origin_row);
+                    let line = (scroll + rel_y + 1).clamp(1, scroll_max.max(1));
+
+                    self.preview_drag_active = true;
+                    self.start_drag(state, key, line, modifier);
+                    state.mouse_drag_active = true;
+                    return true;
+                } else {
+                    let state = &mut global_data.state;
+                    let consecutive_clicks = self.clicks.register(mouse.pos, Instant::now());
+
+                    let files = Arc::clone(&state.files);
+                    let snapshot = files.load();
+                    let file = &snapshot[key.0];
+                    let data = file.data.read();
+                    let (line_idx, _char_idx, cursor_byte) =
+                        self.screen_pos_to_line_char(state, row, col, key, &data);
+
+                    match consecutive_clicks {
+                        1 => {
+                            let bounds = data.word_bounds(cursor_byte);
+                            state.text_selection = Some(TextSelection {
+                                window: Window::FilePreview(key),
+                                start: SelPoint::Preview {
+                                    line_idx,
+                                    byte_offset: bounds.0,
+                                },
+                                end: SelPoint::Preview {
+                                    line_idx,
+                                    byte_offset: bounds.0,
+                                },
+                                click_anchor: Some(SelPoint::Preview {
+                                    line_idx,
+                                    byte_offset: cursor_byte,
+                                }),
+                                click_word: Some((
+                                    SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: bounds.0,
+                                    },
+                                    SelPoint::Preview {
+                                        line_idx,
+                                        byte_offset: bounds.1,
+                                    },
+                                )),
+                                active: true,
+                            });
+                            self.text_drag_active = true;
+                            state.mouse_drag_active = true;
+                        }
+                        2 => {
+                            let line = data.line(line_idx);
+                            let byte_in_line = cursor_byte - data.line_starts[line_idx];
+                            let character = crate::lsp::byte_to_utf16(line, byte_in_line);
+
+                            let hit = state.symbol_highlights.iter().position(|g| {
+                                !(g.needs_rebuild && g.locations.is_empty())
+                                    && ((g.origin_file == key
+                                        && g.origin_byte_start.is_some_and(|s| cursor_byte >= s)
+                                        && g.origin_byte_end.is_some_and(|e| cursor_byte < e))
+                                        || g.locations.iter().any(|l| {
+                                            l.file_key == key
+                                                && cursor_byte >= l.start_byte
+                                                && cursor_byte < l.end_byte
+                                        }))
+                            });
+
+                            if let Some(idx) = hit {
+                                state.symbol_highlights.remove(idx);
+                                state.mark_session_dirty();
+                            } else {
+                                let bounds = data.word_bounds(cursor_byte);
+                                let word = data.content[bounds.0..bounds.1].to_string();
+                                crate::lsp::send_symbol_request(
+                                    key.0,
+                                    line_idx as u32,
+                                    character,
+                                    Some(word),
+                                    None,
+                                );
+                            }
+                        }
+                        3 => {
+                            let bounds = data.line_bounds(line_idx);
+                            state.text_selection = Some(TextSelection {
+                                window: Window::FilePreview(key),
+                                start: SelPoint::Preview {
+                                    line_idx,
+                                    byte_offset: bounds.0,
+                                },
+                                end: SelPoint::Preview {
+                                    line_idx,
+                                    byte_offset: bounds.1,
+                                },
+                                click_anchor: None,
+                                click_word: None,
+                                active: true,
+                            });
+                            self.text_drag_active = true;
+                            state.mouse_drag_active = true;
+                        }
+                        _ => {}
+                    }
+                    return true;
+                }
+            }
+            MouseInputKind::MouseDrag(Button::Left) if self.text_drag_active => {
+                let state = &mut global_data.state;
+                let files = Arc::clone(&state.files);
+                let snapshot = files.load();
+                let file = &snapshot[key.0];
+                let data = file.data.read();
+                let (line_idx, _char_idx, cursor_byte) =
+                    self.screen_pos_to_line_char(state, row, col, key, &data);
+
+                let Some(ref mut sel) = state.text_selection else {
+                    return true;
+                };
+                if sel.window != Window::FilePreview(key) {
+                    return true;
+                }
+
+                if let (
+                    Some(SelPoint::Preview {
+                        line_idx: anchor_line,
+                        byte_offset: anchor_byte,
+                    }),
+                    Some((
+                        SelPoint::Preview {
+                            byte_offset: word_start,
+                            ..
+                        },
+                        SelPoint::Preview {
+                            byte_offset: word_end,
+                            ..
+                        },
+                    )),
+                ) = (sel.click_anchor, sel.click_word)
+                    && anchor_line == line_idx
+                {
+                    if cursor_byte >= anchor_byte {
+                        sel.start = SelPoint::Preview {
+                            line_idx,
+                            byte_offset: word_start,
+                        };
+                        let cur = data.word_bounds(cursor_byte);
+                        sel.end = SelPoint::Preview {
+                            line_idx,
+                            byte_offset: cur.1,
+                        };
+                    } else {
+                        let cur = data.word_bounds(cursor_byte);
+                        sel.start = SelPoint::Preview {
+                            line_idx,
+                            byte_offset: cur.0,
+                        };
+                        sel.end = SelPoint::Preview {
+                            line_idx,
+                            byte_offset: word_end,
+                        };
+                    }
+                    return true;
+                }
+
+                sel.end = SelPoint::Preview {
+                    line_idx,
+                    byte_offset: cursor_byte,
+                };
+                return true;
+            }
+            MouseInputKind::MouseDrag(Button::Left) if self.preview_drag_active => {
+                let state = &mut global_data.state;
+                let window = Window::FilePreview(key);
+                let scroll = state.pane_manager.window_scroll(&window);
+                let scroll_max = state.pane_manager.window_scroll_max(&window);
+                let rel_y = row.saturating_sub(origin_row);
+                let line = (scroll + rel_y + 1).clamp(1, scroll_max.max(1));
+
+                let before = state.highlight_ranges.get(&key).cloned();
+                self.update_drag(state, key, line);
+                let after = state.highlight_ranges.get(&key).cloned();
+                if before != after {
+                    state.mark_session_dirty();
+                }
+                return true;
+            }
+            MouseInputKind::MouseUp(Button::Left) if self.text_drag_active => {
+                let state = &mut global_data.state;
+                if let Some(ref sel) = state.text_selection
+                    && sel.window == Window::FilePreview(key)
+                {
+                    let snapshot = state.files.load();
+                    let file = &snapshot[key.0];
+                    let data = file.data.read();
+                    let (start_byte, end_byte) = match (sel.start, sel.end) {
+                        (
+                            SelPoint::Preview {
+                                line_idx: s_line,
+                                byte_offset: s_byte,
+                            },
+                            SelPoint::Preview {
+                                line_idx: e_line,
+                                byte_offset: e_byte,
+                            },
+                        ) => {
+                            if s_line == e_line {
+                                let (lo, hi) = (s_byte.min(e_byte), s_byte.max(e_byte));
+                                (lo, hi)
+                            } else {
+                                let s_bounds = data.line_bounds(s_line.min(e_line));
+                                let e_bounds = data.line_bounds(s_line.max(e_line));
+                                (s_bounds.0, e_bounds.1)
+                            }
+                        }
+                        _ => (0, 0),
+                    };
+                    if let Some(text) = data.extract_text(start_byte, end_byte) {
+                        let mut cb = r3bl_tui::SystemClipboard;
+                        let _ = cb.try_to_put_content_into_clipboard(text);
+                    }
+                }
+                state.text_selection = None;
+                self.text_drag_active = false;
+                state.mouse_drag_active = false;
+                return true;
+            }
+            MouseInputKind::MouseUp(Button::Left) if self.preview_drag_active => {
+                self.preview_drag_active = false;
+                self.end_drag();
+                global_data.state.mouse_drag_active = false;
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Drops the drags in progress, for a pane that stopped showing a preview.
+    pub(crate) fn cancel_drag(&mut self, state: &mut crate::tui::state::AppState) {
+        if self.preview_drag_active {
+            self.preview_drag_active = false;
+            self.end_drag();
+            state.mouse_drag_active = false;
+        }
+        if self.text_drag_active {
+            self.text_drag_active = false;
+            state.text_selection = None;
+            state.mouse_drag_active = false;
+            self.clicks.clear();
+        }
+    }
+
     /// Maps a screen position relative to the preview content origin to a
     /// `(line_idx_0_based, char_idx, cursor_byte)` tuple. `cursor_byte` is the
     /// absolute byte offset within `FileData.content`. Accounts for line wrapping.
-    pub fn screen_pos_to_line_char(
+    fn screen_pos_to_line_char(
         &self,
         state: &crate::tui::state::AppState,
         row: usize,
@@ -392,6 +710,9 @@ impl FilePreviewComponent {
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePreviewComponent {
     fn reset(&mut self) {
+        self.preview_drag_active = false;
+        self.text_drag_active = false;
+        self.clicks.clear();
         self.drag_snapshot = None;
         self.drag_start_line = None;
         self.drag_modifier = None;
@@ -1473,5 +1794,34 @@ mod paint_tests {
             None,
         );
         assert_eq!(painted_text(&ops).concat(), "—");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn clicks_count_only_while_they_repeat_on_one_cell_in_time() {
+        let mut clicks = ClickTracker::default();
+        let cell = vp_col(3) + vp_row(4);
+        let other = vp_col(4) + vp_row(4);
+        let start = Instant::now();
+        assert_eq!(clicks.register(cell, start), 1);
+        assert_eq!(clicks.register(cell, start + Duration::from_millis(100)), 2);
+        assert_eq!(clicks.register(cell, start + Duration::from_millis(200)), 3);
+        assert_eq!(
+            clicks.register(other, start + Duration::from_millis(250)),
+            1
+        );
+        assert_eq!(
+            clicks.register(other, start + Duration::from_millis(700)),
+            1
+        );
+        clicks.clear();
+        assert_eq!(
+            clicks.register(other, start + Duration::from_millis(710)),
+            1
+        );
     }
 }

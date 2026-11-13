@@ -10,6 +10,7 @@ pub struct TerminalPaneComponent {
     content_origin_col: usize,
     content_col_count: usize,
     content_row_count: usize,
+    text_drag_active: bool,
 }
 
 impl TerminalPaneComponent {
@@ -21,6 +22,7 @@ impl TerminalPaneComponent {
             content_origin_col: 0,
             content_col_count: 0,
             content_row_count: 0,
+            text_drag_active: false,
         }
     }
 
@@ -31,6 +33,251 @@ impl TerminalPaneComponent {
             return None;
         };
         Some(id)
+    }
+
+    /// Takes the text selection in terminal `term_id`, except on a mouse-tracking alternate screen.
+    pub(crate) fn handle_mouse(
+        &mut self,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
+        mouse: MouseInput,
+        term_id: usize,
+    ) -> bool {
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::pane_manager::TextSelection;
+        use crate::tui::pane_manager::Window;
+        let col = mouse.pos.col_index.as_usize();
+        let row = mouse.pos.row_index.as_usize();
+        let origin_row = self.content_origin_row;
+        let origin_col = self.content_origin_col;
+        let col_count = self.content_col_count;
+        let row_count = self.content_row_count;
+
+        let in_content_rows = row >= origin_row && row < origin_row + row_count;
+        let in_content_cols = col >= origin_col && col < origin_col + col_count;
+
+        let (is_alternate, mouse_tracking_active) = global_data
+            .state
+            .with_terminal(term_id, |p| {
+                let alt = p.ofs_buf.get_terminal_mode().active_screen_buffer
+                    == ActiveScreenBuffer::Alternate;
+                let mouse = p.ofs_buf.get_terminal_mode().mouse_tracking_mode
+                    != MouseTrackingMode::Disabled;
+                (alt, mouse)
+            })
+            .unwrap_or((false, false));
+
+        let selection_blocked = is_alternate && mouse_tracking_active;
+
+        match mouse.kind {
+            MouseInputKind::MouseDown(Button::Left)
+                if in_content_rows && in_content_cols && !selection_blocked =>
+            {
+                let rel_row = row - origin_row;
+                let rel_col = col - origin_col;
+
+                let word_bounds = global_data.state.with_terminal(term_id, |pane| {
+                    let (line, _) =
+                        crate::tui::panes::terminal::terminal_line_at_viewport_row(pane, rel_row);
+                    let (ws, we) =
+                        crate::tui::panes::terminal::terminal_word_bounds(&line, rel_col);
+                    (ws, we)
+                });
+
+                let state = &mut global_data.state;
+                if let Some((ws, we)) = word_bounds {
+                    state.text_selection = Some(TextSelection {
+                        window: Window::Terminal(term_id),
+                        start: SelPoint::Terminal {
+                            viewport_row: rel_row,
+                            col: ws,
+                        },
+                        end: SelPoint::Terminal {
+                            viewport_row: rel_row,
+                            col: we,
+                        },
+                        click_anchor: Some(SelPoint::Terminal {
+                            viewport_row: rel_row,
+                            col: rel_col,
+                        }),
+                        click_word: Some((
+                            SelPoint::Terminal {
+                                viewport_row: rel_row,
+                                col: ws,
+                            },
+                            SelPoint::Terminal {
+                                viewport_row: rel_row,
+                                col: we,
+                            },
+                        )),
+                        active: true,
+                    });
+                } else {
+                    state.text_selection = Some(TextSelection {
+                        window: Window::Terminal(term_id),
+                        start: SelPoint::Terminal {
+                            viewport_row: rel_row,
+                            col: rel_col,
+                        },
+                        end: SelPoint::Terminal {
+                            viewport_row: rel_row,
+                            col: rel_col,
+                        },
+                        click_anchor: None,
+                        click_word: None,
+                        active: true,
+                    });
+                }
+                self.text_drag_active = true;
+                state.mouse_drag_active = true;
+                return true;
+            }
+            MouseInputKind::MouseDrag(Button::Left)
+                if self.text_drag_active && !selection_blocked =>
+            {
+                let rel_row = row
+                    .saturating_sub(origin_row)
+                    .min(row_count.saturating_sub(1));
+                let rel_col = col
+                    .saturating_sub(origin_col)
+                    .min(col_count.saturating_sub(1));
+
+                let click_anchor_row = global_data.state.text_selection.as_ref().and_then(|sel| {
+                    match sel.click_anchor {
+                        Some(SelPoint::Terminal { viewport_row, .. }) => Some(viewport_row),
+                        _ => None,
+                    }
+                });
+
+                let (word_bounds, cur_line_len) = global_data
+                    .state
+                    .with_terminal(term_id, |pane| {
+                        let (line, count) =
+                            crate::tui::panes::terminal::terminal_line_at_viewport_row(
+                                pane, rel_row,
+                            );
+                        let wb = crate::tui::panes::terminal::terminal_word_bounds(&line, rel_col);
+                        let cl = click_anchor_row.filter(|&ar| ar != rel_row).map(|_| count);
+                        (Some(wb), cl)
+                    })
+                    .unwrap_or((None, None));
+
+                let state = &mut global_data.state;
+                let Some(ref mut sel) = state.text_selection else {
+                    return true;
+                };
+                if sel.window != Window::Terminal(term_id) {
+                    return true;
+                }
+
+                if let (
+                    Some(SelPoint::Terminal {
+                        viewport_row: anchor_row,
+                        col: anchor_col,
+                    }),
+                    Some((
+                        SelPoint::Terminal {
+                            col: word_start, ..
+                        },
+                        SelPoint::Terminal { col: word_end, .. },
+                    )),
+                ) = (sel.click_anchor, sel.click_word)
+                    && anchor_row == rel_row
+                    && let Some((cur_start, cur_end)) = word_bounds
+                {
+                    if rel_col >= anchor_col {
+                        sel.start = SelPoint::Terminal {
+                            viewport_row: rel_row,
+                            col: word_start,
+                        };
+                        sel.end = SelPoint::Terminal {
+                            viewport_row: rel_row,
+                            col: cur_end,
+                        };
+                    } else {
+                        sel.start = SelPoint::Terminal {
+                            viewport_row: rel_row,
+                            col: cur_start,
+                        };
+                        sel.end = SelPoint::Terminal {
+                            viewport_row: rel_row,
+                            col: word_end,
+                        };
+                    }
+                    return true;
+                }
+
+                if let Some(anchor_row) = click_anchor_row
+                    && anchor_row != rel_row
+                    && let Some(cur_len) = cur_line_len
+                {
+                    sel.start = SelPoint::Terminal {
+                        viewport_row: anchor_row,
+                        col: 0,
+                    };
+                    sel.end = SelPoint::Terminal {
+                        viewport_row: rel_row,
+                        col: cur_len,
+                    };
+                    return true;
+                }
+
+                sel.end = SelPoint::Terminal {
+                    viewport_row: rel_row,
+                    col: rel_col,
+                };
+                return true;
+            }
+            MouseInputKind::MouseUp(Button::Left)
+                if self.text_drag_active && !selection_blocked =>
+            {
+                let maybe_text = if let Some(ref sel) = global_data.state.text_selection {
+                    if sel.window == Window::Terminal(term_id) {
+                        global_data
+                            .state
+                            .with_terminal(term_id, |pane| {
+                                crate::tui::panes::terminal::extract_terminal_text(
+                                    pane, sel.start, sel.end,
+                                )
+                                .filter(|t| !t.is_empty())
+                            })
+                            .flatten()
+                    } else {
+                        None
+                    }
+                } else {
+                    None
+                };
+                match maybe_text {
+                    Some(text) => {
+                        let length = text.len();
+                        let mut cb = r3bl_tui::SystemClipboard;
+                        match cb.try_to_put_content_into_clipboard(text) {
+                            Ok(()) => tracing::debug!(length, "terminal selection copied"),
+                            Err(error) => {
+                                tracing::warn!(%error, "terminal selection not copied");
+                            }
+                        }
+                    }
+                    None => tracing::debug!("terminal selection released with no text"),
+                }
+                let state = &mut global_data.state;
+                state.text_selection = None;
+                self.text_drag_active = false;
+                state.mouse_drag_active = false;
+                return true;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    /// Drops the selection in progress, for a pane that stopped showing a terminal.
+    pub(crate) fn cancel_drag(&mut self, state: &mut crate::tui::state::AppState) {
+        if self.text_drag_active {
+            self.text_drag_active = false;
+            state.text_selection = None;
+            state.mouse_drag_active = false;
+        }
     }
 
     fn pane_height(
@@ -83,7 +330,9 @@ impl crate::tui::widgets::title_row::TitleRow for TerminalPaneComponent {
 }
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for TerminalPaneComponent {
-    fn reset(&mut self) {}
+    fn reset(&mut self) {
+        self.text_drag_active = false;
+    }
 
     fn get_id(&self) -> FlexBoxId {
         self.id
