@@ -1,5 +1,3 @@
-use std::time::Duration;
-
 #[derive(serde::Deserialize)]
 struct ModelList {
     data: Vec<ModelEntry>,
@@ -8,28 +6,6 @@ struct ModelList {
 #[derive(serde::Deserialize)]
 struct ModelEntry {
     id: String,
-}
-
-/// Model ids served by an OpenAI-compatible server, from `GET <url>/models`, sorted.
-pub async fn fetch(url: &str, token: &str) -> Result<Vec<String>, String> {
-    let url = format!("{}/models", url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("{url}: HTTP {}", response.status()));
-    }
-    let list: ModelList = response.json().await.map_err(|e| e.to_string())?;
-    let mut ids: Vec<String> = list.data.into_iter().map(|entry| entry.id).collect();
-    ids.sort();
-    Ok(ids)
 }
 
 #[derive(serde::Deserialize)]
@@ -43,50 +19,72 @@ struct RecommendedModel {
     id: String,
 }
 
-/// The `cline-pass/<model>` ids of a Cline membership, billed to its subscription
-/// rather than to credits, from `GET <url>/ai/cline/recommended-models`.
-pub async fn fetch_cline(url: &str, token: &str) -> Result<Vec<String>, String> {
-    let url = format!("{}/ai/cline/recommended-models", url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("{url}: HTTP {}", response.status()));
-    }
-    let list: Recommended = response.json().await.map_err(|e| e.to_string())?;
-    if list.cline_pass.is_empty() {
-        return Err("no clinePass model in answer".to_string());
-    }
-    let mut ids: Vec<String> = list.cline_pass.into_iter().map(|model| model.id).collect();
+/// The model ids an endpoint offers, sorted: the `data[].id` of `GET <url>/models`, or
+/// the `clinePass[].id` of a Cline membership, which lists its plan models elsewhere.
+pub async fn fetch(
+    url: &str,
+    token: &str,
+    provider: crate::endpoint::Provider,
+) -> Result<Vec<String>, String> {
+    let url = format!(
+        "{}/{}",
+        crate::util::http::base_url(url),
+        provider.models_path()
+    );
+    let body = crate::util::http::get(&url, token).await?;
+    ids(&body, provider)
+}
+
+/// The ids in the answer of `provider`'s listing, sorted.
+fn ids(body: &str, provider: crate::endpoint::Provider) -> Result<Vec<String>, String> {
+    use crate::endpoint::Provider;
+    let mut ids: Vec<String> = match provider {
+        Provider::Cline => {
+            let list: Recommended = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            if list.cline_pass.is_empty() {
+                return Err("no clinePass model in answer".to_string());
+            }
+            list.cline_pass.into_iter().map(|model| model.id).collect()
+        }
+        _ => {
+            let list: ModelList = serde_json::from_str(body).map_err(|e| e.to_string())?;
+            list.data.into_iter().map(|entry| entry.id).collect()
+        }
+    };
     ids.sort();
     Ok(ids)
 }
 
 #[cfg(test)]
-mod cline_tests {
+mod tests {
     use super::*;
 
     #[test]
+    fn an_openai_answer_gives_its_model_ids_sorted() {
+        use crate::endpoint::Provider;
+        let body = r#"{"data":[{"id":"b"},{"id":"a"}]}"#;
+        assert_eq!(
+            ids(body, Provider::OpenAi),
+            Ok(["a".to_string(), "b".to_string()].to_vec())
+        );
+    }
+
+    #[test]
     fn cline_answer_gives_the_plan_models_sorted() {
+        use crate::endpoint::Provider;
         let body = r#"{"clinePass":[
             {"id":"cline-pass/b"},
             {"id":"cline-pass/a","name":"A","description":"x","tags":[]}
         ]}"#;
-        let list: Recommended = serde_json::from_str(body).expect("valid answer");
-        let ids: Vec<String> = list.cline_pass.into_iter().map(|m| m.id).collect();
-        assert_eq!(ids, ["cline-pass/b", "cline-pass/a"]);
+        assert_eq!(
+            ids(body, Provider::Cline),
+            Ok(["cline-pass/a".to_string(), "cline-pass/b".to_string()].to_vec())
+        );
     }
 
     #[test]
-    fn cline_answer_without_plan_models_is_an_empty_list() {
-        let list: Recommended = serde_json::from_str("{}").expect("valid answer");
-        assert!(list.cline_pass.is_empty());
+    fn cline_answer_without_plan_models_is_an_error() {
+        use crate::endpoint::Provider;
+        assert!(ids("{}", Provider::Cline).is_err());
     }
 }

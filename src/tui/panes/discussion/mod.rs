@@ -1324,14 +1324,16 @@ mod tests {
     /// A configured endpoint, so that a refusal is the trust gate and not a missing token.
     fn agent_with_endpoint() -> Arc<crate::agent::AgentConfig> {
         use crate::agent::AgentConfig;
-        use crate::agent::Endpoint;
-        use crate::agent::EndpointKind;
+        use crate::endpoint::Endpoint;
+        use crate::endpoint::EndpointKind;
+        use crate::endpoint::Provider;
         Arc::new(AgentConfig {
             endpoints: vec![Endpoint {
                 name: "mock".to_string(),
-                kind: EndpointKind::OpenAi {
+                kind: EndpointKind::Http {
                     url: "http://localhost:1".to_string(),
                     token: "t".to_string(),
+                    provider: Provider::OpenAi,
                 },
             }],
             ..Default::default()

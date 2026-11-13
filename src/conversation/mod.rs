@@ -302,7 +302,7 @@ impl ConversationTree {
             parent_session: parent_meta
                 .filter(|meta| {
                     !parent_is_compact
-                        && meta.kind.as_deref() == Some(crate::config::CLAUDE_CODE_KIND)
+                        && meta.kind.as_deref() == Some(crate::endpoint::CLAUDE_CODE_KIND)
                 })
                 .and_then(|meta| meta.session_id.clone()),
         })

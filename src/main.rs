@@ -7,6 +7,7 @@ mod agent;
 mod cli;
 mod config;
 mod conversation;
+mod endpoint;
 mod git;
 mod highlight;
 mod loader;

@@ -259,19 +259,17 @@ fn focused_endpoint(state: &crate::tui::state::AppState) -> Option<String> {
 /// The status-bar entry for the spending behind the focused window's endpoint;
 /// empty when that endpoint reports no usage or its usage is not known yet.
 fn focused_usage(state: &crate::tui::state::AppState) -> Vec<(String, Option<u32>)> {
-    use crate::agent::EndpointKind;
     let entry = || {
         let endpoint = focused_endpoint(state)?;
         let kind = &state.agent.endpoint(&endpoint)?.kind;
         let label = kind.usage_label()?;
         let usage = state.usage.get(&endpoint)?;
-        // An OpenRouter key states money and its limit, not the percents and reset
-        // times of a subscription.
-        if matches!(kind, EndpointKind::OpenRouter { .. }) {
-            return Some(usage.money_pieces(label));
-        }
-        let now = crate::util::time::now_secs();
-        Some(usage.pieces(label, now, crate::util::time::local_offset_secs))
+        Some(usage.entry(
+            kind.provider(),
+            label,
+            crate::util::time::now_secs(),
+            crate::util::time::local_offset_secs,
+        ))
     };
     entry().unwrap_or_default()
 }
@@ -283,9 +281,12 @@ pub(super) fn poll_openrouter_usage(
     state: &crate::tui::state::AppState,
     main_tx: crate::signal::MainTx,
 ) {
-    use crate::agent::EndpointKind;
+    use crate::endpoint::EndpointKind;
     for endpoint in &state.agent.endpoints {
-        if matches!(endpoint.kind, EndpointKind::OpenRouter { .. }) {
+        let EndpointKind::Http { provider, .. } = &endpoint.kind else {
+            continue;
+        };
+        if crate::usage::polls_the_key(*provider) {
             crate::agent::turn::report_usage(endpoint.clone(), None, main_tx.clone());
         }
     }

@@ -182,7 +182,7 @@ struct Launch {
     index: u32,
     dir: camino::Utf8PathBuf,
     backend: crate::agent::Backend,
-    endpoint: crate::agent::Endpoint,
+    endpoint: crate::endpoint::Endpoint,
     /// Model of this run, named in the notes of a retry.
     spec: crate::model_spec::ModelSpec,
     /// The role's name, for the retry's metadata.
@@ -252,10 +252,10 @@ fn prepare(
     subagents: &Subagents,
     args: &serde_json::Value,
 ) -> Result<Launch, String> {
-    use crate::agent::EndpointKind;
     use crate::agent::Mode;
     use crate::conversation::NodeStatus;
     use crate::conversation::metadata::Metadata;
+    use crate::endpoint::EndpointKind;
     let config = &subagents.config;
     let description = str_arg(args, "description")?;
     let prompt = str_arg(args, "prompt")?;
@@ -303,13 +303,9 @@ fn prepare(
         .endpoint(&spec.endpoint)
         .map(|endpoint| &endpoint.kind)
     {
-        Some(
-            EndpointKind::OpenAi { .. }
-            | EndpointKind::OpenCodeGo { .. }
-            | EndpointKind::KimiCode { .. }
-            | EndpointKind::Cline { .. }
-            | EndpointKind::OpenRouter { .. },
-        ) if source.is_none() && spec != subagents.spec => Some(subagents.spec.clone()),
+        Some(EndpointKind::Http { .. }) if source.is_none() && spec != subagents.spec => {
+            Some(subagents.spec.clone())
+        }
         _ => None,
     };
     let endpoint = config.endpoint(&spec.endpoint).cloned();
@@ -450,7 +446,7 @@ async fn execute(
 struct Outcome {
     index: u32,
     spec: crate::model_spec::ModelSpec,
-    endpoint: crate::agent::Endpoint,
+    endpoint: crate::endpoint::Endpoint,
     result: Result<(), String>,
     reply: String,
     secs: u64,
@@ -479,7 +475,7 @@ impl Outcome {
 /// The metadata fields that describe the model a run landed on, which a first run and its
 /// fallback rerun both record.
 fn recorded_on(
-    endpoint: &crate::agent::Endpoint,
+    endpoint: &crate::endpoint::Endpoint,
     spec: &crate::model_spec::ModelSpec,
 ) -> crate::conversation::metadata::Metadata {
     use crate::conversation::metadata::Metadata;
@@ -964,17 +960,19 @@ mod tests {
     #[test]
     fn only_a_finished_run_with_something_to_describe_and_a_summary_model_is_titled() {
         use crate::agent::AgentConfig;
-        use crate::agent::Endpoint;
-        use crate::agent::EndpointKind;
         use crate::agent::Mode;
+        use crate::endpoint::Endpoint;
+        use crate::endpoint::EndpointKind;
+        use crate::endpoint::Provider;
         use crate::model_spec::ModelSpec;
         let config = |summary: Option<ModelSpec>| Subagents {
             config: Arc::new(AgentConfig {
                 endpoints: vec![Endpoint {
                     name: "router".to_string(),
-                    kind: EndpointKind::OpenAi {
+                    kind: EndpointKind::Http {
                         url: "https://r".to_string(),
                         token: "sk-or".to_string(),
+                        provider: Provider::OpenAi,
                     },
                 }],
                 summary_model: summary,
@@ -990,9 +988,10 @@ mod tests {
             spec: crate::model_spec::ModelSpec::parse("router/x/low").unwrap(),
             endpoint: Endpoint {
                 name: "router".to_string(),
-                kind: EndpointKind::OpenAi {
+                kind: EndpointKind::Http {
                     url: "https://r".to_string(),
                     token: "sk-or".to_string(),
+                    provider: Provider::OpenAi,
                 },
             },
             result,

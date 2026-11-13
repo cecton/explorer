@@ -87,22 +87,18 @@ impl ModelPickerComponent {
 
 /// Gets the model list of `endpoint` in the background: fetched from an
 /// OpenAI-compatible server, taken from the configuration for the `claude` CLI.
-pub(crate) fn fetch_models(endpoint: &crate::agent::Endpoint, main_tx: crate::signal::MainTx) {
-    use crate::agent::EndpointKind;
+pub(crate) fn fetch_models(endpoint: &crate::endpoint::Endpoint, main_tx: crate::signal::MainTx) {
+    use crate::endpoint::EndpointKind;
     use crate::signal::AppSignal;
     let name = endpoint.name.clone();
     let kind = endpoint.kind.clone();
     tokio::spawn(async move {
         let result = match kind {
-            EndpointKind::OpenAi { url, token }
-            | EndpointKind::OpenCodeGo { url, token }
-            | EndpointKind::KimiCode { url, token }
-            | EndpointKind::OpenRouter { url, token } => {
-                crate::agent::models::fetch(&url, &token).await
-            }
-            EndpointKind::Cline { url, token } => {
-                crate::agent::models::fetch_cline(&url, &token).await
-            }
+            EndpointKind::Http {
+                url,
+                token,
+                provider,
+            } => crate::agent::models::fetch(&url, &token, provider).await,
             EndpointKind::ClaudeCode { models } => Ok(models),
         };
         crate::signal::send(

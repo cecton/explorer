@@ -59,7 +59,7 @@ pub enum CargoFeatureSelection {
 /// The `agent` block as written in `config.kdl`: endpoints still without their tokens.
 #[derive(Debug, Default, PartialEq, Eq)]
 pub struct AgentSettings {
-    pub endpoints: Vec<EndpointDecl>,
+    pub endpoints: Vec<crate::endpoint::Endpoint>,
     pub summary_model: Option<crate::model_spec::ModelSpec>,
     pub subagent_model: Option<crate::model_spec::ModelSpec>,
     pub review_rounds: Option<u32>,
@@ -84,31 +84,8 @@ impl Config {
     }
 }
 
-/// An endpoint as declared, before its token is looked up.
-#[derive(Debug, PartialEq, Eq)]
-pub enum EndpointDecl {
-    OpenAi { name: String, url: String },
-    OpenCodeGo { name: String, url: String },
-    KimiCode { name: String, url: String },
-    Cline { name: String, url: String },
-    OpenRouter { name: String, url: String },
-    ClaudeCode { name: String, models: Vec<String> },
-}
-
-pub const CLAUDE_CODE_KIND: &str = "claude-code";
-pub const OPENCODE_GO_KIND: &str = "opencode-go";
-pub const KIMI_CODE_KIND: &str = "kimi-code";
-pub const CLINE_KIND: &str = "cline";
-pub const OPENROUTER_KIND: &str = "openrouter";
-
 /// Models offered for a `claude-code` endpoint that lists none.
 const CLAUDE_CODE_DEFAULT_MODELS: [&str; 3] = ["opus", "sonnet", "haiku"];
-
-/// Where an `opencode-go` endpoint that gives no `url` is reached.
-const OPENCODE_GO_URL: &str = "https://opencode.ai/zen/go/v1";
-
-/// Where an `openrouter` endpoint that gives no `url` is reached.
-const OPENROUTER_URL: &str = "https://openrouter.ai/api/v1";
 
 fn auth_path() -> Option<PathBuf> {
     Some(
@@ -195,34 +172,34 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                     }
                 }
                 let name = name.to_string();
-                settings.endpoints.push(match kind {
-                    "openai" => EndpointDecl::OpenAi {
-                        url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
-                        name,
-                    },
-                    OPENCODE_GO_KIND => EndpointDecl::OpenCodeGo {
-                        url: url.unwrap_or_else(|| OPENCODE_GO_URL.to_string()),
-                        name,
-                    },
-                    KIMI_CODE_KIND => EndpointDecl::KimiCode {
-                        url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
-                        name,
-                    },
-                    CLINE_KIND => EndpointDecl::Cline {
-                        url: url.ok_or_else(|| format!("endpoint '{name}' must have a url"))?,
-                        name,
-                    },
-                    OPENROUTER_KIND => EndpointDecl::OpenRouter {
-                        url: url.unwrap_or_else(|| OPENROUTER_URL.to_string()),
-                        name,
-                    },
-                    CLAUDE_CODE_KIND => {
+                use crate::endpoint::EndpointKind;
+                use crate::endpoint::Provider;
+                let receiver = match Provider::from_label(kind) {
+                    Some(provider) => {
+                        let url = match (url, provider.default_url()) {
+                            (Some(url), _) => url,
+                            (None, Some(default)) => default.to_string(),
+                            (None, None) => {
+                                return Err(format!("endpoint '{name}' must have a url"));
+                            }
+                        };
+                        EndpointKind::Http {
+                            url,
+                            token: String::new(),
+                            provider,
+                        }
+                    }
+                    None if kind == crate::endpoint::CLAUDE_CODE_KIND => {
                         if models.is_empty() {
                             models = CLAUDE_CODE_DEFAULT_MODELS.map(str::to_string).to_vec();
                         }
-                        EndpointDecl::ClaudeCode { name, models }
+                        EndpointKind::ClaudeCode { models }
                     }
-                    other => return Err(format!("endpoint '{name}': unknown kind '{other}'")),
+                    None => return Err(format!("endpoint '{name}': unknown kind '{kind}'")),
+                };
+                settings.endpoints.push(crate::endpoint::Endpoint {
+                    name,
+                    kind: receiver,
                 });
             }
             "summary-model" => {
@@ -432,17 +409,21 @@ mod config_tests {
         "#,
         )
         .expect("valid config");
+        use crate::endpoint::EndpointKind;
+        use crate::endpoint::Provider;
+        let declared = |name: &str, url: &str| crate::endpoint::Endpoint {
+            name: name.to_string(),
+            kind: EndpointKind::Http {
+                url: url.to_string(),
+                token: String::new(),
+                provider: Provider::OpenAi,
+            },
+        };
         assert_eq!(
             config.agent.endpoints,
             [
-                EndpointDecl::OpenAi {
-                    name: "kimi".to_string(),
-                    url: "https://api.moonshot.ai/v1".to_string()
-                },
-                EndpointDecl::OpenAi {
-                    name: "router".to_string(),
-                    url: "https://openrouter.ai/api/v1".to_string()
-                },
+                declared("kimi", "https://api.moonshot.ai/v1"),
+                declared("router", "https://openrouter.ai/api/v1"),
             ]
         );
         let summary = config.agent.summary_model.expect("summary model");
@@ -467,17 +448,18 @@ mod config_tests {
         "#,
         )
         .expect("valid config");
+        use crate::endpoint::EndpointKind;
+        let claude = |name: &str, models: &[&str]| crate::endpoint::Endpoint {
+            name: name.to_string(),
+            kind: EndpointKind::ClaudeCode {
+                models: models.iter().map(|model| model.to_string()).collect(),
+            },
+        };
         assert_eq!(
             config.agent.endpoints,
             [
-                EndpointDecl::ClaudeCode {
-                    name: "claude".to_string(),
-                    models: vec!["opus".into(), "sonnet".into(), "haiku".into()],
-                },
-                EndpointDecl::ClaudeCode {
-                    name: "max".to_string(),
-                    models: vec!["opus".into(), "fable".into()],
-                },
+                claude("claude", &["opus", "sonnet", "haiku"]),
+                claude("max", &["opus", "fable"]),
             ]
         );
     }

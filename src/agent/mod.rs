@@ -18,65 +18,6 @@ pub enum Mode {
     Commit,
 }
 
-/// A place to run models, as declared in `config.kdl`.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Endpoint {
-    pub name: String,
-    pub kind: EndpointKind,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum EndpointKind {
-    /// An OpenAI-compatible server, driven by our own agent loop.
-    OpenAi {
-        /// Base URL to which `chat/completions` and `models` are appended.
-        url: String,
-        token: String,
-    },
-    /// An OpenCode Go subscription: an OpenAI-compatible server that also reports how
-    /// much of the plan is used.
-    OpenCodeGo { url: String, token: String },
-    /// A Kimi Code membership: an OpenAI-compatible server that also reports its
-    /// quota windows at `<base>/usages`.
-    KimiCode { url: String, token: String },
-    /// A Cline membership: an OpenAI-compatible server that also reports how much of
-    /// its Cline Pass is used at `<base>/users/me/plan/usage-limits`. Its plan models
-    /// are listed at `<base>/ai/cline/recommended-models`, not `<base>/models`.
-    Cline { url: String, token: String },
-    /// OpenRouter: an OpenAI-compatible gateway for many providers, which also reports
-    /// what the key has cost and the limit it enforces, at `<base>/key`.
-    OpenRouter { url: String, token: String },
-    /// The local `claude` CLI, which runs its own loop and tools with its own login.
-    ClaudeCode { models: Vec<String> },
-}
-
-impl EndpointKind {
-    /// The `kind` recorded in a node's metadata.
-    pub fn label(&self) -> &'static str {
-        match self {
-            EndpointKind::OpenAi { .. } => "openai",
-            EndpointKind::OpenCodeGo { .. } => crate::config::OPENCODE_GO_KIND,
-            EndpointKind::KimiCode { .. } => crate::config::KIMI_CODE_KIND,
-            EndpointKind::Cline { .. } => crate::config::CLINE_KIND,
-            EndpointKind::OpenRouter { .. } => crate::config::OPENROUTER_KIND,
-            EndpointKind::ClaudeCode { .. } => crate::config::CLAUDE_CODE_KIND,
-        }
-    }
-
-    /// The name the status bar gives to the spending behind this endpoint; `None` when
-    /// it reports no usage.
-    pub fn usage_label(&self) -> Option<&'static str> {
-        match self {
-            EndpointKind::OpenAi { .. } => None,
-            EndpointKind::OpenCodeGo { .. } => Some("OpenCode"),
-            EndpointKind::KimiCode { .. } => Some("Kimi"),
-            EndpointKind::Cline { .. } => Some("Cline"),
-            EndpointKind::OpenRouter { .. } => Some("OpenRouter"),
-            EndpointKind::ClaudeCode { .. } => Some("Claude"),
-        }
-    }
-}
-
 /// A model ready to run: where it lives and how to reach it.
 #[derive(Clone, Debug)]
 pub enum Backend {
@@ -110,7 +51,7 @@ pub const DEFAULT_REPEAT_LIMIT: u32 = 5;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct AgentConfig {
     /// Only endpoints that have a token; the others were skipped with a warning.
-    pub endpoints: Vec<Endpoint>,
+    pub endpoints: Vec<crate::endpoint::Endpoint>,
     /// Model used for titles and summaries; neither is generated without it.
     pub summary_model: Option<crate::model_spec::ModelSpec>,
     /// Custom slash commands.
@@ -141,18 +82,15 @@ impl Default for AgentConfig {
 }
 
 impl AgentConfig {
-    pub fn endpoint(&self, name: &str) -> Option<&Endpoint> {
+    pub fn endpoint(&self, name: &str) -> Option<&crate::endpoint::Endpoint> {
         self.endpoints.iter().find(|endpoint| endpoint.name == name)
     }
 
     /// The backend `spec` designates, if its endpoint is usable.
     pub fn backend(&self, spec: &crate::model_spec::ModelSpec) -> Option<Backend> {
+        use crate::endpoint::EndpointKind;
         Some(match &self.endpoint(&spec.endpoint)?.kind {
-            EndpointKind::OpenAi { url, token }
-            | EndpointKind::OpenCodeGo { url, token }
-            | EndpointKind::KimiCode { url, token }
-            | EndpointKind::Cline { url, token }
-            | EndpointKind::OpenRouter { url, token } => Backend::OpenAi(llm::LlmTarget {
+            EndpointKind::Http { url, token, .. } => Backend::OpenAi(llm::LlmTarget {
                 url: url.clone(),
                 token: token.clone(),
                 model: spec.model.clone(),
@@ -174,60 +112,10 @@ impl AgentConfig {
         commands: Vec<commands::Command>,
         roles: Vec<subagent::Role>,
     ) -> Self {
-        use crate::agent::Endpoint;
-        use crate::agent::EndpointKind;
-        use crate::config::EndpointDecl;
-        let token_of = |name: &str| {
-            let token = tokens.get(name).cloned();
-            if token.is_none() {
-                tracing::warn!("endpoint '{name}' has no token in auth.kdl; skipping it");
-            }
-            token
-        };
         let endpoints = settings
             .endpoints
             .into_iter()
-            .filter_map(|decl| match decl {
-                EndpointDecl::ClaudeCode { name, models } => Some(Endpoint {
-                    name,
-                    kind: EndpointKind::ClaudeCode { models },
-                }),
-                EndpointDecl::OpenAi { name, url } => {
-                    let token = token_of(&name)?;
-                    Some(Endpoint {
-                        name,
-                        kind: EndpointKind::OpenAi { url, token },
-                    })
-                }
-                EndpointDecl::OpenCodeGo { name, url } => {
-                    let token = token_of(&name)?;
-                    Some(Endpoint {
-                        name,
-                        kind: EndpointKind::OpenCodeGo { url, token },
-                    })
-                }
-                EndpointDecl::KimiCode { name, url } => {
-                    let token = token_of(&name)?;
-                    Some(Endpoint {
-                        name,
-                        kind: EndpointKind::KimiCode { url, token },
-                    })
-                }
-                EndpointDecl::Cline { name, url } => {
-                    let token = token_of(&name)?;
-                    Some(Endpoint {
-                        name,
-                        kind: EndpointKind::Cline { url, token },
-                    })
-                }
-                EndpointDecl::OpenRouter { name, url } => {
-                    let token = token_of(&name)?;
-                    Some(Endpoint {
-                        name,
-                        kind: EndpointKind::OpenRouter { url, token },
-                    })
-                }
-            })
+            .filter_map(|endpoint| endpoint.resolved(tokens))
             .collect();
         Self {
             endpoints,
@@ -275,6 +163,41 @@ pub struct ToolCall {
 mod tests {
     use super::*;
 
+    /// The endpoint `name` reaches `url` on `provider`, as `config.kdl` declares it.
+    fn declared(
+        name: &str,
+        url: &str,
+        provider: crate::endpoint::Provider,
+    ) -> crate::endpoint::Endpoint {
+        use crate::endpoint::EndpointKind;
+        crate::endpoint::Endpoint {
+            name: name.to_string(),
+            kind: EndpointKind::Http {
+                url: url.to_string(),
+                token: String::new(),
+                provider,
+            },
+        }
+    }
+
+    /// The endpoint `name` reaches `url` with `token`, once its token is resolved.
+    fn live(
+        name: &str,
+        url: &str,
+        token: &str,
+        provider: crate::endpoint::Provider,
+    ) -> crate::endpoint::Endpoint {
+        use crate::endpoint::EndpointKind;
+        crate::endpoint::Endpoint {
+            name: name.to_string(),
+            kind: EndpointKind::Http {
+                url: url.to_string(),
+                token: token.to_string(),
+                provider,
+            },
+        }
+    }
+
     fn resolve(content: &str) -> AgentConfig {
         let settings = crate::config::parse(content).expect("valid config").agent;
         AgentConfig::resolve(
@@ -287,7 +210,7 @@ mod tests {
 
     #[test]
     fn opencode_go_endpoint_has_a_default_url_and_needs_a_token() {
-        use crate::config::EndpointDecl;
+        use crate::endpoint::Provider;
         let settings = crate::config::parse(
             r#"
             agent {
@@ -306,32 +229,26 @@ mod tests {
         assert_eq!(
             settings.endpoints,
             [
-                EndpointDecl::OpenCodeGo {
-                    name: "go".to_string(),
-                    url: "https://opencode.ai/zen/go/v1".to_string()
-                },
-                EndpointDecl::OpenCodeGo {
-                    name: "mirror".to_string(),
-                    url: "https://mirror/v1".to_string()
-                },
+                declared("go", "https://opencode.ai/zen/go/v1", Provider::OpenCodeGo),
+                declared("mirror", "https://mirror/v1", Provider::OpenCodeGo),
             ]
         );
         let tokens = crate::config::parse_auth("go \"sk-go\"").expect("valid auth");
         let agent = AgentConfig::resolve(settings, &tokens, Vec::new(), Vec::new());
         assert_eq!(
             agent.endpoints,
-            [Endpoint {
-                name: "go".to_string(),
-                kind: EndpointKind::OpenCodeGo {
-                    url: "https://opencode.ai/zen/go/v1".to_string(),
-                    token: "sk-go".to_string()
-                }
-            }]
+            [live(
+                "go",
+                "https://opencode.ai/zen/go/v1",
+                "sk-go",
+                Provider::OpenCodeGo
+            )]
         );
     }
 
     #[test]
     fn kimi_code_endpoint_needs_a_url_and_a_token() {
+        use crate::endpoint::Provider;
         let settings = crate::config::parse(
             r#"
             agent {
@@ -348,13 +265,12 @@ mod tests {
         let agent = AgentConfig::resolve(settings, &tokens, Vec::new(), Vec::new());
         assert_eq!(
             agent.endpoints,
-            [Endpoint {
-                name: "kimi".to_string(),
-                kind: EndpointKind::KimiCode {
-                    url: "https://api.kimi.ai/coding/v1".to_string(),
-                    token: "sk-kimi".to_string()
-                }
-            }]
+            [live(
+                "kimi",
+                "https://api.kimi.ai/coding/v1",
+                "sk-kimi",
+                Provider::KimiCode
+            )]
         );
         assert!(
             crate::config::parse(
@@ -372,6 +288,7 @@ mod tests {
 
     #[test]
     fn cline_endpoint_needs_a_url_and_a_token() {
+        use crate::endpoint::Provider;
         let settings = crate::config::parse(
             r#"
             agent {
@@ -388,13 +305,12 @@ mod tests {
         let agent = AgentConfig::resolve(settings, &tokens, Vec::new(), Vec::new());
         assert_eq!(
             agent.endpoints,
-            [Endpoint {
-                name: "cline".to_string(),
-                kind: EndpointKind::Cline {
-                    url: "https://api.cline.bot/api/v1".to_string(),
-                    token: "sk_4d98".to_string()
-                }
-            }]
+            [live(
+                "cline",
+                "https://api.cline.bot/api/v1",
+                "sk_4d98",
+                Provider::Cline
+            )]
         );
         assert!(
             crate::config::parse(
@@ -432,20 +348,17 @@ mod tests {
     #[test]
     fn endpoint_without_a_token_is_skipped() {
         use crate::config::AgentSettings;
-        use crate::config::EndpointDecl;
+        use crate::endpoint::EndpointKind;
+        use crate::endpoint::Provider;
         let settings = AgentSettings {
             endpoints: vec![
-                EndpointDecl::OpenAi {
-                    name: "kimi".to_string(),
-                    url: "https://k".to_string(),
-                },
-                EndpointDecl::OpenAi {
-                    name: "router".to_string(),
-                    url: "https://r".to_string(),
-                },
-                EndpointDecl::ClaudeCode {
+                declared("kimi", "https://k", Provider::OpenAi),
+                declared("router", "https://r", Provider::OpenAi),
+                crate::endpoint::Endpoint {
                     name: "claude".to_string(),
-                    models: vec!["opus".to_string()],
+                    kind: EndpointKind::ClaudeCode {
+                        models: vec!["opus".to_string()],
+                    },
                 },
             ],
             summary_model: None,
@@ -459,11 +372,8 @@ mod tests {
         let names: Vec<&str> = agent.endpoints.iter().map(|e| e.name.as_str()).collect();
         assert_eq!(names, ["router", "claude"]);
         assert_eq!(
-            agent.endpoints[0].kind,
-            EndpointKind::OpenAi {
-                url: "https://r".to_string(),
-                token: "sk-or".to_string()
-            }
+            agent.endpoints[0],
+            live("router", "https://r", "sk-or", Provider::OpenAi)
         );
         assert!(agent.endpoint("kimi").is_none());
     }

@@ -1,5 +1,4 @@
 use std::collections::HashMap;
-use std::time::Duration;
 
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
@@ -99,10 +98,28 @@ fn ordinal_suffix(day: u32) -> &'static str {
 }
 
 impl Usage {
+    /// The status-bar entry for the spending behind `provider`'s endpoint named
+    /// `label`; empty when there is nothing to state yet. A key states money and its
+    /// limit, a subscription the percents and reset times of its windows, and `None` —
+    /// the `claude` CLI, which reports its own windows — states those windows.
+    pub fn entry(
+        &self,
+        provider: Option<crate::endpoint::Provider>,
+        label: &str,
+        now: i64,
+        offset_of: impl Fn(i64) -> i32,
+    ) -> Vec<(String, Option<u32>)> {
+        use crate::endpoint::Provider;
+        match provider {
+            Some(Provider::OpenRouter) => self.money_pieces(label).unwrap_or_default(),
+            _ => self.pieces(label, now, offset_of),
+        }
+    }
+
     /// The status-bar entry of the subscription named `label`, as the pieces of
     /// `label 22% 17:00 · 18% Thu 01:00`. A piece that states a percent carries it,
     /// for its color. `offset_of` gives the local offset at an instant.
-    pub fn pieces(
+    fn pieces(
         &self,
         label: &str,
         now: i64,
@@ -127,11 +144,11 @@ impl Usage {
     /// `label $0.50 · $1.00 daily`: the credit the key has spent, then its limit and
     /// the window that limit counts over. The limit carries the percent of it spent,
     /// for its color; a key without a limit states what is left of the account's
-    /// credit instead, and one without a credit states what it has spent alone.
-    pub fn money_pieces(&self, label: &str) -> Vec<(String, Option<u32>)> {
-        let Some(key) = &self.key else {
-            return Vec::new();
-        };
+    /// credit instead, and one without a credit states what it has spent alone. `None`
+    /// for a usage that states no key, which is every subscription, and for a key that
+    /// has reported no money yet.
+    fn money_pieces(&self, label: &str) -> Option<Vec<(String, Option<u32>)>> {
+        let key = self.key.as_ref()?;
         let mut pieces = Vec::with_capacity(5);
         pieces.push((format!("│ {label}"), None));
         pieces.push((format!(" {}", money(key.spent)), None));
@@ -151,7 +168,7 @@ impl Usage {
             pieces.push((" left".to_string(), None));
         }
         pieces.push((" ".to_string(), None));
-        pieces
+        Some(pieces)
     }
 }
 
@@ -218,26 +235,6 @@ fn parse_go(body: &str) -> Result<Usage, String> {
     Ok(Usage { windows, key: None })
 }
 
-/// How much of an OpenCode Go subscription is used, from `GET <url>/usage`.
-pub async fn fetch(url: &str, token: &str) -> Result<Usage, String> {
-    let url = format!("{}/usage", url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("{url}: HTTP {}", response.status()));
-    }
-    let body = response.text().await.map_err(|e| e.to_string())?;
-    parse_go(&body)
-}
-
 #[derive(serde::Deserialize)]
 struct KimiReply {
     usages: KimiUsages,
@@ -285,26 +282,6 @@ fn parse_kimi(body: &str) -> Result<Usage, String> {
         });
     }
     Ok(Usage { windows, key: None })
-}
-
-/// How much of a Kimi Code membership is used, from `GET <url>/usages`.
-pub async fn fetch_kimi(url: &str, token: &str) -> Result<Usage, String> {
-    let url = format!("{}/usages", url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("{url}: HTTP {}", response.status()));
-    }
-    let body = response.text().await.map_err(|e| e.to_string())?;
-    parse_kimi(&body)
 }
 
 /// `<data_dir>/usage.json`: a subscription is the same in every repository, so its
@@ -432,24 +409,36 @@ fn cline_span(kind: &str) -> Option<Span> {
     }
 }
 
-/// How much of a Cline Pass is used, from `GET <url>/users/me/plan/usage-limits`.
-pub async fn fetch_cline(url: &str, token: &str) -> Result<Usage, String> {
-    let url = format!("{}/users/me/plan/usage-limits", url.trim_end_matches('/'));
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .get(&url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("{url}: HTTP {}", response.status()));
-    }
-    let body = response.text().await.map_err(|e| e.to_string())?;
-    parse_cline(&body)
+/// What a subscription of `provider` reports of its spending, or why the request it
+/// answers failed; `Ok(None)` for a provider that reports none, which is not a failure.
+pub async fn fetch(
+    provider: crate::endpoint::Provider,
+    url: &str,
+    token: &str,
+) -> Result<Option<Usage>, String> {
+    use crate::endpoint::Provider;
+    let path = match provider {
+        Provider::OpenCodeGo => "usage",
+        Provider::KimiCode => "usages",
+        Provider::Cline => "users/me/plan/usage-limits",
+        Provider::OpenRouter => return fetch_openrouter(url, token).await.map(Some),
+        Provider::OpenAi => return Ok(None),
+    };
+    let url = format!("{}/{}", crate::util::http::base_url(url), path);
+    let body = crate::util::http::get(&url, token).await?;
+    let usage = match provider {
+        Provider::KimiCode => parse_kimi(&body),
+        Provider::Cline => parse_cline(&body),
+        _ => parse_go(&body),
+    };
+    usage.map(Some)
+}
+
+/// Whether the spending behind `provider` has to be polled rather than read when a turn
+/// ends: an OpenRouter key's counter settles seconds after the requests that spent it.
+pub fn polls_the_key(provider: crate::endpoint::Provider) -> bool {
+    use crate::endpoint::Provider;
+    provider == Provider::OpenRouter
 }
 
 #[derive(serde::Deserialize)]
@@ -505,33 +494,16 @@ fn parse_credit(body: &str) -> Result<Credit, String> {
     })
 }
 
-/// The body of `GET url` with the bearer `token`, or why it failed.
-async fn get(url: &str, token: &str) -> Result<String, String> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(20))
-        .build()
-        .map_err(|e| e.to_string())?;
-    let response = client
-        .get(url)
-        .bearer_auth(token)
-        .send()
-        .await
-        .map_err(|e| e.to_string())?;
-    if !response.status().is_success() {
-        return Err(format!("{url}: HTTP {}", response.status()));
-    }
-    response.text().await.map_err(|e| e.to_string())
-}
-
 /// What an OpenRouter key has cost and where its limit stands, from `GET <url>/key`.
 /// The plain inference key answers this; no management key is needed. A key without a
 /// limit also gets what is left of the account's credit, from `GET <url>/credits`; a
 /// failure of that second request is only logged.
-pub async fn fetch_openrouter(url: &str, token: &str) -> Result<Usage, String> {
-    let base = url.trim_end_matches('/');
-    let mut usage = parse_openrouter(&get(&format!("{base}/key"), token).await?)?;
+async fn fetch_openrouter(url: &str, token: &str) -> Result<Usage, String> {
+    let base = crate::util::http::base_url(url);
+    let mut usage =
+        parse_openrouter(&crate::util::http::get(&format!("{base}/key"), token).await?)?;
     if usage.key.as_ref().is_some_and(|key| key.limit.is_none()) {
-        let credit = get(&format!("{base}/credits"), token)
+        let credit = crate::util::http::get(&format!("{base}/credits"), token)
             .await
             .and_then(|body| parse_credit(&body))
             .map_err(|e| tracing::warn!("credits of '{base}' failed: {e}"));
@@ -545,7 +517,7 @@ pub async fn fetch_openrouter(url: &str, token: &str) -> Result<Usage, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agent::EndpointKind;
+    use crate::endpoint::Provider;
 
     fn text(pieces: &[(String, Option<u32>)]) -> String {
         pieces.iter().map(|(text, _)| text.as_str()).collect()
@@ -663,18 +635,6 @@ mod tests {
         assert!(parse_kimi(r#"{"usages":null}"#).is_err());
         assert!(parse_kimi(r#"{"usages":{}}"#).is_err());
         assert!(parse_kimi(r#"{"usages":{"limit_5h":null}}"#).is_err());
-    }
-
-    #[test]
-    fn kimi_endpoint_names_its_subscription() {
-        assert!(matches!(
-            EndpointKind::KimiCode {
-                url: String::new(),
-                token: String::new(),
-            }
-            .usage_label(),
-            Some("Kimi")
-        ));
     }
 
     #[test]
@@ -799,18 +759,6 @@ mod tests {
     }
 
     #[test]
-    fn cline_endpoint_names_its_subscription() {
-        assert!(matches!(
-            EndpointKind::Cline {
-                url: String::new(),
-                token: String::new(),
-            }
-            .usage_label(),
-            Some("Cline")
-        ));
-    }
-
-    #[test]
     fn window_past_its_reset_has_used_nothing() {
         let usage = Usage {
             windows: vec![
@@ -872,7 +820,7 @@ mod tests {
         assert_eq!(key.limit, None);
         assert_eq!(key.resets.as_deref(), Some("daily"));
         assert_eq!(
-            text(&usage.money_pieces("OpenRouter")),
+            text(&usage.money_pieces("OpenRouter").expect("a key")),
             "│ OpenRouter $0.00 "
         );
     }
@@ -914,7 +862,7 @@ mod tests {
                 credit: None,
             }),
         };
-        let pieces = usage.money_pieces("OpenRouter");
+        let pieces = usage.money_pieces("OpenRouter").expect("a key");
         assert_eq!(text(&pieces), "│ OpenRouter $0.50 · $1.00 daily ");
         // Only the limit carries a percent, for its color.
         let percents: Vec<Option<u32>> = pieces.iter().map(|(_, percent)| *percent).collect();
@@ -936,7 +884,7 @@ mod tests {
                 }),
             }),
         };
-        let pieces = usage.money_pieces("OpenRouter");
+        let pieces = usage.money_pieces("OpenRouter").expect("a key");
         assert_eq!(text(&pieces), "│ OpenRouter $0.00 · $19.31 left ");
         // The credit carries the percent of the purchased credit spent, for its color.
         assert_eq!(pieces[2].1, Some(88));
@@ -958,7 +906,7 @@ mod tests {
             }),
         };
         assert_eq!(
-            text(&usage.money_pieces("OpenRouter")),
+            text(&usage.money_pieces("OpenRouter").expect("a key")),
             "│ OpenRouter $0.50 · $1.00 daily "
         );
     }
@@ -976,7 +924,7 @@ mod tests {
             }),
         };
         assert_eq!(
-            text(&usage.money_pieces("OpenRouter")),
+            text(&usage.money_pieces("OpenRouter").expect("a key")),
             "│ OpenRouter $12.34 "
         );
     }
@@ -993,7 +941,7 @@ mod tests {
                 credit: None,
             }),
         };
-        let pieces = usage.money_pieces("OpenRouter");
+        let pieces = usage.money_pieces("OpenRouter").expect("a key");
         assert_eq!(text(&pieces), "│ OpenRouter $0.50 · $1.00 ");
         assert_eq!(pieces[2].1, Some(75));
     }
@@ -1007,21 +955,46 @@ mod tests {
     }
 
     #[test]
-    fn openrouter_endpoint_names_its_key() {
-        assert!(matches!(
-            EndpointKind::OpenRouter {
-                url: String::new(),
-                token: String::new(),
-            }
-            .usage_label(),
-            Some("OpenRouter")
-        ));
-    }
-
-    #[test]
     fn a_usage_file_written_before_the_key_money_still_loads() {
         let stored = r#"{"openrouter":{"windows":[]}}"#;
         let usage: HashMap<String, Usage> = serde_json::from_str(stored).expect("valid store");
         assert_eq!(usage["openrouter"].key, None);
+        // Nothing to state: the entry names no money and no window, so it stays empty
+        // rather than leaving a bare label in the status bar.
+        assert!(
+            usage["openrouter"]
+                .entry(Some(Provider::OpenRouter), "OpenRouter", 0, |_| 0)
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_key_states_money_where_a_subscription_states_its_windows() {
+        let usage = Usage {
+            windows: vec![UsageWindow {
+                span: Span::FiveHours,
+                percent: 22,
+                resets_at: None,
+            }],
+            key: Some(KeyMoney {
+                spent: 500_000,
+                limit: Some(1_000_000),
+                remaining: Some(250_000),
+                resets: Some("daily".to_string()),
+                credit: None,
+            }),
+        };
+        assert_eq!(
+            text(&usage.entry(None, "Claude", 0, |_| 0)),
+            "│ Claude 22% "
+        );
+        assert_eq!(
+            text(&usage.entry(Some(Provider::OpenAi), "Server", 0, |_| 0)),
+            "│ Server 22% "
+        );
+        assert_eq!(
+            text(&usage.entry(Some(Provider::OpenRouter), "OpenRouter", 0, |_| 0)),
+            "│ OpenRouter $0.50 · $1.00 daily "
+        );
     }
 }

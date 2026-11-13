@@ -54,7 +54,7 @@ pub struct TurnRequest {
     pub date: String,
     pub backend: crate::agent::Backend,
     /// The endpoint of `backend`, whose subscription this turn spends.
-    pub endpoint: crate::agent::Endpoint,
+    pub endpoint: crate::endpoint::Endpoint,
     /// The model this turn is sent to.
     pub spec: crate::model_spec::ModelSpec,
     /// Endpoints, roles and models the turn's sub-agents can run on.
@@ -108,32 +108,25 @@ fn message_to_send(request: &TurnRequest) -> String {
 /// minute between turns, since its counter settles seconds after the requests that
 /// spent it.
 pub fn report_usage(
-    endpoint: crate::agent::Endpoint,
+    endpoint: crate::endpoint::Endpoint,
     reported: Option<crate::usage::Usage>,
     main_tx: crate::signal::MainTx,
 ) {
-    use crate::agent::EndpointKind;
+    use crate::endpoint::EndpointKind;
     use crate::signal::AppSignal;
     tokio::spawn(async move {
         let usage = match &endpoint.kind {
+            // The CLI pushes its own spending while it runs; there is nothing to ask.
             EndpointKind::ClaudeCode { .. } => reported,
-            EndpointKind::OpenCodeGo { url, token } => crate::usage::fetch(url, token)
+            EndpointKind::Http {
+                url,
+                token,
+                provider,
+            } => crate::usage::fetch(*provider, url, token)
                 .await
                 .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
-                .ok(),
-            EndpointKind::KimiCode { url, token } => crate::usage::fetch_kimi(url, token)
-                .await
-                .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
-                .ok(),
-            EndpointKind::Cline { url, token } => crate::usage::fetch_cline(url, token)
-                .await
-                .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
-                .ok(),
-            EndpointKind::OpenRouter { url, token } => crate::usage::fetch_openrouter(url, token)
-                .await
-                .map_err(|e| tracing::warn!("usage of '{}' failed: {e}", endpoint.name))
-                .ok(),
-            EndpointKind::OpenAi { .. } => None,
+                .ok()
+                .flatten(),
         };
         let Some(usage) = usage else {
             return;
@@ -514,11 +507,11 @@ mod tests {
     #[test]
     fn a_continue_turn_starts_from_the_node_and_anything_else_from_its_parent() {
         use crate::agent::Backend;
-        use crate::agent::Endpoint;
-        use crate::agent::EndpointKind;
         use crate::agent::Mode;
         use crate::agent::claude_code::Resume;
         use crate::conversation::NodeId;
+        use crate::endpoint::Endpoint;
+        use crate::endpoint::EndpointKind;
         use crate::model_spec::Effort;
         let request =
             |mode, parent_session: Option<&str>, continue_session: Option<&str>| TurnRequest {
