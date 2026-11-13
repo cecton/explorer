@@ -878,16 +878,14 @@ mod tests {
         fn new() -> Self {
             use crate::loader::FileKey;
             use crate::tui::pane_manager::Window;
+            use crate::tui::state::AppState;
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("sample.txt");
             std::fs::write(&path, "foo beta gamma\nsecond line here\n").unwrap();
             let file = crate::loader::LoadedFile::load(path).unwrap();
-            let files = Arc::new(arc_swap::ArcSwap::from_pointee(vec![file]));
-            let mut state = crate::tui::state::AppState::new(
-                files,
+            let mut state = AppState::for_test_with_files(
+                vec![file],
                 camino::Utf8PathBuf::from("/tmp/nowhere"),
-                crate::tui::theme::HelixTheme::default(),
-                crate::tui::keymap::Keymap::default(),
             );
             let window = Window::FilePreview(FileKey(0));
             state.pane_manager.push_window(window);
@@ -895,15 +893,7 @@ mod tests {
             let size = vp_width(80) + vp_height(24);
             state.pane_manager.relayout(size);
             let pane_box = *state.pane_manager.slot_box(0).unwrap();
-            let (main_tx, _) = tokio::sync::mpsc::channel(8);
-            let mut global_data = GlobalData::try_to_create_instance(
-                main_tx,
-                state,
-                size,
-                OutputDevice::new_mock().0,
-                OfsBufPool::new(size),
-            )
-            .unwrap();
+            let mut global_data = crate::tui::test_support::global_data(state);
             let (tx, _) = tokio::sync::mpsc::channel(1);
             let mut component = PaneComponent::new_boxed(0, pane_id(0), tx, Arc::default());
             let origin = pane_box.style_adjusted_bounds.origin_pos;

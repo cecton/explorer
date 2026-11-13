@@ -10,5 +10,7 @@ pub(crate) mod panes_renderer;
 pub(crate) mod session;
 pub(crate) mod state;
 pub(crate) mod symbols;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub(crate) mod theme;
 pub(crate) mod widgets;

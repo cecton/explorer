@@ -705,6 +705,27 @@ impl AppState {
     }
 }
 
+#[cfg(test)]
+impl AppState {
+    /// A state over `root` with no files, the default theme and the default keymap.
+    pub(crate) fn for_test(root: camino::Utf8PathBuf) -> Self {
+        Self::for_test_with_files(Vec::new(), root)
+    }
+
+    /// Like `for_test`, over `files`.
+    pub(crate) fn for_test_with_files(
+        files: Vec<Arc<crate::loader::LoadedFile>>,
+        root: camino::Utf8PathBuf,
+    ) -> Self {
+        Self::new(
+            Arc::new(arc_swap::ArcSwap::from_pointee(files)),
+            root,
+            crate::tui::theme::HelixTheme::default(),
+            crate::tui::keymap::Keymap::default(),
+        )
+    }
+}
+
 impl Debug for AppState {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         let count = self.files.load().len();

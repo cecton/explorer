@@ -499,11 +499,8 @@ pub fn session_file_path(repo_root: &camino::Utf8Path) -> Option<camino::Utf8Pat
 mod tests {
     use super::*;
     use crate::loader::FileKey;
-    use crate::tui::keymap::Keymap;
     use crate::tui::pane_manager::{PaneSize, Window, WindowState};
     use crate::tui::state::TerminalPane;
-    use crate::tui::theme::HelixTheme;
-    use arc_swap::ArcSwap;
     use camino::Utf8PathBuf;
     use parking_lot::Mutex;
     use r3bl_tui::{OfsBufVT100, VPSize};
@@ -518,10 +515,8 @@ mod tests {
     }
 
     fn empty_state(root: Utf8PathBuf) -> crate::tui::state::AppState {
-        use crate::loader::LoadedFile;
         use crate::tui::state::AppState;
-        let files = Arc::new(ArcSwap::from_pointee(Vec::<Arc<LoadedFile>>::new()));
-        AppState::new(files, root, HelixTheme::default(), Keymap::default())
+        AppState::for_test(root)
     }
 
     fn dummy_terminal_pane(cwd: Utf8PathBuf, command: Option<String>) -> TerminalPane {
@@ -619,9 +614,7 @@ mod tests {
         std::fs::write(&file_path, "fn main() {}\n").unwrap();
 
         let loaded = LoadedFile::load(file_path.into()).unwrap();
-        let files = Arc::new(ArcSwap::from_pointee(vec![loaded]));
-        let theme = HelixTheme::default();
-        let mut state = AppState::new(files, root.clone(), theme, Keymap::default());
+        let mut state = AppState::for_test_with_files(vec![loaded], root.clone());
 
         state.pane_manager.window_stack =
             vec![Window::FilePreview(FileKey(0)), Window::Terminal(1)];
@@ -733,9 +726,7 @@ mod tests {
         std::fs::create_dir_all(existing_path.parent().unwrap()).unwrap();
         std::fs::write(&existing_path, "// b.rs content\n").unwrap();
         let loaded = LoadedFile::load(existing_path.into()).unwrap();
-        let files = Arc::new(ArcSwap::from_pointee(vec![loaded]));
-        let theme = HelixTheme::default();
-        let mut state = AppState::new(files, root.clone(), theme, Keymap::default());
+        let mut state = AppState::for_test_with_files(vec![loaded], root.clone());
 
         // Session has two missing-file previews whose paths sort differently
         // from the order they appear in the session.
@@ -822,13 +813,7 @@ mod tests {
         )
         .unwrap();
         let loaded = LoadedFile::load(file_path.into()).unwrap();
-        let files = Arc::new(ArcSwap::from_pointee(vec![loaded]));
-        let mut state = AppState::new(
-            files,
-            root.clone(),
-            HelixTheme::default(),
-            Keymap::default(),
-        );
+        let mut state = AppState::for_test_with_files(vec![loaded], root.clone());
 
         let session = Session {
             symbol_highlights: vec![
@@ -1123,9 +1108,7 @@ mod tests {
         std::fs::write(&file_path, "fn main() {}\n").unwrap();
 
         let loaded = LoadedFile::load(file_path.into()).unwrap();
-        let files = Arc::new(ArcSwap::from_pointee(vec![loaded]));
-        let theme = HelixTheme::default();
-        let mut state = AppState::new(files, root.clone(), theme, Keymap::default());
+        let mut state = AppState::for_test_with_files(vec![loaded], root.clone());
         state
             .pane_manager
             .push_window(Window::FilePreview(FileKey(0)));

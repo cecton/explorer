@@ -1239,16 +1239,8 @@ mod tests {
     }
 
     fn empty_state() -> crate::tui::state::AppState {
-        use crate::tui::keymap::Keymap;
         use crate::tui::state::AppState;
-        use crate::tui::theme::HelixTheme;
-        let files = Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new()));
-        AppState::new(
-            files,
-            Utf8PathBuf::from("/tmp"),
-            HelixTheme::default(),
-            Keymap::default(),
-        )
+        AppState::for_test(Utf8PathBuf::from("/tmp"))
     }
 
     /// A state over a done root `a1` and its failed child `a2`, which was sent with the
@@ -2315,16 +2307,7 @@ mod tests {
                 },
             );
         }
-        let (main_tx, _) = tokio::sync::mpsc::channel(8);
-        let size = vp_width(80) + vp_height(24);
-        GlobalData::try_to_create_instance(
-            main_tx,
-            state,
-            size,
-            OutputDevice::new_mock().0,
-            OfsBufPool::new(size),
-        )
-        .unwrap()
+        crate::tui::test_support::global_data(state)
     }
 
     #[test]

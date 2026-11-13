@@ -147,14 +147,11 @@ fn notify_terminal_focus_change(
 mod tests {
     use super::*;
     use crate::loader::FileKey;
-    use crate::tui::keymap::Keymap;
     use crate::tui::pane_manager::Window;
     use crate::tui::state::AppState;
     use crate::tui::state::PreviewInput;
     use crate::tui::state::SearchDirection;
     use crate::tui::state::TerminalPane;
-    use crate::tui::theme::HelixTheme;
-    use arc_swap::ArcSwap;
     use camino::Utf8PathBuf;
     use r3bl_tui::OfsBufVT100;
     use r3bl_tui::VPSize;
@@ -162,12 +159,7 @@ mod tests {
     use tokio::sync::mpsc;
 
     fn empty_state() -> AppState {
-        AppState::new(
-            Arc::new(ArcSwap::from_pointee(Vec::new())),
-            Utf8PathBuf::from("/tmp/nowhere"),
-            HelixTheme::default(),
-            Keymap::default(),
-        )
+        AppState::for_test(Utf8PathBuf::from("/tmp/nowhere"))
     }
 
     /// Nothing here needs a PTY: the pane is the state `close_terminal` works on.

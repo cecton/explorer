@@ -136,15 +136,8 @@ mod tests {
     }
 
     fn state() -> crate::tui::state::AppState {
-        use crate::tui::keymap::Keymap;
-        use crate::tui::theme::HelixTheme;
-        use std::sync::Arc;
-        crate::tui::state::AppState::new(
-            Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
-            camino::Utf8PathBuf::from("/tmp/nowhere"),
-            HelixTheme::default(),
-            Keymap::default(),
-        )
+        use crate::tui::state::AppState;
+        AppState::for_test(camino::Utf8PathBuf::from("/tmp/nowhere"))
     }
 
     fn location(key: usize) -> crate::signal::SymbolRefLocation {

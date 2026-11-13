@@ -249,18 +249,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tokio::sync::mpsc;
 
     fn empty_state() -> crate::tui::state::AppState {
-        use crate::tui::keymap::Keymap;
         use crate::tui::state::AppState;
-        use crate::tui::theme::HelixTheme;
-        AppState::new(
-            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
-            camino::Utf8PathBuf::from("/tmp/nowhere"),
-            HelixTheme::default(),
-            Keymap::default(),
-        )
+        AppState::for_test(camino::Utf8PathBuf::from("/tmp/nowhere"))
     }
 
     #[test]
@@ -319,21 +311,6 @@ mod tests {
         assert!(session.panes.is_empty(), "{:?}", session.panes.len());
     }
 
-    fn global_data_with_a_report(
-        state: crate::tui::state::AppState,
-    ) -> GlobalData<crate::tui::state::AppState, crate::signal::AppSignal> {
-        let (main_tx, _) = mpsc::channel(8);
-        let size = vp_width(80) + vp_height(24);
-        GlobalData::try_to_create_instance(
-            main_tx,
-            state,
-            size,
-            OutputDevice::new_mock().0,
-            OfsBufPool::new(size),
-        )
-        .unwrap()
-    }
-
     fn key(k: Key) -> InputEvent {
         InputEvent::Keyboard(KeyPress::Plain { key: k })
     }
@@ -344,7 +321,7 @@ mod tests {
         use crate::tui::pane_manager::Window;
         let mut state = empty_state();
         let id = ReportComponent::show(&mut state, "t".to_string(), "m".to_string());
-        let mut global_data = global_data_with_a_report(state);
+        let mut global_data = crate::tui::test_support::global_data(state);
         let mut component = ReportComponent::new(crate::tui::pane_component::pane_id(0));
 
         let closed = component
@@ -370,7 +347,7 @@ mod tests {
     fn a_frame_lays_the_markdown_out_again_only_when_the_report_or_the_width_moves() {
         let mut state = empty_state();
         let id = ReportComponent::show(&mut state, "t".to_string(), "# one\n\n- a".to_string());
-        let mut global_data = global_data_with_a_report(state);
+        let mut global_data = crate::tui::test_support::global_data(state);
         let mut component = ReportComponent::new(crate::tui::pane_component::pane_id(0));
         let laid_out = |component: &ReportComponent| component.renders;
 

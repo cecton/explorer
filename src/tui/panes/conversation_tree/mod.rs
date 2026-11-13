@@ -218,15 +218,8 @@ mod tests {
 
     #[test]
     fn the_title_says_the_repository_is_untrusted() {
-        use crate::tui::keymap::Keymap;
         use crate::tui::state::AppState;
-        use crate::tui::theme::HelixTheme;
-        let mut state = AppState::new(
-            std::sync::Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
-            camino::Utf8PathBuf::from("/tmp"),
-            HelixTheme::default(),
-            Keymap::default(),
-        );
+        let mut state = AppState::for_test(camino::Utf8PathBuf::from("/tmp"));
         assert_eq!(
             ConversationTreeComponent::title(&state),
             "Conversations (untrusted)"
