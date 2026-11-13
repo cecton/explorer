@@ -42,7 +42,6 @@ pub(super) fn background_services(
     use crate::signal::AppSignal;
     use crate::tui::pane_manager::Window;
     use crate::tui::panes::git_log_pane::GitLogPaneComponent;
-    use crate::tui::state::CommitDiffState;
     use crate::watcher::WatcherConfig;
     use std::sync::Arc;
     use std::time::Duration;
@@ -139,44 +138,29 @@ pub(super) fn background_services(
         }
     }
 
-    for id in global_data.state.pending_diffs.drain(..) {
-        if global_data.state.commit_diffs.contains_key(&id) {
-            continue;
-        }
-        global_data
-            .state
-            .commit_diffs
-            .insert(id, CommitDiffState::default());
-        let main_tx = notify_tx.clone();
-        match global_data.state.repo.clone() {
-            Some(repo) => {
-                tokio::task::spawn_blocking(move || {
-                    let result = crate::git::load_commit_diff(&repo, id)
-                        .map(|text| std::sync::Arc::new(crate::git::classify_diff(&text)));
-                    crate::signal::send(&main_tx, AppSignal::CommitDiffLoaded { id, result });
-                });
+    // The stack holds only the windows restored from the session: load what they show.
+    let stack = global_data.state.pane_manager.window_stack.clone();
+    for window in stack {
+        match window {
+            Window::CommitDiff(id) => {
+                GitLogPaneComponent::load_commit_diff(&mut global_data.state, notify_tx.clone(), id)
             }
-            None => {
-                crate::signal::send(
-                    &main_tx,
-                    AppSignal::CommitDiffLoaded {
-                        id,
-                        result: Err("open repository: not a git repository".to_string()),
-                    },
+            Window::GitLog(id) => {
+                let source = global_data
+                    .state
+                    .git_logs
+                    .get(&id)
+                    .map(|win| win.source.clone())
+                    .unwrap_or_default();
+                GitLogPaneComponent::reload_log(
+                    global_data.state.repo.clone(),
+                    notify_tx.clone(),
+                    id,
+                    &source,
                 );
             }
+            _ => {}
         }
-    }
-
-    for id in global_data.state.pending_git_logs.drain(..) {
-        let main_tx = notify_tx.clone();
-        let source = global_data
-            .state
-            .git_logs
-            .get(&id)
-            .map(|win| win.source.clone())
-            .unwrap_or_default();
-        GitLogPaneComponent::reload_log(global_data.state.repo.clone(), main_tx, id, &source);
     }
 
     if let Some(dir) = crate::conversation::conversations_dir(&global_data.state.root) {

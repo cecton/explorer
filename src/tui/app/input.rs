@@ -115,8 +115,7 @@ pub(super) fn handle(
             }
             Some(Action::OpenGitLog) => {
                 let state = &mut global_data.state;
-                let id = state.next_git_log_id;
-                state.next_git_log_id += 1;
+                let id = state.next_id();
                 state.git_logs.insert(id, GitLogWindowState::default());
                 crate::tui::focus::focus_window(state, Window::GitLog(id));
                 let main_tx = global_data.main_thread_channel_sender.clone();

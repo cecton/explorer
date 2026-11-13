@@ -445,23 +445,14 @@ pub struct AppState {
     pub saved_theme: crate::tui::theme::HelixTheme,
     /// Terminal panes keyed by their unique ID.
     pub terminal_panes: HashMap<usize, Arc<parking_lot::Mutex<TerminalPane>>>,
-    /// Next available terminal pane ID.
-    pub next_terminal_id: usize,
     /// Terminal windows restored from the session that still need a PTY spawned.
     pub pending_terminals: HashMap<usize, crate::tui::session::TerminalRestoreInfo>,
     /// Git log windows keyed by their unique ID.
     pub git_logs: HashMap<usize, GitLogWindowState>,
-    /// Next available git log window ID.
-    pub next_git_log_id: usize,
     /// Cached flat list of all branches and tags for the branch picker.
     pub git_refs: Option<Arc<Vec<crate::git::GitRef>>>,
-    /// Git log windows restored from the session that still need a log loaded:
-    /// (window id, branch ref, search query).
-    pub pending_git_logs: Vec<usize>,
     /// Loaded commit diffs keyed by commit object id.
     pub commit_diffs: HashMap<[u8; 20], CommitDiffState>,
-    /// Commit-diff windows restored from the session that still need a diff loaded.
-    pub pending_diffs: Vec<[u8; 20]>,
     /// Maps editor terminal IDs back to the FileKey they should restore on exit.
     pub terminal_to_preview: HashMap<usize, crate::loader::FileKey>,
     /// Agent conversation tree, shared with the background task that loads it.
@@ -469,8 +460,6 @@ pub struct AppState {
     pub tree_view: TreeViewState,
     /// Discussion windows keyed by their unique ID.
     pub discussions: HashMap<usize, DiscussionState>,
-    /// Next available discussion window ID.
-    pub next_discussion_id: usize,
     /// Highlights of the nodes shown in Discussion windows, by node.
     pub discussion_highlights: HashMap<crate::conversation::NodeId, NodeHighlights>,
     /// Endpoints, tokens and agent settings from `config.kdl` and `auth.kdl`.
@@ -486,8 +475,8 @@ pub struct AppState {
     /// Markdown shown in the report windows, by window id. In memory only: a report is not
     /// saved, and leaves nothing behind when its window closes.
     pub reports: HashMap<usize, ReportState>,
-    /// Next available report window ID.
-    pub next_report_id: usize,
+    /// Next id of a terminal, git log, discussion or report window; see `next_id`.
+    pub next_window_id: usize,
     /// Model last picked during this run, offered to new conversations.
     pub last_picked_model: Option<crate::model_spec::ModelSpec>,
     /// Model Picker entries are indexes into `models.specs`.
@@ -538,6 +527,14 @@ pub struct AppState {
 }
 
 impl AppState {
+    /// A fresh id for a terminal, git log, discussion or report window. Windows are
+    /// keyed by their `Window` variant, so the kinds share one counter.
+    pub fn next_id(&mut self) -> usize {
+        let id = self.next_window_id;
+        self.next_window_id += 1;
+        id
+    }
+
     pub fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
     }
@@ -654,26 +651,21 @@ impl AppState {
             theme,
             saved_theme,
             terminal_panes: HashMap::new(),
-            next_terminal_id: 0,
             pending_terminals: HashMap::new(),
             git_logs: HashMap::new(),
-            next_git_log_id: 0,
             git_refs: None,
-            pending_git_logs: Vec::new(),
             commit_diffs: HashMap::new(),
-            pending_diffs: Vec::new(),
             terminal_to_preview: HashMap::new(),
             conversations: Arc::default(),
             tree_view: TreeViewState::default(),
             discussions: HashMap::new(),
-            next_discussion_id: 0,
             discussion_highlights: HashMap::new(),
             agent: Arc::default(),
             models: ModelCatalog::default(),
             usage: HashMap::new(),
             mcp_servers: Vec::new(),
             reports: HashMap::new(),
-            next_report_id: 0,
+            next_window_id: 0,
             mcp,
             last_picked_model: None,
             model_picker: FuzzyPickerState::default(),

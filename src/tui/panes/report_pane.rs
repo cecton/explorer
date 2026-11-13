@@ -101,11 +101,7 @@ impl ReportComponent {
             });
         let id = match existing {
             Some(id) => id,
-            None => {
-                let id = state.next_report_id;
-                state.next_report_id += 1;
-                id
-            }
+            None => state.next_id(),
         };
         let window = Window::Report(id);
         crate::tui::focus::focus_window(state, window);

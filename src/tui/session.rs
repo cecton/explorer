@@ -2,16 +2,10 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
-pub const SESSION_VERSION: u32 = 4;
-
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, Default, serde::Serialize, serde::Deserialize)]
 pub struct Session {
     #[serde(default)]
-    pub version: u32,
-    #[serde(default)]
-    pub repo_root: camino::Utf8PathBuf,
-    #[serde(default)]
-    pub panes: Vec<PaneEntry>,
+    pub panes: Vec<PaneRecord>,
     #[serde(default)]
     pub highlight_ranges: HashMap<String, Vec<(usize, usize)>>,
     #[serde(default)]
@@ -56,41 +50,39 @@ pub struct SessionSymbolGroup {
     pub color: [u8; 3],
 }
 
+/// One window of the saved stack: its size, and what it shows.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct PaneRecord {
+    pub pane_size: crate::tui::pane_manager::PaneSize,
+    #[serde(flatten)]
+    pub entry: PaneEntry,
+}
+
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind")]
 pub enum PaneEntry {
     #[serde(rename = "file_preview")]
-    FilePreview {
-        path: String,
-        scroll: usize,
-        pane_size: SerializablePaneSize,
-    },
+    FilePreview { path: String, scroll: usize },
 
     #[serde(rename = "terminal")]
     Terminal {
         command: Option<String>,
         cwd: camino::Utf8PathBuf,
         is_command_pane: bool,
-        pane_size: SerializablePaneSize,
     },
 
     #[serde(rename = "git_log")]
     GitLog {
-        id: usize,
         source: crate::tui::state::LogSource,
         query: String,
         scroll: usize,
-        pane_size: SerializablePaneSize,
     },
 
     #[serde(rename = "commit_diff")]
-    CommitDiff {
-        hash: String,
-        pane_size: SerializablePaneSize,
-    },
+    CommitDiff { hash: String },
 
     #[serde(rename = "conversation_tree")]
-    ConversationTree { pane_size: SerializablePaneSize },
+    ConversationTree,
 
     #[serde(rename = "discussion")]
     Discussion {
@@ -101,17 +93,7 @@ pub enum PaneEntry {
         agent: Option<u32>,
         #[serde(default)]
         draft: String,
-        pane_size: SerializablePaneSize,
     },
-}
-
-#[derive(Clone, Copy, Debug, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum SerializablePaneSize {
-    Full,
-    Half,
-    Third,
-    Quarter,
 }
 
 #[derive(Clone, Debug)]
@@ -121,37 +103,14 @@ pub struct TerminalRestoreInfo {
     pub is_command_pane: bool,
 }
 
-impl From<crate::tui::pane_manager::PaneSize> for SerializablePaneSize {
-    fn from(value: crate::tui::pane_manager::PaneSize) -> Self {
-        use crate::tui::pane_manager::PaneSize;
-        match value {
-            PaneSize::Full => Self::Full,
-            PaneSize::Half => Self::Half,
-            PaneSize::Third => Self::Third,
-            PaneSize::Quarter => Self::Quarter,
-        }
-    }
-}
-
-impl From<SerializablePaneSize> for crate::tui::pane_manager::PaneSize {
-    fn from(value: SerializablePaneSize) -> Self {
-        match value {
-            SerializablePaneSize::Full => Self::Full,
-            SerializablePaneSize::Half => Self::Half,
-            SerializablePaneSize::Third => Self::Third,
-            SerializablePaneSize::Quarter => Self::Quarter,
-        }
-    }
-}
-
 impl Session {
     pub fn from_state(state: &crate::tui::state::AppState) -> Self {
         let snapshot = state.files.load();
-        let panes: Vec<PaneEntry> = state
+        let panes: Vec<PaneRecord> = state
             .pane_manager
             .window_stack
             .iter()
-            .filter_map(|window| pane_entry_from_window(window, &snapshot, state))
+            .filter_map(|window| pane_record_from_window(window, &snapshot, state))
             .collect();
 
         let mut highlight_ranges = HashMap::new();
@@ -195,8 +154,6 @@ impl Session {
             .collect();
 
         Self {
-            version: SESSION_VERSION,
-            repo_root: state.root.clone(),
             panes,
             highlight_ranges,
             symbol_highlights,
@@ -221,16 +178,6 @@ impl Session {
         use crate::tui::state::SymbolHighlightGroup;
         use crate::tui::theme::HelixTheme;
         use crate::tui::widgets::input_line::InputLine;
-        let canon = |p: &camino::Utf8Path| -> camino::Utf8PathBuf {
-            std::fs::canonicalize(p)
-                .ok()
-                .and_then(|c| camino::Utf8PathBuf::from_path_buf(c).ok())
-                .unwrap_or_else(|| p.to_owned())
-        };
-        if canon(&self.repo_root) != canon(&state.root) {
-            return;
-        }
-
         state.cargo_features = self.cargo_features.clone();
 
         if let Some(name) = &self.theme
@@ -242,8 +189,8 @@ impl Session {
 
         let mut missing_paths: Vec<camino::Utf8PathBuf> = Vec::new();
         let snapshot_before = state.files.load();
-        for entry in &self.panes {
-            if let PaneEntry::FilePreview { path, .. } = entry {
+        for record in &self.panes {
+            if let PaneEntry::FilePreview { path, .. } = &record.entry {
                 let abs = state.root.join(path);
                 if crate::loader::file_key_for_path(&snapshot_before, &abs).is_none() {
                     missing_paths.push(abs);
@@ -264,48 +211,30 @@ impl Session {
         let mut new_stack = Vec::new();
         let mut new_states = HashMap::new();
 
-        for entry in self.panes {
-            match entry {
-                PaneEntry::FilePreview {
-                    path,
-                    scroll,
-                    pane_size,
-                } => {
+        for PaneRecord { pane_size, entry } in self.panes {
+            let mut window_state = WindowState {
+                pane_size,
+                ..Default::default()
+            };
+            let window = match entry {
+                PaneEntry::FilePreview { path, scroll } => {
                     let abs = state.root.join(&path);
-                    if let Some(key) = crate::loader::file_key_for_path(&snapshot_after, &abs) {
-                        snapshot_after[key.0]
-                            .needs_full_load
-                            .store(true, Ordering::Relaxed);
-                        let window = Window::FilePreview(key);
-                        new_stack.push(window);
-                        new_states.insert(
-                            window,
-                            WindowState {
-                                scroll,
-                                pane_size: pane_size.into(),
-                                ..Default::default()
-                            },
-                        );
-                    }
+                    let Some(key) = crate::loader::file_key_for_path(&snapshot_after, &abs) else {
+                        continue;
+                    };
+                    snapshot_after[key.0]
+                        .needs_full_load
+                        .store(true, Ordering::Relaxed);
+                    window_state.scroll = scroll;
+                    Window::FilePreview(key)
                 }
 
                 PaneEntry::Terminal {
                     command,
                     cwd,
                     is_command_pane,
-                    pane_size,
                 } => {
-                    let id = state.next_terminal_id;
-                    state.next_terminal_id += 1;
-                    let window = Window::Terminal(id);
-                    new_stack.push(window);
-                    new_states.insert(
-                        window,
-                        WindowState {
-                            pane_size: pane_size.into(),
-                            ..Default::default()
-                        },
-                    );
+                    let id = state.next_id();
                     state.pending_terminals.insert(
                         id,
                         TerminalRestoreInfo {
@@ -314,28 +243,17 @@ impl Session {
                             is_command_pane,
                         },
                     );
+                    Window::Terminal(id)
                 }
 
                 PaneEntry::GitLog {
-                    id,
                     source,
                     query,
                     scroll,
-                    pane_size,
                 } => {
-                    let window = Window::GitLog(id);
-                    new_stack.push(window);
-                    new_states.insert(
-                        window,
-                        WindowState {
-                            scroll,
-                            pane_size: pane_size.into(),
-                            ..Default::default()
-                        },
-                    );
-                    state.next_git_log_id = state.next_git_log_id.max(id.saturating_add(1));
+                    let id = state.next_id();
                     let mut win = GitLogWindowState {
-                        source: source.clone(),
+                        source,
                         query: InputLine::with_text(query.as_str()),
                         ..Default::default()
                     };
@@ -343,57 +261,24 @@ impl Session {
                         crate::tui::panes::git_log_pane::apply_filter(&mut win);
                     }
                     state.git_logs.insert(id, win);
-                    state.pending_git_logs.push(id);
+                    window_state.scroll = scroll;
+                    Window::GitLog(id)
                 }
 
-                PaneEntry::CommitDiff { hash, pane_size } => {
+                PaneEntry::CommitDiff { hash } => {
                     let Ok(bytes) = hex::decode(&hash) else {
                         continue;
                     };
                     let Ok(id) = <[u8; 20]>::try_from(bytes.as_slice()) else {
                         continue;
                     };
-                    let window = Window::CommitDiff(id);
-                    new_stack.push(window);
-                    new_states.insert(
-                        window,
-                        WindowState {
-                            pane_size: pane_size.into(),
-                            ..Default::default()
-                        },
-                    );
-                    state.pending_diffs.push(id);
+                    Window::CommitDiff(id)
                 }
 
-                PaneEntry::ConversationTree { pane_size } => {
-                    let window = Window::ConversationTree;
-                    new_stack.push(window);
-                    new_states.insert(
-                        window,
-                        WindowState {
-                            pane_size: pane_size.into(),
-                            ..Default::default()
-                        },
-                    );
-                }
+                PaneEntry::ConversationTree => Window::ConversationTree,
 
-                PaneEntry::Discussion {
-                    node,
-                    agent,
-                    draft,
-                    pane_size,
-                } => {
-                    let id = state.next_discussion_id;
-                    state.next_discussion_id += 1;
-                    let window = Window::Discussion(id);
-                    new_stack.push(window);
-                    new_states.insert(
-                        window,
-                        WindowState {
-                            pane_size: pane_size.into(),
-                            ..Default::default()
-                        },
-                    );
+                PaneEntry::Discussion { node, agent, draft } => {
+                    let id = state.next_id();
                     state.discussions.insert(
                         id,
                         DiscussionState {
@@ -404,8 +289,11 @@ impl Session {
                             ..Default::default()
                         },
                     );
+                    Window::Discussion(id)
                 }
-            }
+            };
+            new_stack.push(window);
+            new_states.insert(window, window_state);
         }
 
         state.tree_view.expanded = self
@@ -468,11 +356,11 @@ impl Session {
     }
 }
 
-fn pane_entry_from_window(
+fn pane_record_from_window(
     window: &crate::tui::pane_manager::Window,
     files: &[Arc<crate::loader::LoadedFile>],
     state: &crate::tui::state::AppState,
-) -> Option<PaneEntry> {
+) -> Option<PaneRecord> {
     use crate::tui::pane_manager::Window;
     let root = &state.root;
     let window_state = state
@@ -481,73 +369,68 @@ fn pane_entry_from_window(
         .get(window)
         .cloned()
         .unwrap_or_default();
-    match window {
+    let entry = match window {
         Window::FilePreview(key) => {
             let path = crate::loader::path_for_file_key(files, *key)?;
             let rel = path.strip_prefix(root).ok()?;
-            Some(PaneEntry::FilePreview {
+            PaneEntry::FilePreview {
                 path: rel.to_string(),
                 scroll: window_state.scroll,
-                pane_size: window_state.pane_size.into(),
-            })
+            }
         }
         // A report is read and gone: it is never part of the session.
         Window::WindowPicker | Window::ThemePicker | Window::ModelPicker | Window::Report(_) => {
-            None
+            return None;
         }
         Window::GitLog(id) => {
             let win = state.git_logs.get(id)?;
-            Some(PaneEntry::GitLog {
-                id: *id,
+            PaneEntry::GitLog {
                 source: win.source.clone(),
                 query: win.query.text().to_string(),
                 scroll: window_state.scroll,
-                pane_size: window_state.pane_size.into(),
-            })
+            }
         }
-        Window::CommitDiff(id) => Some(PaneEntry::CommitDiff {
+        Window::CommitDiff(id) => PaneEntry::CommitDiff {
             hash: hex::encode(id),
-            pane_size: window_state.pane_size.into(),
-        }),
-        Window::ConversationTree => Some(PaneEntry::ConversationTree {
-            pane_size: window_state.pane_size.into(),
-        }),
+        },
+        Window::ConversationTree => PaneEntry::ConversationTree,
         Window::Discussion(id) => {
             let discussion = state.discussions.get(id)?;
-            Some(PaneEntry::Discussion {
+            PaneEntry::Discussion {
                 node: discussion
                     .node
                     .as_ref()
                     .map(|node| node.as_str().to_string()),
                 agent: discussion.agent,
                 draft: discussion.draft.text().to_string(),
-                pane_size: window_state.pane_size.into(),
-            })
+            }
         }
-        Window::Terminal(id) => {
+        Window::Terminal(id) => 'terminal: {
             // Editor terminals save as FilePreview so restore brings back the preview.
             if let Some(file_key) = state.terminal_to_preview.get(id)
                 && let Some(path) = crate::loader::path_for_file_key(files, *file_key)
                 && let Ok(rel) = path.strip_prefix(root)
             {
-                return Some(PaneEntry::FilePreview {
+                break 'terminal PaneEntry::FilePreview {
                     path: rel.to_string(),
                     scroll: 0,
-                    pane_size: window_state.pane_size.into(),
-                });
+                };
             }
             let pane = state.terminal_panes.get(id)?.lock();
             if pane.exited {
                 return None;
             }
-            Some(PaneEntry::Terminal {
+            PaneEntry::Terminal {
                 command: pane.command.clone(),
                 cwd: pane.cwd.clone(),
                 is_command_pane: pane.is_command_pane,
-                pane_size: window_state.pane_size.into(),
-            })
+            }
         }
-    }
+    };
+    Some(PaneRecord {
+        pane_size: window_state.pane_size,
+        entry,
+    })
 }
 
 #[derive(Debug)]
@@ -584,14 +467,6 @@ pub fn load_session(repo_root: &camino::Utf8Path) -> Option<Session> {
             return None;
         }
     };
-    if session.version > SESSION_VERSION {
-        tracing::debug!(
-            "session version too new ({} > {}), discarding",
-            session.version,
-            SESSION_VERSION
-        );
-        return None;
-    }
     Some(session)
 }
 
@@ -672,19 +547,21 @@ mod tests {
     fn session_serialization_round_trip() {
         use crate::config::CargoFeatureSelection;
         let session = Session {
-            version: SESSION_VERSION,
-            repo_root: Utf8PathBuf::from("/tmp/repo"),
             panes: vec![
-                PaneEntry::FilePreview {
-                    path: "src/main.rs".to_string(),
-                    scroll: 5,
-                    pane_size: SerializablePaneSize::Half,
+                PaneRecord {
+                    pane_size: PaneSize::Half,
+                    entry: PaneEntry::FilePreview {
+                        path: "src/main.rs".to_string(),
+                        scroll: 5,
+                    },
                 },
-                PaneEntry::Terminal {
-                    command: Some("cargo test".to_string()),
-                    cwd: Utf8PathBuf::from("/tmp/repo"),
-                    is_command_pane: true,
-                    pane_size: SerializablePaneSize::Quarter,
+                PaneRecord {
+                    pane_size: PaneSize::Quarter,
+                    entry: PaneEntry::Terminal {
+                        command: Some("cargo test".to_string()),
+                        cwd: Utf8PathBuf::from("/tmp/repo"),
+                        is_command_pane: true,
+                    },
                 },
             ],
             highlight_ranges: {
@@ -724,8 +601,6 @@ mod tests {
         // Older session files (or any writer that omits the field) must still load,
         // defaulting to no persisted symbol highlights.
         let json = serde_json::json!({
-            "version": SESSION_VERSION,
-            "repo_root": "/tmp/repo",
             "panes": [],
             "highlight_ranges": {},
         });
@@ -777,12 +652,12 @@ mod tests {
         let kinds: Vec<_> = session
             .panes
             .iter()
-            .map(|entry| match entry {
+            .map(|record| match record.entry {
                 PaneEntry::FilePreview { .. } => "file_preview",
                 PaneEntry::Terminal { .. } => "terminal",
                 PaneEntry::GitLog { .. } => "git_log",
                 PaneEntry::CommitDiff { .. } => "commit_diff",
-                PaneEntry::ConversationTree { .. } => "conversation_tree",
+                PaneEntry::ConversationTree => "conversation_tree",
                 PaneEntry::Discussion { .. } => "discussion",
             })
             .collect();
@@ -790,14 +665,13 @@ mod tests {
 
         assert!(matches!(
             session.panes[0],
-            PaneEntry::FilePreview {
-                path: _,
-                scroll: 3,
-                pane_size: SerializablePaneSize::Half,
+            PaneRecord {
+                pane_size: PaneSize::Half,
+                entry: PaneEntry::FilePreview { path: _, scroll: 3 }
             }
         ));
         assert!(matches!(
-            session.panes[1],
+            session.panes[1].entry,
             PaneEntry::Terminal {
                 command: Some(_),
                 ..
@@ -807,17 +681,16 @@ mod tests {
 
     #[test]
     fn session_apply_creates_stubs_and_restores_highlights() {
-        use crate::config::CargoFeatureSelection;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
 
         let session = Session {
-            version: SESSION_VERSION,
-            repo_root: root.clone(),
-            panes: vec![PaneEntry::FilePreview {
-                path: "missing.rs".to_string(),
-                scroll: 0,
-                pane_size: SerializablePaneSize::Full,
+            panes: vec![PaneRecord {
+                pane_size: PaneSize::Full,
+                entry: PaneEntry::FilePreview {
+                    path: "missing.rs".to_string(),
+                    scroll: 0,
+                },
             }],
             highlight_ranges: {
                 let mut m = HashMap::new();
@@ -825,14 +698,7 @@ mod tests {
                 m
             },
             symbol_highlights: Vec::new(),
-            cargo_features: CargoFeatureSelection::default(),
-            theme: None,
-            conversation_expanded: Vec::new(),
-            conversation_query: String::new(),
-            discussion_highlights: HashMap::new(),
-            mcp_servers: Vec::new(),
-            aliases: Vec::new(),
-            trusted: false,
+            ..Default::default()
         };
 
         session.apply(&mut state);
@@ -858,7 +724,6 @@ mod tests {
 
     #[test]
     fn session_apply_batches_stubs_so_multiple_missing_files_get_distinct_keys() {
-        use crate::config::CargoFeatureSelection;
         use crate::loader::LoadedFile;
         use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
@@ -875,30 +740,23 @@ mod tests {
         // Session has two missing-file previews whose paths sort differently
         // from the order they appear in the session.
         let session = Session {
-            version: SESSION_VERSION,
-            repo_root: root.clone(),
             panes: vec![
-                PaneEntry::FilePreview {
-                    path: "missing_x.rs".to_string(),
-                    scroll: 0,
-                    pane_size: SerializablePaneSize::Half,
+                PaneRecord {
+                    pane_size: PaneSize::Half,
+                    entry: PaneEntry::FilePreview {
+                        path: "missing_x.rs".to_string(),
+                        scroll: 0,
+                    },
                 },
-                PaneEntry::FilePreview {
-                    path: "missing_a.rs".to_string(),
-                    scroll: 10,
-                    pane_size: SerializablePaneSize::Half,
+                PaneRecord {
+                    pane_size: PaneSize::Half,
+                    entry: PaneEntry::FilePreview {
+                        path: "missing_a.rs".to_string(),
+                        scroll: 10,
+                    },
                 },
             ],
-            highlight_ranges: HashMap::new(),
-            symbol_highlights: Vec::new(),
-            cargo_features: CargoFeatureSelection::default(),
-            theme: None,
-            conversation_expanded: Vec::new(),
-            conversation_query: String::new(),
-            discussion_highlights: HashMap::new(),
-            mcp_servers: Vec::new(),
-            aliases: Vec::new(),
-            trusted: false,
+            ..Default::default()
         };
 
         session.apply(&mut state);
@@ -926,29 +784,19 @@ mod tests {
 
     #[test]
     fn session_apply_stores_terminal_restore_infos() {
-        use crate::config::CargoFeatureSelection;
         let (_dir, root) = temp_root();
         let mut state = empty_state(root.clone());
 
         let session = Session {
-            version: SESSION_VERSION,
-            repo_root: root.clone(),
-            panes: vec![PaneEntry::Terminal {
-                command: Some("cargo test".to_string()),
-                cwd: root.clone(),
-                is_command_pane: true,
-                pane_size: SerializablePaneSize::Quarter,
+            panes: vec![PaneRecord {
+                pane_size: PaneSize::Quarter,
+                entry: PaneEntry::Terminal {
+                    command: Some("cargo test".to_string()),
+                    cwd: root.clone(),
+                    is_command_pane: true,
+                },
             }],
-            highlight_ranges: HashMap::new(),
-            symbol_highlights: Vec::new(),
-            cargo_features: CargoFeatureSelection::default(),
-            theme: None,
-            conversation_expanded: Vec::new(),
-            conversation_query: String::new(),
-            discussion_highlights: HashMap::new(),
-            mcp_servers: Vec::new(),
-            aliases: Vec::new(),
-            trusted: false,
+            ..Default::default()
         };
 
         session.apply(&mut state);
@@ -961,47 +809,7 @@ mod tests {
     }
 
     #[test]
-    fn session_apply_skips_when_repo_root_mismatches() {
-        use crate::config::CargoFeatureSelection;
-        let (_dir_a, root_a) = temp_root();
-        let (_dir_b, root_b) = temp_root();
-        let mut state = empty_state(root_b.clone());
-
-        let session = Session {
-            version: SESSION_VERSION,
-            repo_root: root_a,
-            panes: vec![PaneEntry::FilePreview {
-                path: "src/main.rs".to_string(),
-                scroll: 10,
-                pane_size: SerializablePaneSize::Half,
-            }],
-            highlight_ranges: HashMap::new(),
-            symbol_highlights: Vec::new(),
-            cargo_features: CargoFeatureSelection::default(),
-            theme: None,
-            conversation_expanded: Vec::new(),
-            conversation_query: String::new(),
-            discussion_highlights: HashMap::new(),
-            mcp_servers: Vec::new(),
-            aliases: Vec::new(),
-            trusted: false,
-        };
-
-        session.apply(&mut state);
-
-        assert_eq!(state.pane_manager.window_stack.len(), 1);
-        assert!(matches!(
-            state.pane_manager.window_stack[0],
-            Window::WindowPicker
-        ));
-        assert!(state.highlight_ranges.is_empty());
-        assert!(state.pending_terminals.is_empty());
-        assert!(state.symbol_highlights.is_empty());
-    }
-
-    #[test]
     fn session_apply_restores_symbol_groups() {
-        use crate::config::CargoFeatureSelection;
         use crate::loader::LoadedFile;
         use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
@@ -1023,10 +831,6 @@ mod tests {
         );
 
         let session = Session {
-            version: SESSION_VERSION,
-            repo_root: root.clone(),
-            panes: Vec::new(),
-            highlight_ranges: HashMap::new(),
             symbol_highlights: vec![
                 SessionSymbolGroup {
                     origin_path: "src/util.rs".to_string(),
@@ -1048,14 +852,7 @@ mod tests {
                     color: [100, 200, 255],
                 },
             ],
-            cargo_features: CargoFeatureSelection::default(),
-            theme: None,
-            conversation_expanded: Vec::new(),
-            conversation_query: String::new(),
-            discussion_highlights: HashMap::new(),
-            mcp_servers: Vec::new(),
-            aliases: Vec::new(),
-            trusted: false,
+            ..Default::default()
         };
 
         session.apply(&mut state);
@@ -1159,10 +956,10 @@ mod tests {
         // An older session file that predates the flag loads as untrusted.
         let path = session_file_path(&root).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, format!("{{\"version\": {}}}", SESSION_VERSION - 1)).unwrap();
+        std::fs::write(&path, "{}").unwrap();
         let mut old = empty_state(root);
         load_session(&old.root)
-            .expect("older version must load")
+            .expect("an older file must load")
             .apply(&mut old);
         assert!(!old.trusted);
         let _ = std::fs::remove_file(&path);
@@ -1227,21 +1024,20 @@ mod tests {
         );
 
         let session = Session::from_state(&state);
-        assert_eq!(session.version, SESSION_VERSION);
         let kinds: Vec<_> = session
             .panes
             .iter()
-            .map(|entry| match entry {
+            .map(|record| match record.entry {
                 PaneEntry::FilePreview { .. } => "file_preview",
                 PaneEntry::Terminal { .. } => "terminal",
                 PaneEntry::GitLog { .. } => "git_log",
                 PaneEntry::CommitDiff { .. } => "commit_diff",
-                PaneEntry::ConversationTree { .. } => "conversation_tree",
+                PaneEntry::ConversationTree => "conversation_tree",
                 PaneEntry::Discussion { .. } => "discussion",
             })
             .collect();
         assert_eq!(kinds, vec!["commit_diff"]);
-        let PaneEntry::CommitDiff { hash, .. } = &session.panes[0] else {
+        let PaneEntry::CommitDiff { hash } = &session.panes[0].entry else {
             panic!("expected commit_diff entry");
         };
         assert_eq!(hash, &hex::encode([0x42u8; 20]));
@@ -1252,7 +1048,6 @@ mod tests {
             restored.pane_manager.window_stack,
             vec![Window::CommitDiff(id)]
         );
-        assert_eq!(restored.pending_diffs, vec![id]);
     }
 
     #[test]
@@ -1277,30 +1072,25 @@ mod tests {
             ..Default::default()
         };
         state.git_logs.insert(7, win);
-        state.next_git_log_id = 8;
 
         let session = Session::from_state(&state);
         let PaneEntry::GitLog {
-            id,
             source,
             query,
             scroll,
-            ..
-        } = &session.panes[0]
+        } = &session.panes[0].entry
         else {
             panic!("expected git_log entry");
         };
-        assert_eq!(id, &7);
         assert_eq!(source, &LogSource::Branch("origin/main".to_string()));
         assert_eq!(query, "fix:");
         assert_eq!(scroll, &4);
 
         let mut restored = empty_state(root.clone());
         session.apply(&mut restored);
-        assert_eq!(restored.pane_manager.window_stack, vec![Window::GitLog(7)]);
-        assert_eq!(restored.next_git_log_id, 8);
-        assert_eq!(restored.pending_git_logs, vec![7]);
-        let restored_win = restored.git_logs.get(&7).expect("window state");
+        // The window takes a fresh id: the saved one means nothing to the new run.
+        assert_eq!(restored.pane_manager.window_stack, vec![Window::GitLog(0)]);
+        let restored_win = restored.git_logs.get(&0).expect("window state");
         assert_eq!(
             restored_win.source,
             LogSource::Branch("origin/main".to_string())
@@ -1351,35 +1141,10 @@ mod tests {
         assert_eq!(parsed.panes.len(), 1);
         assert!(matches!(
             &parsed.panes[0],
-            PaneEntry::FilePreview { path, .. } if path == "src/main.rs",
+            PaneRecord { entry: PaneEntry::FilePreview { path, .. }, .. } if path == "src/main.rs",
         ));
 
         // Clean up.
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn load_session_accepts_older_versions() {
-        let (_dir, root) = temp_root();
-        let path = session_file_path(&root).unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, format!("{{\"version\": {}}}", SESSION_VERSION - 1)).unwrap();
-
-        let session = load_session(&root).expect("older version must load");
-        assert_eq!(session.version, SESSION_VERSION - 1);
-
-        let _ = std::fs::remove_file(&path);
-    }
-
-    #[test]
-    fn load_session_discards_newer_versions() {
-        let (_dir, root) = temp_root();
-        let path = session_file_path(&root).unwrap();
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
-        std::fs::write(&path, format!("{{\"version\": {}}}", SESSION_VERSION + 1)).unwrap();
-
-        assert!(load_session(&root).is_none());
-
         let _ = std::fs::remove_file(&path);
     }
 }

@@ -159,8 +159,7 @@ impl DiscussionComponent {
                 crate::tui::panes::discussion::launch::node_model(source),
             )
         };
-        let id = state.next_discussion_id;
-        state.next_discussion_id += 1;
+        let id = state.next_id();
         state.discussions.insert(
             id,
             DiscussionState {
@@ -193,8 +192,7 @@ impl DiscussionComponent {
             })
             .map(|(id, _)| *id);
         let id = existing.unwrap_or_else(|| {
-            let id = state.next_discussion_id;
-            state.next_discussion_id += 1;
+            let id = state.next_id();
             let model = {
                 let tree = state.conversations.read();
                 match agent {
@@ -248,8 +246,7 @@ impl DiscussionComponent {
     /// Opens a window for a new conversation, offering the model last picked.
     pub(crate) fn open_new_root(state: &mut crate::tui::state::AppState) {
         use crate::tui::state::DiscussionState;
-        let id = state.next_discussion_id;
-        state.next_discussion_id += 1;
+        let id = state.next_id();
         state.discussions.insert(
             id,
             DiscussionState {

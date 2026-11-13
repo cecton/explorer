@@ -40,11 +40,7 @@ pub(crate) fn open(
     throws_with_return!({
         let state = &mut global_data.state;
         let restore = id.is_some();
-        let id = id.unwrap_or_else(|| {
-            let id = state.next_terminal_id;
-            state.next_terminal_id += 1;
-            id
-        });
+        let id = id.unwrap_or_else(|| state.next_id());
 
         let window_size = global_data.window_size;
         // Start with the full window width; the first render will resize to

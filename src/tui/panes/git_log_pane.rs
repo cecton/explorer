@@ -39,32 +39,42 @@ impl GitLogPaneComponent {
         main_tx: crate::signal::MainTx,
         id: [u8; 20],
     ) {
-        use crate::signal::AppSignal;
         use crate::tui::pane_manager::Window;
-        use crate::tui::state::CommitDiffState;
-        if let std::collections::hash_map::Entry::Vacant(slot) = state.commit_diffs.entry(id) {
-            slot.insert(CommitDiffState::default());
-            match state.repo.clone() {
-                Some(repo) => {
-                    tokio::task::spawn_blocking(move || {
-                        let result = crate::git::load_commit_diff(&repo, id)
-                            .map(|text| Arc::new(crate::git::classify_diff(&text)));
-                        crate::signal::send(&main_tx, AppSignal::CommitDiffLoaded { id, result });
-                    });
-                }
-                None => {
-                    crate::signal::send(
-                        &main_tx,
-                        AppSignal::CommitDiffLoaded {
-                            id,
-                            result: Err("open repository: not a git repository".to_string()),
-                        },
-                    );
-                }
-            }
-        }
+        Self::load_commit_diff(state, main_tx, id);
         crate::tui::focus::focus_window(state, Window::CommitDiff(id));
         state.mark_session_dirty();
+    }
+
+    /// Starts loading the diff of commit `id` unless it is loaded or loading.
+    pub(crate) fn load_commit_diff(
+        state: &mut crate::tui::state::AppState,
+        main_tx: crate::signal::MainTx,
+        id: [u8; 20],
+    ) {
+        use crate::signal::AppSignal;
+        use crate::tui::state::CommitDiffState;
+        let std::collections::hash_map::Entry::Vacant(slot) = state.commit_diffs.entry(id) else {
+            return;
+        };
+        slot.insert(CommitDiffState::default());
+        match state.repo.clone() {
+            Some(repo) => {
+                tokio::task::spawn_blocking(move || {
+                    let result = crate::git::load_commit_diff(&repo, id)
+                        .map(|text| Arc::new(crate::git::classify_diff(&text)));
+                    crate::signal::send(&main_tx, AppSignal::CommitDiffLoaded { id, result });
+                });
+            }
+            None => {
+                crate::signal::send(
+                    &main_tx,
+                    AppSignal::CommitDiffLoaded {
+                        id,
+                        result: Err("open repository: not a git repository".to_string()),
+                    },
+                );
+            }
+        }
     }
 
     /// Opens a git log window showing the history starting at `hash`: a new one,
@@ -89,8 +99,7 @@ impl GitLogPaneComponent {
         let id = match existing {
             Some(id) => id,
             None => {
-                let id = state.next_git_log_id;
-                state.next_git_log_id += 1;
+                let id = state.next_id();
                 state.git_logs.insert(id, GitLogWindowState::default());
                 let source = LogSource::Commit(hash);
                 state.git_logs.get_mut(&id).expect("inserted above").source = source.clone();
