@@ -286,22 +286,14 @@ fn usize_arg(args: &serde_json::Value, key: &str) -> Option<usize> {
 }
 
 fn format_markdown(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
-    let relatives = match args.get("paths").and_then(serde_json::Value::as_array) {
-        Some(paths) if !paths.is_empty() => paths
+    let paths = match args.get("paths").and_then(serde_json::Value::as_array) {
+        Some(paths) => paths
             .iter()
-            .map(|path| {
-                let path = path.as_str().ok_or("`paths` holds a non-string")?;
-                let resolved = crate::util::fs::resolve_in(root, path)?;
-                resolved
-                    .strip_prefix(root)
-                    .map(camino::Utf8Path::to_path_buf)
-                    .map_err(|_| format!("{path} is outside the repository"))
-            })
-            .collect::<Result<Vec<camino::Utf8PathBuf>, String>>()?,
-        _ => crate::git::working_tree_changes(root)?,
+            .map(|path| path.as_str().ok_or("`paths` holds a non-string"))
+            .collect::<Result<Vec<&str>, _>>()?,
+        None => Vec::new(),
     };
-    let relatives = crate::markdown_format::expand_directories(root, relatives)?;
-    let changed = crate::markdown_format::format_files(root, &relatives)?;
+    let changed = crate::markdown_format::format_paths(root, &paths)?;
     if changed.is_empty() {
         Ok("nothing to format".to_string())
     } else {

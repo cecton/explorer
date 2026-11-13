@@ -32,30 +32,20 @@ fn print_ignoring_broken_pipe(text: &str) -> std::io::Result<()> {
 
 /// The `fmt-md` subcommand: prints the paths it rewrote and returns the exit code.
 fn fmt_md(root: &camino::Utf8Path, paths: &[camino::Utf8PathBuf]) -> i32 {
-    let relatives = if paths.is_empty() {
-        git::working_tree_changes(root)
-    } else {
-        paths
-            .iter()
-            .map(|path| {
-                let absolute = std::env::current_dir()
-                    .map_err(|e| e.to_string())
-                    .map(|cwd| cwd.join(path))?;
-                let absolute = camino::Utf8PathBuf::from_path_buf(absolute)
-                    .map_err(|p| format!("{} is not valid UTF-8", p.display()))?;
-                // Lexically resolves `..`, so a path leaving the repository is refused.
-                let resolved = util::fs::resolve_in(root, absolute.as_str())
-                    .map_err(|_| format!("{path} is outside the repository"))?;
-                resolved
-                    .strip_prefix(root)
-                    .map(|relative| relative.to_path_buf())
-                    .map_err(|_| format!("{path} is outside the repository"))
-            })
-            .collect()
-    };
-    let result = relatives
-        .and_then(|relatives| markdown_format::expand_directories(root, relatives))
-        .and_then(|relatives| markdown_format::format_files(root, &relatives));
+    let result = paths
+        .iter()
+        .map(|path| {
+            let absolute = std::env::current_dir()
+                .map_err(|e| e.to_string())
+                .map(|cwd| cwd.join(path))?;
+            camino::Utf8PathBuf::from_path_buf(absolute)
+                .map_err(|p| format!("{} is not valid UTF-8", p.display()))
+        })
+        .collect::<Result<Vec<_>, String>>()
+        .and_then(|absolutes| {
+            let absolutes: Vec<&str> = absolutes.iter().map(|path| path.as_str()).collect();
+            markdown_format::format_paths(root, &absolutes)
+        });
     match result {
         Ok(changed) => {
             let lines: String = changed.iter().map(|path| format!("{path}\n")).collect();

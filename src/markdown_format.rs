@@ -39,6 +39,28 @@ pub fn expand_directories(
     Ok(expanded)
 }
 
+/// Formats the markdown of `paths` or of the working-tree changes; returns the paths rewritten.
+pub fn format_paths(
+    root: &camino::Utf8Path,
+    paths: &[&str],
+) -> Result<Vec<camino::Utf8PathBuf>, String> {
+    let relatives = if paths.is_empty() {
+        crate::git::working_tree_changes(root)?
+    } else {
+        paths
+            .iter()
+            .map(|path| {
+                let resolved = crate::util::fs::resolve_in(root, path)?;
+                resolved
+                    .strip_prefix(root)
+                    .map(camino::Utf8Path::to_path_buf)
+                    .map_err(|_| format!("{path} is outside the repository"))
+            })
+            .collect::<Result<Vec<_>, String>>()?
+    };
+    format_files(root, &expand_directories(root, relatives)?)
+}
+
 /// Formats the files in place and returns the paths rewritten; a read error writes nothing.
 pub fn format_files(
     root: &camino::Utf8Path,
@@ -305,5 +327,24 @@ mod tests {
             "| a | b |\n| - | - |\n| 1 | 2 |\n"
         );
         assert!(git(root, &["status", "--short"]).is_empty());
+    }
+
+    #[test]
+    fn format_paths_expands_directories_and_refuses_outside_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
+        git(root, &["init", "-q"]);
+        std::fs::create_dir(root.join("docs")).unwrap();
+        std::fs::write(root.join("docs/a.md"), "|a|b|\n|-|-|\n|1|2|\n").unwrap();
+        git(root, &["add", "-A"]);
+
+        let changed = format_paths(root, &["docs"]).unwrap();
+        assert_eq!(changed, [camino::Utf8PathBuf::from("docs/a.md")]);
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/a.md")).unwrap(),
+            "| a | b |\n| - | - |\n| 1 | 2 |\n"
+        );
+        let outside = format_paths(root, &["../x.md"]).unwrap_err();
+        assert!(outside.contains("outside the repository"), "{outside}");
     }
 }
