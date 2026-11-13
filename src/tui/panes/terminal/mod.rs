@@ -324,7 +324,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Termin
 
             let scrollback_len = pane.ofs_buf.get_history_len();
             let scroll_offset = pane.scroll_offset.min(scrollback_len);
-            let buffer_height = pane.ofs_buf.get_window_size().row_height.as_usize();
 
             let hl_rgb = global_data
                 .state
@@ -355,65 +354,34 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Termin
                 }
             });
 
-            let render_ops = if scroll_offset == 0 {
-                let visible_rows = pane_height.min(buffer_height);
-                let is_grabbed = global_data.state.terminal_grabbed;
+            let cursor_pos = if scroll_offset == 0 {
                 let is_active = matches!(
                     global_data.state.pane_manager.focused_window,
                     Some(Window::Terminal(focused_id)) if focused_id == id
                 );
                 let cursor_visible = pane.ofs_buf.get_parser_global_state().cursor_visibility
                     == CursorVisibilityMode::Visible
-                    && is_grabbed
+                    && global_data.state.terminal_grabbed
                     && is_active;
-                let cursor_pos = if cursor_visible {
-                    Some(pane.ofs_buf.get_active_screen_buffer().get_cursor_pos())
-                } else {
-                    None
-                };
-                let mut ops = render_ofs_buf_to_ir(&pane.ofs_buf, origin, visible_rows, cursor_pos);
-                if visible_rows < pane_height {
-                    for row_idx in visible_rows..pane_height {
-                        ops += RenderOpCommon::MoveCursorPositionRelTo(
-                            origin,
-                            vp_col(0) + vp_row(row_idx as u16),
-                        );
-                        ops += RenderOpIR::PaintTextWithAttributes(
-                            " ".repeat(pane_width).into(),
-                            None,
-                        );
-                    }
-                }
-                if let Some(rect) = selection_rect {
-                    let lines: Vec<&[PixelChar]> = (0..visible_rows)
-                        .filter_map(|r| terminal_row(&pane.ofs_buf, 0, r))
-                        .collect();
-                    overlay_selection(&mut ops, &lines, origin, rect, hl_rgb);
-                }
-                ops
+                cursor_visible.then(|| pane.ofs_buf.get_active_screen_buffer().get_cursor_pos())
             } else {
-                let lines: Vec<&[PixelChar]> = (0..pane_height)
-                    .map_while(|r| terminal_row(&pane.ofs_buf, scroll_offset, r))
-                    .collect();
-
-                let mut ops = render_lines_to_ir(&lines, origin, None);
-                if lines.len() < pane_height {
-                    for row_idx in lines.len()..pane_height {
-                        ops += RenderOpCommon::MoveCursorPositionRelTo(
-                            origin,
-                            vp_col(0) + vp_row(row_idx as u16),
-                        );
-                        ops += RenderOpIR::PaintTextWithAttributes(
-                            " ".repeat(pane_width).into(),
-                            None,
-                        );
-                    }
-                }
-                if let Some(rect) = selection_rect {
-                    overlay_selection(&mut ops, &lines, origin, rect, hl_rgb);
-                }
-                ops
+                None
             };
+            let lines: Vec<&[PixelChar]> = (0..pane_height)
+                .map_while(|r| terminal_row(&pane.ofs_buf, scroll_offset, r))
+                .collect();
+            let mut render_ops = render_lines_to_ir(&lines, origin, cursor_pos);
+            for row_idx in lines.len()..pane_height {
+                render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                    origin,
+                    vp_col(0) + vp_row(row_idx as u16),
+                );
+                render_ops +=
+                    RenderOpIR::PaintTextWithAttributes(" ".repeat(pane_width).into(), None);
+            }
+            if let Some(rect) = selection_rect {
+                overlay_selection(&mut render_ops, &lines, origin, rect, hl_rgb);
+            }
 
             global_data.pipeline.push(ZOrder::Normal, render_ops);
         });
@@ -441,18 +409,6 @@ fn terminal_row(
         vp_row(viewport_row as u16),
         scrollback_amount(scroll_offset),
     )
-}
-
-fn render_ofs_buf_to_ir(
-    ofs_buf: &OfsBufVT100,
-    origin: r3bl_tui::VPPos,
-    max_rows: usize,
-    cursor_pos: Option<r3bl_tui::VPPos>,
-) -> RenderOpIRVec {
-    let lines: Vec<&[PixelChar]> = (0..max_rows)
-        .filter_map(|r| terminal_row(ofs_buf, 0, r))
-        .collect();
-    render_lines_to_ir(&lines, origin, cursor_pos)
 }
 
 fn render_lines_to_ir(
