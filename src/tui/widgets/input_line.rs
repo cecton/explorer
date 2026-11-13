@@ -266,297 +266,111 @@ impl InputLine {
         let grapheme_count = self.text.graphemes(true).count();
         self.cursor = self.cursor.min(grapheme_count);
 
-        match input_event {
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('a'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => {
+        let (key, ctrl, alt, shift) = match input_event {
+            InputEvent::Keyboard(KeyPress::Plain { key }) => (key, false, false, false),
+            InputEvent::Keyboard(KeyPress::WithModifiers { key, mask }) => (
+                key,
+                mask.ctrl_key_state == KeyState::Pressed,
+                mask.alt_key_state == KeyState::Pressed,
+                mask.shift_key_state == KeyState::Pressed,
+            ),
+            InputEvent::BracketedPaste(text) => return self.paste(text),
+            _ => return false,
+        };
+        match (key, ctrl, alt, shift) {
+            (Key::Character('a'), true, false, false) => {
                 self.cursor = self.current_line().start;
                 true
             }
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('e'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => {
+            (Key::Character('e'), true, false, false) => {
                 let line = self.current_line();
                 self.cursor = line.start + line.len;
                 true
             }
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('d'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => self.delete_grapheme(),
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('b'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => {
-                if self.cursor == 0 {
-                    false
-                } else {
-                    self.cursor -= 1;
-                    true
-                }
+            (Key::Character('d'), true, false, false)
+            | (Key::SpecialKey(SpecialKey::Delete), false, false, false) => self.delete_grapheme(),
+            (Key::Character('b'), true, false, false)
+            | (Key::SpecialKey(SpecialKey::Left), false, false, false) => {
+                self.cursor_to(self.cursor.saturating_sub(1))
             }
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('f'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => {
-                if self.cursor >= grapheme_count {
-                    false
-                } else {
-                    self.cursor += 1;
-                    true
-                }
+            (Key::Character('f'), true, false, false)
+            | (Key::SpecialKey(SpecialKey::Right), false, false, false) => {
+                self.cursor_to((self.cursor + 1).min(grapheme_count))
             }
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('k'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => self.kill_to_end(),
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('c'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => {
+            (Key::Character('k'), true, false, false) => self.kill_to_end(),
+            (Key::Character('c'), true, false, false) => {
                 self.text.clear();
                 self.cursor = 0;
                 true
             }
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('u'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => self.kill_to_start(),
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('w'),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => self.kill_word_backward(),
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::SpecialKey(SpecialKey::Left),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => self.cursor_prev_word(),
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::SpecialKey(SpecialKey::Right),
-                mask:
-                    ModifierKeysMask {
-                        ctrl_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        alt_key_state: KeyState::NotPressed,
-                    },
-            }) => self.cursor_next_word(),
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('b'),
-                mask:
-                    ModifierKeysMask {
-                        alt_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        ctrl_key_state: KeyState::NotPressed,
-                    },
-            }) => self.cursor_prev_word(),
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('f'),
-                mask:
-                    ModifierKeysMask {
-                        alt_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        ctrl_key_state: KeyState::NotPressed,
-                    },
-            }) => self.cursor_next_word(),
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character('d'),
-                mask:
-                    ModifierKeysMask {
-                        alt_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        ctrl_key_state: KeyState::NotPressed,
-                    },
-            }) => self.kill_word_forward(),
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::SpecialKey(SpecialKey::Backspace),
-                mask:
-                    ModifierKeysMask {
-                        alt_key_state: KeyState::Pressed,
-                        shift_key_state: KeyState::NotPressed,
-                        ctrl_key_state: KeyState::NotPressed,
-                    },
-            }) => self.kill_word_backward(),
-            InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::SpecialKey(SpecialKey::Enter),
-                mask:
-                    ModifierKeysMask {
-                        shift_key_state: KeyState::Pressed,
-                        alt_key_state: KeyState::NotPressed,
-                        ctrl_key_state: KeyState::NotPressed,
-                    },
-            }) => {
-                let byte_pos = grapheme_byte_offset(&self.text, self.cursor);
-                self.text.insert(byte_pos, '\n');
-                self.cursor += 1;
-                true
+            (Key::Character('u'), true, false, false) => self.kill_to_start(),
+            (Key::Character('w'), true, false, false)
+            | (Key::SpecialKey(SpecialKey::Backspace), false, true, false) => {
+                self.kill_word_backward()
             }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::Character(ch),
-            })
-            | InputEvent::Keyboard(KeyPress::WithModifiers {
-                key: Key::Character(ch),
-                mask:
-                    ModifierKeysMask {
-                        shift_key_state: KeyState::Pressed,
-                        alt_key_state: KeyState::NotPressed,
-                        ctrl_key_state: KeyState::NotPressed,
-                    },
-            }) => {
-                if ch.is_control() {
-                    return false;
-                }
-                let byte_pos = grapheme_byte_offset(&self.text, self.cursor);
-                self.text.insert(byte_pos, *ch);
-                self.cursor += 1;
-                true
+            (Key::SpecialKey(SpecialKey::Left), true, false, false)
+            | (Key::Character('b'), false, true, false) => self.cursor_prev_word(),
+            (Key::SpecialKey(SpecialKey::Right), true, false, false)
+            | (Key::Character('f'), false, true, false) => self.cursor_next_word(),
+            (Key::Character('d'), false, true, false) => self.kill_word_forward(),
+            (Key::SpecialKey(SpecialKey::Enter), false, false, true) => self.insert_char('\n'),
+            (Key::Character(ch), false, false, _) => !ch.is_control() && self.insert_char(*ch),
+            (Key::SpecialKey(SpecialKey::Backspace), false, false, false) => {
+                self.backspace_grapheme()
             }
-            InputEvent::BracketedPaste(text) => {
-                use unicode_segmentation::UnicodeSegmentation;
-                if text.is_empty() {
-                    return false;
-                }
-                let byte_pos = grapheme_byte_offset(&self.text, self.cursor);
-                self.text.insert_str(byte_pos, text);
-                self.cursor += text.graphemes(true).count();
-                true
+            (Key::SpecialKey(SpecialKey::Home), false, false, false) => self.cursor_to(0),
+            (Key::SpecialKey(SpecialKey::End), false, false, false) => {
+                self.cursor_to(grapheme_count)
             }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Backspace),
-            }) => self.backspace_grapheme(),
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Delete),
-            }) => self.delete_grapheme(),
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Home),
-            }) => {
-                if self.cursor == 0 {
-                    false
-                } else {
-                    self.cursor = 0;
-                    true
-                }
-            }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::End),
-            }) => {
-                if self.cursor == grapheme_count {
-                    false
-                } else {
-                    self.cursor = grapheme_count;
-                    true
-                }
-            }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Up),
-            }) => self.move_vertically(false),
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Down),
-            }) => self.move_vertically(true),
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Left),
-            }) => {
-                if self.cursor == 0 {
-                    false
-                } else {
-                    self.cursor -= 1;
-                    true
-                }
-            }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Right),
-            }) => {
-                if self.cursor >= grapheme_count {
-                    false
-                } else {
-                    self.cursor += 1;
-                    true
-                }
-            }
+            (Key::SpecialKey(SpecialKey::Up), false, false, false) => self.move_vertically(false),
+            (Key::SpecialKey(SpecialKey::Down), false, false, false) => self.move_vertically(true),
             _ => false,
         }
     }
 
-    fn backspace_grapheme(&mut self) -> bool {
+    /// Moves the cursor to `target`; false when it was already there.
+    fn cursor_to(&mut self, target: usize) -> bool {
+        let moved = target != self.cursor;
+        self.cursor = target;
+        moved
+    }
+
+    fn insert_char(&mut self, ch: char) -> bool {
+        let byte_pos = grapheme_byte_offset(&self.text, self.cursor);
+        self.text.insert(byte_pos, ch);
+        self.cursor += 1;
+        true
+    }
+
+    fn paste(&mut self, text: &str) -> bool {
         use unicode_segmentation::UnicodeSegmentation;
+        if text.is_empty() {
+            return false;
+        }
+        let byte_pos = grapheme_byte_offset(&self.text, self.cursor);
+        self.text.insert_str(byte_pos, text);
+        self.cursor += text.graphemes(true).count();
+        true
+    }
+
+    fn backspace_grapheme(&mut self) -> bool {
         if self.cursor == 0 {
             return false;
         }
-        let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
         let target = self.cursor - 1;
-        let start = graphemes[target].0;
-        let end = if target + 1 < graphemes.len() {
-            graphemes[target + 1].0
-        } else {
-            self.text.len()
-        };
+        let start = grapheme_byte_offset(&self.text, target);
+        let end = grapheme_byte_offset(&self.text, self.cursor);
         self.text.replace_range(start..end, "");
         self.cursor = target;
         true
     }
 
     fn delete_grapheme(&mut self) -> bool {
-        use unicode_segmentation::UnicodeSegmentation;
-        let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
-        if self.cursor >= graphemes.len() {
+        let start = grapheme_byte_offset(&self.text, self.cursor);
+        if start == self.text.len() {
             return false;
         }
-        let start = graphemes[self.cursor].0;
-        let end = if self.cursor + 1 < graphemes.len() {
-            graphemes[self.cursor + 1].0
-        } else {
-            self.text.len()
-        };
+        let end = grapheme_byte_offset(&self.text, self.cursor + 1);
         self.text.replace_range(start..end, "");
         true
     }
@@ -591,18 +405,12 @@ impl InputLine {
     }
 
     fn kill_word_backward(&mut self) -> bool {
-        use unicode_segmentation::UnicodeSegmentation;
         let word_start = self.prev_word_start();
         if word_start >= self.cursor {
             return false;
         }
-        let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
-        let start_byte = graphemes[word_start].0;
-        let end_byte = if self.cursor < graphemes.len() {
-            graphemes[self.cursor].0
-        } else {
-            self.text.len()
-        };
+        let start_byte = grapheme_byte_offset(&self.text, word_start);
+        let end_byte = grapheme_byte_offset(&self.text, self.cursor);
         self.text.replace_range(start_byte..end_byte, "");
         self.cursor = word_start;
         true
@@ -702,22 +510,12 @@ impl InputLine {
     }
 
     fn kill_word_forward(&mut self) -> bool {
-        use unicode_segmentation::UnicodeSegmentation;
         let word_end = self.next_word_end();
-        if word_end <= self.cursor || word_end == 0 {
+        if word_end <= self.cursor {
             return false;
         }
-        let graphemes: Vec<(usize, &str)> = self.text.grapheme_indices(true).collect();
-        let start_byte = if self.cursor < graphemes.len() {
-            graphemes[self.cursor].0
-        } else {
-            self.text.len()
-        };
-        let end_byte = if word_end < graphemes.len() {
-            graphemes[word_end].0
-        } else {
-            self.text.len()
-        };
+        let start_byte = grapheme_byte_offset(&self.text, self.cursor);
+        let end_byte = grapheme_byte_offset(&self.text, word_end);
         self.text.replace_range(start_byte..end_byte, "");
         true
     }
@@ -1322,6 +1120,209 @@ mod wrap_tests {
             })
             .collect();
         assert_eq!(painted, ["c", "d"]);
+    }
+}
+
+#[cfg(test)]
+mod binding_tests {
+    use super::*;
+
+    fn press(key: Key, mask: ModifierKeysMask) -> InputEvent {
+        InputEvent::Keyboard(KeyPress::WithModifiers { key, mask })
+    }
+
+    fn ctrl(ch: char) -> InputEvent {
+        press(Key::Character(ch), ModifierKeysMask::new().with_ctrl())
+    }
+
+    fn alt(ch: char) -> InputEvent {
+        press(Key::Character(ch), ModifierKeysMask::new().with_alt())
+    }
+
+    fn special(key: SpecialKey) -> InputEvent {
+        InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::SpecialKey(key),
+        })
+    }
+
+    fn with(text: &str, cursor: usize) -> InputLine {
+        let mut input = InputLine::new();
+        input.set_text(text);
+        input.cursor = cursor;
+        input
+    }
+
+    #[test]
+    fn ctrl_b_and_ctrl_f_move_one_grapheme_like_the_arrows() {
+        let mut input = with("ae\u{301}b", 1);
+        assert!(input.handle_key(&ctrl('f')));
+        assert_eq!(input.cursor, 2);
+        assert!(input.handle_key(&ctrl('b')));
+        assert!(input.handle_key(&ctrl('b')));
+        assert_eq!(input.cursor, 0);
+        assert!(!input.handle_key(&ctrl('b')));
+        input.cursor = 3;
+        assert!(!input.handle_key(&ctrl('f')));
+        assert!(input.handle_key(&special(SpecialKey::Left)));
+        assert_eq!(input.cursor, 2);
+        assert!(input.handle_key(&special(SpecialKey::Right)));
+        assert_eq!(input.cursor, 3);
+        assert!(!input.handle_key(&special(SpecialKey::Right)));
+    }
+
+    #[test]
+    fn ctrl_d_and_delete_remove_the_grapheme_under_the_cursor() {
+        let mut input = with("ae\u{301}b", 1);
+        assert!(input.handle_key(&ctrl('d')));
+        assert_eq!(input.text(), "ab");
+        assert_eq!(input.cursor, 1);
+        assert!(input.handle_key(&special(SpecialKey::Delete)));
+        assert_eq!(input.text(), "a");
+        assert!(!input.handle_key(&special(SpecialKey::Delete)));
+        assert!(!input.handle_key(&ctrl('d')));
+        assert_eq!(input.text(), "a");
+    }
+
+    #[test]
+    fn backspace_removes_the_grapheme_before_the_cursor() {
+        let mut input = with("ae\u{301}b", 2);
+        assert!(input.handle_key(&special(SpecialKey::Backspace)));
+        assert_eq!(input.text(), "ab");
+        assert_eq!(input.cursor, 1);
+        input.cursor = 2;
+        assert!(input.handle_key(&special(SpecialKey::Backspace)));
+        assert_eq!(input.text(), "a");
+        input.cursor = 0;
+        assert!(!input.handle_key(&special(SpecialKey::Backspace)));
+    }
+
+    #[test]
+    fn ctrl_c_clears_the_input() {
+        let mut input = with("abc\ndef", 5);
+        assert!(input.handle_key(&ctrl('c')));
+        assert_eq!(input.text(), "");
+        assert_eq!(input.cursor, 0);
+    }
+
+    #[test]
+    fn words_are_walked_with_ctrl_arrows_and_alt_b_f() {
+        let ctrl_left = press(
+            Key::SpecialKey(SpecialKey::Left),
+            ModifierKeysMask::new().with_ctrl(),
+        );
+        let ctrl_right = press(
+            Key::SpecialKey(SpecialKey::Right),
+            ModifierKeysMask::new().with_ctrl(),
+        );
+        for (back, forward) in [(&ctrl_left, &ctrl_right), (&alt('b'), &alt('f'))] {
+            let mut input = with("foo bar baz", 7);
+            assert!(input.handle_key(back));
+            assert_eq!(input.cursor, 4);
+            assert!(input.handle_key(back));
+            assert_eq!(input.cursor, 0);
+            assert!(!input.handle_key(back));
+            assert!(input.handle_key(forward));
+            assert_eq!(input.cursor, 4);
+            input.cursor = 8;
+            assert!(input.handle_key(forward));
+            assert_eq!(input.cursor, 11);
+            assert!(!input.handle_key(forward));
+            assert_eq!(input.text(), "foo bar baz");
+        }
+    }
+
+    #[test]
+    fn ctrl_w_and_alt_backspace_kill_the_word_before_the_cursor() {
+        let alt_backspace = press(
+            Key::SpecialKey(SpecialKey::Backspace),
+            ModifierKeysMask::new().with_alt(),
+        );
+        for event in [ctrl('w'), alt_backspace] {
+            let mut input = with("foo bar baz", 7);
+            assert!(input.handle_key(&event));
+            assert_eq!(input.text(), "foo  baz");
+            assert_eq!(input.cursor, 4);
+            input.cursor = 0;
+            assert!(!input.handle_key(&event));
+            let mut input = with("foo bar", 7);
+            assert!(input.handle_key(&event));
+            assert_eq!(input.text(), "foo ");
+            assert_eq!(input.cursor, 4);
+        }
+    }
+
+    #[test]
+    fn alt_d_kills_the_word_after_the_cursor() {
+        let mut input = with("foo bar baz", 4);
+        assert!(input.handle_key(&alt('d')));
+        assert_eq!(input.text(), "foo  baz");
+        assert_eq!(input.cursor, 4);
+        let mut input = with("foo bar", 5);
+        assert!(input.handle_key(&alt('d')));
+        assert_eq!(input.text(), "foo b");
+        input.cursor = 5;
+        assert!(!input.handle_key(&alt('d')));
+    }
+
+    #[test]
+    fn shift_enter_inserts_a_newline_and_plain_enter_is_left_alone() {
+        let mut input = with("ab", 1);
+        let shift_enter = press(
+            Key::SpecialKey(SpecialKey::Enter),
+            ModifierKeysMask::new().with_shift(),
+        );
+        assert!(input.handle_key(&shift_enter));
+        assert_eq!(input.text(), "a\nb");
+        assert_eq!(input.cursor, 2);
+        assert!(!input.handle_key(&special(SpecialKey::Enter)));
+        assert_eq!(input.text(), "a\nb");
+    }
+
+    #[test]
+    fn characters_are_inserted_at_the_cursor_with_or_without_shift() {
+        let mut input = with("ac", 1);
+        let plain = InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::Character('b'),
+        });
+        assert!(input.handle_key(&plain));
+        let shifted = press(Key::Character('X'), ModifierKeysMask::new().with_shift());
+        assert!(input.handle_key(&shifted));
+        assert_eq!(input.text(), "abXc");
+        assert_eq!(input.cursor, 3);
+        let control = InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::Character('\u{7}'),
+        });
+        assert!(!input.handle_key(&control));
+        assert_eq!(input.text(), "abXc");
+    }
+
+    #[test]
+    fn unbound_chords_are_not_consumed() {
+        let mut input = with("abc", 1);
+        assert!(!input.handle_key(&ctrl('x')));
+        assert!(!input.handle_key(&alt('x')));
+        let ctrl_alt = press(
+            Key::Character('a'),
+            ModifierKeysMask::new().with_ctrl().with_alt(),
+        );
+        assert!(!input.handle_key(&ctrl_alt));
+        let ctrl_shift = press(
+            Key::Character('a'),
+            ModifierKeysMask::new().with_ctrl().with_shift(),
+        );
+        assert!(!input.handle_key(&ctrl_shift));
+        assert!(!input.handle_key(&special(SpecialKey::Tab)));
+        assert_eq!(input.text(), "abc");
+        assert_eq!(input.cursor, 1);
+    }
+
+    #[test]
+    fn a_paste_is_inserted_at_the_cursor_and_an_empty_one_is_refused() {
+        let mut input = with("ad", 1);
+        assert!(input.handle_key(&InputEvent::BracketedPaste("b\nc".to_string())));
+        assert_eq!(input.text(), "ab\ncd");
+        assert_eq!(input.cursor, 4);
+        assert!(!input.handle_key(&InputEvent::BracketedPaste(String::new())));
     }
 }
 
