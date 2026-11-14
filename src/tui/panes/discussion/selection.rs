@@ -140,46 +140,29 @@ pub(crate) fn row_pieces<'a>(
         .collect()
 }
 
-/// Whether the selection in progress lies in the work log of window `window_id`.
-fn holds_work_log_selection(state: &crate::tui::state::AppState, window_id: usize) -> bool {
+/// Whether `part` has lines in the document the window shows. The work log leaves it
+/// without a byte of its text changing, when `Ctrl+O` hides it or a round of it is
+/// dropped, and the offsets of a drag then name cells that are not painted.
+pub(crate) fn part_is_on_screen(
+    state: &crate::tui::state::AppState,
+    discussion: &crate::tui::state::DiscussionState,
+    part: crate::tui::pane_manager::DocPart,
+) -> bool {
     use crate::tui::pane_manager::DocPart;
-    use crate::tui::pane_manager::SelPoint;
-    use crate::tui::pane_manager::TextSelection;
-    use crate::tui::pane_manager::Window;
-    matches!(
-        &state.text_selection,
-        Some(TextSelection {
-            window: Window::Discussion(id),
-            start: SelPoint::Discussion {
-                part: DocPart::WorkLog,
-                ..
-            },
-            ..
-        }) if *id == window_id
-    )
+    match part {
+        DocPart::WorkLog => {
+            !discussion.shown_work_log().is_empty()
+                && crate::tui::panes::discussion::status::work_log_shown(
+                    &state.conversations.read(),
+                    discussion,
+                )
+        }
+        DocPart::Thinking => !discussion.thinking.is_empty(),
+        DocPart::Prompt | DocPart::Reply => true,
+    }
 }
 
 impl crate::tui::panes::discussion::DiscussionComponent {
-    /// Drops the drag and the selection a work log held, when the window shows other
-    /// entries: the offsets no longer name the text the user saw.
-    pub(crate) fn clear_work_log_selection(
-        &mut self,
-        state: &mut crate::tui::state::AppState,
-        window_id: usize,
-    ) {
-        use crate::tui::pane_manager::DocPart;
-        if self
-            .drag
-            .as_ref()
-            .is_some_and(|drag| drag.window_id == window_id && drag.part == DocPart::WorkLog)
-        {
-            self.cancel_drag(state);
-        }
-        if holds_work_log_selection(state, window_id) {
-            state.text_selection = None;
-        }
-    }
-
     /// Starts a drag on the word under the mouse: a selection, or with Shift or Ctrl a
     /// change to the highlights of the node shown.
     pub(crate) fn begin_drag(
@@ -205,6 +188,8 @@ impl crate::tui::panes::discussion::DiscussionComponent {
             return;
         }
         let word = crate::util::text::word_bounds(&text, anchor);
+        let (text_len, content_revision) = (text.len(), discussion.content_revision);
+        let laid_out = part_is_on_screen(state, discussion, part);
         // A sub-agent run has no highlights: a modified drag selects too.
         let highlighted = discussion
             .node
@@ -257,8 +242,23 @@ impl crate::tui::panes::discussion::DiscussionComponent {
             part,
             anchor,
             word,
+            text_len,
+            content_revision,
+            laid_out,
         });
         state.mouse_drag_active = true;
+    }
+
+    /// Ends the drag when the text it began in is no longer the one under it.
+    fn drag_stands(&mut self, state: &mut crate::tui::state::AppState) -> bool {
+        let unchanged = self
+            .drag
+            .as_ref()
+            .is_some_and(|drag| drag.still_stands(state, drag.part));
+        if !unchanged {
+            self.cancel_drag(state);
+        }
+        unchanged
     }
 
     /// Extends the drag to the word under the mouse. A drag never leaves the text it
@@ -266,28 +266,34 @@ impl crate::tui::panes::discussion::DiscussionComponent {
     pub(crate) fn update_drag(&mut self, state: &mut crate::tui::state::AppState, pos: VPPos) {
         use crate::tui::pane_manager::SelPoint;
         use crate::tui::panes::preview::DragModifier;
+        if !self.drag_stands(state) {
+            return;
+        }
         let Some(drag) = &self.drag else {
             return;
         };
-        let Some(discussion) = state.discussions.get(&drag.window_id) else {
+        let (window_id, part, anchor, word) = (drag.window_id, drag.part, drag.anchor, drag.word);
+        let Some(discussion) = state.discussions.get(&window_id) else {
             return;
         };
-        let text = crate::tui::panes::discussion::document::part_text(discussion, drag.part);
-        let (lo, hi) = match self.locate(state, discussion, drag.window_id, pos) {
-            Some((part, cursor)) if part == drag.part => {
+        let text = crate::tui::panes::discussion::document::part_text(discussion, part);
+        let (lo, hi) = match self.locate(state, discussion, window_id, pos) {
+            Some((cursor_part, cursor)) if cursor_part == part => {
                 if cursor >= text.len() || !text.is_char_boundary(cursor) {
                     return;
                 }
-                crate::util::text::drag_range(&text, drag.anchor, drag.word, cursor)
+                crate::util::text::drag_range(&text, anchor, word, cursor)
             }
-            Some((part, _)) if part < drag.part => (0, drag.word.1),
-            Some(_) => (drag.word.0, text.len()),
+            Some((cursor_part, _)) if cursor_part < part => (0, word.1),
+            Some(_) => (word.0, text.len()),
             None => return,
+        };
+        let Some(drag) = &self.drag else {
+            return;
         };
         match &drag.kind {
             DragKind::Select => {
                 if let Some(selection) = &mut state.text_selection {
-                    let part = drag.part;
                     selection.start = SelPoint::Discussion { part, offset: lo };
                     selection.end = SelPoint::Discussion { part, offset: hi };
                 }
@@ -303,7 +309,7 @@ impl crate::tui::panes::discussion::DiscussionComponent {
                 };
                 let highlights = state.discussion_highlights.entry(node.clone()).or_default();
                 let changed = highlights
-                    .part_mut(drag.part)
+                    .part_mut(part)
                     .filter(|current| **current != ranges)
                     .map(|current| *current = ranges)
                     .is_some();
@@ -317,28 +323,38 @@ impl crate::tui::panes::discussion::DiscussionComponent {
         }
     }
 
-    /// Ends the drag; a selection is copied to the clipboard as its source text.
+    /// Ends the drag; the text a selection covers is copied to the clipboard, unless the
+    /// text changed under it.
     pub(crate) fn end_drag(&mut self, state: &mut crate::tui::state::AppState) {
-        use crate::tui::pane_manager::SelPoint;
-        use crate::tui::pane_manager::TextSelection;
-        if let Some(crate::tui::panes::discussion::Drag {
-            window_id,
-            kind: DragKind::Select,
-            ..
-        }) = &self.drag
-            && let Some(TextSelection {
-                start: SelPoint::Discussion { part, offset: lo },
-                end: SelPoint::Discussion { offset: hi, .. },
-                ..
-            }) = &state.text_selection
-            && let Some(discussion) = state.discussions.get(window_id)
-        {
-            let text = crate::tui::panes::discussion::document::part_text(discussion, *part);
-            if let Some(selected) = text.get(*lo..*hi).filter(|selected| !selected.is_empty()) {
-                let mut clipboard = r3bl_tui::SystemClipboard;
-                let _ = clipboard.try_to_put_content_into_clipboard(selected.to_string());
-            }
+        if let Some(selected) = self.selected_text(state) {
+            let mut clipboard = r3bl_tui::SystemClipboard;
+            let _ = clipboard.try_to_put_content_into_clipboard(selected);
         }
         self.cancel_drag(state);
+    }
+
+    /// The text a plain drag covers, when it still stands: the source text between its
+    /// offsets, in the text the drag began in.
+    pub(crate) fn selected_text(&self, state: &crate::tui::state::AppState) -> Option<String> {
+        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::pane_manager::TextSelection;
+        let drag = self.drag.as_ref()?;
+        if !matches!(drag.kind, DragKind::Select) || !drag.still_stands(state, drag.part) {
+            return None;
+        }
+        let (lo, hi) = match state.text_selection.as_ref()? {
+            TextSelection {
+                start: SelPoint::Discussion { offset: lo, .. },
+                end: SelPoint::Discussion { offset: hi, .. },
+                ..
+            } => (*lo, *hi),
+            _ => return None,
+        };
+        let text = crate::tui::panes::discussion::document::part_text(
+            state.discussions.get(&drag.window_id)?,
+            drag.part,
+        );
+        let selected = text.get(lo..hi).filter(|selected| !selected.is_empty())?;
+        Some(selected.to_string())
     }
 }

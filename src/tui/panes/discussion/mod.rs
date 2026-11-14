@@ -15,6 +15,33 @@ struct Drag {
     /// Byte offset under the click, and the word around it.
     anchor: usize,
     word: (usize, usize),
+    /// The text the drag began in: its length, and the revision of the window's texts.
+    /// Either moving means the offsets name text the user never saw.
+    text_len: usize,
+    content_revision: u64,
+    /// Whether that text was on screen. The work log can leave it without a byte of it
+    /// changing, when `Ctrl+O` hides it or a round of it is dropped.
+    laid_out: bool,
+}
+
+impl Drag {
+    /// Whether the text this drag began in is still the text under it: a text replaced
+    /// or rewritten, another revision of the window, or one that left the screen, all
+    /// leave its offsets naming text the user never saw.
+    fn still_stands(
+        &self,
+        state: &crate::tui::state::AppState,
+        part: crate::tui::pane_manager::DocPart,
+    ) -> bool {
+        let Some(discussion) = state.discussions.get(&self.window_id) else {
+            return false;
+        };
+        discussion.content_revision == self.content_revision
+            && crate::tui::panes::discussion::selection::part_is_on_screen(state, discussion, part)
+                == self.laid_out
+            && crate::tui::panes::discussion::document::part_text(discussion, part).len()
+                == self.text_len
+    }
 }
 
 pub struct DiscussionComponent {
@@ -676,12 +703,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             let output = state.discussions.get(&window_id).and_then(|discussion| {
                 crate::tui::panes::discussion::launch::running_output(state, discussion)
             });
-            let (log_start_before, content_revision_before) = state
-                .discussions
-                .get(&window_id)
-                .map_or((0, 0), |discussion| {
-                    (discussion.log_start, discussion.content_revision)
-                });
             if let Some(output) = &output
                 && let Some(discussion) = state.discussions.get_mut(&window_id)
             {
@@ -692,14 +713,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             {
                 // Once the turn is over, its whole work log is on screen again.
                 discussion.log_start = 0;
-            }
-            // The work log on screen is other text now, so a drag through it no longer
-            // means what it did.
-            if state.discussions.get(&window_id).is_some_and(|discussion| {
-                discussion.log_start != log_start_before
-                    || discussion.content_revision != content_revision_before
-            }) {
-                self.clear_work_log_selection(state, window_id);
             }
             let Some(discussion) = state.discussions.get(&window_id) else {
                 return Ok(());
@@ -1464,8 +1477,13 @@ mod tests {
         assert_eq!(state.discussions[&0].draft.text(), "again");
     }
 
-    #[test]
-    fn a_drag_through_the_work_log_ends_when_the_window_shows_other_entries() {
+    /// A window showing `work_log` from entry `log_start` on, the log itself shown as
+    /// `show_work_log` says, and a drag over the text of the entries on screen.
+    fn state_with_a_work_log_drag(
+        work_log: &[&str],
+        log_start: usize,
+        show_work_log: bool,
+    ) -> (crate::tui::state::AppState, DiscussionComponent) {
         use crate::tui::pane_manager::DocPart;
         use crate::tui::pane_manager::SelPoint;
         use crate::tui::pane_manager::TextSelection;
@@ -1473,14 +1491,28 @@ mod tests {
         use crate::tui::panes::discussion::selection::DragKind;
         use crate::tui::state::DiscussionState;
         let mut state = empty_state();
-        state.discussions.insert(0, DiscussionState::default());
+        let entries: Vec<String> = work_log.iter().map(|entry| (*entry).to_string()).collect();
+        state.discussions.insert(
+            0,
+            DiscussionState {
+                work_log: entries,
+                log_start,
+                show_work_log: Some(show_work_log),
+                ..Default::default()
+            },
+        );
         let mut component = DiscussionComponent::new(crate::tui::pane_component::pane_id(0));
+        let shown = state.discussions[&0].shown_work_log().join("\n");
+        let content_revision = state.discussions[&0].content_revision;
         component.drag = Some(crate::tui::panes::discussion::Drag {
             window_id: 0,
             kind: DragKind::Select,
             part: DocPart::WorkLog,
             anchor: 0,
-            word: (0, 3),
+            word: (0, shown.len()),
+            text_len: shown.len(),
+            content_revision,
+            laid_out: show_work_log,
         });
         let point = |offset| SelPoint::Discussion {
             part: DocPart::WorkLog,
@@ -1489,44 +1521,73 @@ mod tests {
         state.text_selection = Some(TextSelection {
             window: Window::Discussion(0),
             start: point(0),
-            end: point(3),
+            end: point(shown.len()),
             click_anchor: Some(point(0)),
-            click_word: Some((point(0), point(3))),
+            click_word: Some((point(0), point(shown.len()))),
             active: true,
         });
         state.mouse_drag_active = true;
-
-        component.clear_work_log_selection(&mut state, 0);
-        assert!(state.text_selection.is_none());
-        assert!(!state.mouse_drag_active);
-        assert!(component.drag.is_none());
+        (state, component)
     }
 
     #[test]
-    fn a_drag_outside_the_work_log_survives_it() {
-        use crate::tui::pane_manager::DocPart;
-        use crate::tui::pane_manager::SelPoint;
-        use crate::tui::pane_manager::TextSelection;
-        use crate::tui::pane_manager::Window;
-        use crate::tui::state::DiscussionState;
-        let mut state = empty_state();
-        state.discussions.insert(0, DiscussionState::default());
-        let mut component = DiscussionComponent::new(crate::tui::pane_component::pane_id(0));
-        let point = |offset| SelPoint::Discussion {
-            part: DocPart::Reply,
-            offset,
-        };
-        state.text_selection = Some(TextSelection {
-            window: Window::Discussion(0),
-            start: point(0),
-            end: point(3),
-            click_anchor: Some(point(0)),
-            click_word: Some((point(0), point(3))),
-            active: true,
-        });
+    fn a_drag_ends_when_the_text_under_it_changes() {
+        use crate::tui::panes::discussion::selection::DragKind;
+        let (mut state, mut component) = state_with_a_work_log_drag(&["old", "shown"], 1, false);
+        assert!(matches!(
+            component.drag.as_ref().map(|drag| &drag.kind),
+            Some(DragKind::Select)
+        ));
 
-        component.clear_work_log_selection(&mut state, 0);
+        // Ctrl+O is the case no length of the state changes for: the entries on screen
+        // are other ones, and the drag's offsets name text the user never saw.
+        state.discussions.get_mut(&0).unwrap().show_work_log = Some(true);
+        component.update_drag(&mut state, vp_col(0) + vp_row(1));
+
+        assert!(component.drag.is_none(), "the drag ended");
+        assert!(state.text_selection.is_none(), "and took its selection");
+        assert!(!state.mouse_drag_active);
+    }
+
+    #[test]
+    fn a_drag_survives_the_text_it_began_in_not_changing() {
+        let (mut state, mut component) = state_with_a_work_log_drag(&["old", "shown"], 1, false);
+        component.update_drag(&mut state, vp_col(0) + vp_row(1));
+        assert!(component.drag.is_some());
         assert!(state.text_selection.is_some());
+    }
+
+    #[test]
+    fn a_drag_ends_when_ctrl_o_takes_the_text_off_the_screen() {
+        // The first round of a turn keeps `log_start` at 0, so Ctrl+O hides the work
+        // log without a byte of it changing: the text a drag holds is simply not on
+        // screen any more.
+        let (mut state, mut component) = state_with_a_work_log_drag(&["shown"], 0, true);
+        component.update_drag(&mut state, vp_col(0) + vp_row(1));
+        assert!(component.drag.is_some(), "the work log is still on screen");
+
+        state.discussions.get_mut(&0).unwrap().show_work_log = Some(false);
+        component.update_drag(&mut state, vp_col(0) + vp_row(1));
+        assert!(component.drag.is_none(), "the drag ended with the text");
+        assert!(state.text_selection.is_none());
+    }
+
+    #[test]
+    fn a_release_copies_the_text_the_drag_covered() {
+        let (state, component) = state_with_a_work_log_drag(&["old", "shown"], 1, false);
+        assert_eq!(component.selected_text(&state).as_deref(), Some("shown"));
+    }
+
+    #[test]
+    fn a_release_after_the_text_changed_copies_nothing() {
+        let (mut state, component) = state_with_a_work_log_drag(&["old", "shown"], 1, false);
+        // Texts of the same length, as a reload of another node's log can leave them:
+        // only the change itself tells the offsets apart from the text they name.
+        state.discussions.get_mut(&0).unwrap().work_log =
+            vec!["other".to_string(), "words".to_string()];
+        state.discussions.get_mut(&0).unwrap().content_revision += 1;
+
+        assert_eq!(component.selected_text(&state), None);
     }
 
     #[tokio::test]
