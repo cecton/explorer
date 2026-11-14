@@ -90,10 +90,11 @@ impl ConversationTreeComponent {
             let Some(node_dir) = tree.node_dir(&id) else {
                 return;
             };
-            let has_reply = node.title.is_none()
-                && crate::conversation::files::has_content(
-                    &crate::conversation::files::read_reply(&node_dir),
-                );
+            let has_reply = || {
+                crate::conversation::files::has_content(&crate::conversation::files::read_reply(
+                    &node_dir,
+                ))
+            };
             if !needs_retitle(&id, node, has_reply, &state.tree_view.retitling) {
                 return;
             }
@@ -157,19 +158,21 @@ impl crate::tui::widgets::title_row::TitleRow for ConversationTreeComponent {
 }
 
 /// Whether an untitled finished node has something to describe and no retitle is running.
+/// `has_reply` is asked last, and only when neither the status nor the commits have
+/// already answered: asking costs a read of the node's reply.
 fn needs_retitle(
     id: &crate::conversation::NodeId,
     node: &crate::conversation::Node,
-    has_reply: bool,
+    has_reply: impl FnOnce() -> bool,
     retitling: &HashSet<crate::conversation::NodeId>,
 ) -> bool {
     use crate::conversation::NodeStatus;
     node.title.is_none()
         && node.meta.status != Some(NodeStatus::Running)
-        && (node.meta.status == Some(NodeStatus::Done)
-            || has_reply
-            || !node.meta.commits.is_empty())
         && !retitling.contains(id)
+        && (node.meta.status == Some(NodeStatus::Done)
+            || !node.meta.commits.is_empty()
+            || has_reply())
 }
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
@@ -244,24 +247,79 @@ mod tests {
         let mut node = tree.node(&id).unwrap().clone();
         let none = HashSet::new();
         node.meta.status = Some(NodeStatus::Failed);
-        assert!(!needs_retitle(&id, &node, false, &none));
-        assert!(needs_retitle(&id, &node, true, &none));
+        assert!(!needs_retitle(&id, &node, || false, &none));
+        assert!(needs_retitle(&id, &node, || true, &none));
         node.meta.commits = vec!["abc".to_string()];
-        assert!(needs_retitle(&id, &node, false, &none));
+        assert!(needs_retitle(&id, &node, || false, &none));
         node.meta.commits.clear();
         node.meta.status = Some(NodeStatus::Done);
-        assert!(needs_retitle(&id, &node, false, &none));
+        assert!(needs_retitle(&id, &node, || false, &none));
         assert!(!needs_retitle(
             &id,
             &node,
-            false,
+            || false,
             &HashSet::from([id.clone()])
         ));
         node.meta.status = Some(NodeStatus::Running);
-        assert!(!needs_retitle(&id, &node, true, &none));
+        assert!(!needs_retitle(&id, &node, || true, &none));
         node.meta.status = Some(NodeStatus::Done);
         node.title = Some("Titled".to_string());
-        assert!(!needs_retitle(&id, &node, true, &none));
+        assert!(!needs_retitle(&id, &node, || true, &none));
+    }
+
+    /// The reply is only read when neither the status nor the commits already say the
+    /// node has something to describe, and the common case is a finished turn.
+    #[test]
+    fn a_node_whose_status_already_answers_is_not_asked_for_its_reply() {
+        use crate::conversation::NodeId;
+        use crate::conversation::NodeStatus;
+        use crate::tui::panes::conversation_tree::test_support::tree_with;
+        let (_tmp, tree) = tree_with(&["a1"]);
+        let id = NodeId::new("a1");
+        let mut node = tree.node(&id).unwrap().clone();
+        let none = HashSet::new();
+        let asked = std::cell::Cell::new(0);
+        let has_reply = || {
+            asked.set(asked.get() + 1);
+            true
+        };
+
+        node.meta.status = Some(NodeStatus::Done);
+        assert!(needs_retitle(&id, &node, has_reply, &none));
+        assert_eq!(asked.get(), 0, "a done turn needs no reply to decide");
+
+        node.meta.status = Some(NodeStatus::Running);
+        assert!(!needs_retitle(&id, &node, has_reply, &none));
+        assert_eq!(asked.get(), 0, "a running turn is never retitled");
+
+        node.meta.status = Some(NodeStatus::Failed);
+        node.meta.commits = vec!["abc".to_string()];
+        assert!(needs_retitle(&id, &node, has_reply, &none));
+        assert_eq!(asked.get(), 0, "commits answer it on their own");
+
+        node.meta.commits.clear();
+        assert!(needs_retitle(&id, &node, has_reply, &none));
+        assert_eq!(
+            asked.get(),
+            1,
+            "a failed turn without commits is asked once"
+        );
+
+        node.title = Some("Titled".to_string());
+        assert!(!needs_retitle(&id, &node, has_reply, &none));
+        assert_eq!(asked.get(), 1, "a titled node is not asked either");
+
+        // A node whose retitle is under way is refused before its reply is looked for:
+        // unlike the title and the status, nothing else in the rule knows about it.
+        node.title = None;
+        node.meta.status = Some(NodeStatus::Failed);
+        assert!(!needs_retitle(
+            &id,
+            &node,
+            has_reply,
+            &HashSet::from([id.clone()])
+        ));
+        assert_eq!(asked.get(), 1, "a node being retitled is not asked");
     }
 
     #[test]
