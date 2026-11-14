@@ -78,7 +78,10 @@ impl r3bl_tui::RRTWorker for LspWorker {
         config: Self::Config,
         input_receiver: tokio::sync::broadcast::Receiver<Self::Input>,
     ) -> miette::Result<(Self, Self::Interrupt)> {
-        let server = spawn_server(&config.root, &config.cargo_features)?;
+        let server = spawn_server(
+            &config.root,
+            &crate::lsp::cargo_features(&config.cargo_features),
+        )?;
         let files = Arc::clone(&config.files);
         let warmup_queue = warmup_queue(&files);
         let now = Instant::now();

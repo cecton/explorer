@@ -171,9 +171,30 @@ pub fn send_symbol_request(
     });
 }
 
+// ── Cargo features ───────────────────────────────────────────────────────────
+
+/// The Cargo features the last selection asked for, `None` before any command did. The
+/// engine rebuilds the worker from the config it was subscribed with, so a new selection
+/// only survives a restart (rust-analyzer crash, read error) if the worker reads it here.
+static CARGO_FEATURES: parking_lot::Mutex<Option<crate::config::CargoFeatureSelection>> =
+    parking_lot::const_mutex(None);
+
+/// The Cargo features a new rust-analyzer process starts with: the last selection, or
+/// `initial` — the one of the config the worker was subscribed with — when no command has
+/// selected any yet.
+pub(crate) fn cargo_features(
+    initial: &crate::config::CargoFeatureSelection,
+) -> crate::config::CargoFeatureSelection {
+    CARGO_FEATURES
+        .lock()
+        .clone()
+        .unwrap_or_else(|| initial.clone())
+}
+
 /// Restarts rust-analyzer on `selection`. Its `cargo.*` initialization options are only
 /// read once, so nothing short of a fresh process applies a new feature selection.
 pub fn set_cargo_features(selection: crate::config::CargoFeatureSelection) {
+    *CARGO_FEATURES.lock() = Some(selection.clone());
     send_lsp_input(LspInput::Restart(selection));
 }
 
@@ -277,6 +298,14 @@ mod tests {
     #[test]
     fn utf16_to_byte_past_the_end_is_the_end() {
         assert_eq!(utf16_to_byte("hi", 9), 2);
+    }
+
+    #[test]
+    fn a_new_worker_starts_on_the_last_selected_features() {
+        let seed = CargoFeatureSelection::Default;
+        assert_eq!(cargo_features(&seed), CargoFeatureSelection::Default);
+        set_cargo_features(CargoFeatureSelection::All);
+        assert_eq!(cargo_features(&seed), CargoFeatureSelection::All);
     }
 
     #[test]
