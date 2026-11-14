@@ -267,11 +267,6 @@ impl LspWorker {
                 return Ok(());
             }
         };
-        let reopened: Vec<usize> = {
-            let mut opened: Vec<usize> = self.req_state.opened.iter().copied().collect();
-            opened.sort_unstable();
-            opened
-        };
         self.kill_server();
         self.child = server.child;
         self.stdin = server.stdin;
@@ -291,14 +286,6 @@ impl LspWorker {
         {
             use crate::signal::AppSignal;
             crate::signal::try_send(&self.app_tx, AppSignal::Redraw);
-        }
-        for file_idx in reopened {
-            // A write to the new server may fail here where the old one was healthy;
-            // turning that into a restart would have the engine drop this process and
-            // spawn the next one on the config's startup feature selection.
-            if self.send_tokens(file_idx).is_err() {
-                tracing::warn!("LSP: did not reopen file_idx={file_idx} on the new server");
-            }
         }
         Ok(())
     }

@@ -57,6 +57,14 @@ pub(super) fn handle(
         global_data.state.cargo_features = selection.clone();
         global_data.state.mark_session_dirty();
         crate::lsp::set_cargo_features(selection.clone());
+        // The restart drops the colors of every file, and the new server holds none of
+        // them open: each preview of the window stack asks again, queued behind the
+        // restart it must follow, and the warmup colors the rest.
+        for window in global_data.state.pane_manager.window_stack.iter() {
+            if let Window::FilePreview(key) = window {
+                crate::lsp::send_file_request(key.0);
+            }
+        }
         return Ok(EventPropagation::ConsumedRender);
     }
     throws_with_return!({
