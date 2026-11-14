@@ -107,13 +107,18 @@ impl LoadedFile {
     pub fn load(path: PathBuf) -> Option<Arc<Self>> {
         let path = camino::Utf8PathBuf::from_path_buf(path).ok()?;
         let data = read_file_data(&path)?;
-        Some(Arc::new(Self {
+        Some(Self::from_data(path, data))
+    }
+
+    /// A file built from data read ahead of time, for a caller that read before it published.
+    pub(crate) fn from_data(path: camino::Utf8PathBuf, data: FileData) -> Arc<Self> {
+        Arc::new(Self {
             path,
             data: parking_lot::RwLock::new(data),
             colored_lines: parking_lot::Mutex::new(vec![]),
             removed: AtomicBool::new(false),
             needs_full_load: AtomicBool::new(false),
-        }))
+        })
     }
 
     /// Publishes data read ahead of time, dropping the colors computed against the old one.

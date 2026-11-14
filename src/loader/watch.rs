@@ -24,13 +24,42 @@ pub(crate) struct Changes {
 }
 
 struct Pending {
-    removed: Vec<crate::loader::FileKey>,
+    /// The length of the list this batch was read against. A path the read did not find there
+    /// can only have come back in the tail grown since.
+    read_len: usize,
+    removed: Vec<(Option<crate::loader::FileKey>, camino::Utf8PathBuf)>,
     /// New data for files the list already holds and that are still there.
-    reloaded: Vec<(crate::loader::FileKey, crate::loader::FileData)>,
-    /// A file that went away and came back: the key it already had, and its new data.
-    resurrected: Vec<(crate::loader::FileKey, crate::loader::FileData)>,
-    /// Files the list does not hold yet, already read and built.
-    appended: Vec<std::sync::Arc<crate::loader::LoadedFile>>,
+    reloaded: Vec<(
+        Option<crate::loader::FileKey>,
+        camino::Utf8PathBuf,
+        crate::loader::FileData,
+    )>,
+    /// A file that went away and came back, or a new one: the key the read found, when it did.
+    created: Vec<(
+        Option<crate::loader::FileKey>,
+        camino::Utf8PathBuf,
+        crate::loader::FileData,
+    )>,
+}
+
+/// The key a path of the batch names once the list has grown.
+///
+/// A key the read found still names the file it named: the list is append-only, so nothing
+/// before it moves. A path the read did not find can only have come back in the tail appended
+/// since, by a batch published while this one was being read.
+fn resolve_key(
+    files: &[std::sync::Arc<crate::loader::LoadedFile>],
+    read_len: usize,
+    known: Option<crate::loader::FileKey>,
+    path: &camino::Utf8Path,
+) -> Option<crate::loader::FileKey> {
+    known.or_else(|| {
+        let from = read_len.min(files.len());
+        files[from..]
+            .iter()
+            .position(|file| file.path == path)
+            .map(|offset| crate::loader::FileKey(from + offset))
+    })
 }
 
 impl std::fmt::Debug for Changes {
@@ -41,8 +70,7 @@ impl std::fmt::Debug for Changes {
                 .debug_struct("Changes")
                 .field("removed", &pending.removed.len())
                 .field("reloaded", &pending.reloaded.len())
-                .field("resurrected", &pending.resurrected.len())
-                .field("appended", &pending.appended.len())
+                .field("created", &pending.created.len())
                 .finish(),
             None => f.debug_struct("Changes").field("published", &true).finish(),
         }
@@ -63,12 +91,17 @@ impl Changes {
 
 /// Reads everything `batch` names without touching the shared list or any file in it: the
 /// answer is what [`swap_in`] publishes. Runs on the watcher thread.
+///
+/// The list is read once, for its length and for the `removed` flags of the files it names, but
+/// the keys answered here are only a hint: a batch can be read while an earlier one still waits
+/// to be published, and the list then holds files this read never saw. [`swap_in`] resolves
+/// every path again against the list it publishes into, so the overlap loses no edit, leaves no
+/// deleted file behind and appends no path twice.
 pub(crate) fn read(
     files: &arc_swap::ArcSwap<Vec<std::sync::Arc<crate::loader::LoadedFile>>>,
     batch: &Batch,
 ) -> Changes {
     use crate::loader::FileKey;
-    use crate::loader::LoadedFile;
     use std::sync::atomic::Ordering;
 
     let snapshot = files.load_full();
@@ -81,42 +114,42 @@ pub(crate) fn read(
         .collect();
 
     let mut pending = Pending {
+        read_len: snapshot.len(),
         removed: Vec::new(),
         reloaded: Vec::new(),
-        resurrected: Vec::new(),
-        appended: Vec::new(),
+        created: Vec::new(),
     };
 
     for path in &batch.removed {
-        let Some(&file_idx) = index.get(path.as_path()) else {
-            tracing::debug!("FilesChanged: removed no match for path={path}");
-            continue;
-        };
-        pending.removed.push(FileKey(file_idx));
+        let known = index.get(path.as_path()).map(|&file_idx| FileKey(file_idx));
+        pending.removed.push((known, path.clone()));
     }
 
     for path in &batch.modified {
-        match index.get(path.as_path()) {
+        let known = match index.get(path.as_path()) {
             Some(&file_idx) if !snapshot[file_idx].removed.load(Ordering::Relaxed) => {
-                match crate::loader::read_file_data(path) {
-                    Some(data) => pending.reloaded.push((FileKey(file_idx), data)),
-                    None => tracing::debug!("FilesChanged: modified unreadable for path={path}"),
-                }
+                Some(FileKey(file_idx))
             }
-            _ => tracing::debug!("FilesChanged: modified no match for path={path}"),
+            Some(_) => {
+                tracing::debug!("FilesChanged: modified no match for path={path}");
+                continue;
+            }
+            None => None,
+        };
+        match crate::loader::read_file_data(path) {
+            Some(data) => pending.reloaded.push((known, path.clone(), data)),
+            None => tracing::debug!("FilesChanged: modified unreadable for path={path}"),
         }
     }
 
+    // A `created` reads a file whether the list holds it or not: which of the two it is only
+    // the list at publication decides, and a path the list does not hold yet may be one an
+    // earlier batch appended meanwhile.
     for path in &batch.created {
-        match index.get(path.as_path()) {
-            Some(&file_idx) => match crate::loader::read_file_data(path) {
-                Some(data) => pending.resurrected.push((FileKey(file_idx), data)),
-                None => tracing::debug!("FilesChanged: created unreadable for path={path}"),
-            },
-            None => match LoadedFile::load(path.clone().into_std_path_buf()) {
-                Some(loaded) => pending.appended.push(loaded),
-                None => tracing::debug!("FilesChanged: created no match for path={path}"),
-            },
+        let known = index.get(path.as_path()).map(|&file_idx| FileKey(file_idx));
+        match crate::loader::read_file_data(path) {
+            Some(data) => pending.created.push((known, path.clone(), data)),
+            None => tracing::debug!("FilesChanged: created unreadable for path={path}"),
         }
     }
 
@@ -134,6 +167,7 @@ pub(crate) fn swap_in(
     files: &arc_swap::ArcSwap<Vec<std::sync::Arc<crate::loader::LoadedFile>>>,
     changes: &Changes,
 ) -> crate::signal::FilesChanged {
+    use crate::loader::FileKey;
     use crate::loader::LoadedFile;
     use crate::signal::FilesChanged;
     use std::sync::atomic::Ordering;
@@ -143,44 +177,50 @@ pub(crate) fn swap_in(
     };
     let snapshot = files.load_full();
     let mut touched = FilesChanged::default();
+    let read_len = pending.read_len;
+    let key_of = |known, path: &camino::Utf8Path| resolve_key(&snapshot, read_len, known, path);
 
-    for key in pending.removed {
-        let Some(file) = snapshot.get(key.0) else {
+    for (known, path) in pending.removed {
+        let Some(key) = key_of(known, &path) else {
+            tracing::debug!("FilesChanged: removed no match for path={path}");
             continue;
         };
-        file.removed.store(true, Ordering::Relaxed);
+        snapshot[key.0].removed.store(true, Ordering::Relaxed);
         crate::lsp::send_file_request(key.0);
         touched.removed.push(key);
     }
 
-    for (key, data) in pending.reloaded {
-        let Some(file) = snapshot.get(key.0) else {
+    for (known, path, data) in pending.reloaded {
+        let Some(key) = key_of(known, &path) else {
+            tracing::debug!("FilesChanged: modified no match for path={path}");
             continue;
         };
-        file.replace_data(data);
+        snapshot[key.0].replace_data(data);
         crate::lsp::send_file_request(key.0);
         touched.modified.push(key);
     }
 
-    for (key, data) in pending.resurrected {
-        let Some(file) = snapshot.get(key.0) else {
-            continue;
-        };
-        file.removed.store(false, Ordering::Relaxed);
-        file.replace_data(data);
-        crate::lsp::send_file_request(key.0);
-        touched.created.push(key);
+    let mut appended: Vec<std::sync::Arc<LoadedFile>> = Vec::new();
+    for (known, path, data) in pending.created {
+        match key_of(known, &path) {
+            Some(key) => {
+                snapshot[key.0].removed.store(false, Ordering::Relaxed);
+                snapshot[key.0].replace_data(data);
+                crate::lsp::send_file_request(key.0);
+                touched.created.push(key);
+            }
+            None => appended.push(LoadedFile::from_data(path, data)),
+        }
     }
 
-    if !pending.appended.is_empty() {
+    if !appended.is_empty() {
         // Safe because the watcher becomes the one appender once it runs: the session's own
         // additions are made before it is subscribed.
         let base = snapshot.len();
         let mut next: Vec<std::sync::Arc<LoadedFile>> =
             snapshot.iter().map(std::sync::Arc::clone).collect();
-        for (offset, file) in pending.appended.into_iter().enumerate() {
-            file.removed.store(false, Ordering::Relaxed);
-            touched.created.push(crate::loader::FileKey(base + offset));
+        for (offset, file) in appended.into_iter().enumerate() {
+            touched.created.push(FileKey(base + offset));
             crate::lsp::send_file_request(base + offset);
             next.push(file);
         }
@@ -444,5 +484,84 @@ mod tests {
         swap_in(&files, &changes);
 
         assert!(files.load()[0].colored_lines.lock().is_empty());
+    }
+
+    /// A batch is read on the watcher thread and published on the main one, so a second batch
+    /// can be read before the first is published. A file the first created is edited by the
+    /// second: the edit lands on the file the first appended, not on a key only the read of
+    /// the second could name.
+    #[test]
+    fn an_edit_of_a_file_created_by_an_unpublished_batch_is_applied() {
+        let (dir, files) = list(&["a.rs"]);
+        std::fs::write(dir.path().join("z.rs"), "one\n").expect("write");
+        let created = read(
+            &files,
+            &Batch {
+                created: vec![path_of(&dir, "z.rs")],
+                ..Default::default()
+            },
+        );
+        std::fs::write(dir.path().join("z.rs"), "two\n").expect("write");
+        let edited = read(
+            &files,
+            &Batch {
+                modified: vec![path_of(&dir, "z.rs")],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(swap_in(&files, &created).created, [FileKey(1)]);
+        assert_eq!(swap_in(&files, &edited).modified, [FileKey(1)]);
+        assert_eq!(files.load()[1].data.read().content, "two\n");
+    }
+
+    /// The same overlap with a deletion: the file must not outlive the batch that saw it go.
+    #[test]
+    fn a_file_created_and_then_removed_by_an_overlapping_batch_is_marked_removed() {
+        let (dir, files) = list(&["a.rs"]);
+        std::fs::write(dir.path().join("z.rs"), "one\n").expect("write");
+        let created = read(
+            &files,
+            &Batch {
+                created: vec![path_of(&dir, "z.rs")],
+                ..Default::default()
+            },
+        );
+        std::fs::remove_file(dir.path().join("z.rs")).expect("remove");
+        let removed = read(
+            &files,
+            &Batch {
+                removed: vec![path_of(&dir, "z.rs")],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(swap_in(&files, &created).created, [FileKey(1)]);
+        assert_eq!(swap_in(&files, &removed).removed, [FileKey(1)]);
+        assert!(
+            files.load()[1]
+                .removed
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert_eq!(files.load().len(), 2);
+    }
+
+    /// And a path both batches call created is appended once: the second finds the file the
+    /// first appended, since a key answers a path for the life of the list.
+    #[test]
+    fn a_path_created_by_two_overlapping_batches_is_appended_once() {
+        let (dir, files) = list(&["a.rs"]);
+        std::fs::write(dir.path().join("z.rs"), "one\n").expect("write");
+        let batch = Batch {
+            created: vec![path_of(&dir, "z.rs")],
+            ..Default::default()
+        };
+        let first = read(&files, &batch);
+        let second = read(&files, &batch);
+
+        swap_in(&files, &first);
+        assert_eq!(swap_in(&files, &second).created, [FileKey(1)]);
+        assert_eq!(files.load().len(), 2);
+        assert_eq!(files.load()[1].path, path_of(&dir, "z.rs"));
     }
 }
