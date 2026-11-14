@@ -92,17 +92,15 @@ impl Changes {
 /// Reads everything `batch` names without touching the shared list or any file in it: the
 /// answer is what [`swap_in`] publishes. Runs on the watcher thread.
 ///
-/// The list is read once, for its length and for the `removed` flags of the files it names, but
-/// the keys answered here are only a hint: a batch can be read while an earlier one still waits
-/// to be published, and the list then holds files this read never saw. [`swap_in`] resolves
-/// every path again against the list it publishes into, so the overlap loses no edit, leaves no
-/// deleted file behind and appends no path twice.
+/// The list is read once, for its length, but the keys answered here are only a hint: a batch
+/// can be read while an earlier one still waits to be published, and the list then holds files
+/// this read never saw. [`swap_in`] resolves every path again against the list it publishes
+/// into, so the overlap loses no edit, leaves no deleted file behind and appends no path twice.
 pub(crate) fn read(
     files: &arc_swap::ArcSwap<Vec<std::sync::Arc<crate::loader::LoadedFile>>>,
     batch: &Batch,
 ) -> Changes {
     use crate::loader::FileKey;
-    use std::sync::atomic::Ordering;
 
     let snapshot = files.load_full();
     // Index path -> position once. A rescan (post-overflow) batch can carry hundreds of
@@ -126,16 +124,8 @@ pub(crate) fn read(
     }
 
     for path in &batch.modified {
-        let known = match index.get(path.as_path()) {
-            Some(&file_idx) if !snapshot[file_idx].removed.load(Ordering::Relaxed) => {
-                Some(FileKey(file_idx))
-            }
-            Some(_) => {
-                tracing::debug!("FilesChanged: modified no match for path={path}");
-                continue;
-            }
-            None => None,
-        };
+        // The removed flag may be stale here: publication decides whether the file is there.
+        let known = index.get(path.as_path()).map(|&file_idx| FileKey(file_idx));
         match crate::loader::read_file_data(path) {
             Some(data) => pending.reloaded.push((known, path.clone(), data)),
             None => tracing::debug!("FilesChanged: modified unreadable for path={path}"),
@@ -191,7 +181,10 @@ pub(crate) fn swap_in(
     }
 
     for (known, path, data) in pending.reloaded {
-        let Some(key) = key_of(known, &path) else {
+        // By publication the file may be gone: the edit then has no file to land on.
+        let Some(key) =
+            key_of(known, &path).filter(|key| !snapshot[key.0].removed.load(Ordering::Relaxed))
+        else {
             tracing::debug!("FilesChanged: modified no match for path={path}");
             continue;
         };
@@ -563,5 +556,36 @@ mod tests {
         assert_eq!(swap_in(&files, &second).created, [FileKey(1)]);
         assert_eq!(files.load().len(), 2);
         assert_eq!(files.load()[1].path, path_of(&dir, "z.rs"));
+    }
+
+    /// The removed flag the read saw is not the one that decides: a file the list held as gone
+    /// is brought back by a batch still waiting to be published, so the edit that follows must
+    /// land on it rather than be dropped as an edit of a file that no longer exists.
+    #[test]
+    fn an_edit_of_a_file_brought_back_by_an_unpublished_batch_is_applied() {
+        let (dir, files) = list(&["a.rs", "z.rs"]);
+        files.load()[1]
+            .removed
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        std::fs::write(dir.path().join("z.rs"), "one\n").expect("write");
+        let created = read(
+            &files,
+            &Batch {
+                created: vec![path_of(&dir, "z.rs")],
+                ..Default::default()
+            },
+        );
+        std::fs::write(dir.path().join("z.rs"), "two\n").expect("write");
+        let edited = read(
+            &files,
+            &Batch {
+                modified: vec![path_of(&dir, "z.rs")],
+                ..Default::default()
+            },
+        );
+
+        assert_eq!(swap_in(&files, &created).created, [FileKey(1)]);
+        assert_eq!(swap_in(&files, &edited).modified, [FileKey(1)]);
+        assert_eq!(files.load()[1].data.read().content, "two\n");
     }
 }
