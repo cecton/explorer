@@ -122,8 +122,9 @@ pub struct DiscussionState {
     pub log_start: usize,
     /// Thinking of the running turn, streamed dimmed; empty once the turn is over.
     pub thinking: String,
-    /// Revision of the running turn's live texts the fields above were copied from.
-    pub live_revision: u64,
+    /// Revision of the running turn's live texts the fields above were copied from; `None`
+    /// when they have to be taken again, as after the texts were replaced from disk.
+    pub live_revision: Option<u64>,
     /// Bumped whenever the texts are replaced as a whole (content read from disk, a
     /// prompt sent, a turn finished), which no length tells apart.
     pub content_revision: u64,
@@ -220,7 +221,7 @@ impl DiscussionState {
     /// appends what is new instead of taking the whole texts again; a text that shrank
     /// or was rewritten is taken whole, which the layout cache has to know.
     pub fn mirror(&mut self, live: &crate::agent::turn::live::LiveTurn) {
-        if live.revision() == self.live_revision {
+        if self.live_revision == Some(live.revision()) {
             return;
         }
         let reply_replaced = append_str(&mut self.reply, &live.reply);
@@ -242,17 +243,20 @@ impl DiscussionState {
             self.prompt.clone_from(&live.prompt);
         }
         self.log_start = live.log_start();
-        self.live_revision = live.revision();
+        self.live_revision = Some(live.revision());
     }
 
     /// Replaces what the window shows with the texts of a node or sub-agent run read
-    /// from disk.
+    /// from disk. A running turn's texts are taken again at the next frame, since the
+    /// disk copy is not the live one: the reply may be up to a second old, the thinking
+    /// was never written, and the work log has none of the rounds the turn dropped.
     pub fn show_content(&mut self, prompt: String, reply: String, work_log: Vec<String>) {
         self.prompt = prompt;
         self.reply = reply;
         self.work_log = work_log;
         self.thinking.clear();
         self.log_start = 0;
+        self.live_revision = None;
         self.content_revision += 1;
     }
 

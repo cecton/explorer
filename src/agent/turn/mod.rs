@@ -156,15 +156,17 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
         head_before: request.head.clone(),
         cancel: Arc::new(cancel_tx),
     };
+    // Before the handle leaves, so a window that mirrors the turn in its first frame
+    // paints the prompt it was just sent, never the empty one a live turn starts with.
+    {
+        let mut live = live.lock();
+        live.model = request.spec.to_string();
+        live.prompt = request.prompt.clone();
+    }
 
     tokio::spawn(async move {
         let mut recorder =
             live::Recorder::new(Arc::clone(&live), request.node_dir.clone(), main_tx.clone());
-        {
-            let mut live = live.lock();
-            live.model = request.spec.to_string();
-            live.prompt = request.prompt.clone();
-        }
         let (mut status, mut error) = tokio::select! {
             result = run(&request, &mut recorder) => match result {
                 Ok(()) => (NodeStatus::Done, None),

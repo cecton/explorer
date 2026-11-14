@@ -1685,7 +1685,7 @@ mod tests {
         assert_eq!(discussion.work_log, ["a", "b"]);
         assert_eq!(discussion.thinking, "thinking");
         assert_eq!(discussion.prompt, "do it");
-        assert_eq!(discussion.live_revision, live.revision());
+        assert_eq!(discussion.live_revision, Some(live.revision()));
 
         // A frame with nothing new copies nothing and leaves the texts as they are.
         let revision = discussion.content_revision;
@@ -1710,6 +1710,33 @@ mod tests {
             discussion.content_revision, 1,
             "the layout is laid out again"
         );
+    }
+
+    #[test]
+    fn texts_replaced_from_disk_are_taken_again_from_the_running_turn() {
+        use crate::agent::turn::live::LiveTurn;
+        use crate::tui::state::DiscussionState;
+        let mut discussion = DiscussionState::default();
+        let live = LiveTurn::for_test("answered so far", &["a", "b"], "still thinking", "do it");
+        discussion.mirror(&live);
+        assert_eq!(discussion.thinking, "still thinking");
+
+        // What `NodeContentLoaded` hands over: the reply as far as it was flushed, and
+        // the work log alone, with no thinking at all.
+        discussion.show_content(
+            "do it".to_string(),
+            "answered".to_string(),
+            vec!["a".to_string(), "b".to_string()],
+        );
+        assert!(discussion.thinking.is_empty());
+        assert_eq!(discussion.live_revision, None);
+
+        // The same revision as the last frame, since the turn wrote nothing meanwhile,
+        // and the texts it holds are the ones the window has to show again.
+        discussion.mirror(&live);
+        assert_eq!(discussion.reply, "answered so far");
+        assert_eq!(discussion.thinking, "still thinking");
+        assert_eq!(discussion.live_revision, Some(live.revision()));
     }
 
     #[test]
