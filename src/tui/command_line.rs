@@ -314,25 +314,25 @@ impl CommandLine {
                 key: Key::SpecialKey(SpecialKey::Tab),
             }) => {
                 let entries = entries(global_data);
-                if !entries.is_empty() {
-                    if let Some(command_line) = global_data.state.command_line.as_mut() {
-                        command_line.move_selection(true, entries.len());
-                        command_line.error = None;
-                    }
-                    return true;
+                if !entries.is_empty()
+                    && let Some(command_line) = global_data.state.command_line.as_mut()
+                {
+                    command_line.move_selection(true, entries.len());
+                    command_line.error = None;
                 }
+                return true;
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::BackTab),
             }) => {
                 let entries = entries(global_data);
-                if !entries.is_empty() {
-                    if let Some(command_line) = global_data.state.command_line.as_mut() {
-                        command_line.move_selection(false, entries.len());
-                        command_line.error = None;
-                    }
-                    return true;
+                if !entries.is_empty()
+                    && let Some(command_line) = global_data.state.command_line.as_mut()
+                {
+                    command_line.move_selection(false, entries.len());
+                    command_line.error = None;
                 }
+                return true;
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Enter),
@@ -1398,6 +1398,21 @@ mod tests {
         assert_eq!(completed("sc", 0), "scan");
         assert_eq!(completed("un", 0), "untrust");
         assert_eq!(completed("alias", 0), "alias");
+    }
+
+    #[test]
+    fn tab_stays_with_the_line_when_the_palette_is_empty() {
+        let mut state = state_with_aliases();
+        state.command_line = Some(CommandLine::prefilled(None, "alias x"));
+        assert!(palette_entries("alias x", &state).is_empty());
+        let mut global_data = crate::tui::test_support::global_data(state);
+        for key in [SpecialKey::Tab, SpecialKey::BackTab] {
+            let event = InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(key),
+            });
+            assert!(CommandLine::handle_event(&event, &mut global_data));
+        }
+        assert!(global_data.state.command_line.is_some());
     }
 
     #[test]
