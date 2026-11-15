@@ -146,6 +146,11 @@ impl Injector {
         idle
     }
 
+    /// Opens the turn to messages again: a new run of the CLI has a stdin of its own.
+    pub(crate) fn open(&self) {
+        self.live.lock().closed = false;
+    }
+
     /// Closes the turn to new messages whatever waits: the CLI's stdin is gone.
     pub(crate) fn close(&self) {
         self.live.lock().closed = true;
@@ -458,6 +463,19 @@ mod tests {
         live.lock().injected.clear();
         assert!(injector.close_if_idle(true));
         assert!(live.lock().closed);
+    }
+
+    #[test]
+    fn a_closed_turn_takes_messages_again_once_opened() {
+        let live = Arc::new(parking_lot::Mutex::new(LiveTurn::default()));
+        let injector = Injector {
+            live: Arc::clone(&live),
+            node_dir: camino::Utf8PathBuf::new(),
+        };
+        // A commit nudge, or the retry after a lost session, runs the CLI again.
+        assert!(injector.close_if_idle(true));
+        injector.open();
+        assert!(!live.lock().closed);
     }
 
     #[test]

@@ -416,6 +416,9 @@ pub async fn run(
     use tokio::io::AsyncBufReadExt;
     use tokio::io::AsyncReadExt;
     use tokio::io::AsyncWriteExt;
+    let injector: Injector = recorder.injector();
+    // The recorder may come from a run that closed it: a commit nudge, a lost session.
+    injector.open();
     let mut child = tokio::process::Command::new("claude")
         .args(arguments(invocation))
         .current_dir(invocation.root)
@@ -431,7 +434,6 @@ pub async fn run(
         .map(|pid| crate::util::process::GroupGuard::new(pid, libc::SIGTERM));
 
     // stdin stays open for steering; the run ends once `Settling` lets stdin close.
-    let injector: Injector = recorder.injector();
     let first = input_frame(invocation.prompt);
     let settled = Arc::new(AtomicBool::new(false));
     let steering = child.stdin.take().map(|mut stdin| {
