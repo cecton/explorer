@@ -164,9 +164,10 @@ pub fn report_usage(
 /// outcome arrives as `AppSignal::TurnFinished`.
 pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle {
     use crate::agent::Mode;
+    use crate::agent::turn::live::LiveTurn;
     use crate::conversation::NodeStatus;
     use crate::signal::AppSignal;
-    let live = Arc::new(parking_lot::Mutex::new(live::LiveTurn::default()));
+    let live = Arc::new(parking_lot::Mutex::new(LiveTurn::new()));
     let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
     let handle = TurnHandle {
         live: Arc::clone(&live),

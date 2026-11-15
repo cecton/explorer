@@ -88,6 +88,13 @@ pub struct LiveSubagent {
 }
 
 impl LiveTurn {
+    /// A turn that has produced nothing yet, with a revision of its own.
+    pub(crate) fn new() -> Self {
+        let mut live = Self::default();
+        live.touch();
+        live
+    }
+
     /// Index of the first work log entry of the current answer in progress.
     pub fn log_start(&self) -> usize {
         self.log_start.min(self.work_log.len())
@@ -268,7 +275,11 @@ impl Recorder {
                 live: Arc::clone(&self.live),
                 node_dir: self.node_dir.clone(),
             }),
-            ..Self::new(Arc::default(), dir, self.main_tx.clone())
+            ..Self::new(
+                Arc::new(parking_lot::Mutex::new(LiveTurn::new())),
+                dir,
+                self.main_tx.clone(),
+            )
         }
     }
 

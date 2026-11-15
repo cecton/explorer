@@ -12,9 +12,8 @@ struct Drag {
     window_id: usize,
     kind: crate::tui::panes::discussion::selection::DragKind,
     part: crate::tui::pane_manager::DocPart,
-    /// Byte offset under the click, and the word around it.
+    /// Byte offset under the click.
     anchor: usize,
-    word: (usize, usize),
     /// The revision of the window's texts, and the first work-log entry on screen, when
     /// the drag began. Text that only grows keeps the offsets valid; a replaced text, or
     /// a work log shown from another entry, leaves them naming text the user never saw.
@@ -29,12 +28,9 @@ impl Drag {
     /// Whether the text this drag began in is still the text under it: a text replaced,
     /// a work log shown from another entry, or a text that left the screen, all leave its
     /// offsets naming text the user never saw. Text appended while a turn runs does not.
-    fn still_stands(
-        &self,
-        state: &crate::tui::state::AppState,
-        part: crate::tui::pane_manager::DocPart,
-    ) -> bool {
+    fn still_stands(&self, state: &crate::tui::state::AppState) -> bool {
         use crate::tui::pane_manager::DocPart;
+        let part = self.part;
         let Some(discussion) = state.discussions.get(&self.window_id) else {
             return false;
         };
@@ -1435,7 +1431,6 @@ mod tests {
             kind: DragKind::Select,
             part: DocPart::WorkLog,
             anchor: 0,
-            word: (0, shown.len()),
             content_revision,
             shown_log_start: state.discussions[&0].shown_log_start(),
             laid_out: show_work_log,
@@ -1507,6 +1502,25 @@ mod tests {
             .push_str("streamed");
         component.update_drag(&mut state, vp_col(0) + vp_row(1));
         assert!(component.drag.is_some(), "a growing reply keeps its drag");
+
+        // Nor the thinking: on screen once it has text, it stays there as it grows.
+        let discussion = state.discussions.get_mut(&0).unwrap();
+        discussion.thinking.push_str("pondering");
+        let drag = component.drag.as_mut().unwrap();
+        (drag.part, drag.laid_out) = (DocPart::Thinking, true);
+        component.update_drag(&mut state, vp_col(0) + vp_row(1));
+        assert!(component.drag.is_some(), "the thinking is on screen");
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .thinking
+            .push_str(" further");
+        component.update_drag(&mut state, vp_col(0) + vp_row(1));
+        assert!(
+            component.drag.is_some(),
+            "a growing thinking keeps its drag"
+        );
     }
 
     #[test]

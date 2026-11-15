@@ -84,12 +84,12 @@ pub(crate) fn files_changed(
 }
 
 /// Folds one answer from the language server into the groups. A fresh answer takes the next
-/// colour no active group uses, and `None` means the group was unmarked while its request
-/// was in flight.
+/// colour no active group uses; an answer for a group unmarked while its request was in
+/// flight changes nothing.
 pub(crate) fn answered(
     state: &mut crate::tui::state::AppState,
     answer: &crate::signal::SymbolHighlight,
-) -> Option<()> {
+) {
     let target = find(
         &state.symbol_highlights,
         answer.origin,
@@ -103,10 +103,12 @@ pub(crate) fn answered(
             state.symbol_highlights.remove(idx);
             state.mark_session_dirty();
         }
-        return Some(());
+        return;
     }
     if answer.group_id.is_some() {
-        let idx = target?;
+        let Some(idx) = target else {
+            return;
+        };
         let group = &mut state.symbol_highlights[idx];
         group.qualified_name.clone_from(&answer.qualified_name);
         group.needs_rebuild = false;
@@ -124,7 +126,7 @@ pub(crate) fn answered(
         let name = group.qualified_name.clone();
         dedup(&mut state.symbol_highlights, &name, Some(idx));
         state.mark_session_dirty();
-        return Some(());
+        return;
     }
     let origin = answer.origin_locations.first();
     let palette = &crate::tui::state::SYMBOL_PALETTE;
@@ -164,7 +166,6 @@ pub(crate) fn answered(
         Some(keep),
     );
     state.mark_session_dirty();
-    Some(())
 }
 
 #[cfg(test)]
@@ -325,9 +326,8 @@ mod tests {
     #[test]
     fn a_fresh_answer_adds_a_group() {
         let mut state = state();
-        let handled = answered(&mut state, &answer("a", None, 0, 1, 2));
+        answered(&mut state, &answer("a", None, 0, 1, 2));
 
-        assert_eq!(handled, Some(()));
         assert_eq!(names(&state.symbol_highlights), ["a"]);
         let group = &state.symbol_highlights[0];
         assert_eq!(group.color, crate::tui::state::SYMBOL_PALETTE[0]);
@@ -361,9 +361,8 @@ mod tests {
         state.symbol_highlights[0].needs_rebuild = true;
         state.session_dirty = false;
 
-        let handled = answered(&mut state, &answer("a", Some(0), 0, 2, 1));
+        answered(&mut state, &answer("a", Some(0), 0, 2, 1));
 
-        assert_eq!(handled, Some(()));
         assert_eq!(state.symbol_highlights.len(), 1);
         let group = &state.symbol_highlights[0];
         assert!(!group.needs_rebuild);
@@ -378,9 +377,8 @@ mod tests {
         answered(&mut state, &answer("a", None, 0, 1, 0));
         state.session_dirty = false;
 
-        let handled = answered(&mut state, &answer("a", Some(0), 0, 0, 0));
+        answered(&mut state, &answer("a", Some(0), 0, 0, 0));
 
-        assert_eq!(handled, Some(()));
         assert!(state.symbol_highlights.is_empty());
         assert!(state.session_dirty);
     }
@@ -390,7 +388,7 @@ mod tests {
     fn a_rebuild_of_an_unmarked_group_does_nothing() {
         let mut state = state();
 
-        assert_eq!(answered(&mut state, &answer("a", Some(0), 0, 1, 0)), None);
+        answered(&mut state, &answer("a", Some(0), 0, 1, 0));
         assert!(state.symbol_highlights.is_empty());
         assert!(!state.session_dirty);
     }

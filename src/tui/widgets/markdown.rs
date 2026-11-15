@@ -1016,6 +1016,35 @@ mod marks_tests {
             [piece("one", true), piece(" ", false), piece("two", false)]
         );
     }
+
+    #[test]
+    fn paint_row_paints_nothing_past_the_end_of_the_row() {
+        let black = RgbValue::from_u8(0, 0, 0);
+        let spans = [span("abcd", None, black), span("efgh", None, black)];
+        let mut ops = RenderOpIRVec::new();
+        paint_row(
+            &mut ops,
+            vp_col(0) + vp_row(0),
+            0,
+            &spans,
+            &RowColors {
+                fg: black,
+                bg: black,
+            },
+            &Marks::none(black),
+            3,
+        );
+        let painted: Vec<String> = ops
+            .list
+            .iter()
+            .filter_map(|op| match op {
+                RenderOpIR::PaintTextWithAttributes(text, _) => Some(text.to_string()),
+                _ => None,
+            })
+            .collect();
+        // The stripe, then the first span cut to the row; the second span is not painted.
+        assert_eq!(painted, ["   ", "abc"]);
+    }
 }
 
 #[cfg(test)]

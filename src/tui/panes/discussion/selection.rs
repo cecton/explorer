@@ -190,7 +190,6 @@ impl crate::tui::panes::discussion::DiscussionComponent {
             kind,
             part,
             anchor,
-            word,
             content_revision,
             shown_log_start,
             laid_out,
@@ -203,7 +202,7 @@ impl crate::tui::panes::discussion::DiscussionComponent {
         let unchanged = self
             .drag
             .as_ref()
-            .is_some_and(|drag| drag.still_stands(state, drag.part));
+            .is_some_and(|drag| drag.still_stands(state));
         if !unchanged {
             self.cancel_drag(state);
         }
@@ -221,11 +220,13 @@ impl crate::tui::panes::discussion::DiscussionComponent {
         let Some(drag) = &self.drag else {
             return;
         };
-        let (window_id, part, anchor, word) = (drag.window_id, drag.part, drag.anchor, drag.word);
+        let (window_id, part, anchor) = (drag.window_id, drag.part, drag.anchor);
         let Some(discussion) = state.discussions.get(&window_id) else {
             return;
         };
         let text = crate::tui::panes::discussion::document::part_text(discussion, part);
+        // Found again on each move: the word under the click grows as a turn appends.
+        let word = crate::util::text::word_bounds(&text, anchor);
         let (lo, hi) = match self.locate(state, discussion, window_id, pos) {
             Some((cursor_part, cursor)) if cursor_part == part => {
                 if cursor >= text.len() || !text.is_char_boundary(cursor) {
@@ -288,7 +289,7 @@ impl crate::tui::panes::discussion::DiscussionComponent {
         use crate::tui::pane_manager::SelPoint;
         use crate::tui::pane_manager::TextSelection;
         let drag = self.drag.as_ref()?;
-        if !matches!(drag.kind, DragKind::Select) || !drag.still_stands(state, drag.part) {
+        if !matches!(drag.kind, DragKind::Select) || !drag.still_stands(state) {
             return None;
         }
         let (lo, hi) = match state.text_selection.as_ref()? {
