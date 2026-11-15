@@ -178,12 +178,42 @@ fn surface_size(window_size: VPSize) -> VPSize {
     col_count + row_count
 }
 
+/// Stops the turns still running, keeping what they produced: a turn with a reply or
+/// commits is cancelled, part of the discussion, and one with neither fails, both
+/// through the rule a turn that ends on its own goes through, so a commit turn's
+/// commits count. Its sub-agent runs end with it: left running they would load as
+/// "interrupted" and lose the duration a cancelled one records.
+fn stop_running_turns(state: &crate::tui::state::AppState) {
+    use crate::agent::Mode;
+    let head_now = state.repo.as_ref().and_then(crate::git::head_id);
+    let now_secs = crate::util::time::now_secs();
+    for (node, handle) in &state.running_turns {
+        handle.cancel();
+        let reply = handle.live.lock().reply.clone();
+        let commits = match handle.mode {
+            Mode::Commit => crate::git::commits_since(
+                &state.root,
+                handle.head_before.as_deref(),
+                head_now.as_deref(),
+            ),
+            Mode::Feedback => Vec::new(),
+        };
+        let mut tree = state.conversations.write();
+        if let Err(e) = tree.mark_cut_short(node, &reply, &commits, head_now.as_deref()) {
+            tracing::warn!(
+                "failed to record the turn of {} cut short at exit: {e}",
+                node.as_str()
+            );
+        }
+        tree.cancel_running_agents(node, now_secs);
+    }
+}
+
 pub async fn run(
     initial_state: crate::tui::state::AppState,
     files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
     root: camino::Utf8PathBuf,
 ) -> CommonResult<()> {
-    use crate::agent::Mode;
     let exit_tx: Arc<OnceLock<crate::signal::MainTx>> = Arc::new(OnceLock::new());
     let exit_message: Arc<OnceLock<&'static str>> = Arc::new(OnceLock::new());
 
@@ -227,33 +257,7 @@ pub async fn run(
             it => return it.into_err(),
         };
 
-    // Stop running turns: keep what they produced. A turn with a reply or commits is
-    // cancelled, part of the discussion; it is marked through the same rule as one that
-    // ended on its own, so a commit turn's commits count.
-    let head_now = global_data
-        .state
-        .repo
-        .as_ref()
-        .and_then(crate::git::head_id);
-    for (node, handle) in &global_data.state.running_turns {
-        handle.cancel();
-        let reply = handle.live.lock().reply.clone();
-        let commits = match handle.mode {
-            Mode::Commit => crate::git::commits_since(
-                &global_data.state.root,
-                handle.head_before.as_deref(),
-                head_now.as_deref(),
-            ),
-            Mode::Feedback => Vec::new(),
-        };
-        let mut tree = global_data.state.conversations.write();
-        if let Err(e) = tree.mark_cut_short(node, &reply, &commits, head_now.as_deref()) {
-            tracing::warn!(
-                "failed to record the turn of {} cut short at exit: {e}",
-                node.as_str()
-            );
-        }
-    }
+    stop_running_turns(&global_data.state);
 
     // Kill all terminal children gracefully.
     for pane in global_data.state.terminal_panes.values() {
@@ -273,4 +277,62 @@ pub async fn run(
         eprintln!("{msg}");
     }
     ok!()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn stopping_a_turn_at_exit_ends_its_running_sub_agents_with_it() {
+        use crate::agent::Mode;
+        use crate::agent::turn::TurnHandle;
+        use crate::conversation::ConversationTree;
+        use crate::conversation::NodeStatus;
+        use crate::conversation::files;
+        use crate::conversation::metadata::Metadata;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let mut tree = ConversationTree::load(&root);
+        let node = tree
+            .create_node(None, 86_401, Metadata::default(), "p", None)
+            .unwrap();
+        let running = Metadata {
+            status: Some(NodeStatus::Running),
+            ..Default::default()
+        };
+        tree.create_agent(&node, 86_402, running, "task").unwrap();
+        let run_dir = tree.agent_dir(&node, 1).unwrap();
+        files::write_reply(&run_dir, "a partial answer").unwrap();
+
+        let mut state = crate::tui::state::AppState::for_test(root);
+        *state.conversations.write() = tree;
+        state.running_turns.insert(
+            node.clone(),
+            TurnHandle::for_test(Mode::Commit, "half an answer"),
+        );
+
+        let before = crate::util::time::now_secs();
+        stop_running_turns(&state);
+        let after = crate::util::time::now_secs();
+
+        let tree = state.conversations.read();
+        let cut_short = &tree.node(&node).unwrap().meta;
+        assert_eq!(cut_short.status, Some(NodeStatus::Cancelled));
+        assert_eq!(cut_short.commits, Vec::<String>::new());
+        let run = tree.agent(&node, 1).unwrap();
+        assert_eq!(run.meta.status, Some(NodeStatus::Cancelled));
+        assert!(run.meta.error.is_none());
+        // A run cut short records its duration from its creation stamp; left running it
+        // would reload as "interrupted" with none. The clock the function reads sits
+        // between these two.
+        let secs = run.meta.secs.expect("a cancelled run records its duration");
+        assert!(
+            (before - 86_402..=after - 86_402).contains(&(secs as i64)),
+            "{secs} is not between {} and {}",
+            before - 86_402,
+            after - 86_402
+        );
+        assert_eq!(files::read_reply(&run_dir), "a partial answer");
+    }
 }

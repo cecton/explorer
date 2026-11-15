@@ -32,6 +32,25 @@ impl TurnHandle {
     pub fn cancel(&self) {
         let _ = self.cancel.send(true);
     }
+
+    /// A handle on a turn that never ran, for a test that only needs one parked in
+    /// `AppState::running_turns`.
+    #[cfg(test)]
+    pub(crate) fn for_test(mode: crate::agent::Mode, reply: &str) -> Self {
+        let (cancel, _) = tokio::sync::watch::channel(false);
+        Self {
+            live: Arc::new(parking_lot::Mutex::new(live::LiveTurn::for_test(
+                reply,
+                &[],
+                "",
+                "",
+            ))),
+            started: Instant::now(),
+            mode,
+            head_before: None,
+            cancel: Arc::new(cancel),
+        }
+    }
 }
 
 #[derive(Clone)]
