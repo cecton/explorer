@@ -9,15 +9,12 @@ pub(super) fn handle(
 ) -> CommonResult<EventPropagation> {
     use crate::agent::mcp::McpStatus;
     use crate::conversation::NodeStatus;
-    use crate::loader::FileKey;
     use crate::signal::AppSignal;
-    use crate::signal::SymbolRefLocation;
     use crate::tui::after_agents::AfterAgents;
     use crate::tui::pane_manager::Window;
     use crate::tui::panes::discussion::DiscussionComponent;
     use crate::tui::panes::git_log_pane::GitLogPaneComponent;
     use crate::tui::panes::pickers::window_picker::WindowPickerComponent;
-    use crate::tui::state::SymbolHighlightGroup;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     crate::tui::app::sync_has_focus(&global_data.state, has_focus);
@@ -103,90 +100,15 @@ pub(super) fn handle(
             AppSignal::SetCargoFeatures(_) => {
                 // Handled as early return above; unreachable here.
             }
-            AppSignal::SymbolHighlight(highlight) => {
-                let qualified_name = highlight.qualified_name.clone();
-                let group_id = highlight.group_id;
-                let origin_file_idx = highlight.origin.0;
-                let origin_line = highlight.origin_line;
-                let origin_char = highlight.origin_char;
-                let origin_word = highlight.origin_word.clone();
-                let origin_locations = &highlight.origin_locations;
-                let reference_locations = &highlight.reference_locations;
+            AppSignal::SymbolHighlight(answer) => {
                 tracing::debug!(
                     "AppSignal::SymbolHighlight: qn={:?} group_id={:?} origin_locs={} ref_locs={}",
-                    qualified_name,
-                    group_id,
-                    origin_locations.len(),
-                    reference_locations.len(),
+                    answer.qualified_name,
+                    answer.group_id,
+                    answer.origin_locations.len(),
+                    answer.reference_locations.len(),
                 );
-                let target = crate::tui::symbols::find(
-                    &state.symbol_highlights,
-                    FileKey(origin_file_idx),
-                    origin_line,
-                    origin_char,
-                );
-                if origin_locations.is_empty() && reference_locations.is_empty() {
-                    if group_id.is_some()
-                        && let Some(idx) = target
-                    {
-                        state.symbol_highlights.remove(idx);
-                        state.mark_session_dirty();
-                    }
-                } else if group_id.is_some() {
-                    let Some(idx) = target else {
-                        // Group was toggled off while the rebuild was in
-                        // flight; nothing to update.
-                        return Ok(EventPropagation::ConsumedRender);
-                    };
-                    let group = &mut state.symbol_highlights[idx];
-                    group.qualified_name.clone_from(&qualified_name);
-                    group.needs_rebuild = false;
-                    if let Some(origin) = origin_locations.first() {
-                        group.origin_byte_start = Some(origin.start_byte);
-                        group.origin_byte_end = Some(origin.end_byte);
-                    }
-                    group.locations.clear();
-                    group.locations.extend(origin_locations.iter().cloned());
-                    group.locations.extend(reference_locations.iter().cloned());
-                    let qn = group.qualified_name.clone();
-                    crate::tui::symbols::dedup(&mut state.symbol_highlights, &qn, Some(idx));
-                    state.mark_session_dirty();
-                } else {
-                    let origin = origin_locations.first().cloned();
-                    let palette = &crate::tui::state::SYMBOL_PALETTE;
-                    // Prefer a color no active group is already using. Scan the
-                    // whole palette starting at the round-robin cursor; only fall
-                    // back to a reused color once every palette entry is taken.
-                    let start = state.next_palette_index % palette.len();
-                    let color_idx = (0..palette.len())
-                        .map(|off| (start + off) % palette.len())
-                        .find(|&i| {
-                            !state
-                                .symbol_highlights
-                                .iter()
-                                .any(|g| g.color == palette[i])
-                        })
-                        .unwrap_or(start);
-                    state.next_palette_index = (color_idx + 1) % palette.len();
-                    let mut locations: Vec<SymbolRefLocation> = origin_locations.clone();
-                    locations.extend(reference_locations.iter().cloned());
-                    state.symbol_highlights.push(SymbolHighlightGroup {
-                        qualified_name: qualified_name.clone(),
-                        origin_file: FileKey(origin_file_idx),
-                        origin_line,
-                        origin_char,
-                        origin_word,
-                        origin_byte_start: origin.as_ref().map(|l| l.start_byte),
-                        origin_byte_end: origin.as_ref().map(|l| l.end_byte),
-                        color: crate::tui::state::SYMBOL_PALETTE[color_idx],
-                        locations,
-                        needs_rebuild: false,
-                    });
-                    let keep = state.symbol_highlights.len() - 1;
-                    let qn = qualified_name;
-                    crate::tui::symbols::dedup(&mut state.symbol_highlights, &qn, Some(keep));
-                    state.mark_session_dirty();
-                }
+                crate::tui::symbols::answered(state, answer);
             }
             AppSignal::GitLogLoaded { id, result } => {
                 if let Some(win) = state.git_logs.get_mut(id) {

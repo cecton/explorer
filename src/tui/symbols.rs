@@ -83,6 +83,90 @@ pub(crate) fn files_changed(
     }
 }
 
+/// Folds one answer from the language server into the groups. A fresh answer takes the next
+/// colour no active group uses, and `None` means the group was unmarked while its request
+/// was in flight.
+pub(crate) fn answered(
+    state: &mut crate::tui::state::AppState,
+    answer: &crate::signal::SymbolHighlight,
+) -> Option<()> {
+    let target = find(
+        &state.symbol_highlights,
+        answer.origin,
+        answer.origin_line,
+        answer.origin_char,
+    );
+    if answer.origin_locations.is_empty() && answer.reference_locations.is_empty() {
+        if answer.group_id.is_some()
+            && let Some(idx) = target
+        {
+            state.symbol_highlights.remove(idx);
+            state.mark_session_dirty();
+        }
+        return Some(());
+    }
+    if answer.group_id.is_some() {
+        let idx = target?;
+        let group = &mut state.symbol_highlights[idx];
+        group.qualified_name.clone_from(&answer.qualified_name);
+        group.needs_rebuild = false;
+        if let Some(origin) = answer.origin_locations.first() {
+            group.origin_byte_start = Some(origin.start_byte);
+            group.origin_byte_end = Some(origin.end_byte);
+        }
+        group.locations.clear();
+        group
+            .locations
+            .extend(answer.origin_locations.iter().cloned());
+        group
+            .locations
+            .extend(answer.reference_locations.iter().cloned());
+        let name = group.qualified_name.clone();
+        dedup(&mut state.symbol_highlights, &name, Some(idx));
+        state.mark_session_dirty();
+        return Some(());
+    }
+    let origin = answer.origin_locations.first();
+    let palette = &crate::tui::state::SYMBOL_PALETTE;
+    // Prefer a colour no active group is already using. Scan the whole palette starting at
+    // the round-robin cursor; only fall back to a reused colour once every entry is taken.
+    let start = state.next_palette_index % palette.len();
+    let color_idx = (0..palette.len())
+        .map(|off| (start + off) % palette.len())
+        .find(|&i| {
+            !state
+                .symbol_highlights
+                .iter()
+                .any(|group| group.color == palette[i])
+        })
+        .unwrap_or(start);
+    state.next_palette_index = (color_idx + 1) % palette.len();
+    let mut locations = answer.origin_locations.clone();
+    locations.extend(answer.reference_locations.iter().cloned());
+    state
+        .symbol_highlights
+        .push(crate::tui::state::SymbolHighlightGroup {
+            qualified_name: answer.qualified_name.clone(),
+            origin_file: answer.origin,
+            origin_line: answer.origin_line,
+            origin_char: answer.origin_char,
+            origin_word: answer.origin_word.clone(),
+            origin_byte_start: origin.map(|location| location.start_byte),
+            origin_byte_end: origin.map(|location| location.end_byte),
+            color: palette[color_idx],
+            locations,
+            needs_rebuild: false,
+        });
+    let keep = state.symbol_highlights.len() - 1;
+    dedup(
+        &mut state.symbol_highlights,
+        &answer.qualified_name,
+        Some(keep),
+    );
+    state.mark_session_dirty();
+    Some(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -216,5 +300,108 @@ mod tests {
         files_changed(&mut state, &touching(&[], &[]));
 
         assert_eq!(state.symbol_highlights[0].locations, [location(1)]);
+    }
+
+    fn answer(
+        name: &str,
+        group_id: Option<usize>,
+        line: u32,
+        origins: usize,
+        uses: usize,
+    ) -> crate::signal::SymbolHighlight {
+        crate::signal::SymbolHighlight {
+            qualified_name: name.to_string(),
+            group_id,
+            origin: crate::loader::FileKey(0),
+            origin_line: line,
+            origin_char: 0,
+            origin_word: None,
+            origin_locations: (0..origins).map(location).collect(),
+            reference_locations: (10..10 + uses).map(location).collect(),
+        }
+    }
+
+    /// A fresh answer adds a group in the next unused colour and asks nothing.
+    #[test]
+    fn a_fresh_answer_adds_a_group() {
+        let mut state = state();
+        let handled = answered(&mut state, &answer("a", None, 0, 1, 2));
+
+        assert_eq!(handled, Some(()));
+        assert_eq!(names(&state.symbol_highlights), ["a"]);
+        let group = &state.symbol_highlights[0];
+        assert_eq!(group.color, crate::tui::state::SYMBOL_PALETTE[0]);
+        assert_eq!(group.locations.len(), 3);
+        assert!(!group.needs_rebuild);
+        assert_eq!(state.next_palette_index, 1);
+    }
+
+    /// A second name takes the next colour rather than reusing the first.
+    #[test]
+    fn a_second_name_takes_another_colour() {
+        let mut state = state();
+        answered(&mut state, &answer("a", None, 0, 1, 0));
+        answered(&mut state, &answer("b", None, 1, 1, 0));
+
+        assert_eq!(
+            state.symbol_highlights[0].color,
+            crate::tui::state::SYMBOL_PALETTE[0]
+        );
+        assert_eq!(
+            state.symbol_highlights[1].color,
+            crate::tui::state::SYMBOL_PALETTE[1]
+        );
+    }
+
+    /// A rebuild updates the group in place instead of adding a second one.
+    #[test]
+    fn a_rebuild_updates_the_group_it_names() {
+        let mut state = state();
+        answered(&mut state, &answer("a", None, 0, 1, 0));
+        state.symbol_highlights[0].needs_rebuild = true;
+        state.session_dirty = false;
+
+        let handled = answered(&mut state, &answer("a", Some(0), 0, 2, 1));
+
+        assert_eq!(handled, Some(()));
+        assert_eq!(state.symbol_highlights.len(), 1);
+        let group = &state.symbol_highlights[0];
+        assert!(!group.needs_rebuild);
+        assert_eq!(group.locations.len(), 3);
+        assert!(state.session_dirty);
+    }
+
+    /// An answer with no location anywhere drops a group that was marked.
+    #[test]
+    fn an_empty_answer_drops_the_marked_group() {
+        let mut state = state();
+        answered(&mut state, &answer("a", None, 0, 1, 0));
+        state.session_dirty = false;
+
+        let handled = answered(&mut state, &answer("a", Some(0), 0, 0, 0));
+
+        assert_eq!(handled, Some(()));
+        assert!(state.symbol_highlights.is_empty());
+        assert!(state.session_dirty);
+    }
+
+    /// An answer for a group unmarked while the request was in flight has nothing to do.
+    #[test]
+    fn a_rebuild_of_an_unmarked_group_does_nothing() {
+        let mut state = state();
+
+        assert_eq!(answered(&mut state, &answer("a", Some(0), 0, 1, 0)), None);
+        assert!(state.symbol_highlights.is_empty());
+        assert!(!state.session_dirty);
+    }
+
+    /// Two groups of one name never both survive an answer for it.
+    #[test]
+    fn an_answer_leaves_one_group_per_name() {
+        let mut state = state();
+        answered(&mut state, &answer("a", None, 0, 1, 0));
+        answered(&mut state, &answer("a", None, 4, 1, 0));
+        assert_eq!(state.symbol_highlights.len(), 1);
+        assert_eq!(state.symbol_highlights[0].origin_line, 4);
     }
 }
