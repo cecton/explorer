@@ -136,9 +136,7 @@ impl Injector {
         !self.live.lock().injected.is_empty()
     }
 
-    /// Closes the turn to new messages when none waits and `settled` (a result came
-    /// after the last write). The check and the flag share one lock, so a message
-    /// either is seen here or is refused by the window.
+    /// Closes the turn when none waits and `settled`, under the lock `inject` takes.
     pub(crate) fn close_if_idle(&self, settled: bool) -> bool {
         let mut live = self.live.lock();
         let idle = live.injected.is_empty() && settled;

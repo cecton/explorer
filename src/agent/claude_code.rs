@@ -147,7 +147,11 @@ enum StreamEvent {
     CachedIn(u64),
     /// How much of the subscription is used after the request that just completed.
     Usage(crate::usage::Usage),
-    /// The run is over. `no_turn` is set when it ended before the model was called.
+    /// A task the CLI runs on the side (a sub-agent, a background command) started.
+    TaskStarted(String),
+    /// That task is over; the CLI tells the model, which may answer again.
+    TaskDone(String),
+    /// The model's answer is over. `no_turn` is set when it ended before the model was called.
     Result {
         error: Option<String>,
         no_turn: bool,
@@ -232,11 +236,20 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
         .and_then(serde_json::Value::as_str)
         .unwrap_or("");
     match kind {
-        "system" if message.get("subtype").and_then(serde_json::Value::as_str) == Some("init") => {
-            text(&message, "session_id")
-                .map(StreamEvent::Session)
-                .into_iter()
-                .collect()
+        "system" => {
+            let event: fn(String) -> StreamEvent =
+                match message.get("subtype").and_then(serde_json::Value::as_str) {
+                    Some("init") => {
+                        return text(&message, "session_id")
+                            .map(StreamEvent::Session)
+                            .into_iter()
+                            .collect();
+                    }
+                    Some("task_started") => StreamEvent::TaskStarted,
+                    Some("task_notification") => StreamEvent::TaskDone,
+                    _ => return Vec::new(),
+                };
+            text(&message, "task_id").map(event).into_iter().collect()
         }
         "stream_event" => {
             let event = &message["event"];
@@ -360,6 +373,30 @@ fn spawn_error(error: std::io::Error) -> String {
     }
 }
 
+/// Side tasks that have not reported back yet: a result settles the run only when none is left.
+#[derive(Default)]
+struct Settling {
+    outstanding: std::collections::HashSet<String>,
+}
+
+impl Settling {
+    /// What `event` makes of `settled`, when it changes it.
+    fn after(&mut self, event: &StreamEvent) -> Option<bool> {
+        match event {
+            StreamEvent::TaskStarted(id) => {
+                self.outstanding.insert(id.clone());
+                Some(false)
+            }
+            StreamEvent::TaskDone(id) => {
+                self.outstanding.remove(id);
+                Some(false)
+            }
+            StreamEvent::Result { .. } => Some(self.outstanding.is_empty()),
+            _ => None,
+        }
+    }
+}
+
 /// One user message, in the `stream-json` input format of the CLI.
 fn input_frame(content: &str) -> String {
     let frame = serde_json::json!({
@@ -393,11 +430,7 @@ pub async fn run(
         .id()
         .map(|pid| crate::util::process::GroupGuard::new(pid, libc::SIGTERM));
 
-    // stdin stays open for the whole run: what the user sends while the CLI works is
-    // written there, and the CLI reads it as a new user message of the session. The CLI
-    // may answer several frames with one result (it folds a frame sent mid-turn into the
-    // running one) or one frame with several, so frames are not counted: the run is over
-    // once a result came after the last write, and closing stdin then ends it.
+    // stdin stays open for steering; the run ends once `Settling` lets stdin close.
     let injector: Injector = recorder.injector();
     let first = input_frame(invocation.prompt);
     let settled = Arc::new(AtomicBool::new(false));
@@ -429,7 +462,7 @@ pub async fn run(
                     injector.wrote(&content);
                 }
                 if injector.close_if_idle(settled.load(Ordering::SeqCst)) {
-                    // A result came after the last write: closing stdin ends the run.
+                    // The run has settled: closing stdin ends it.
                     return;
                 }
             }
@@ -444,10 +477,14 @@ pub async fn run(
     });
 
     let mut outcome = None;
+    let mut settling = Settling::default();
     if let Some(stdout) = child.stdout.take() {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
         while let Ok(Some(line)) = lines.next_line().await {
             for event in parse_line(&line) {
+                if let Some(now) = settling.after(&event) {
+                    settled.store(now, Ordering::SeqCst);
+                }
                 match event {
                     StreamEvent::Session(session) => recorder.session(session),
                     StreamEvent::AnswerStart => recorder.begin_answer(),
@@ -461,18 +498,14 @@ pub async fn run(
                     StreamEvent::TokensIn(tokens) => recorder.tokens_in(tokens),
                     StreamEvent::CachedIn(tokens) => recorder.cached_in(Some(tokens)),
                     StreamEvent::Usage(usage) => recorder.usage(usage),
-                    StreamEvent::Result { error, no_turn } => {
-                        // The run is over when a result follows the last frame written.
-                        settled.store(true, Ordering::SeqCst);
-                        outcome = Some((error, no_turn));
-                    }
+                    StreamEvent::TaskStarted(_) | StreamEvent::TaskDone(_) => {}
+                    StreamEvent::Result { error, no_turn } => outcome = Some((error, no_turn)),
                 }
             }
         }
     }
     if let Some(steering) = steering {
-        // The task closes stdin itself once a result follows the last write; a run cut short
-        // leaves it waiting, so it is dropped with the process it was writing to.
+        // Output ended without a settled result: the steering task would poll forever.
         steering.abort();
     }
     let status = child.wait().await;
@@ -707,6 +740,58 @@ mod tests {
         assert!(!fresh.contains("--resume"));
         assert!(fresh.contains("--setting-sources user"));
         assert!(fresh.contains("--input-format stream-json"));
+    }
+
+    #[test]
+    fn task_lines_give_the_task_id() {
+        let started = r#"{"type":"system","subtype":"task_started","task_id":"b8zpuyvzl","tool_use_id":"toolu_1","description":"Sleep","is_backgrounded":true,"task_type":"local_bash","session_id":"s"}"#;
+        assert_eq!(
+            parse_line(started),
+            [StreamEvent::TaskStarted("b8zpuyvzl".to_string())]
+        );
+        let done = r#"{"type":"system","subtype":"task_notification","task_id":"b8zpuyvzl","tool_use_id":"toolu_1","status":"completed","output_file":"","summary":"done","session_id":"s"}"#;
+        assert_eq!(
+            parse_line(done),
+            [StreamEvent::TaskDone("b8zpuyvzl".to_string())]
+        );
+        let updated = r#"{"type":"system","subtype":"task_updated","task_id":"b8zpuyvzl","patch":{"status":"completed"},"session_id":"s"}"#;
+        assert!(parse_line(updated).is_empty());
+    }
+
+    #[test]
+    fn a_run_settles_only_once_its_tasks_are_done() {
+        let result = || StreamEvent::Result {
+            error: None,
+            no_turn: false,
+        };
+        let task = |id: &str| id.to_string();
+        let mut settling = Settling::default();
+        // No task: the first result settles the run.
+        assert_eq!(settling.after(&result()), Some(true));
+
+        let mut settling = Settling::default();
+        assert_eq!(
+            settling.after(&StreamEvent::TaskStarted(task("a"))),
+            Some(false)
+        );
+        assert_eq!(
+            settling.after(&StreamEvent::TaskStarted(task("b"))),
+            Some(false)
+        );
+        // A background task outlives the first answer.
+        assert_eq!(settling.after(&result()), Some(false));
+        // Its end starts another answer, so the run is unsettled until that one's result.
+        assert_eq!(
+            settling.after(&StreamEvent::TaskDone(task("a"))),
+            Some(false)
+        );
+        assert_eq!(settling.after(&result()), Some(false));
+        assert_eq!(
+            settling.after(&StreamEvent::TaskDone(task("b"))),
+            Some(false)
+        );
+        assert_eq!(settling.after(&result()), Some(true));
+        assert_eq!(settling.after(&StreamEvent::Text("hi".to_string())), None);
     }
 
     #[test]
