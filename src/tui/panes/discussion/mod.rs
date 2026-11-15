@@ -15,32 +15,33 @@ struct Drag {
     /// Byte offset under the click, and the word around it.
     anchor: usize,
     word: (usize, usize),
-    /// The text the drag began in: its length, and the revision of the window's texts.
-    /// Either moving means the offsets name text the user never saw.
-    text_len: usize,
+    /// The revision of the window's texts, and the first work-log entry on screen, when
+    /// the drag began. Text that only grows keeps the offsets valid; a replaced text, or
+    /// a work log shown from another entry, leaves them naming text the user never saw.
     content_revision: u64,
+    shown_log_start: usize,
     /// Whether that text was on screen. The work log can leave it without a byte of it
     /// changing, when `Ctrl+O` hides it or a round of it is dropped.
     laid_out: bool,
 }
 
 impl Drag {
-    /// Whether the text this drag began in is still the text under it: a text replaced
-    /// or rewritten, another revision of the window, or one that left the screen, all
-    /// leave its offsets naming text the user never saw.
+    /// Whether the text this drag began in is still the text under it: a text replaced,
+    /// a work log shown from another entry, or a text that left the screen, all leave its
+    /// offsets naming text the user never saw. Text appended while a turn runs does not.
     fn still_stands(
         &self,
         state: &crate::tui::state::AppState,
         part: crate::tui::pane_manager::DocPart,
     ) -> bool {
+        use crate::tui::pane_manager::DocPart;
         let Some(discussion) = state.discussions.get(&self.window_id) else {
             return false;
         };
         discussion.content_revision == self.content_revision
             && crate::tui::panes::discussion::selection::part_is_on_screen(state, discussion, part)
                 == self.laid_out
-            && crate::tui::panes::discussion::document::part_text(discussion, part).len()
-                == self.text_len
+            && (part != DocPart::WorkLog || discussion.shown_log_start() == self.shown_log_start)
     }
 }
 
@@ -1435,8 +1436,8 @@ mod tests {
             part: DocPart::WorkLog,
             anchor: 0,
             word: (0, shown.len()),
-            text_len: shown.len(),
             content_revision,
+            shown_log_start: state.discussions[&0].shown_log_start(),
             laid_out: show_work_log,
         });
         let point = |offset| SelPoint::Discussion {
@@ -1480,6 +1481,32 @@ mod tests {
         component.update_drag(&mut state, vp_col(0) + vp_row(1));
         assert!(component.drag.is_some());
         assert!(state.text_selection.is_some());
+    }
+
+    #[test]
+    fn a_drag_survives_the_text_growing_while_a_turn_runs() {
+        use crate::tui::pane_manager::DocPart;
+        let (mut state, mut component) = state_with_a_work_log_drag(&["old", "shown"], 1, false);
+        // A running turn appends to the work log without moving the content revision.
+        let discussion = state.discussions.get_mut(&0).unwrap();
+        discussion.work_log.push("next".to_string());
+        component.update_drag(&mut state, vp_col(0) + vp_row(1));
+        assert!(
+            component.drag.is_some(),
+            "a new entry keeps a work-log drag"
+        );
+
+        // Nor does the reply streaming in end a drag over it.
+        let drag = component.drag.as_mut().unwrap();
+        (drag.part, drag.laid_out) = (DocPart::Reply, true);
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .reply
+            .push_str("streamed");
+        component.update_drag(&mut state, vp_col(0) + vp_row(1));
+        assert!(component.drag.is_some(), "a growing reply keeps its drag");
     }
 
     #[test]

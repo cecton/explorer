@@ -209,10 +209,16 @@ pub struct NodeHighlights {
 impl DiscussionState {
     /// The work log entries on screen; layout, selection and status line all read them.
     pub fn shown_work_log(&self) -> &[String] {
+        &self.work_log[self.shown_log_start()..]
+    }
+
+    /// The first work log entry on screen: all of them when `Ctrl+O` shows the dropped
+    /// rounds, else those of the rounds kept.
+    pub fn shown_log_start(&self) -> usize {
         if self.show_work_log == Some(true) {
-            &self.work_log
+            0
         } else {
-            &self.work_log[self.log_start.min(self.work_log.len())..]
+            self.log_start.min(self.work_log.len())
         }
     }
 

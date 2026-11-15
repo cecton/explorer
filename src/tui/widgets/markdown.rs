@@ -177,9 +177,19 @@ pub(crate) struct Piece<'a> {
 /// has no place for are marked when the text on both sides of them is.
 pub(crate) fn row_pieces<'a>(spans: &'a [Span], marked: &[(usize, usize)]) -> Vec<Piece<'a>> {
     use unicode_segmentation::UnicodeSegmentation;
+    if marked.is_empty() {
+        return spans
+            .iter()
+            .map(|span| Piece {
+                text: &span.text,
+                span,
+                marked: false,
+            })
+            .collect();
+    }
     let mut runs: Vec<(&str, &Span, Option<bool>)> = Vec::with_capacity(spans.len());
     for span in spans {
-        let Some(src) = span.src.filter(|_| !marked.is_empty()) else {
+        let Some(src) = span.src else {
             runs.push((&span.text, span, span.src.map(|_| false)));
             continue;
         };
@@ -261,6 +271,9 @@ pub(crate) fn paint_row(
     *ops += RenderOpIR::PaintTextWithAttributes(" ".repeat(width).into(), Some(stripe));
     let mut x = 0usize;
     for piece in row_pieces(spans, marks.ranges) {
+        if x >= width {
+            break;
+        }
         let truncated;
         let text: &str = if x + crate::tui::widgets::text_layout::display_width(piece.text) > width
         {

@@ -136,7 +136,8 @@ impl crate::tui::panes::discussion::DiscussionComponent {
             return;
         }
         let word = crate::util::text::word_bounds(&text, anchor);
-        let (text_len, content_revision) = (text.len(), discussion.content_revision);
+        let (content_revision, shown_log_start) =
+            (discussion.content_revision, discussion.shown_log_start());
         let laid_out = part_is_on_screen(state, discussion, part);
         // A sub-agent run has no highlights: a modified drag selects too.
         let highlighted = discussion
@@ -190,8 +191,8 @@ impl crate::tui::panes::discussion::DiscussionComponent {
             part,
             anchor,
             word,
-            text_len,
             content_revision,
+            shown_log_start,
             laid_out,
         });
         state.mouse_drag_active = true;
