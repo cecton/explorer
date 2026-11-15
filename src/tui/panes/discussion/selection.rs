@@ -7,7 +7,7 @@ pub(crate) enum DragKind {
     /// A Shift or Ctrl drag: adds to or removes from the highlights `node` had when the
     /// drag began.
     Highlight {
-        modifier: crate::tui::panes::preview::DragModifier,
+        modifier: crate::tui::widgets::contrast::DragModifier,
         node: crate::conversation::NodeId,
         snapshot: Vec<(usize, usize)>,
     },
@@ -88,58 +88,6 @@ pub(crate) fn remove_range(ranges: &[(usize, usize)], lo: usize, hi: usize) -> V
     kept
 }
 
-/// A run of cells of one span that are all marked (selected or highlighted) or all not.
-pub(crate) struct Piece<'a> {
-    pub(crate) text: &'a str,
-    pub(crate) span: &'a crate::tui::widgets::markdown::Span,
-    pub(crate) marked: bool,
-}
-
-/// Cuts the spans of a row where `marked` source ranges begin and end. Cells the source
-/// has no place for are marked when the text on both sides of them is.
-pub(crate) fn row_pieces<'a>(
-    spans: &'a [crate::tui::widgets::markdown::Span],
-    marked: &[(usize, usize)],
-) -> Vec<Piece<'a>> {
-    use crate::tui::widgets::markdown::Span;
-    let mut runs: Vec<(&str, &Span, Option<bool>)> = Vec::with_capacity(spans.len());
-    for span in spans {
-        use unicode_segmentation::UnicodeSegmentation;
-        let Some(src) = span.src.filter(|_| !marked.is_empty()) else {
-            runs.push((&span.text, span, span.src.map(|_| false)));
-            continue;
-        };
-        let mut start = 0;
-        let mut state = None;
-        for (at, _) in span.text.grapheme_indices(true) {
-            let hit = marked
-                .iter()
-                .any(|&(lo, hi)| (lo..hi).contains(&(src + at)));
-            if state.is_some_and(|state| state != hit) {
-                runs.push((&span.text[start..at], span, state));
-                start = at;
-            }
-            state = Some(hit);
-        }
-        if start < span.text.len() {
-            runs.push((&span.text[start..], span, state));
-        }
-    }
-    let states: Vec<Option<bool>> = runs.iter().map(|run| run.2).collect();
-    runs.into_iter()
-        .enumerate()
-        .map(|(i, (text, span, state))| Piece {
-            text,
-            span,
-            marked: state.unwrap_or_else(|| {
-                let before = states[..i].iter().rev().find_map(|state| *state);
-                let after = states[i + 1..].iter().find_map(|state| *state);
-                before == Some(true) && after == Some(true)
-            }),
-        })
-        .collect()
-}
-
 /// Whether `part` has lines in the document the window shows. The work log leaves it
 /// without a byte of its text changing, when `Ctrl+O` hides it or a round of it is
 /// dropped, and the offsets of a drag then name cells that are not painted.
@@ -196,7 +144,7 @@ impl crate::tui::panes::discussion::DiscussionComponent {
             .as_ref()
             .filter(|_| discussion.agent.is_none());
         let kind = match (
-            crate::tui::pane_component::drag_modifier_from_mouse(mouse),
+            crate::tui::widgets::contrast::drag_modifier_from_mouse(mouse),
             highlighted,
         ) {
             (Some(modifier), Some(node)) => {
@@ -265,7 +213,7 @@ impl crate::tui::panes::discussion::DiscussionComponent {
     /// began in: past it, it reaches that text's start or end.
     pub(crate) fn update_drag(&mut self, state: &mut crate::tui::state::AppState, pos: VPPos) {
         use crate::tui::pane_manager::SelPoint;
-        use crate::tui::panes::preview::DragModifier;
+        use crate::tui::widgets::contrast::DragModifier;
         if !self.drag_stands(state) {
             return;
         }

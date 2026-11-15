@@ -35,18 +35,12 @@ impl ClickTracker {
     }
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DragModifier {
-    Shift,
-    Ctrl,
-}
-
 pub struct FilePreviewComponent {
     id: FlexBoxId,
     error: Option<(String, Instant)>,
     drag_snapshot: Option<Vec<(usize, usize)>>,
     drag_start_line: Option<usize>,
-    drag_modifier: Option<DragModifier>,
+    drag_modifier: Option<crate::tui::widgets::contrast::DragModifier>,
     /// Cached geometry of the content area at last render, used for mouse event handling.
     content_origin_row: usize,
     content_origin_col: usize,
@@ -334,7 +328,7 @@ impl FilePreviewComponent {
         state: &crate::tui::state::AppState,
         key: crate::loader::FileKey,
         line: usize,
-        modifier: DragModifier,
+        modifier: crate::tui::widgets::contrast::DragModifier,
     ) {
         self.drag_snapshot = state.highlight_ranges.get(&key).cloned();
         self.drag_start_line = Some(line);
@@ -356,6 +350,7 @@ impl FilePreviewComponent {
         let snapshot: &[(usize, usize)] = self.drag_snapshot.as_deref().unwrap_or(&[]);
         let lo = start.min(current_line);
         let hi = start.max(current_line);
+        use crate::tui::widgets::contrast::DragModifier;
         let new_ranges = match modifier {
             DragModifier::Shift => union_ranges(snapshot, lo, hi),
             DragModifier::Ctrl => subtract_ranges(snapshot, lo, hi),
@@ -395,7 +390,8 @@ impl FilePreviewComponent {
 
         match mouse.kind {
             MouseInputKind::MouseDown(Button::Left) if in_content_rows && in_content_cols => {
-                if let Some(modifier) = crate::tui::pane_component::drag_modifier_from_mouse(&mouse)
+                if let Some(modifier) =
+                    crate::tui::widgets::contrast::drag_modifier_from_mouse(&mouse)
                 {
                     let state = &mut global_data.state;
                     let window = Window::FilePreview(key);
@@ -1334,7 +1330,7 @@ fn paint_line_segment(
             }
             let text = &line_content[overlap_start..overlap_end];
             let fg_rgb = theme.token_color(span.kind).unwrap_or(default_fg);
-            let fg_rgb = ensure_readable_fg(fg_rgb, pane_bg);
+            let fg_rgb = crate::tui::widgets::contrast::ensure_readable_fg(fg_rgb, pane_bg);
             let fg = TuiColor::from(fg_rgb);
             let style = new_style!(color_fg: {fg} color_bg: {bg});
             *render_ops += RenderOpCommon::ApplyColors(Some(style));
@@ -1344,7 +1340,7 @@ fn paint_line_segment(
     }
 
     let text = &line_content[seg_start_byte..seg_end_byte];
-    let fg_rgb = ensure_readable_fg(default_fg, pane_bg);
+    let fg_rgb = crate::tui::widgets::contrast::ensure_readable_fg(default_fg, pane_bg);
     let fg = TuiColor::from(fg_rgb);
     let style = new_style!(color_fg: {fg} color_bg: {bg});
     *render_ops += RenderOpCommon::ApplyColors(Some(style));
@@ -1390,34 +1386,6 @@ fn advance_chars(line: &str, from: usize, chars: usize) -> usize {
     }
 }
 
-/// Perceived brightness on a 0-255 scale (standard luma weights). Good enough for
-/// picking readable terminal text; not meant to be WCAG-certified color science.
-fn luminance(c: RgbValue) -> f32 {
-    0.299 * c.red as f32 + 0.587 * c.green as f32 + 0.114 * c.blue as f32
-}
-
-/// Minimum acceptable luminance gap between text and its background, on the same
-/// 0-255 scale as `luminance`. Chosen empirically against the symbol-highlight
-/// palette (`SYMBOL_PALETTE`), several of whose colors sit close in perceived
-/// brightness to common syntax-highlight foregrounds despite differing in hue.
-const MIN_FG_BG_CONTRAST: f32 = 100.0;
-
-/// Returns `fg` unchanged if it contrasts adequately against `bg`; otherwise swaps
-/// to near-black or near-white, whichever contrasts better with `bg`. Applied to
-/// every span so it transparently covers symbol-highlight and selection overlay
-/// backgrounds (`overlay_interval` in `render()`) as well as the normal pane
-/// background, without either call site needing to know which case it is.
-pub(super) fn ensure_readable_fg(fg: RgbValue, bg: RgbValue) -> RgbValue {
-    if (luminance(fg) - luminance(bg)).abs() >= MIN_FG_BG_CONTRAST {
-        return fg;
-    }
-    if luminance(bg) > 127.0 {
-        RgbValue::from_u8(20, 20, 20)
-    } else {
-        RgbValue::from_u8(235, 235, 235)
-    }
-}
-
 /// Repaints `o_lo..o_hi` in `intervals` with `color`, splitting partially
 /// overlapped pieces. No-op when the range is empty.
 fn overlay_interval(
@@ -1449,52 +1417,6 @@ fn overlay_interval(
         }
     }
     *intervals = result;
-}
-
-/// Formats highlight ranges as the canonical comma-separated string (single line `N`,
-/// range `lo-hi`, joined with `, `). Used for the pane title, title-bar hit testing, and
-/// the `highlight` command's hint.
-#[cfg(test)]
-mod contrast_tests {
-    use super::*;
-
-    #[test]
-    fn keeps_fg_when_contrast_is_already_adequate() {
-        // White text on a near-black background: plenty of contrast, unchanged.
-        assert_eq!(
-            ensure_readable_fg(
-                RgbValue::from_u8(230, 230, 230),
-                RgbValue::from_u8(10, 10, 10),
-            ),
-            RgbValue::from_u8(230, 230, 230)
-        );
-    }
-
-    #[test]
-    fn overrides_fg_when_luminance_nearly_matches() {
-        // Yellow-ish syntax fg on a similarly bright symbol-highlight orange bg
-        // (SYMBOL_PALETTE[2] = [255, 200, 100]) — nearly identical luminance.
-        let fg = RgbValue::from_u8(255, 255, 100);
-        let bg = RgbValue::from_u8(255, 200, 100);
-        let result = ensure_readable_fg(fg, bg);
-        assert_ne!(result, fg);
-        assert!((luminance(result) - luminance(bg)).abs() >= MIN_FG_BG_CONTRAST);
-    }
-
-    #[test]
-    fn overridden_fg_picks_dark_text_on_light_bg_and_light_text_on_dark_bg() {
-        assert_eq!(
-            ensure_readable_fg(
-                RgbValue::from_u8(255, 255, 100),
-                RgbValue::from_u8(255, 200, 100),
-            ),
-            RgbValue::from_u8(20, 20, 20)
-        );
-        assert_eq!(
-            ensure_readable_fg(RgbValue::from_u8(50, 50, 50), RgbValue::from_u8(30, 30, 30),),
-            RgbValue::from_u8(235, 235, 235)
-        );
-    }
 }
 
 #[cfg(test)]

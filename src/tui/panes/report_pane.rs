@@ -212,6 +212,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
                 .theme
                 .ui_bg("ui.background")
                 .unwrap_or(RgbValue::from_u8(30, 30, 46));
+            let text_fg = state
+                .theme
+                .ui_fg("ui.text")
+                .unwrap_or(RgbValue::from_u8(170, 170, 200));
 
             let blank = new_style!(color_bg: {TuiColor::from(pane_bg)});
             let mut ops = RenderOpIRVec::new();
@@ -232,12 +236,14 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
             let scroll = state.pane_manager.window_scroll(&window);
 
             for (row_offset, line) in lines.iter().skip(scroll).take(rows).enumerate() {
+                let bg = line.bg.unwrap_or(pane_bg);
                 crate::tui::widgets::markdown::paint_row(
                     &mut ops,
                     origin,
                     row_offset,
                     &line.spans,
-                    line.bg.unwrap_or(pane_bg),
+                    &crate::tui::widgets::markdown::RowColors { fg: text_fg, bg },
+                    &crate::tui::widgets::markdown::Marks::none(bg),
                     width,
                 );
             }

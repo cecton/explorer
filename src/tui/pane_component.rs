@@ -337,24 +337,6 @@ fn scroll_from_y(
     (rel_y * (scroll_max - page_size)) / (scrollbar_height.saturating_sub(1).max(1))
 }
 
-pub(super) fn drag_modifier_from_mouse(
-    mouse: &MouseInput,
-) -> Option<crate::tui::panes::preview::DragModifier> {
-    use crate::tui::panes::preview::DragModifier;
-    let mask = mouse.maybe_modifier_keys?;
-    let shift = mask.shift_key_state == KeyState::Pressed;
-    let ctrl = mask.ctrl_key_state == KeyState::Pressed;
-    let alt = mask.alt_key_state == KeyState::Pressed;
-    if alt {
-        return None;
-    }
-    match (shift, ctrl) {
-        (true, false) => Some(DragModifier::Shift),
-        (false, true) => Some(DragModifier::Ctrl),
-        _ => None,
-    }
-}
-
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneComponent {
     fn reset(&mut self) {
         self.picker.reset();

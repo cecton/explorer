@@ -1,3 +1,4 @@
+pub(crate) mod contrast;
 pub(crate) mod fuzzy;
 pub(crate) mod fuzzy_picker;
 pub(crate) mod input_line;

@@ -684,7 +684,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
         use crate::tui::pane_manager::SelPoint;
         use crate::tui::pane_manager::TextSelection;
         use crate::tui::pane_manager::Window;
-        use crate::tui::widgets::markdown::Span;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -865,61 +864,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             };
 
             let mut render_ops = RenderOpIRVec::new();
-            let paint_row = |ops: &mut RenderOpIRVec,
-                             row_offset: usize,
-                             spans: &[Span],
-                             fg: RgbValue,
-                             bg: RgbValue,
-                             marked: &[(usize, usize)],
-                             marked_bg: RgbValue,
-                             keep_fg: bool| {
-                let strip_style =
-                    new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
-                *ops += RenderOpCommon::MoveCursorPositionRelTo(
-                    origin,
-                    vp_col(0) + vp_row(row_offset as u16),
-                );
-                *ops += RenderOpCommon::ApplyColors(Some(strip_style));
-                *ops += RenderOpIR::PaintTextWithAttributes(
-                    " ".repeat(doc_width).into(),
-                    Some(strip_style),
-                );
-                let mut x = 0usize;
-                for piece in crate::tui::panes::discussion::selection::row_pieces(spans, marked) {
-                    let truncated;
-                    let text: &str =
-                        if x + crate::tui::widgets::text_layout::display_width(piece.text)
-                            > doc_width
-                        {
-                            truncated = crate::tui::widgets::text_layout::truncate(
-                                piece.text,
-                                doc_width.saturating_sub(x),
-                            );
-                            truncated.as_str()
-                        } else {
-                            piece.text
-                        };
-                    let mut style = crate::tui::widgets::markdown::span_style(piece.span, bg);
-                    if piece.marked {
-                        style.color_bg = Some(TuiColor::from(marked_bg));
-                        if !keep_fg {
-                            style.color_fg = Some(TuiColor::from(
-                                crate::tui::panes::preview::ensure_readable_fg(
-                                    piece.span.fg,
-                                    marked_bg,
-                                ),
-                            ));
-                        }
-                    }
-                    *ops += RenderOpCommon::MoveCursorPositionRelTo(
-                        origin,
-                        vp_col(x as u16) + vp_row(row_offset as u16),
-                    );
-                    *ops += RenderOpCommon::ApplyColors(Some(style));
-                    *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                    x += crate::tui::widgets::text_layout::display_width(text);
-                }
-            };
             for row_offset in 0..doc_rows {
                 match doc.line(scroll + row_offset) {
                     Some(line) => {
@@ -928,26 +872,35 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                             _ => line.bg.unwrap_or(pane_bg),
                         };
                         let (marked, marked_bg, keep_fg) = marks_of(line.part);
-                        paint_row(
+                        crate::tui::widgets::markdown::paint_row(
                             &mut render_ops,
+                            origin,
                             row_offset,
                             &line.spans,
-                            text_fg,
-                            bg,
-                            marked,
-                            marked_bg,
-                            keep_fg,
+                            &crate::tui::widgets::markdown::RowColors { fg: text_fg, bg },
+                            &crate::tui::widgets::markdown::Marks {
+                                ranges: marked,
+                                bg: marked_bg,
+                                keep_fg,
+                            },
+                            doc_width,
                         );
                     }
-                    None => paint_row(
+                    None => crate::tui::widgets::markdown::paint_row(
                         &mut render_ops,
+                        origin,
                         row_offset,
                         &[],
-                        text_fg,
-                        pane_bg,
-                        &[],
-                        pane_bg,
-                        false,
+                        &crate::tui::widgets::markdown::RowColors {
+                            fg: text_fg,
+                            bg: pane_bg,
+                        },
+                        &crate::tui::widgets::markdown::Marks {
+                            ranges: &[],
+                            bg: pane_bg,
+                            keep_fg: false,
+                        },
+                        doc_width,
                     ),
                 }
             }
@@ -955,15 +908,18 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                 let fg = if alert { error_fg } else { status_fg };
                 let text = crate::tui::widgets::text_layout::truncate(&status, doc_width);
                 let span = [crate::tui::widgets::markdown::Span::plain(text, fg)];
-                paint_row(
+                crate::tui::widgets::markdown::paint_row(
                     &mut render_ops,
+                    origin,
                     doc_rows,
                     &span,
-                    fg,
-                    pane_bg,
-                    &[],
-                    pane_bg,
-                    false,
+                    &crate::tui::widgets::markdown::RowColors { fg, bg: pane_bg },
+                    &crate::tui::widgets::markdown::Marks {
+                        ranges: &[],
+                        bg: pane_bg,
+                        keep_fg: false,
+                    },
+                    doc_width,
                 );
             }
 
@@ -1017,7 +973,6 @@ mod tests {
     use crate::tui::panes::discussion::selection::locate;
     use crate::tui::panes::discussion::selection::offset_at;
     use crate::tui::panes::discussion::selection::remove_range;
-    use crate::tui::panes::discussion::selection::row_pieces;
     use crate::tui::panes::discussion::status::fmt_elapsed;
     use crate::tui::panes::discussion::status::fmt_tokens;
     use crate::tui::panes::discussion::status::marker_bg;
@@ -1057,8 +1012,7 @@ mod tests {
     }
 
     fn span(text: &str, src: Option<usize>) -> crate::tui::widgets::markdown::Span {
-        use crate::tui::widgets::markdown::Span;
-        Span {
+        crate::tui::widgets::markdown::Span {
             src,
             ..crate::tui::widgets::markdown::Span::plain(text, RgbValue::from_u8(0, 0, 0))
         }
@@ -1143,35 +1097,6 @@ mod tests {
         assert_eq!(remove_range(&[(2, 4), (6, 8)], 0, 5), [(6, 8)]);
         assert_eq!(remove_range(&[(2, 4)], 4, 9), [(2, 4)]);
         assert_eq!(remove_range(&[(2, 4)], 0, 2), [(2, 4)]);
-    }
-
-    #[test]
-    fn row_pieces_cut_spans_at_the_marks_and_fill_the_gaps_between_them() {
-        let spans = [span("one", Some(0)), span(" ", None), span("two", Some(8))];
-        let pieces = |marked: &[(usize, usize)]| -> Vec<(String, bool)> {
-            row_pieces(&spans, marked)
-                .iter()
-                .map(|piece| (piece.text.to_string(), piece.marked))
-                .collect()
-        };
-        let piece = |text: &str, marked: bool| (text.to_string(), marked);
-        assert_eq!(
-            pieces(&[]),
-            [piece("one", false), piece(" ", false), piece("two", false)]
-        );
-        assert_eq!(
-            pieces(&[(1, 11)]),
-            [
-                piece("o", false),
-                piece("ne", true),
-                piece(" ", true),
-                piece("two", true)
-            ]
-        );
-        assert_eq!(
-            pieces(&[(0, 3)]),
-            [piece("one", true), piece(" ", false), piece("two", false)]
-        );
     }
 
     #[test]

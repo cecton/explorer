@@ -166,40 +166,124 @@ pub(crate) fn span_style(span: &Span, bg: RgbValue) -> TuiStyle {
     style
 }
 
+/// A run of cells of one span that are all marked (selected or highlighted) or all not.
+pub(crate) struct Piece<'a> {
+    pub(crate) text: &'a str,
+    pub(crate) span: &'a Span,
+    pub(crate) marked: bool,
+}
+
+/// Cuts the spans of a row where `marked` source ranges begin and end. Cells the source
+/// has no place for are marked when the text on both sides of them is.
+pub(crate) fn row_pieces<'a>(spans: &'a [Span], marked: &[(usize, usize)]) -> Vec<Piece<'a>> {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut runs: Vec<(&str, &Span, Option<bool>)> = Vec::with_capacity(spans.len());
+    for span in spans {
+        let Some(src) = span.src.filter(|_| !marked.is_empty()) else {
+            runs.push((&span.text, span, span.src.map(|_| false)));
+            continue;
+        };
+        let mut start = 0;
+        let mut state = None;
+        for (at, _) in span.text.grapheme_indices(true) {
+            let hit = marked
+                .iter()
+                .any(|&(lo, hi)| (lo..hi).contains(&(src + at)));
+            if state.is_some_and(|state| state != hit) {
+                runs.push((&span.text[start..at], span, state));
+                start = at;
+            }
+            state = Some(hit);
+        }
+        if start < span.text.len() {
+            runs.push((&span.text[start..], span, state));
+        }
+    }
+    let states: Vec<Option<bool>> = runs.iter().map(|run| run.2).collect();
+    runs.into_iter()
+        .enumerate()
+        .map(|(i, (text, span, state))| Piece {
+            text,
+            span,
+            marked: state.unwrap_or_else(|| {
+                let before = states[..i].iter().rev().find_map(|state| *state);
+                let after = states[i + 1..].iter().find_map(|state| *state);
+                before == Some(true) && after == Some(true)
+            }),
+        })
+        .collect()
+}
+
+/// How a row's marked source ranges are painted: the colour laid over the text they
+/// cover, and whether the text keeps the foreground it was rendered with.
+pub(crate) struct Marks<'a> {
+    pub(crate) ranges: &'a [(usize, usize)],
+    pub(crate) bg: RgbValue,
+    pub(crate) keep_fg: bool,
+}
+
+impl<'a> Marks<'a> {
+    /// No marked range: the row is painted as the markdown rendered it.
+    pub(crate) fn none(bg: RgbValue) -> Marks<'a> {
+        Marks {
+            ranges: &[],
+            bg,
+            keep_fg: true,
+        }
+    }
+}
+
+/// The colours of one painted row.
+pub(crate) struct RowColors {
+    /// The text of the spans the row paints.
+    pub(crate) fg: RgbValue,
+    /// The stripe behind the whole row.
+    pub(crate) bg: RgbValue,
+}
+
 /// Paints one row of markdown spans at `origin`, `row` down: the stripe behind them in
-/// `bg`, then each span at its column, cut where the row runs out of `width`.
+/// `colors.bg`, then each span at its column, cut where the row runs out of `width`. The
+/// cells a marked range covers take `marks.bg`, and their text a readable foreground
+/// unless the caller keeps the rendered one.
 pub(crate) fn paint_row(
     ops: &mut RenderOpIRVec,
     origin: VPPos,
     row: usize,
     spans: &[Span],
-    bg: RgbValue,
+    colors: &RowColors,
+    marks: &Marks<'_>,
     width: usize,
 ) {
-    let stripe = new_style!(color_bg: {TuiColor::from(bg)});
+    let (fg, bg) = (colors.fg, colors.bg);
+    let stripe = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
     *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(row as u16));
     *ops += RenderOpCommon::ApplyColors(Some(stripe));
     *ops += RenderOpIR::PaintTextWithAttributes(" ".repeat(width).into(), Some(stripe));
     let mut x = 0usize;
-    for span in spans {
-        if x >= width {
-            break;
-        }
+    for piece in row_pieces(spans, marks.ranges) {
         let truncated;
-        let text: &str = if x + crate::tui::widgets::text_layout::display_width(&span.text) > width
+        let text: &str = if x + crate::tui::widgets::text_layout::display_width(piece.text) > width
         {
             truncated =
-                crate::tui::widgets::text_layout::truncate(&span.text, width.saturating_sub(x));
+                crate::tui::widgets::text_layout::truncate(piece.text, width.saturating_sub(x));
             truncated.as_str()
         } else {
-            &span.text
+            piece.text
         };
-        let style = span_style(span, bg);
+        let mut style = span_style(piece.span, bg);
+        if piece.marked {
+            style.color_bg = Some(TuiColor::from(marks.bg));
+            if !marks.keep_fg {
+                style.color_fg = Some(TuiColor::from(
+                    crate::tui::widgets::contrast::ensure_readable_fg(piece.span.fg, marks.bg),
+                ));
+            }
+        }
         *ops +=
             RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(x as u16) + vp_row(row as u16));
         *ops += RenderOpCommon::ApplyColors(Some(style));
         *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-        x += crate::tui::widgets::text_layout::display_width(&span.text);
+        x += crate::tui::widgets::text_layout::display_width(text);
     }
 }
 
@@ -874,6 +958,51 @@ fn split_words(content: &[Span]) -> Vec<Vec<Span>> {
         words.push(word);
     }
     words
+}
+
+#[cfg(test)]
+mod marks_tests {
+    use super::*;
+
+    fn span(text: &str, src: Option<usize>, fg: RgbValue) -> Span {
+        Span {
+            src,
+            ..Span::plain(text, fg)
+        }
+    }
+
+    #[test]
+    fn row_pieces_cut_spans_at_the_marks_and_fill_the_gaps_between_them() {
+        let spans = [
+            span("one", Some(0), RgbValue::from_u8(0, 0, 0)),
+            span(" ", None, RgbValue::from_u8(0, 0, 0)),
+            span("two", Some(8), RgbValue::from_u8(0, 0, 0)),
+        ];
+        let pieces = |marked: &[(usize, usize)]| -> Vec<(String, bool)> {
+            row_pieces(&spans, marked)
+                .iter()
+                .map(|piece| (piece.text.to_string(), piece.marked))
+                .collect()
+        };
+        let piece = |text: &str, marked: bool| (text.to_string(), marked);
+        assert_eq!(
+            pieces(&[]),
+            [piece("one", false), piece(" ", false), piece("two", false)]
+        );
+        assert_eq!(
+            pieces(&[(1, 11)]),
+            [
+                piece("o", false),
+                piece("ne", true),
+                piece(" ", true),
+                piece("two", true)
+            ]
+        );
+        assert_eq!(
+            pieces(&[(0, 3)]),
+            [piece("one", true), piece(" ", false), piece("two", false)]
+        );
+    }
 }
 
 #[cfg(test)]
