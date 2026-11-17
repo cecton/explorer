@@ -33,8 +33,8 @@ Each item below is meant to be one commit. Tick it off here in the commit that d
 
 These looked fine to the review; the owner decides. Nothing to do unless one is reverted.
 
-- [ ] **C1. Idle wakeups.** The 100 ms spinner tick (step 15) runs for the whole session and renders only while a turn runs, so an idle app wakes 11 times a second instead of once. Proposed: run the tick only while `running_turns` is non-empty.
-- [ ] **C2. `fmt-md .` still formats the whole repository.** The guard from `2352de8` refuses `""` only. Either refuse any path that resolves to the repository root, or drop the guard.
+- [x] **C1. Idle wakeups.** The 100 ms spinner tick (step 15) runs for the whole session and renders only while a turn runs, so an idle app wakes 10 times a second instead of once. Kept as is: an idle tick costs a channel message and no render, and gating the timer would add start/stop state and tie a shared clock to agent turns. When a second animated element appears, replace `running_turns.is_empty()` in the `TurnTick` arm with a `state.animating()` predicate, and move `SPINNER`/`SPINNER_INTERVAL` from `agent/turn` to the TUI.
+- [x] **C2. `fmt-md .` still formats the whole repository.** The guard from `2352de8` refuses `""` only. Kept as is: `""` is a missing target and is refused; `.` run from the repository root is an explicit request for the whole repository (other spellings of the root, such as `./`, reach it too); no argument means the working-tree changes.
 
 Accepted as they are:
 
