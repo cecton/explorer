@@ -157,6 +157,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
         use crate::tui::pane_manager::Window;
         use crate::tui::panes::conversation_tree::layout;
         use crate::tui::state::RowTarget;
+        use crate::tui::theme::Color;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -182,36 +183,17 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             state.tree_view.selected = selected_target.clone();
 
             let theme = &state.theme;
-            let pane_bg = theme
-                .ui_bg("ui.background")
-                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
-            let selected_bg = theme
-                .ui_bg("ui.selection")
-                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG);
-            let text_fg = theme
-                .ui_fg("ui.text")
-                .unwrap_or(RgbValue::from_u8(170, 170, 200));
-            let dim_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
-            let gutter_fg = theme.ui_fg("ui.linenr").unwrap_or(dim_fg);
-            let selected_gutter_fg = theme
-                .ui_fg("ui.linenr.selected")
-                .or_else(|| theme.ui_fg("ui.text"))
-                .unwrap_or(dim_fg);
-            let commit_fg = theme
-                .color_for_scope("diff.plus")
-                .unwrap_or(RgbValue::from_u8(150, 220, 120));
-            let hash_fg = theme
-                .color_for_scope("constant")
-                .unwrap_or(RgbValue::from_u8(250, 200, 90));
-            let running_fg = theme
-                .color_for_scope("diff.delta")
-                .unwrap_or(RgbValue::from_u8(250, 200, 90));
-            let error_fg = theme
-                .ui_fg("error")
-                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_ERROR_FG);
-            let favorite_fg = theme
-                .ui_fg("ui.cursor.match")
-                .unwrap_or(RgbValue::from_u8(255, 200, 60));
+            let pane_bg = theme.ui.background;
+            let selected_bg = theme.ui.selection;
+            let text_fg = theme.ui.text;
+            let dim_fg = theme.ui.dim;
+            let gutter_fg = theme.ui.line_number;
+            let selected_gutter_fg = theme.ui.line_number_selected;
+            let commit_fg = theme.color_for_scope("diff.plus");
+            let hash_fg = theme.color_for_scope("constant");
+            let running_fg = theme.color_for_scope("diff.delta");
+            let error_fg = theme.ui.error;
+            let favorite_fg = theme.ui.matched;
             let match_fg = favorite_fg;
 
             let mut render_ops = RenderOpIRVec::new();
@@ -224,8 +206,8 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 } else {
                     "(no conversations)"
                 };
-                let bg_style = new_style!(color_bg: {TuiColor::from(pane_bg)});
-                let text_style = new_style!(color_fg: {TuiColor::from(text_fg)} color_bg: {TuiColor::from(pane_bg)});
+                let text_style = text_fg.on(pane_bg);
+                let bg_style = text_style;
                 for row_offset in 0..total_rows {
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
@@ -359,8 +341,8 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             for row_offset in 0..total_rows {
                 let line = lines.get(scroll + row_offset);
                 let is_selected = line.is_some_and(|line| line.row == selected);
-                let bg = TuiColor::from(if is_selected { selected_bg } else { pane_bg });
-                let bg_style = new_style!(color_bg: {bg});
+                let bg = if is_selected { selected_bg } else { pane_bg };
+                let bg_style = text_fg.on(bg);
                 render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                     origin,
                     vp_col(0) + vp_row(row_offset as u16),
@@ -381,10 +363,9 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 } else {
                     gutter_fg
                 };
-                let plain =
-                    |fg: RgbValue| new_style!(color_fg: {TuiColor::from(fg)} color_bg: {bg});
+                let plain = |fg: Color| fg.on(bg);
                 let paint_plain =
-                    |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: RgbValue| {
+                    |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: Color| {
                         let style = plain(fg);
                         *ops += RenderOpCommon::MoveCursorPositionRelTo(
                             origin,
@@ -445,15 +426,10 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                     (_, Some(NodeType::Compact)) => dim_fg,
                     _ => text_fg,
                 };
-                let styled = |fg: RgbValue| {
-                    let fg = TuiColor::from(fg);
-                    if favorite {
-                        new_style!(bold color_fg: {fg} color_bg: {bg})
-                    } else {
-                        new_style!(color_fg: {fg} color_bg: {bg})
-                    }
+                let styled = |fg: Color| {
+                    if favorite { fg.on_bold(bg) } else { fg.on(bg) }
                 };
-                let paint = |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: RgbValue| {
+                let paint = |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: Color| {
                     let style = styled(fg);
                     *ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
@@ -469,7 +445,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                     (Some(found), _) => &found.title,
                     (None, _) => &[],
                 };
-                let paint_text = |ops: &mut RenderOpIRVec, fg: RgbValue| {
+                let paint_text = |ops: &mut RenderOpIRVec, fg: Color| {
                     let mut column = text_column;
                     for (text, is_match) in segments(&line.text, line.offset, matched) {
                         let mut style = styled(if is_match { match_fg } else { fg });

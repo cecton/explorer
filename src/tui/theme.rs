@@ -4,17 +4,131 @@ use std::collections::HashMap;
 
 include!("../../themes/themes.rs");
 
+/// A color as the terminal is told to paint it. Helix themes name colors three ways, and
+/// each reaches the screen differently: a hex value is painted as is, one of the 16 color
+/// names (`red`, `light-gray`, …) is the terminal's own palette entry, and a role the
+/// theme leaves unset keeps the terminal's default color.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Color {
+    Rgb(RgbValue),
+    /// An index of the terminal's palette, 0 to 15.
+    Ansi(u8),
+    /// The terminal's default foreground or background.
+    #[default]
+    Default,
+}
+
+impl Color {
+    pub const fn from_u8(red: u8, green: u8, blue: u8) -> Self {
+        Self::Rgb(RgbValue { red, green, blue })
+    }
+
+    /// The color r3bl paints, `None` for the terminal's default. Painted through a style
+    /// set with `ApplyColors`, a `None` side clears the pen, so the terminal's own color
+    /// shows; `SetBgColor` cannot say that, so theme colors never go through it.
+    pub fn tui(self) -> Option<TuiColor> {
+        match self {
+            Self::Rgb(rgb) => Some(TuiColor::Rgb(rgb)),
+            Self::Ansi(index) => Some(TuiColor::Ansi(AnsiValue::from(index))),
+            Self::Default => None,
+        }
+    }
+
+    /// The RGB value, when the theme gave one: the terminal's palette and default colors
+    /// are unknown to Explorer, so color arithmetic runs on this alone.
+    pub fn rgb(self) -> Option<RgbValue> {
+        match self {
+            Self::Rgb(rgb) => Some(rgb),
+            Self::Ansi(_) | Self::Default => None,
+        }
+    }
+
+    /// This color as the foreground over `bg`.
+    pub fn on(self, bg: Color) -> TuiStyle {
+        TuiStyle {
+            color_fg: self.tui(),
+            color_bg: bg.tui(),
+            ..TuiStyle::default()
+        }
+    }
+
+    /// This color as a bold foreground over `bg`.
+    pub fn on_bold(self, bg: Color) -> TuiStyle {
+        let mut style = self.on(bg);
+        style.attribs.bold = Some(tui_style_attrib::Bold);
+        style
+    }
+}
+
+/// What a theme leaves unset falls back to these. The background and the text have none:
+/// like Helix, Explorer leaves them to the terminal.
+const DEFAULT_SELECTION_BG: Color = Color::from_u8(50, 50, 90);
+const DEFAULT_SELECTION_FG: Color = Color::from_u8(255, 255, 255);
+const DEFAULT_STATUSLINE_BG: Color = Color::from_u8(30, 30, 50);
+const DEFAULT_STATUSLINE_FG: Color = Color::from_u8(180, 180, 220);
+const DEFAULT_ERROR_FG: Color = Color::from_u8(220, 80, 80);
+const DEFAULT_WARNING_FG: Color = Color::from_u8(220, 170, 80);
+const DEFAULT_MATCH_FG: Color = Color::from_u8(255, 200, 60);
+const DEFAULT_SCROLL_THUMB: Color = Color::from_u8(120, 120, 160);
+
+/// The colors of Explorer's own surfaces, resolved once when the theme is built so every
+/// pane paints a role the same way. Each role names the theme keys it is read from.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Ui {
+    /// `ui.background` bg.
+    pub background: Color,
+    /// `ui.text` fg.
+    pub text: Color,
+    /// Secondary text: the `comment` scope, else `text`.
+    pub dim: Color,
+    /// `ui.selection` bg.
+    pub selection: Color,
+    /// `ui.selection` fg: a line number on a highlighted line.
+    pub selection_fg: Color,
+    /// `ui.linenr` fg, else `dim`.
+    pub line_number: Color,
+    /// `ui.linenr` bg, else `background`.
+    pub line_number_bg: Color,
+    /// `ui.linenr.selected` fg, else `text`.
+    pub line_number_selected: Color,
+    /// `ui.cursor` bg, then `ui.text.focus` fg, else `text`.
+    pub cursor: Color,
+    /// `ui.cursor.match` fg: fuzzy matches and favorites.
+    pub matched: Color,
+    /// `error` fg.
+    pub error: Color,
+    /// `warning` fg.
+    pub warning: Color,
+    /// `ui.statusline` fg.
+    pub statusline_fg: Color,
+    /// `ui.statusline` bg.
+    pub statusline_bg: Color,
+    /// The Discussion's prompt block: `ui.cursorline` bg, then `ui.cursorline.primary`
+    /// bg, else `statusline_bg`.
+    pub prompt: Color,
+    /// The Discussion's input: `ui.help` bg, else `background`.
+    pub input: Color,
+    /// `ui.virtual.ruler` bg: a markdown code block, `None` paints none.
+    pub ruler: Option<Color>,
+    /// `ui.menu.scroll` bg, then `ui.virtual.ruler` bg, else `statusline_bg`.
+    pub scroll_track: Color,
+    /// `ui.menu.scroll` fg, then the bg of `ui.selection`, `ui.cursorline.primary` and
+    /// `ui.cursorline`, else `selection`; `cursor` when that is the track color.
+    pub scroll_thumb: Color,
+}
+
 #[derive(Clone, PartialEq, Debug, Default)]
 pub struct HelixTheme {
     name: String,
     styles: HashMap<String, Style>,
-    token_colors: [Option<RgbValue>; crate::highlight::TokenKind::COUNT],
+    token_colors: [Option<Color>; crate::highlight::TokenKind::COUNT],
+    pub ui: Ui,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Style {
-    pub fg: Option<RgbValue>,
-    pub bg: Option<RgbValue>,
+    pub fg: Option<Color>,
+    pub bg: Option<Color>,
 }
 
 struct RawTheme {
@@ -80,24 +194,75 @@ impl HelixTheme {
             name: name.to_string(),
             styles,
             token_colors: [None; crate::highlight::TokenKind::COUNT],
+            ui: Ui::default(),
         };
         for (index, kind) in crate::highlight::TokenKind::ALL.into_iter().enumerate() {
             theme.token_colors[index] =
                 kind.scopes().iter().find_map(|scope| theme.scope_fg(scope));
         }
+        theme.ui = theme.resolve_ui();
         theme
+    }
+
+    /// Every role of `Ui` from the styles, each through its own fallback chain.
+    fn resolve_ui(&self) -> Ui {
+        let fg = |key: &str| self.styles.get(key).and_then(|style| style.fg);
+        let bg = |key: &str| self.styles.get(key).and_then(|style| style.bg);
+        let background = bg("ui.background").unwrap_or(Color::Default);
+        let text = fg("ui.text").unwrap_or(Color::Default);
+        let dim = self.scope_fg("comment").unwrap_or(text);
+        let selection = bg("ui.selection").unwrap_or(DEFAULT_SELECTION_BG);
+        let cursor = bg("ui.cursor")
+            .or_else(|| fg("ui.text.focus"))
+            .unwrap_or(text);
+        let statusline_bg = bg("ui.statusline").unwrap_or(DEFAULT_STATUSLINE_BG);
+        let ruler = bg("ui.virtual.ruler");
+        let scroll_track = bg("ui.menu.scroll").or(ruler).unwrap_or(statusline_bg);
+        let mut scroll_thumb = fg("ui.menu.scroll")
+            .or_else(|| bg("ui.selection"))
+            .or_else(|| bg("ui.cursorline.primary"))
+            .or_else(|| bg("ui.cursorline"))
+            .unwrap_or(selection);
+        if scroll_thumb == scroll_track {
+            scroll_thumb = cursor;
+        }
+        if scroll_thumb == scroll_track {
+            scroll_thumb = DEFAULT_SCROLL_THUMB;
+        }
+        Ui {
+            background,
+            text,
+            dim,
+            selection,
+            selection_fg: fg("ui.selection").unwrap_or(DEFAULT_SELECTION_FG),
+            line_number: fg("ui.linenr").unwrap_or(dim),
+            line_number_bg: bg("ui.linenr").unwrap_or(background),
+            line_number_selected: fg("ui.linenr.selected").unwrap_or(text),
+            cursor,
+            matched: fg("ui.cursor.match").unwrap_or(DEFAULT_MATCH_FG),
+            error: fg("error").unwrap_or(DEFAULT_ERROR_FG),
+            warning: fg("warning").unwrap_or(DEFAULT_WARNING_FG),
+            statusline_fg: fg("ui.statusline").unwrap_or(DEFAULT_STATUSLINE_FG),
+            statusline_bg,
+            prompt: bg("ui.cursorline")
+                .or_else(|| bg("ui.cursorline.primary"))
+                .unwrap_or(statusline_bg),
+            input: bg("ui.help").unwrap_or(background),
+            ruler,
+            scroll_track,
+            scroll_thumb,
+        }
     }
 
     /// The color a scope resolves to, falling back to `ui.text` when the theme styles
     /// none of its dotted parents.
-    pub fn color_for_scope(&self, scope: &str) -> Option<RgbValue> {
-        self.scope_fg(scope)
-            .or_else(|| self.styles.get("ui.text").and_then(|s| s.fg))
+    pub fn color_for_scope(&self, scope: &str) -> Color {
+        self.scope_fg(scope).unwrap_or(self.ui.text)
     }
 
     /// The color the theme gives a scope or its nearest styled dotted parent, `None`
     /// when it styles none of them.
-    fn scope_fg(&self, scope: &str) -> Option<RgbValue> {
+    fn scope_fg(&self, scope: &str) -> Option<Color> {
         let mut s = scope;
         loop {
             if let Some(fg) = self.styles.get(s).and_then(|style| style.fg) {
@@ -107,18 +272,16 @@ impl HelixTheme {
         }
     }
 
+    /// The color the theme gives exactly `scope`, without walking its dotted parents:
+    /// for markdown styles that only take a color the theme meant for them.
+    pub fn exact_fg(&self, scope: &str) -> Option<Color> {
+        self.styles.get(scope).and_then(|style| style.fg)
+    }
+
     /// The color of a semantic token kind, `None` when the theme styles none of its
     /// scopes.
-    pub fn token_color(&self, kind: crate::highlight::TokenKind) -> Option<RgbValue> {
+    pub fn token_color(&self, kind: crate::highlight::TokenKind) -> Option<Color> {
         self.token_colors[kind as usize]
-    }
-
-    pub fn ui_fg(&self, key: &str) -> Option<RgbValue> {
-        self.styles.get(key).and_then(|s| s.fg)
-    }
-
-    pub fn ui_bg(&self, key: &str) -> Option<RgbValue> {
-        self.styles.get(key).and_then(|s| s.bg)
     }
 }
 
@@ -205,33 +368,67 @@ fn parse_theme(toml_str: &str) -> RawTheme {
     }
 }
 
+/// A style of the theme: a bare string is a foreground. A style whose `modifiers` hold
+/// `reversed` has its colors swapped here, as the terminal would swap them, so a role read
+/// from it (`ui.selection` as `{ fg = "gray", modifiers = ["reversed"] }`) gets the color
+/// the user sees there.
 fn resolve_style(val: &serde_json::Value, palette: &HashMap<&str, RgbValue>) -> Option<Style> {
     match val {
-        serde_json::Value::String(s) => {
-            if let Some(rgb) = parse_hex_color(s) {
-                return Some(Style {
-                    fg: Some(rgb),
-                    bg: None,
-                });
-            }
-            palette.get(s.as_str()).map(|rgb| Style {
-                fg: Some(*rgb),
-                bg: None,
-            })
-        }
+        serde_json::Value::String(s) => Some(Style {
+            fg: Some(resolve_color(s, palette)?),
+            bg: None,
+        }),
         serde_json::Value::Object(obj) => {
-            let fg = obj
-                .get("fg")
-                .and_then(|v| v.as_str())
-                .and_then(|s| parse_hex_color(s).or_else(|| palette.get(s).copied()));
-            let bg = obj
-                .get("bg")
-                .and_then(|v| v.as_str())
-                .and_then(|s| parse_hex_color(s).or_else(|| palette.get(s).copied()));
-            Some(Style { fg, bg })
+            let color = |key: &str| {
+                obj.get(key)
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| resolve_color(s, palette))
+            };
+            let (fg, bg) = (color("fg"), color("bg"));
+            let reversed = obj
+                .get("modifiers")
+                .and_then(|v| v.as_array())
+                .is_some_and(|modifiers| modifiers.iter().any(|m| m.as_str() == Some("reversed")));
+            Some(if reversed {
+                Style { fg: bg, bg: fg }
+            } else {
+                Style { fg, bg }
+            })
         }
         _ => None,
     }
+}
+
+/// A color as Helix reads it: the theme's palette first, then a hex value, then one of the
+/// 16 names Helix gives the terminal's palette, numbered as its crossterm backend numbers
+/// them (`gray` is the bright black 8, `light-gray` the plain white 7).
+fn resolve_color(s: &str, palette: &HashMap<&str, RgbValue>) -> Option<Color> {
+    if let Some(&rgb) = palette.get(s) {
+        return Some(Color::Rgb(rgb));
+    }
+    if let Some(rgb) = parse_hex_color(s) {
+        return Some(Color::Rgb(rgb));
+    }
+    let index = match s {
+        "black" => 0,
+        "red" => 1,
+        "green" => 2,
+        "yellow" => 3,
+        "blue" => 4,
+        "magenta" => 5,
+        "cyan" => 6,
+        "light-gray" => 7,
+        "gray" => 8,
+        "light-red" => 9,
+        "light-green" => 10,
+        "light-yellow" => 11,
+        "light-blue" => 12,
+        "light-magenta" => 13,
+        "light-cyan" => 14,
+        "white" => 15,
+        _ => return None,
+    };
+    Some(Color::Ansi(index))
 }
 
 fn parse_hex_color(s: &str) -> Option<RgbValue> {
@@ -271,7 +468,7 @@ mod tests {
             theme.scope_fg("keyword")
         );
         assert_eq!(
-            theme.color_for_scope("keyword.control.return"),
+            Some(theme.color_for_scope("keyword.control.return")),
             theme.scope_fg("keyword")
         );
     }
@@ -334,22 +531,74 @@ mod tests {
             if expected.is_none() {
                 assert_ne!(
                     theme.token_color(kind),
-                    theme.ui_fg("ui.text"),
+                    Some(theme.ui.text),
                     "{kind:?} must not fall back to ui.text",
                 );
             }
         }
         assert_eq!(theme.token_color(TokenKind::Other), None);
-        assert!(theme.ui_fg("ui.text").is_some());
+        assert_ne!(theme.ui.text, Color::Default);
     }
 
     #[test]
     fn global_actions_resolve_an_unstyled_scope_to_ui_text() {
         let theme = theme("catppuccin_mocha");
-        assert_eq!(
-            theme.color_for_scope("no.such.scope"),
-            theme.ui_fg("ui.text")
-        );
+        assert_eq!(theme.color_for_scope("no.such.scope"), theme.ui.text);
         assert_eq!(theme.scope_fg("no.such.scope"), None);
+    }
+
+    /// The 16-color themes name the terminal's palette, so their colors are its entries,
+    /// numbered as Helix numbers them, and a reversed selection paints its fg behind the
+    /// text.
+    #[test]
+    fn a_color_name_is_the_terminal_palette_entry() {
+        use crate::highlight::TokenKind;
+
+        let theme = theme("base16_terminal");
+        assert_eq!(theme.scope_fg("keyword"), Some(Color::Ansi(13)));
+        assert_eq!(
+            theme.token_color(TokenKind::from_name("keyword")),
+            Some(Color::Ansi(13))
+        );
+        assert_eq!(theme.ui.selection, Color::Ansi(8));
+        assert_eq!(theme.ui.line_number, Color::Ansi(7));
+    }
+
+    /// Where a theme sets no background, or an empty one, the terminal's own shows, as in
+    /// Helix; so does its own text color where the theme sets none.
+    #[test]
+    fn an_unset_background_or_text_is_the_terminal_default() {
+        for name in ["term16_dark", "term16_light", "base16_transparent"] {
+            let theme = theme(name);
+            assert_eq!(theme.ui.background, Color::Default, "{name}");
+            assert_eq!(theme.ui.background.tui(), None, "{name}");
+        }
+        assert_eq!(theme("term16_dark").ui.text, Color::Default);
+    }
+
+    /// A theme's palette entry wins over the terminal color of the same name.
+    #[test]
+    fn a_palette_entry_overrides_a_color_name() {
+        let theme = HelixTheme::build(
+            "test",
+            "keyword = \"red\"\nstring = \"green\"\n[palette]\nred = \"#ff0000\"\n",
+        );
+        assert_eq!(theme.scope_fg("keyword"), Some(Color::from_u8(255, 0, 0)));
+        assert_eq!(theme.scope_fg("string"), Some(Color::Ansi(2)));
+    }
+
+    /// The roles fall back along their chains to Explorer's constants when the theme
+    /// styles nothing, and to the terminal's default for the background and the text.
+    #[test]
+    fn an_unstyled_theme_resolves_every_role() {
+        let theme = HelixTheme::build("test", "");
+        assert_eq!(theme.ui.background, Color::Default);
+        assert_eq!(theme.ui.text, Color::Default);
+        assert_eq!(theme.ui.dim, Color::Default);
+        assert_eq!(theme.ui.selection, DEFAULT_SELECTION_BG);
+        assert_eq!(theme.ui.prompt, DEFAULT_STATUSLINE_BG);
+        assert_eq!(theme.ui.scroll_track, DEFAULT_STATUSLINE_BG);
+        assert_ne!(theme.ui.scroll_thumb, theme.ui.scroll_track);
+        assert_eq!(theme.ui.ruler, None);
     }
 }

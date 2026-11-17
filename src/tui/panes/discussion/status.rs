@@ -1,19 +1,19 @@
-#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
-use r3bl_tui::*;
 use std::time::Instant;
 /// Share of the theme's warning color in the background of highlighted text.
 const MARKER_STRENGTH: f32 = 0.4;
 
 /// Background of highlighted text: the theme's warning color laid over the pane
-/// background, since `ui.selection` barely differs from it in many themes.
-pub(crate) fn marker_bg(theme: &crate::tui::theme::HelixTheme, pane_bg: RgbValue) -> RgbValue {
-    let Some(accent) = theme.color_for_scope("warning") else {
-        return theme.ui_bg("ui.selection").unwrap_or(pane_bg);
+/// background, since `ui.selection` barely differs from it in many themes. The mix needs
+/// both in RGB; with a color of the terminal's on either side it is `ui.selection`.
+pub(crate) fn marker_bg(theme: &crate::tui::theme::HelixTheme) -> crate::tui::theme::Color {
+    use crate::tui::theme::Color;
+    let (Some(pane_bg), Some(accent)) = (theme.ui.background.rgb(), theme.ui.warning.rgb()) else {
+        return theme.ui.selection;
     };
     let mix = |bg: u8, accent: u8| {
         (f32::from(bg) + (f32::from(accent) - f32::from(bg)) * MARKER_STRENGTH).round() as u8
     };
-    RgbValue::from_u8(
+    Color::from_u8(
         mix(pane_bg.red, accent.red),
         mix(pane_bg.green, accent.green),
         mix(pane_bg.blue, accent.blue),

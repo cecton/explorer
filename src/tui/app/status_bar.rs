@@ -9,17 +9,11 @@ pub(super) fn render_status_bar(
 ) {
     use crate::tui::keymap::Action;
     use crate::tui::pane_manager::Window;
-    let bg_rgb = theme
-        .ui_bg("ui.statusline")
-        .unwrap_or(crate::tui::widgets::title_row::DEFAULT_STATUSLINE_BG);
-    let fg_rgb = theme
-        .ui_fg("ui.statusline")
-        .unwrap_or(crate::tui::widgets::title_row::DEFAULT_STATUSLINE_FG);
-    let color_bg = TuiColor::from(bg_rgb);
-    let color_fg = TuiColor::from(fg_rgb);
+    let color_bg = theme.ui.statusline_bg;
+    let color_fg = theme.ui.statusline_fg;
 
-    let leader_style = new_style!(bold color_fg: {color_fg} color_bg: {color_bg});
-    let normal_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+    let leader_style = color_fg.on_bold(color_bg);
+    let normal_style = color_fg.on(color_bg);
 
     // Status-bar shortcut hints are derived from the live keymap so they reflect any
     // rebindings from config.kdl, rather than hardcoded key letters.
@@ -132,11 +126,10 @@ pub(super) fn render_status_bar(
     let row_idx = size.row_height.convert_to_index();
     let mut render_ops = RenderOpIRVec::new();
     render_ops += RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + row_idx);
-    render_ops += RenderOpCommon::ResetColor;
-    render_ops += RenderOpCommon::SetBgColor(color_bg);
+    render_ops += RenderOpCommon::ApplyColors(Some(normal_style));
     render_ops += RenderOpIR::PaintTextWithAttributes(
-        SPACER_GLYPH.repeat(size.col_width.as_usize()).into(),
-        None,
+        " ".repeat(size.col_width.as_usize()).into(),
+        Some(normal_style),
     );
     render_ops += RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + row_idx);
     render_tui_styled_texts_into(&styled_texts, &mut render_ops);
@@ -144,19 +137,9 @@ pub(super) fn render_status_bar(
     // Right-aligned "dirty" flag (uncommitted staged/unstaged changes), shown in a
     // bright error-like theme color, followed by the usage of the spending behind the
     // focused conversation's endpoint. The flag reflects `state.is_dirty` unconditionally.
-    let error_fg = TuiColor::from(
-        theme
-            .ui_fg("error")
-            .unwrap_or(crate::tui::widgets::title_row::DEFAULT_ERROR_FG),
-    );
-    let warning_fg = TuiColor::from(
-        theme
-            .ui_fg("warning")
-            .unwrap_or(crate::tui::widgets::title_row::DEFAULT_WARNING_FG),
-    );
-    let dirty_style = new_style!(bold color_fg: {error_fg} color_bg: {color_bg});
-    let warning_style = new_style!(color_fg: {warning_fg} color_bg: {color_bg});
-    let error_style = new_style!(color_fg: {error_fg} color_bg: {color_bg});
+    let dirty_style = theme.ui.error.on_bold(color_bg);
+    let warning_style = theme.ui.warning.on(color_bg);
+    let error_style = theme.ui.error.on(color_bg);
     let dirty = state.is_dirty.then_some(("│ ", "dirty "));
     let usage = focused_usage(state);
     let after_agents = state

@@ -5,7 +5,7 @@ use r3bl_tui::*;
 #[derive(Clone)]
 pub struct Span {
     pub text: String,
-    pub fg: RgbValue,
+    pub fg: crate::tui::theme::Color,
     pub bold: bool,
     pub italic: bool,
     pub underline: bool,
@@ -16,7 +16,7 @@ pub struct Span {
 }
 
 impl Span {
-    pub(crate) fn plain(text: impl Into<String>, fg: RgbValue) -> Self {
+    pub(crate) fn plain(text: impl Into<String>, fg: crate::tui::theme::Color) -> Self {
         Self {
             text: text.into(),
             fg,
@@ -62,7 +62,7 @@ impl Span {
 /// instead of the pane background.
 pub struct MdLine {
     pub spans: Vec<Span>,
-    pub bg: Option<RgbValue>,
+    pub bg: Option<crate::tui::theme::Color>,
 }
 
 impl MdLine {
@@ -73,7 +73,7 @@ impl MdLine {
 
 #[derive(Clone, Copy)]
 struct InlineStyle {
-    fg: RgbValue,
+    fg: crate::tui::theme::Color,
     bold: bool,
     italic: bool,
     underline: bool,
@@ -131,25 +131,22 @@ struct TableCtx {
 struct Renderer<'a> {
     theme: &'a crate::tui::theme::HelixTheme,
     width: usize,
-    text_fg: RgbValue,
     plain: InlineStyle,
     style: InlineStyle,
     stack: Vec<InlineStyle>,
     lines: Vec<MdLine>,
     content: Vec<Span>,
     quote_depth: usize,
-    quote_fg: RgbValue,
+    quote_fg: crate::tui::theme::Color,
     items: Vec<ItemCtx>,
     lists: Vec<Option<u64>>,
-    code_bg: Option<RgbValue>,
+    code_bg: Option<crate::tui::theme::Color>,
     table: Option<TableCtx>,
 }
 
 /// Paint style for one markdown span: its fg over `bg`, with the span's attributes.
-pub(crate) fn span_style(span: &Span, bg: RgbValue) -> TuiStyle {
-    let mut style = new_style!(
-        color_fg: {TuiColor::from(span.fg)} color_bg: {TuiColor::from(bg)}
-    );
+pub(crate) fn span_style(span: &Span, bg: crate::tui::theme::Color) -> TuiStyle {
+    let mut style = span.fg.on(bg);
     use r3bl_tui::tui_style_attrib;
     if span.bold {
         style.attribs.bold = Some(tui_style_attrib::Bold);
@@ -228,13 +225,13 @@ pub(crate) fn row_pieces<'a>(spans: &'a [Span], marked: &[(usize, usize)]) -> Ve
 /// cover, and whether the text keeps the foreground it was rendered with.
 pub(crate) struct Marks<'a> {
     pub(crate) ranges: &'a [(usize, usize)],
-    pub(crate) bg: RgbValue,
+    pub(crate) bg: crate::tui::theme::Color,
     pub(crate) keep_fg: bool,
 }
 
 impl<'a> Marks<'a> {
     /// No marked range: the row is painted as the markdown rendered it.
-    pub(crate) fn none(bg: RgbValue) -> Marks<'a> {
+    pub(crate) fn none(bg: crate::tui::theme::Color) -> Marks<'a> {
         Marks {
             ranges: &[],
             bg,
@@ -246,9 +243,9 @@ impl<'a> Marks<'a> {
 /// The colours of one painted row.
 pub(crate) struct RowColors {
     /// The text of the spans the row paints.
-    pub(crate) fg: RgbValue,
+    pub(crate) fg: crate::tui::theme::Color,
     /// The stripe behind the whole row.
-    pub(crate) bg: RgbValue,
+    pub(crate) bg: crate::tui::theme::Color,
 }
 
 /// Paints one row of markdown spans at `origin`, `row` down: the stripe behind them in
@@ -265,7 +262,7 @@ pub(crate) fn paint_row(
     width: usize,
 ) {
     let (fg, bg) = (colors.fg, colors.bg);
-    let stripe = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
+    let stripe = fg.on(bg);
     *ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(row as u16));
     *ops += RenderOpCommon::ApplyColors(Some(stripe));
     *ops += RenderOpIR::PaintTextWithAttributes(" ".repeat(width).into(), Some(stripe));
@@ -285,11 +282,11 @@ pub(crate) fn paint_row(
         };
         let mut style = span_style(piece.span, bg);
         if piece.marked {
-            style.color_bg = Some(TuiColor::from(marks.bg));
+            style.color_bg = marks.bg.tui();
             if !marks.keep_fg {
-                style.color_fg = Some(TuiColor::from(
-                    crate::tui::widgets::contrast::ensure_readable_fg(piece.span.fg, marks.bg),
-                ));
+                style.color_fg =
+                    crate::tui::widgets::contrast::ensure_readable_fg(piece.span.fg, marks.bg)
+                        .tui();
             }
         }
         *ops +=
@@ -344,7 +341,7 @@ pub(crate) fn render(
             }
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => {
                 r.flush_content();
-                r.code_bg = r.theme.ui_bg("ui.virtual.ruler");
+                r.code_bg = r.theme.ui.ruler;
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
                 r.code_bg = None;
@@ -500,9 +497,7 @@ pub(crate) fn render(
 
 impl Renderer<'_> {
     fn new(theme: &crate::tui::theme::HelixTheme, width: usize) -> Renderer<'_> {
-        let text_fg = theme
-            .ui_fg("ui.text")
-            .unwrap_or(RgbValue::from_u8(170, 170, 200));
+        let text_fg = theme.ui.text;
         let plain = InlineStyle {
             fg: text_fg,
             bold: false,
@@ -513,7 +508,6 @@ impl Renderer<'_> {
         Renderer {
             theme,
             width,
-            text_fg,
             plain,
             style: plain,
             stack: Vec::new(),
@@ -528,12 +522,12 @@ impl Renderer<'_> {
         }
     }
 
-    fn fg(&self, scope: &str) -> RgbValue {
-        self.theme.color_for_scope(scope).unwrap_or(self.text_fg)
+    fn fg(&self, scope: &str) -> crate::tui::theme::Color {
+        self.theme.color_for_scope(scope)
     }
 
-    fn exact_fg(&self, scope: &str) -> Option<RgbValue> {
-        self.theme.ui_fg(scope)
+    fn exact_fg(&self, scope: &str) -> Option<crate::tui::theme::Color> {
+        self.theme.exact_fg(scope)
     }
 
     fn start_style(&mut self, style: InlineStyle) {
@@ -976,8 +970,9 @@ fn split_words(content: &[Span]) -> Vec<Vec<Span>> {
 #[cfg(test)]
 mod marks_tests {
     use super::*;
+    use crate::tui::theme::Color;
 
-    fn span(text: &str, src: Option<usize>, fg: RgbValue) -> Span {
+    fn span(text: &str, src: Option<usize>, fg: Color) -> Span {
         Span {
             src,
             ..Span::plain(text, fg)
@@ -987,9 +982,9 @@ mod marks_tests {
     #[test]
     fn row_pieces_cut_spans_at_the_marks_and_fill_the_gaps_between_them() {
         let spans = [
-            span("one", Some(0), RgbValue::from_u8(0, 0, 0)),
-            span(" ", None, RgbValue::from_u8(0, 0, 0)),
-            span("two", Some(8), RgbValue::from_u8(0, 0, 0)),
+            span("one", Some(0), Color::from_u8(0, 0, 0)),
+            span(" ", None, Color::from_u8(0, 0, 0)),
+            span("two", Some(8), Color::from_u8(0, 0, 0)),
         ];
         let pieces = |marked: &[(usize, usize)]| -> Vec<(String, bool)> {
             row_pieces(&spans, marked)
@@ -1019,7 +1014,7 @@ mod marks_tests {
 
     #[test]
     fn paint_row_paints_nothing_past_the_end_of_the_row() {
-        let black = RgbValue::from_u8(0, 0, 0);
+        let black = Color::from_u8(0, 0, 0);
         let spans = [span("abcd", None, black), span("efgh", None, black)];
         let mut ops = RenderOpIRVec::new();
         paint_row(
@@ -1050,6 +1045,7 @@ mod marks_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::theme::Color;
 
     fn theme() -> crate::tui::theme::HelixTheme {
         use crate::tui::theme::HelixTheme;
@@ -1085,10 +1081,7 @@ mod tests {
         );
         assert!(lines[0].spans[0].bold);
         assert!(!lines[2].spans[0].bold);
-        assert_eq!(
-            lines[1].spans[0].fg,
-            theme().color_for_scope("comment").unwrap()
-        );
+        assert_eq!(lines[1].spans[0].fg, theme().color_for_scope("comment"));
     }
 
     #[test]
@@ -1196,21 +1189,15 @@ mod tests {
         let span = &lines[0].spans[0];
         assert_eq!(span.text, "Title");
         assert!(span.bold);
-        assert_eq!(
-            span.fg,
-            theme().color_for_scope("markup.heading.1").unwrap()
-        );
+        assert_eq!(span.fg, theme().color_for_scope("markup.heading.1"));
     }
 
     #[test]
     fn paragraphs_after_a_heading_revert_to_plain_text_color() {
         let lines = render_md("# Title\n\nbody text", 40);
-        let plain_fg = theme().ui_fg("ui.text").unwrap();
+        let plain_fg = theme().ui.text;
         let heading = &lines[0].spans[0];
-        assert_eq!(
-            heading.fg,
-            theme().color_for_scope("markup.heading.1").unwrap()
-        );
+        assert_eq!(heading.fg, theme().color_for_scope("markup.heading.1"));
         let body = &lines[2];
         assert_eq!(text(body), "body text");
         for span in &body.spans {
@@ -1243,12 +1230,12 @@ mod tests {
             .iter()
             .find(|s| s.text == "ls -la")
             .expect("code span");
-        assert_eq!(code.fg, theme().color_for_scope("markup.raw").unwrap());
+        assert_eq!(code.fg, theme().color_for_scope("markup.raw"));
     }
 
     #[test]
     fn code_block_lines_wrap_and_keep_their_color() {
-        let ruler = theme().ui_bg("ui.virtual.ruler");
+        let ruler = theme().ui.ruler;
         let lines = render_md("```\nlet x = 1234567890;\n```", 10);
         assert_eq!(
             lines.iter().map(text).collect::<Vec<_>>(),
@@ -1276,7 +1263,7 @@ mod tests {
     #[test]
     fn an_unclosed_fence_closes_at_the_end_of_input() {
         // CommonMark closes an unclosed fence at end of input; pin that, so an upgrade can't bleed the code background across replies.
-        let ruler = theme().ui_bg("ui.virtual.ruler").unwrap();
+        let ruler = theme().ui.ruler.expect("the theme has a ruler");
         let lines = render_md("```sh\ncargo test\n```\n\nplain\n```\nnever closed", 40);
         assert_eq!(ruler, lines[0].bg.unwrap());
         assert_eq!(None, lines[2].bg);
@@ -1305,11 +1292,11 @@ mod tests {
         assert_eq!(text(&lines[1]), "☐ todo");
         assert_eq!(
             lines[0].spans[0].fg,
-            theme().color_for_scope("markup.list.checked").unwrap()
+            theme().color_for_scope("markup.list.checked")
         );
         assert_eq!(
             lines[1].spans[0].fg,
-            theme().color_for_scope("markup.list.unchecked").unwrap()
+            theme().color_for_scope("markup.list.unchecked")
         );
     }
 
@@ -1319,7 +1306,7 @@ mod tests {
         assert_eq!(text(&lines[0]), "> quoted");
         assert_eq!(
             lines[0].spans[0].fg,
-            theme().color_for_scope("markup.quote").unwrap()
+            theme().color_for_scope("markup.quote")
         );
     }
 
@@ -1416,10 +1403,10 @@ mod tests {
 
     #[test]
     fn wrap_spans_keeps_style_across_a_break() {
-        let bold = Span::plain("two", RgbValue::from_u8(255, 0, 0));
+        let bold = Span::plain("two", Color::from_u8(255, 0, 0));
         let mut bold_style = bold.clone();
         bold_style.bold = true;
-        let plain = Span::plain(" words", RgbValue::from_u8(0, 255, 0));
+        let plain = Span::plain(" words", Color::from_u8(0, 255, 0));
         let lines = wrap_spans(&[bold_style, plain], 5, Vec::new(), Vec::new());
         assert_eq!(lines.len(), 2);
         assert!(lines[0][0].bold);
@@ -1429,7 +1416,7 @@ mod tests {
 
     #[test]
     fn wrap_spans_splits_words_longer_than_a_line() {
-        let span = Span::plain("abcdef", RgbValue::from_u8(0, 0, 0));
+        let span = Span::plain("abcdef", Color::from_u8(0, 0, 0));
         let lines = wrap_spans(&[span], 4, Vec::new(), Vec::new());
         let texts: Vec<String> = lines
             .iter()
@@ -1440,9 +1427,9 @@ mod tests {
 
     #[test]
     fn wrap_spans_applies_prefixes_as_a_hanging_indent() {
-        let marker = Span::plain("• ", RgbValue::from_u8(0, 0, 0));
-        let cont = Span::plain("  ", RgbValue::from_u8(0, 0, 0));
-        let span = Span::plain("alpha beta", RgbValue::from_u8(0, 0, 0));
+        let marker = Span::plain("• ", Color::from_u8(0, 0, 0));
+        let cont = Span::plain("  ", Color::from_u8(0, 0, 0));
+        let span = Span::plain("alpha beta", Color::from_u8(0, 0, 0));
         let lines = wrap_spans(&[span], 8, vec![marker], vec![cont]);
         let texts: Vec<String> = lines
             .iter()

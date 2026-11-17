@@ -892,21 +892,10 @@ pub fn render_command_line(
     else {
         return;
     };
-    let (bg_rgb, fg_rgb) = crate::tui::widgets::title_row::title_bar_colors(false, theme);
-    let color_bg = TuiColor::from(bg_rgb);
-    let color_fg = TuiColor::from(fg_rgb);
-    let color_selection = TuiColor::from(crate::tui::widgets::title_row::title_selection_bg(
-        false, theme,
-    ));
+    let (color_bg, color_fg) = crate::tui::widgets::title_row::title_bar_colors(false, theme);
+    let color_selection = crate::tui::widgets::title_row::title_selection_bg(false, theme);
     let placeholder = match &command_line.error {
-        Some(error) => {
-            let error_fg = TuiColor::from(
-                theme
-                    .ui_fg("error")
-                    .unwrap_or(crate::tui::widgets::title_row::DEFAULT_ERROR_FG),
-            );
-            Some((format!("  {error}"), error_fg))
-        }
+        Some(error) => Some((format!("  {error}"), theme.ui.error)),
         // With the palette up, the keys that walk it are worth naming once, after whatever
         // the line itself has to say.
         None => {
@@ -919,10 +908,7 @@ pub fn render_command_line(
                 (None, Some(keys)) => Some(format!("  {keys}")),
                 (None, None) => None,
             };
-            hint.map(|hint| {
-                let weak = theme.color_for_scope("comment").unwrap_or(fg_rgb);
-                (hint, TuiColor::from(weak))
-            })
+            hint.map(|hint| (hint, theme.ui.dim))
         }
     };
 
@@ -946,7 +932,7 @@ pub fn render_command_line(
     });
     let top = screen_rows.saturating_sub(rows + list_rows);
 
-    let fill_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+    let fill_style = color_fg.on(color_bg);
     let mut ops = RenderOpIRVec::new();
     for row_idx in top..(top + rows + list_rows).min(screen_rows) {
         ops += RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + vp_row(row_idx as u16));
@@ -972,9 +958,7 @@ pub fn render_command_line(
         pipeline.push(ZOrder::Normal, ops);
         return;
     };
-    let picked_bg = TuiColor::from(crate::tui::widgets::title_row::title_selection_bg(
-        false, theme,
-    ));
+    let picked_bg = color_selection;
     // Keep the highlighted row in view when the list has to be cut short.
     let first = (palette.selected + 1).saturating_sub(list_rows);
     let lines: Vec<(bool, String)> = palette
@@ -994,7 +978,7 @@ pub fn render_command_line(
         .collect();
     for (offset, (picked, line)) in lines.iter().enumerate() {
         let bg = if *picked { picked_bg } else { color_bg };
-        let style = new_style!(color_fg: {color_fg} color_bg: {bg});
+        let style = color_fg.on(bg);
         let line = crate::tui::widgets::text_layout::truncate(line, width as usize);
         ops +=
             RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + vp_row((top + rows + offset) as u16));

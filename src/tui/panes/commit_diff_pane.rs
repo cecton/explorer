@@ -37,26 +37,17 @@ impl CommitDiffPaneComponent {
         }
     }
 
-    fn kind_color(theme: &crate::tui::theme::HelixTheme, kind: crate::git::DiffKind) -> RgbValue {
+    fn kind_color(
+        theme: &crate::tui::theme::HelixTheme,
+        kind: crate::git::DiffKind,
+    ) -> crate::tui::theme::Color {
         use crate::git::DiffKind;
-        let fallback = |r: u8, g: u8, b: u8| RgbValue::from_u8(r, g, b);
         match kind {
-            DiffKind::FileHeader => theme
-                .color_for_scope("function")
-                .unwrap_or(fallback(137, 180, 250)),
-            DiffKind::File => theme
-                .color_for_scope("function")
-                .unwrap_or(fallback(110, 130, 170)),
-            DiffKind::Hunk => theme
-                .color_for_scope("diff.delta")
-                .unwrap_or(fallback(250, 200, 90)),
-            DiffKind::Add => theme
-                .color_for_scope("diff.plus")
-                .unwrap_or(fallback(150, 220, 120)),
-            DiffKind::Del => theme
-                .color_for_scope("diff.minus")
-                .unwrap_or(fallback(230, 120, 120)),
-            DiffKind::Context => theme.ui_fg("ui.text").unwrap_or(fallback(170, 170, 200)),
+            DiffKind::FileHeader | DiffKind::File => theme.color_for_scope("function"),
+            DiffKind::Hunk => theme.color_for_scope("diff.delta"),
+            DiffKind::Add => theme.color_for_scope("diff.plus"),
+            DiffKind::Del => theme.color_for_scope("diff.minus"),
+            DiffKind::Context => theme.ui.text,
         }
     }
 }
@@ -164,20 +155,13 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
             state.pane_manager.clamp_scroll(&window);
             let scroll = state.pane_manager.window_scroll(&window);
 
-            let pane_bg = state
-                .theme
-                .ui_bg("ui.background")
-                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
-            let bg = TuiColor::from(pane_bg);
-            let bg_style = new_style!(color_bg: {bg});
+            let pane_bg = state.theme.ui.background;
+            let bg_style = state.theme.ui.text.on(pane_bg);
 
             let mut render_ops = RenderOpIRVec::new();
             match (&lines, &error) {
                 (_, Some(err)) => {
-                    let fg = state
-                        .theme
-                        .ui_fg("error")
-                        .unwrap_or(RgbValue::from_u8(220, 80, 80));
+                    let fg = state.theme.ui.error;
                     let text = format!("error: {err}");
                     paint_centered(
                         &mut render_ops,
@@ -190,10 +174,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
                     );
                 }
                 (None, _) => {
-                    let fg = state
-                        .theme
-                        .ui_fg("ui.text")
-                        .unwrap_or(RgbValue::from_u8(170, 170, 200));
+                    let fg = state.theme.ui.text;
                     paint_centered(
                         &mut render_ops,
                         &origin,
@@ -205,10 +186,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
                     );
                 }
                 (Some(lines), _) if lines.is_empty() => {
-                    let fg = state
-                        .theme
-                        .ui_fg("ui.text")
-                        .unwrap_or(RgbValue::from_u8(170, 170, 200));
+                    let fg = state.theme.ui.text;
                     paint_centered(
                         &mut render_ops,
                         &origin,
@@ -239,7 +217,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
                             vp_col(0) + vp_row(row_offset as u16),
                         );
                         let fg = Self::kind_color(&state.theme, line.kind);
-                        let style = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {bg});
+                        let style = fg.on(pane_bg);
                         let mut text = line.text.clone();
                         if text.chars().count() > pane_width.saturating_sub(1) {
                             text = text.chars().take(pane_width.saturating_sub(1)).collect();
@@ -260,20 +238,19 @@ fn paint_centered(
     pane_width: usize,
     total_rows: usize,
     text: &str,
-    fg: RgbValue,
-    pane_bg: RgbValue,
+    fg: crate::tui::theme::Color,
+    pane_bg: crate::tui::theme::Color,
 ) {
     let text_width = crate::tui::widgets::text_layout::display_width(text);
     let pad = pane_width.saturating_sub(text_width) / 2;
     let padded = format!("{:pad$}{}", "", text, pad = pad);
-    let style = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(pane_bg)});
-    let bg_style = new_style!(color_bg: {TuiColor::from(pane_bg)});
+    let style = fg.on(pane_bg);
     for row_offset in 0..total_rows {
         render_ops +=
             RenderOpCommon::MoveCursorPositionRelTo(*origin, vp_col(0) + vp_row(row_offset as u16));
-        render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
+        render_ops += RenderOpCommon::ApplyColors(Some(style));
         render_ops +=
-            RenderOpIR::PaintTextWithAttributes(" ".repeat(pane_width).into(), Some(bg_style));
+            RenderOpIR::PaintTextWithAttributes(" ".repeat(pane_width).into(), Some(style));
     }
     render_ops += RenderOpCommon::MoveCursorPositionRelTo(*origin, vp_col(0) + vp_row(0));
     render_ops += RenderOpCommon::ApplyColors(Some(style));

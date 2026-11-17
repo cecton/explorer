@@ -114,9 +114,9 @@ impl crate::tui::widgets::title_row::TitleRow for WindowPickerComponent {
 /// Foreground colors of the rows that are not files, by kind of window.
 #[derive(Clone, Copy, Debug, PartialEq)]
 struct RowAccents {
-    terminal: RgbValue,
-    agent: RgbValue,
-    git: RgbValue,
+    terminal: crate::tui::theme::Color,
+    agent: crate::tui::theme::Color,
+    git: crate::tui::theme::Color,
 }
 
 /// Accent colors for terminal, agent and git rows in the picker.
@@ -129,19 +129,20 @@ struct RowAccents {
 /// theme lacks. `constant` is intentionally excluded — it maps to the same color
 /// the picker uses for fuzzy-match highlights.
 fn row_accents(theme: &crate::tui::theme::HelixTheme) -> RowAccents {
-    let text = theme.ui_fg("ui.text");
+    use crate::tui::theme::Color;
+    let text = theme.ui.text;
     let defaults = [
-        RgbValue::from_u8(137, 180, 250),
-        RgbValue::from_u8(166, 227, 161),
-        RgbValue::from_u8(203, 166, 247),
+        Color::from_u8(137, 180, 250),
+        Color::from_u8(166, 227, 161),
+        Color::from_u8(203, 166, 247),
     ];
-    let mut distinct: Vec<RgbValue> = Vec::with_capacity(3);
+    let mut distinct: Vec<Color> = Vec::with_capacity(3);
     for color in ["function", "string", "keyword", "type"]
         .into_iter()
-        .filter_map(|scope| theme.color_for_scope(scope))
+        .map(|scope| theme.color_for_scope(scope))
         .chain(defaults)
     {
-        if Some(color) != text && !distinct.contains(&color) {
+        if color != text && !distinct.contains(&color) {
             distinct.push(color);
         }
     }
@@ -438,12 +439,12 @@ mod tests {
         let accents = row_accents(&theme);
         // Never identical to the file-row (ui.text) color, nor to each other.
         for accent in [accents.terminal, accents.agent, accents.git] {
-            assert_ne!(Some(accent), theme.ui_fg("ui.text"));
+            assert_ne!(accent, theme.ui.text);
         }
         assert_ne!(accents.terminal, accents.agent);
         assert_ne!(accents.terminal, accents.git);
         assert_ne!(accents.agent, accents.git);
         // On the default theme terminals keep the `function` scope color.
-        assert_eq!(Some(accents.terminal), theme.color_for_scope("function"));
+        assert_eq!(accents.terminal, theme.color_for_scope("function"));
     }
 }

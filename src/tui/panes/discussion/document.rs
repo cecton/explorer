@@ -1,5 +1,3 @@
-#[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
-use r3bl_tui::*;
 use std::borrow::Cow;
 
 /// The texts a window shows, in the order it shows them.
@@ -11,7 +9,7 @@ pub(crate) struct DocLine {
     /// Each span's `src` is a byte offset in the text of `part`.
     pub(crate) spans: Vec<crate::tui::widgets::markdown::Span>,
     /// Set on code block lines, painted instead of the surrounding background.
-    pub(crate) bg: Option<RgbValue>,
+    pub(crate) bg: Option<crate::tui::theme::Color>,
 }
 
 /// The document of one window: the wrapped lines of each text, in the order the window
@@ -160,7 +158,7 @@ fn push_wrapped(
     base: usize,
     width: usize,
     part: crate::tui::pane_manager::DocPart,
-    fg: RgbValue,
+    fg: crate::tui::theme::Color,
 ) {
     use crate::tui::widgets::markdown::Span;
     for (start, text) in crate::tui::widgets::text_layout::wrap(text, width) {
@@ -197,10 +195,8 @@ pub(crate) fn doc_lines<'a>(
 ) -> &'a Doc {
     use crate::tui::pane_manager::DocPart;
     let mut cache = component.cache.take().unwrap_or_default();
-    let text_fg = theme
-        .ui_fg("ui.text")
-        .unwrap_or(RgbValue::from_u8(170, 170, 200));
-    let dim_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
+    let text_fg = theme.ui.text;
+    let dim_fg = theme.ui.dim;
     let shown = discussion.node.is_some();
     let width_changed = cache.width != width;
     // A text replaced as a whole may have the length of what it replaced: only the
@@ -456,8 +452,7 @@ mod tests {
         let mocha = HelixTheme::from_name("catppuccin_mocha").expect("bundled theme");
         let light = HelixTheme::from_name("adwaita-light").expect("bundled theme");
         assert_ne!(
-            mocha.ui_fg("ui.text"),
-            light.ui_fg("ui.text"),
+            mocha.ui.text, light.ui.text,
             "the two themes paint body text differently"
         );
         let colors = |component: &crate::tui::panes::discussion::DiscussionComponent| {

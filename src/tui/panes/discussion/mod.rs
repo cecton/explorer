@@ -492,7 +492,7 @@ impl DiscussionComponent {
         );
         if label_width < pane_width {
             let (bg, fg) = crate::tui::widgets::title_row::title_bar_colors(focused, theme);
-            let style = new_style!(color_fg: {TuiColor::from(fg)} color_bg: {TuiColor::from(bg)});
+            let style = fg.on(bg);
             *ops += RenderOpCommon::MoveCursorPositionRelTo(
                 pane_box.style_adjusted_bounds.origin_pos,
                 vp_col((pane_width - label_width) as u16) + vp_row(0),
@@ -681,6 +681,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
         use crate::tui::pane_manager::SelPoint;
         use crate::tui::pane_manager::TextSelection;
         use crate::tui::pane_manager::Window;
+        use crate::tui::theme::Color;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -715,29 +716,17 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             };
 
             let theme = &state.theme;
-            let pane_bg = theme
-                .ui_bg("ui.background")
-                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
-            let prompt_bg = theme
-                .ui_bg("ui.cursorline")
-                .or_else(|| theme.ui_bg("ui.cursorline.primary"))
-                .or_else(|| theme.ui_bg("ui.statusline"))
-                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_STATUSLINE_BG);
-            let text_fg = theme
-                .ui_fg("ui.text")
-                .unwrap_or(RgbValue::from_u8(170, 170, 200));
-            let status_fg = theme.color_for_scope("comment").unwrap_or(text_fg);
-            let error_fg = theme
-                .ui_fg("error")
-                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_ERROR_FG);
+            let pane_bg = theme.ui.background;
+            let prompt_bg = theme.ui.prompt;
+            let text_fg = theme.ui.text;
+            let status_fg = theme.ui.dim;
+            let error_fg = theme.ui.error;
             // A surface of its own, like Helix's help box: the input sits inside the
             // window, where the focused title colors would read as the window's own row.
-            let input_bg = theme.ui_bg("ui.help").unwrap_or(pane_bg);
+            let input_bg = theme.ui.input;
             // `ui.selection`, the regular color of the file preview.
-            let selection_bg = theme
-                .ui_bg("ui.selection")
-                .unwrap_or(RgbValue::from_u8(50, 50, 90));
-            let marker = crate::tui::panes::discussion::status::marker_bg(theme, pane_bg);
+            let selection_bg = theme.ui.selection;
+            let marker = crate::tui::panes::discussion::status::marker_bg(theme);
 
             let (status, alert) =
                 crate::tui::panes::discussion::status::status_line(state, window_id, discussion);
@@ -765,9 +754,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
 
             let mut input_ops = RenderOpIRVec::new();
             let input_origin = origin + vp_height((doc_rows + status_rows) as u16);
-            let input_style = new_style!(
-                color_fg: {TuiColor::from(text_fg)} color_bg: {TuiColor::from(input_bg)}
-            );
+            let input_style = text_fg.on(input_bg);
             for row_offset in 0..input_rows {
                 input_ops += RenderOpCommon::MoveCursorPositionRelTo(
                     input_origin,
@@ -808,7 +795,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             // never both: a selection hides the highlights, as in the file preview. A
             // selection is painted on the regular selection color with its foreground
             // auto-contrasted, a highlight on the marker color with the markdown colors.
-            let marked = |part: DocPart| -> (Vec<(usize, usize)>, RgbValue, bool) {
+            let marked = |part: DocPart| -> (Vec<(usize, usize)>, Color, bool) {
                 match (selection, highlights) {
                     (Some((selected, range)), _) if selected == part => {
                         (vec![range], selection_bg, false)
@@ -823,7 +810,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                 marked(DocPart::Reply),
                 marked(DocPart::Thinking),
             ];
-            let marks_of = |part: Option<DocPart>| -> (&[(usize, usize)], RgbValue, bool) {
+            let marks_of = |part: Option<DocPart>| -> (&[(usize, usize)], Color, bool) {
                 match part {
                     Some(DocPart::Prompt) => (&marks[0].0, marks[0].1, marks[0].2),
                     Some(DocPart::WorkLog) => (&marks[1].0, marks[1].1, marks[1].2),
@@ -928,18 +915,13 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             if !read_only && let Some(discussion) = state.discussions.get_mut(&window_id) {
                 discussion.draft.render(
                     &mut input_ops,
-                    hint.as_deref()
-                        .map(|hint| (hint, TuiColor::from(status_fg))),
+                    hint.as_deref().map(|hint| (hint, status_fg)),
                     "",
                     input_origin,
                     pane_width as u16,
                     input_rows,
                     focused,
-                    (
-                        TuiColor::from(input_bg),
-                        TuiColor::from(text_fg),
-                        TuiColor::from(selection_bg),
-                    ),
+                    (input_bg, text_fg, selection_bg),
                 );
             }
             global_data.pipeline.push(ZOrder::Normal, render_ops);
@@ -976,6 +958,7 @@ mod tests {
     use crate::tui::panes::discussion::status::resume_hint;
     use crate::tui::panes::discussion::status::status_line;
     use crate::tui::panes::discussion::status::status_text;
+    use crate::tui::theme::Color;
     use camino::Utf8PathBuf;
     use std::sync::Arc;
 
@@ -1001,17 +984,24 @@ mod tests {
     fn marker_bg_lays_the_warning_color_over_the_pane_background() {
         use crate::tui::theme::HelixTheme;
         let theme = HelixTheme::default();
-        let pane_bg = theme.ui_bg("ui.background").unwrap();
-        let marker = marker_bg(&theme, pane_bg);
-        assert_ne!(marker, pane_bg);
-        assert_ne!(Some(marker), theme.ui_bg("ui.selection"));
-        assert_eq!(marker, RgbValue::from_u8(0x76, 0x6c, 0x62));
+        let marker = marker_bg(&theme);
+        assert_ne!(marker, theme.ui.background);
+        assert_ne!(marker, theme.ui.selection);
+        assert_eq!(marker, Color::from_u8(0x76, 0x6c, 0x62));
+    }
+
+    /// The terminal's background has no RGB value to mix the warning color into.
+    #[test]
+    fn marker_bg_is_the_selection_over_the_terminal_background() {
+        use crate::tui::theme::HelixTheme;
+        let theme = HelixTheme::from_name("term16_dark").expect("bundled theme");
+        assert_eq!(marker_bg(&theme), theme.ui.selection);
     }
 
     fn span(text: &str, src: Option<usize>) -> crate::tui::widgets::markdown::Span {
         crate::tui::widgets::markdown::Span {
             src,
-            ..crate::tui::widgets::markdown::Span::plain(text, RgbValue::from_u8(0, 0, 0))
+            ..crate::tui::widgets::markdown::Span::plain(text, Color::from_u8(0, 0, 0))
         }
     }
 
@@ -2432,7 +2422,7 @@ mod tests {
                 ..Default::default()
             },
         );
-        let color = TuiColor::from(RgbValue::from_u8(0, 0, 0));
+        let color = Color::from_u8(0, 0, 0);
         let mut ops = RenderOpIRVec::new();
         state.discussions.get_mut(&0).unwrap().draft.render(
             &mut ops,

@@ -48,31 +48,38 @@ const MIN_FG_BG_CONTRAST: f32 = 100.0;
 /// to near-black or near-white, whichever contrasts better with `bg`. Applied to
 /// every span so it transparently covers symbol-highlight and selection overlay
 /// backgrounds as well as the normal pane background, without either call site
-/// needing to know which case it is.
-pub(crate) fn ensure_readable_fg(fg: RgbValue, bg: RgbValue) -> RgbValue {
-    if (luminance(fg) - luminance(bg)).abs() >= MIN_FG_BG_CONTRAST {
+/// needing to know which case it is. A color of the terminal's palette or its default
+/// has no brightness Explorer knows, so with one on either side `fg` is kept, as Helix
+/// always keeps it.
+pub(crate) fn ensure_readable_fg(
+    fg: crate::tui::theme::Color,
+    bg: crate::tui::theme::Color,
+) -> crate::tui::theme::Color {
+    use crate::tui::theme::Color;
+    let (Some(fg_rgb), Some(bg_rgb)) = (fg.rgb(), bg.rgb()) else {
+        return fg;
+    };
+    if (luminance(fg_rgb) - luminance(bg_rgb)).abs() >= MIN_FG_BG_CONTRAST {
         return fg;
     }
-    if luminance(bg) > 127.0 {
-        RgbValue::from_u8(20, 20, 20)
+    if luminance(bg_rgb) > 127.0 {
+        Color::from_u8(20, 20, 20)
     } else {
-        RgbValue::from_u8(235, 235, 235)
+        Color::from_u8(235, 235, 235)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::theme::Color;
 
     #[test]
     fn keeps_fg_when_contrast_is_already_adequate() {
         // White text on a near-black background: plenty of contrast, unchanged.
         assert_eq!(
-            ensure_readable_fg(
-                RgbValue::from_u8(230, 230, 230),
-                RgbValue::from_u8(10, 10, 10),
-            ),
-            RgbValue::from_u8(230, 230, 230)
+            ensure_readable_fg(Color::from_u8(230, 230, 230), Color::from_u8(10, 10, 10)),
+            Color::from_u8(230, 230, 230)
         );
     }
 
@@ -80,26 +87,34 @@ mod tests {
     fn overrides_fg_when_luminance_nearly_matches() {
         // Yellow-ish syntax fg on a similarly bright symbol-highlight orange bg
         // (SYMBOL_PALETTE[2] = [255, 200, 100]) — nearly identical luminance.
-        let fg = RgbValue::from_u8(255, 255, 100);
-        let bg = RgbValue::from_u8(255, 200, 100);
-        let result = ensure_readable_fg(fg, bg);
-        assert_ne!(result, fg);
+        let fg = Color::from_u8(255, 255, 100);
+        let bg = Color::from_u8(255, 200, 100);
+        let result = ensure_readable_fg(fg, bg)
+            .rgb()
+            .expect("an RGB pair stays RGB");
+        assert_ne!(Some(result), fg.rgb());
+        let bg = bg.rgb().expect("an RGB background");
         assert!((luminance(result) - luminance(bg)).abs() >= MIN_FG_BG_CONTRAST);
     }
 
     #[test]
     fn overridden_fg_picks_dark_text_on_light_bg_and_light_text_on_dark_bg() {
         assert_eq!(
-            ensure_readable_fg(
-                RgbValue::from_u8(255, 255, 100),
-                RgbValue::from_u8(255, 200, 100),
-            ),
-            RgbValue::from_u8(20, 20, 20)
+            ensure_readable_fg(Color::from_u8(255, 255, 100), Color::from_u8(255, 200, 100)),
+            Color::from_u8(20, 20, 20)
         );
         assert_eq!(
-            ensure_readable_fg(RgbValue::from_u8(50, 50, 50), RgbValue::from_u8(30, 30, 30),),
-            RgbValue::from_u8(235, 235, 235)
+            ensure_readable_fg(Color::from_u8(50, 50, 50), Color::from_u8(30, 30, 30)),
+            Color::from_u8(235, 235, 235)
         );
+    }
+
+    /// The terminal's colors have no brightness Explorer knows: the foreground stays.
+    #[test]
+    fn keeps_fg_when_either_color_is_the_terminals() {
+        let dark = Color::from_u8(30, 30, 30);
+        assert_eq!(ensure_readable_fg(Color::Ansi(8), dark), Color::Ansi(8));
+        assert_eq!(ensure_readable_fg(dark, Color::Default), dark);
     }
 
     #[test]

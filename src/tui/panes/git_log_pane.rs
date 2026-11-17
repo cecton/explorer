@@ -581,43 +581,18 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                 None => Vec::new(),
             };
 
-            let pane_bg = state
-                .theme
-                .ui_bg("ui.background")
-                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
-            let bg = TuiColor::from(pane_bg);
-            let bg_style = new_style!(color_bg: {bg});
-            let selected_bg = TuiColor::from(
-                state
-                    .theme
-                    .ui_bg("ui.selection")
-                    .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG),
-            );
-            let normal_fg = TuiColor::from(
-                state
-                    .theme
-                    .ui_fg("ui.text")
-                    .unwrap_or(RgbValue::from_u8(170, 170, 200)),
-            );
-            let error_fg = TuiColor::from(
-                state
-                    .theme
-                    .ui_fg("error")
-                    .unwrap_or(RgbValue::from_u8(220, 80, 80)),
-            );
-            let selected_text_style = new_style!(color_fg: {normal_fg} color_bg: {selected_bg});
+            let ui = &state.theme.ui;
+            let bg = ui.background;
+            let bg_style = ui.text.on(bg);
+            let selected_bg = ui.selection;
+            let normal_fg = ui.text;
+            let error_fg = ui.error;
+            let selected_text_style = normal_fg.on(selected_bg);
 
             let mut render_ops = RenderOpIRVec::new();
 
             if branch_picking {
-                let branch_rgb = state
-                    .theme
-                    .color_for_scope("namespace")
-                    .unwrap_or(RgbValue::from_u8(100, 160, 255));
-                let tag_rgb = match state.theme.color_for_scope("special") {
-                    Some(rgb) if rgb != branch_rgb => rgb,
-                    _ => RgbValue::from_u8(255, 170, 80),
-                };
+                let (branch_rgb, tag_rgb) = ref_colors(&state.theme);
                 if let Some(win) = state.git_logs.get(&window_id) {
                     let results_origin =
                         vp_col(origin.col_index.as_u16()) + vp_row(origin.row_index.as_u16());
@@ -650,7 +625,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                 } else {
                     ("(no commits)".to_string(), normal_fg)
                 };
-                let message_style = new_style!(color_fg: {message.1} color_bg: {bg});
+                let message_style = message.1.on(bg);
                 for row_offset in 0..total_rows {
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
@@ -673,56 +648,16 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                 }
             } else {
                 let history = entries.as_ref().expect("visible > 0 implies entries");
-                let match_rgb = state
-                    .theme
-                    .ui_fg("ui.cursor.match")
-                    .unwrap_or(RgbValue::from_u8(255, 200, 60));
-                let match_fg = TuiColor::from(match_rgb);
-                let linenum_fg_rgb = state.theme.ui_fg("ui.linenr").unwrap_or({
-                    let default_fg = state
-                        .theme
-                        .ui_fg("ui.text")
-                        .unwrap_or(RgbValue::from_u8(212, 212, 212));
-                    RgbValue::from_u8(
-                        default_fg.red / 3,
-                        default_fg.green / 3,
-                        default_fg.blue / 3,
-                    )
-                });
-                let linenum_bg_rgb = state.theme.ui_bg("ui.linenr").unwrap_or(pane_bg);
-                let selection_bg_rgb = state
-                    .theme
-                    .ui_bg("ui.selection")
-                    .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG);
-                let linenum_selected_fg_rgb = if linenum_bg_rgb == selection_bg_rgb {
-                    state
-                        .theme
-                        .ui_bg("ui.cursor")
-                        .or_else(|| state.theme.ui_fg("ui.text.focus"))
-                        .or_else(|| state.theme.ui_fg("ui.text"))
-                        .unwrap_or(RgbValue::from_u8(120, 120, 160))
+                let match_fg = ui.matched;
+                let linenum_bg = ui.line_number_bg;
+                let linenum_selected_fg = if linenum_bg == ui.selection {
+                    ui.cursor
                 } else {
-                    state
-                        .theme
-                        .ui_fg("ui.selection")
-                        .unwrap_or(RgbValue::from_u8(255, 255, 255))
+                    ui.selection_fg
                 };
-                let linenum_normal_style = new_style!(
-                    color_fg: {TuiColor::from(linenum_fg_rgb)} color_bg: {TuiColor::from(linenum_bg_rgb)}
-                );
-                let linenum_selected_style = new_style!(
-                    color_fg: {TuiColor::from(linenum_selected_fg_rgb)} color_bg: {TuiColor::from(linenum_bg_rgb)}
-                );
-                let branch_fg_rgb = state
-                    .theme
-                    .color_for_scope("namespace")
-                    .unwrap_or(RgbValue::from_u8(100, 160, 255));
-                let tag_fg_rgb = match state.theme.color_for_scope("special") {
-                    Some(rgb) if rgb != branch_fg_rgb => rgb,
-                    _ => RgbValue::from_u8(255, 170, 80),
-                };
-                let branch_fg = TuiColor::from(branch_fg_rgb);
-                let tag_fg = TuiColor::from(tag_fg_rgb);
+                let linenum_normal_style = ui.line_number.on(linenum_bg);
+                let linenum_selected_style = linenum_selected_fg.on(linenum_bg);
+                let (branch_fg, tag_fg) = ref_colors(&state.theme);
                 for row_offset in 0..total_rows {
                     let vis_idx = scroll + row_offset;
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
@@ -765,7 +700,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                     let type_span = crate::git::commit_type_prefix(&summary).map(|(ty, len)| {
                         (
                             summary.char_indices().take_while(|(b, _)| *b < len).count(),
-                            TuiColor::from(commit_type_color(&state.theme, ty)),
+                            commit_type_color(&state.theme, ty),
                         )
                     });
 
@@ -776,7 +711,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                             _ if crate::tui::widgets::fuzzy::matched(matches, char_i) => match_fg,
                             _ => normal_fg,
                         };
-                        new_style!(color_fg: {fg} color_bg: {background})
+                        fg.on(background)
                     };
                     crate::tui::widgets::fuzzy::paint_runs(&mut render_ops, &summary, style_of);
 
@@ -802,9 +737,9 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                         for (i, git_ref) in shown.iter().enumerate() {
                             if i > 0 {
                                 let sep_style = if is_selected {
-                                    new_style!(color_fg: {normal_fg} color_bg: {selected_bg})
+                                    normal_fg.on(selected_bg)
                                 } else {
-                                    new_style!(color_fg: {normal_fg} color_bg: {bg})
+                                    normal_fg.on(bg)
                                 };
                                 render_ops += RenderOpIR::PaintTextWithAttributes(
                                     " ".into(),
@@ -816,9 +751,9 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                                 _ => branch_fg,
                             };
                             let style = if is_selected {
-                                new_style!(color_fg: {fg} color_bg: {selected_bg})
+                                fg.on(selected_bg)
                             } else {
-                                new_style!(color_fg: {fg} color_bg: {bg})
+                                fg.on(bg)
                             };
                             render_ops += RenderOpIR::PaintTextWithAttributes(
                                 git_ref.name.clone().into(),
@@ -832,9 +767,9 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                             };
                             if !shown.is_empty() {
                                 let sep_style = if is_selected {
-                                    new_style!(color_fg: {normal_fg} color_bg: {selected_bg})
+                                    normal_fg.on(selected_bg)
                                 } else {
-                                    new_style!(color_fg: {normal_fg} color_bg: {bg})
+                                    normal_fg.on(bg)
                                 };
                                 render_ops += RenderOpIR::PaintTextWithAttributes(
                                     " ".into(),
@@ -842,9 +777,9 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                                 );
                             }
                             let style = if is_selected {
-                                new_style!(color_fg: {fg} color_bg: {selected_bg})
+                                fg.on(selected_bg)
                             } else {
-                                new_style!(color_fg: {fg} color_bg: {bg})
+                                fg.on(bg)
                             };
                             render_ops +=
                                 RenderOpIR::PaintTextWithAttributes("...".into(), Some(style));
@@ -982,7 +917,21 @@ fn visible_entry_id(win: &crate::tui::state::GitLogWindowState) -> Option<[u8; 2
     history.entries.get(entry_idx).map(|entry| entry.id)
 }
 
-fn commit_type_color(theme: &crate::tui::theme::HelixTheme, ty: &str) -> RgbValue {
+/// The colors of a branch and a tag name: the `namespace` and `special` scopes, the tag
+/// taking a fixed orange where the theme gives both one color.
+fn ref_colors(
+    theme: &crate::tui::theme::HelixTheme,
+) -> (crate::tui::theme::Color, crate::tui::theme::Color) {
+    use crate::tui::theme::Color;
+    let branch = theme.color_for_scope("namespace");
+    let tag = match theme.color_for_scope("special") {
+        tag if tag != branch => tag,
+        _ => Color::from_u8(255, 170, 80),
+    };
+    (branch, tag)
+}
+
+fn commit_type_color(theme: &crate::tui::theme::HelixTheme, ty: &str) -> crate::tui::theme::Color {
     let scope = match ty {
         "feat" => "diff.plus",
         "fix" => "diff.minus",
@@ -996,11 +945,7 @@ fn commit_type_color(theme: &crate::tui::theme::HelixTheme, ty: &str) -> RgbValu
         "chore" | "revert" => "operator",
         _ => "ui.text",
     };
-    theme.color_for_scope(scope).unwrap_or_else(|| {
-        theme
-            .ui_fg("ui.text")
-            .unwrap_or(RgbValue::from_u8(170, 170, 200))
-    })
+    theme.color_for_scope(scope)
 }
 
 fn log_row_parts(entry: &crate::git::LogEntry, pane_width: usize) -> (String, String) {

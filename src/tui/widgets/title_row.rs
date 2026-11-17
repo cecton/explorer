@@ -11,66 +11,24 @@ pub(crate) trait TitleRow {
     ) -> usize;
 }
 
-pub(crate) const DEFAULT_BG: RgbValue = RgbValue {
-    red: 15,
-    green: 15,
-    blue: 25,
-};
-pub(crate) const DEFAULT_SELECTION_BG: RgbValue = RgbValue {
-    red: 50,
-    green: 50,
-    blue: 90,
-};
-pub(crate) const DEFAULT_STATUSLINE_BG: RgbValue = RgbValue {
-    red: 30,
-    green: 30,
-    blue: 50,
-};
-pub(crate) const DEFAULT_STATUSLINE_FG: RgbValue = RgbValue {
-    red: 180,
-    green: 180,
-    blue: 220,
-};
-pub(crate) const DEFAULT_TITLE_FG: RgbValue = RgbValue {
-    red: 220,
-    green: 220,
-    blue: 255,
-};
-pub(crate) const DEFAULT_ERROR_FG: RgbValue = RgbValue {
-    red: 220,
-    green: 80,
-    blue: 80,
-};
-pub(crate) const DEFAULT_WARNING_FG: RgbValue = RgbValue {
-    red: 220,
-    green: 170,
-    blue: 80,
-};
-
+/// The background and the text of a title bar: a focused one wears the selection.
 pub(crate) fn title_bar_colors(
     focused: bool,
     theme: &crate::tui::theme::HelixTheme,
-) -> (RgbValue, RgbValue) {
+) -> (crate::tui::theme::Color, crate::tui::theme::Color) {
     if focused {
-        (
-            theme.ui_bg("ui.selection").unwrap_or(DEFAULT_SELECTION_BG),
-            theme.ui_fg("ui.text").unwrap_or(DEFAULT_TITLE_FG),
-        )
+        (theme.ui.selection, theme.ui.text)
     } else {
-        (
-            theme
-                .ui_bg("ui.statusline")
-                .unwrap_or(DEFAULT_STATUSLINE_BG),
-            theme
-                .ui_fg("ui.statusline")
-                .unwrap_or(DEFAULT_STATUSLINE_FG),
-        )
+        (theme.ui.statusline_bg, theme.ui.statusline_fg)
     }
 }
 
 /// Background of a mouse selection in a title-bar input: a focused title bar already
 /// wears `ui.selection`, so the selection takes the other title bar's background.
-pub(crate) fn title_selection_bg(focused: bool, theme: &crate::tui::theme::HelixTheme) -> RgbValue {
+pub(crate) fn title_selection_bg(
+    focused: bool,
+    theme: &crate::tui::theme::HelixTheme,
+) -> crate::tui::theme::Color {
     title_bar_colors(!focused, theme).0
 }
 
@@ -102,15 +60,13 @@ pub(crate) fn render_input_title(
         .col_width
         .as_u16();
     let height = input.height(None, prompt, width, max_rows);
-    let (bg_rgb, fg_rgb) = title_bar_colors(focused, theme);
-    let color_bg = TuiColor::from(bg_rgb);
-    let color_fg = TuiColor::from(fg_rgb);
-    let color_selection = TuiColor::from(title_selection_bg(focused, theme));
-    let bg_style = new_style!(color_fg: {color_fg} color_bg: {color_bg});
+    let (color_bg, color_fg) = title_bar_colors(focused, theme);
+    let color_selection = title_selection_bg(focused, theme);
+    let bg_style = color_fg.on(color_bg);
     for row_offset in 0..height {
         *ops +=
             RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(row_offset as u16));
-        *ops += RenderOpCommon::SetBgColor(color_bg);
+        *ops += RenderOpCommon::ApplyColors(Some(bg_style));
         *ops += RenderOpIR::PaintTextWithAttributes(
             " ".repeat(width as usize).as_str().into(),
             Some(bg_style),
@@ -144,39 +100,21 @@ pub(crate) fn render_pane_title(
         .col_width
         .as_usize();
 
-    let (bg_active_rgb, fg_active_rgb) = title_bar_colors(true, theme);
-    let (bg_inactive_rgb, fg_inactive_rgb) = title_bar_colors(false, theme);
-    let fg_deleted_rgb = theme.ui_fg("error").unwrap_or(DEFAULT_ERROR_FG);
-
-    let color_bg = if focused {
-        TuiColor::from(bg_active_rgb)
-    } else {
-        TuiColor::from(bg_inactive_rgb)
-    };
-    let color_fg = if is_deleted {
-        TuiColor::from(fg_deleted_rgb)
-    } else if focused {
-        TuiColor::from(fg_active_rgb)
-    } else {
-        TuiColor::from(fg_inactive_rgb)
-    };
+    let (color_bg, title_fg) = title_bar_colors(focused, theme);
+    let color_fg = if is_deleted { theme.ui.error } else { title_fg };
+    let mut style = color_fg.on(color_bg);
+    if focused {
+        style.attribs.bold = Some(tui_style_attrib::Bold);
+    }
 
     let padded = format!(" {title} ");
     let display = truncate_title(&padded, width);
 
     render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
-    render_ops += RenderOpCommon::ResetColor;
-    render_ops += RenderOpCommon::SetBgColor(color_bg);
-    render_ops += RenderOpIR::PaintTextWithAttributes(SPACER_GLYPH.repeat(width).into(), None);
+    render_ops += RenderOpCommon::ApplyColors(Some(style));
+    render_ops += RenderOpIR::PaintTextWithAttributes(" ".repeat(width).into(), Some(style));
     render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
-    render_ops += RenderOpIR::PaintTextWithAttributes(
-        display.into(),
-        Some(if focused {
-            new_style!(bold color_fg: {color_fg} color_bg: {color_bg})
-        } else {
-            new_style!(color_fg: {color_fg} color_bg: {color_bg})
-        }),
-    );
+    render_ops += RenderOpIR::PaintTextWithAttributes(display.into(), Some(style));
 }
 
 fn truncate_title(padded: &str, width: usize) -> String {

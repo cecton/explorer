@@ -208,16 +208,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
             };
             let lines = self.lines(id, report, width, &state.theme);
             let window = Window::Report(id);
-            let pane_bg = state
-                .theme
-                .ui_bg("ui.background")
-                .unwrap_or(RgbValue::from_u8(30, 30, 46));
-            let text_fg = state
-                .theme
-                .ui_fg("ui.text")
-                .unwrap_or(RgbValue::from_u8(170, 170, 200));
+            let pane_bg = state.theme.ui.background;
+            let text_fg = state.theme.ui.text;
 
-            let blank = new_style!(color_bg: {TuiColor::from(pane_bg)});
+            let blank = text_fg.on(pane_bg);
             let mut ops = RenderOpIRVec::new();
             for row_offset in 0..rows {
                 ops += RenderOpCommon::MoveCursorPositionRelTo(

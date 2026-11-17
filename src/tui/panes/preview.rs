@@ -892,6 +892,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
     ) -> CommonResult {
         use crate::tui::pane_manager::SelPoint;
         use crate::tui::pane_manager::Window;
+        use crate::tui::theme::Color;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -934,44 +935,17 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
             let scroll = state.pane_manager.window_scroll(&window);
             let colored_guard = file.colored_lines.lock();
 
-            let pane_bg = state
-                .theme
-                .ui_bg("ui.background")
-                .unwrap_or(RgbValue::from_u8(15, 15, 25));
+            let ui = &state.theme.ui;
+            let pane_bg = ui.background;
             let pane_width = bounds.col_width.as_usize();
-            let bg = TuiColor::from(pane_bg);
-            let bg_style = new_style!(color_bg: {bg});
-            let hl_rgb = state
-                .theme
-                .ui_bg("ui.selection")
-                .unwrap_or(RgbValue::from_u8(50, 50, 90));
-            let hl_bg = TuiColor::from(hl_rgb);
-            let hl_bg_style = new_style!(color_bg: {hl_bg});
+            let bg_style = ui.text.on(pane_bg);
+            let hl_rgb = ui.selection;
+            let hl_bg_style = ui.text.on(hl_rgb);
             let line_num_width = (total_lines.max(1)).to_string().len();
             let content_start_col = line_num_width + GUTTER_GAP.len();
             let content_width = pane_width.saturating_sub(content_start_col).max(1);
-            let line_num_fg = state.theme.ui_fg("ui.linenr").unwrap_or({
-                let default_fg = state
-                    .theme
-                    .ui_fg("ui.text")
-                    .unwrap_or(RgbValue::from_u8(212, 212, 212));
-                RgbValue::from_u8(
-                    default_fg.red / 3,
-                    default_fg.green / 3,
-                    default_fg.blue / 3,
-                )
-            });
-            let line_num_bg = state.theme.ui_bg("ui.linenr").unwrap_or(pane_bg);
-            let line_num_fg_rgb = TuiColor::from(line_num_fg);
-            let line_num_bg_rgb = TuiColor::from(line_num_bg);
-            let line_num_style = new_style!(color_fg: {line_num_fg_rgb} color_bg: {bg});
-            let hl_fg_rgb = state
-                .theme
-                .ui_fg("ui.selection")
-                .unwrap_or(RgbValue::from_u8(255, 255, 255));
-            let hl_line_num_fg = TuiColor::from(hl_fg_rgb);
-            let hl_line_num_style =
-                new_style!(color_fg: {hl_line_num_fg} color_bg: {line_num_bg_rgb});
+            let line_num_style = ui.line_number.on(pane_bg);
+            let hl_line_num_style = ui.selection_fg.on(ui.line_number_bg);
 
             let text_drag_lo;
             let text_drag_hi;
@@ -1015,7 +989,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
 
             // The symbol highlight ranges of this file, once per frame rather than once per
             // wrapped sub-row: absolute byte ranges with the colour of their group.
-            let symbol_ranges: Vec<(usize, usize, RgbValue)> = state
+            let symbol_ranges: Vec<(usize, usize, Color)> = state
                 .symbol_highlights
                 .iter()
                 .flat_map(|group| {
@@ -1023,13 +997,12 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                         .locations
                         .iter()
                         .filter(|loc| loc.file_key == file_key)
-                        .map(move |loc| (loc.start_byte, loc.end_byte, group.color))
+                        .map(move |loc| (loc.start_byte, loc.end_byte, Color::Rgb(group.color)))
                 })
                 .collect();
 
-            let mut overlays: Vec<(usize, usize, RgbValue, Option<RgbValue>)> = Vec::new();
-            let mut intervals: Vec<(usize, usize, RgbValue, Option<RgbValue>)> =
-                Vec::with_capacity(8);
+            let mut overlays: Vec<(usize, usize, Color, Option<Color>)> = Vec::new();
+            let mut intervals: Vec<(usize, usize, Color, Option<Color>)> = Vec::with_capacity(8);
             let mut rendered = 0usize;
             'rendered: for line_idx in scroll..total_lines {
                 let line = data.line(line_idx);
@@ -1093,7 +1066,12 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                                     crate::tui::state::SEARCH_MATCH_FG,
                                 )
                             };
-                            overlays.push((m.start(), m.end(), bg, Some(fg)));
+                            overlays.push((
+                                m.start(),
+                                m.end(),
+                                Color::Rgb(bg),
+                                Some(Color::Rgb(fg)),
+                            ));
                         }
                     }
                     if is_text_drag_single {
@@ -1290,8 +1268,8 @@ fn paint_line_segment(
     line_idx: usize,
     (seg_start_byte, seg_end_byte): (usize, usize),
     theme: &crate::tui::theme::HelixTheme,
-    pane_bg: RgbValue,
-    fg_override: Option<RgbValue>,
+    pane_bg: crate::tui::theme::Color,
+    fg_override: Option<crate::tui::theme::Color>,
 ) {
     if seg_start_byte >= seg_end_byte {
         return;
@@ -1305,17 +1283,13 @@ fn paint_line_segment(
     if seg_start_byte >= seg_end_byte {
         return;
     }
-    let default_fg = theme
-        .ui_fg("ui.text")
-        .unwrap_or(RgbValue::from_u8(212, 212, 212));
-    let bg = TuiColor::from(pane_bg);
+    let default_fg = theme.ui.text;
 
     // A fixed foreground (search matches) paints the whole segment as one run, ignoring syntax
     // spans and the `ensure_readable_fg` auto-contrast so the match text color is uniform.
     if let Some(fg_rgb) = fg_override {
         let text = &line_content[seg_start_byte..seg_end_byte];
-        let fg = TuiColor::from(fg_rgb);
-        let style = new_style!(color_fg: {fg} color_bg: {bg});
+        let style = fg_rgb.on(pane_bg);
         *render_ops += RenderOpCommon::ApplyColors(Some(style));
         *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
         return;
@@ -1331,8 +1305,7 @@ fn paint_line_segment(
             let text = &line_content[overlap_start..overlap_end];
             let fg_rgb = theme.token_color(span.kind).unwrap_or(default_fg);
             let fg_rgb = crate::tui::widgets::contrast::ensure_readable_fg(fg_rgb, pane_bg);
-            let fg = TuiColor::from(fg_rgb);
-            let style = new_style!(color_fg: {fg} color_bg: {bg});
+            let style = fg_rgb.on(pane_bg);
             *render_ops += RenderOpCommon::ApplyColors(Some(style));
             *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
         }
@@ -1341,8 +1314,7 @@ fn paint_line_segment(
 
     let text = &line_content[seg_start_byte..seg_end_byte];
     let fg_rgb = crate::tui::widgets::contrast::ensure_readable_fg(default_fg, pane_bg);
-    let fg = TuiColor::from(fg_rgb);
-    let style = new_style!(color_fg: {fg} color_bg: {bg});
+    let style = fg_rgb.on(pane_bg);
     *render_ops += RenderOpCommon::ApplyColors(Some(style));
     *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
 }
@@ -1389,11 +1361,16 @@ fn advance_chars(line: &str, from: usize, chars: usize) -> usize {
 /// Repaints `o_lo..o_hi` in `intervals` with `color`, splitting partially
 /// overlapped pieces. No-op when the range is empty.
 fn overlay_interval(
-    intervals: &mut Vec<(usize, usize, RgbValue, Option<RgbValue>)>,
+    intervals: &mut Vec<(
+        usize,
+        usize,
+        crate::tui::theme::Color,
+        Option<crate::tui::theme::Color>,
+    )>,
     o_lo: usize,
     o_hi: usize,
-    color: RgbValue,
-    fg: Option<RgbValue>,
+    color: crate::tui::theme::Color,
+    fg: Option<crate::tui::theme::Color>,
 ) {
     if o_lo >= o_hi {
         return;
@@ -1422,6 +1399,7 @@ fn overlay_interval(
 #[cfg(test)]
 mod segment_tests {
     use super::*;
+    use crate::tui::theme::Color;
 
     /// How a line is cut into painted rows at `width` cells: the byte ranges of its segments.
     fn segments(line: &str, width: usize) -> Vec<(usize, usize)> {
@@ -1509,8 +1487,8 @@ mod segment_tests {
 
     #[test]
     fn an_overlay_splits_the_segment_it_lands_in() {
-        let marked = RgbValue::from_u8(1, 2, 3);
-        let plain = RgbValue::default();
+        let marked = Color::from_u8(1, 2, 3);
+        let plain = Color::from_u8(0, 0, 0);
         let mut intervals = vec![(4, 9, plain, None)];
         overlay_interval(&mut intervals, 6, 20, marked, None);
         assert_eq!(intervals, vec![(4, 6, plain, None), (6, 9, marked, None)]);
@@ -1518,8 +1496,8 @@ mod segment_tests {
 
     #[test]
     fn an_overlay_that_misses_the_segment_leaves_it_alone() {
-        let marked = RgbValue::from_u8(1, 2, 3);
-        let plain = RgbValue::default();
+        let marked = Color::from_u8(1, 2, 3);
+        let plain = Color::from_u8(0, 0, 0);
         let mut intervals = vec![(0, 4, plain, None)];
         overlay_interval(&mut intervals, 4, 9, marked, None);
         assert_eq!(intervals, vec![(0, 4, plain, None)]);
@@ -1527,9 +1505,9 @@ mod segment_tests {
 
     #[test]
     fn a_later_overlay_wins_over_an_earlier_one() {
-        let symbol = RgbValue::from_u8(1, 2, 3);
-        let search = RgbValue::from_u8(4, 5, 6);
-        let plain = RgbValue::default();
+        let symbol = Color::from_u8(1, 2, 3);
+        let search = Color::from_u8(4, 5, 6);
+        let plain = Color::from_u8(0, 0, 0);
         let mut intervals = vec![(0, 10, plain, None)];
         overlay_interval(&mut intervals, 2, 8, symbol, None);
         overlay_interval(&mut intervals, 4, 6, search, Some(search));
@@ -1548,6 +1526,7 @@ mod segment_tests {
 #[cfg(test)]
 mod paint_tests {
     use super::*;
+    use crate::tui::theme::Color;
 
     fn painted_text(ops: &RenderOpIRVec) -> Vec<String> {
         ops.list
@@ -1590,7 +1569,7 @@ mod paint_tests {
                 0,
                 (start, end),
                 &theme,
-                RgbValue::from_u8(0, 0, 0),
+                Color::from_u8(0, 0, 0),
                 None,
             );
             start = end;
@@ -1612,7 +1591,7 @@ mod paint_tests {
             0,
             (0, before),
             &theme,
-            RgbValue::from_u8(0, 0, 0),
+            Color::from_u8(0, 0, 0),
             None,
         );
         paint_line_segment(
@@ -1622,8 +1601,8 @@ mod paint_tests {
             0,
             (before, before + "target".len()),
             &theme,
-            RgbValue::from_u8(0, 0, 0),
-            Some(RgbValue::from_u8(255, 255, 0)),
+            Color::from_u8(0, 0, 0),
+            Some(Color::from_u8(255, 255, 0)),
         );
         assert_eq!(painted_text(&ops).concat(), "fn main() { target");
         // the match is one run, the plain text another
@@ -1642,7 +1621,7 @@ mod paint_tests {
             0,
             (3, 3),
             &theme,
-            RgbValue::from_u8(0, 0, 0),
+            Color::from_u8(0, 0, 0),
             None,
         );
         assert!(ops.list.is_empty());
@@ -1666,7 +1645,7 @@ mod paint_tests {
             0,
             (0, 1),
             &theme,
-            RgbValue::from_u8(0, 0, 0),
+            Color::from_u8(0, 0, 0),
             None,
         );
         assert_eq!(painted_text(&ops).concat(), "—");
@@ -1679,7 +1658,7 @@ mod paint_tests {
             0,
             (1, 2),
             &theme,
-            RgbValue::from_u8(0, 0, 0),
+            Color::from_u8(0, 0, 0),
             None,
         );
         assert_eq!(painted_text(&ops).concat(), "—");
@@ -1693,8 +1672,8 @@ mod paint_tests {
             0,
             (0, 1),
             &theme,
-            RgbValue::from_u8(0, 0, 0),
-            Some(RgbValue::from_u8(255, 255, 0)),
+            Color::from_u8(0, 0, 0),
+            Some(Color::from_u8(255, 255, 0)),
         );
         assert_eq!(painted_text(&ops).concat(), "—");
 
@@ -1712,7 +1691,7 @@ mod paint_tests {
             0,
             (0, file.content.len()),
             &theme,
-            RgbValue::from_u8(0, 0, 0),
+            Color::from_u8(0, 0, 0),
             None,
         );
         assert_eq!(painted_text(&ops).concat(), "—");

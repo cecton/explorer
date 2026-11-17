@@ -574,11 +574,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Termin
             let scrollback_len = pane.ofs_buf.get_history_len();
             let scroll_offset = pane.scroll_offset.min(scrollback_len);
 
-            let hl_rgb = global_data
-                .state
-                .theme
-                .ui_bg("ui.selection")
-                .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG);
+            let selection_bg = global_data.state.theme.ui.selection;
             let selection_rect = global_data.state.text_selection.as_ref().and_then(|sel| {
                 if sel.window != Window::Terminal(id) || !sel.active {
                     return None;
@@ -629,7 +625,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Termin
                     RenderOpIR::PaintTextWithAttributes(" ".repeat(pane_width).into(), None);
             }
             if let Some(rect) = selection_rect {
-                overlay_selection(&mut render_ops, &lines, origin, rect, hl_rgb);
+                overlay_selection(&mut render_ops, &lines, origin, rect, selection_bg);
             }
 
             global_data.pipeline.push(ZOrder::Normal, render_ops);
@@ -782,7 +778,7 @@ fn overlay_selection(
     lines: &[&[PixelChar]],
     origin: r3bl_tui::VPPos,
     selection: SelectionRect,
-    hl_bg: RgbValue,
+    hl_bg: crate::tui::theme::Color,
 ) {
     let line_lengths: Vec<usize> = lines
         .iter()
@@ -802,7 +798,7 @@ fn overlay_selection(
         0,
     );
 
-    let sel_bg = TuiColor::from(hl_bg);
+    let sel_bg = hl_bg.tui();
     let default_fg = tui_color!(255, 255, 255);
 
     for (row_idx, col_start, col_end) in ranges {
@@ -821,7 +817,8 @@ fn overlay_selection(
                 _ => None,
             };
             let fg = style.and_then(|s| s.color_fg).unwrap_or(default_fg);
-            let sel_style = new_style!(color_fg: {fg} color_bg: {sel_bg});
+            let mut sel_style = new_style!(color_fg: {fg});
+            sel_style.color_bg = sel_bg;
             *ops += RenderOpCommon::MoveCursorPositionRelTo(
                 origin,
                 vp_col(col_idx as u16) + vp_row(row_idx as u16),

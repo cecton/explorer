@@ -544,32 +544,38 @@ impl InputLine {
     pub fn render(
         &mut self,
         mut ops: &mut RenderOpIRVec,
-        placeholder: Option<(&str, TuiColor)>,
+        placeholder: Option<(&str, crate::tui::theme::Color)>,
         prompt: &str,
         origin: VPPos,
         width: u16,
         max_rows: usize,
         focused: bool,
-        colors: (TuiColor, TuiColor, TuiColor),
+        colors: (
+            crate::tui::theme::Color,
+            crate::tui::theme::Color,
+            crate::tui::theme::Color,
+        ),
     ) {
         use unicode_segmentation::UnicodeSegmentation;
         let prompt_width = prompt.graphemes(true).count();
         let capacity = (width as usize).saturating_sub(prompt_width).max(1);
         let (color_bg, color_text, color_selection) = colors;
-        let text_style = new_style!(color_fg: {color_text} color_bg: {color_bg});
+        let text_style = color_text.on(color_bg);
         // The compositor takes a painted cell's *colors* from the current pen
         // (`ApplyColors`/`SetBgColor`), not from the style handed to
         // `PaintTextWithAttributes` — so we set the pen explicitly instead of relying on
-        // whatever the previously rendered pane left behind. The cursor is a solid block
-        // drawn with foreground/background swapped, which stays visible at any pane
-        // position (a bare `reverse` attribute inherits the stale pen and can vanish).
-        let cursor_style = new_style!(color_fg: {color_bg} color_bg: {color_text});
-        let selection_style = new_style!(color_fg: {color_text} color_bg: {color_selection});
+        // whatever the previously rendered pane left behind. The cursor is a solid block:
+        // the text's colors with the `reverse` attribute, which the terminal swaps even
+        // where one of them is its own default color, unknown to Explorer. A bare
+        // `reverse` with no pen set would inherit a stale one and could vanish.
+        let mut cursor_style = text_style;
+        cursor_style.attribs.reverse = Some(tui_style_attrib::Reverse);
+        let selection_style = color_text.on(color_selection);
         ops += RenderOpCommon::ApplyColors(Some(text_style));
 
         let typed = self.text.graphemes(true).count();
         let (placeholder, placeholder_style) = match placeholder {
-            Some((text, color)) => (text, new_style!(color_fg: {color} color_bg: {color_bg})),
+            Some((text, color)) => (text, color.on(color_bg)),
             None => ("", text_style),
         };
         let shown = format!("{}{placeholder}", self.text);
@@ -689,17 +695,15 @@ fn grapheme_byte_offset(text: &str, grapheme_idx: usize) -> usize {
 #[cfg(test)]
 mod cursor_render_tests {
     use super::*;
+    use crate::tui::theme::Color;
 
-    fn selection() -> TuiColor {
-        TuiColor::from(RgbValue::from_u8(90, 60, 20))
+    fn selection() -> Color {
+        Color::from_u8(90, 60, 20)
     }
 
-    fn colors() -> (TuiColor, TuiColor) {
+    fn colors() -> (Color, Color) {
         // (color_bg, color_text)
-        (
-            TuiColor::from(RgbValue::from_u8(50, 50, 90)),
-            TuiColor::from(RgbValue::from_u8(220, 220, 255)),
-        )
+        (Color::from_u8(50, 50, 90), Color::from_u8(220, 220, 255))
     }
 
     /// The pen in force when the first op painted from `needle` runs. One op may carry a
@@ -719,12 +723,12 @@ mod cursor_render_tests {
     }
 
     // The cursor cell must be preceded by an explicit `ApplyColors` that sets the pen to
-    // the swapped (block-cursor) colors. The compositor reads a painted cell's colors from
+    // the text's colors, reversed (a block cursor). The compositor reads a painted cell's colors from
     // the current pen, not from the style handed to the paint op, so without this the
     // cursor inherits whatever the previously rendered pane left behind and can vanish in
     // non-top / non-left panes.
     #[test]
-    fn end_of_line_cursor_sets_swapped_pen() {
+    fn end_of_line_cursor_sets_reversed_pen() {
         let (color_bg, color_text) = colors();
         let mut input = InputLine::new();
         let mut ops = RenderOpIRVec::new();
@@ -740,18 +744,23 @@ mod cursor_render_tests {
         );
 
         let pen = pen_before_paint(&ops, " ").expect("cursor space must set the pen");
-        assert_eq!(pen.color_fg, Some(color_bg));
-        assert_eq!(pen.color_bg, Some(color_text));
+        assert_eq!(pen.color_fg, color_text.tui());
+        assert_eq!(pen.color_bg, color_bg.tui());
+        assert!(pen.attribs.reverse.is_some());
     }
 
-    /// Text and foreground of every painted cell, in order: an op may paint a run of
-    /// graphemes at one style, so it is split back into them.
+    /// Text and foreground of every painted cell as the terminal shows it, in order: an
+    /// op may paint a run of graphemes at one style, so it is split back into them, and a
+    /// reversed cell shows its background in front.
     fn painted(ops: &RenderOpIRVec) -> Vec<(String, Option<TuiColor>)> {
         use unicode_segmentation::UnicodeSegmentation;
         let mut cells = Vec::new();
         for op in ops.iter() {
             if let RenderOpIR::PaintTextWithAttributes(text, style) = op {
-                let fg = style.and_then(|style| style.color_fg);
+                let fg = style.and_then(|style| match style.attribs.reverse {
+                    Some(_) => style.color_bg,
+                    None => style.color_fg,
+                });
                 for gr in text.as_str().graphemes(true) {
                     cells.push((gr.to_string(), fg));
                 }
@@ -763,7 +772,7 @@ mod cursor_render_tests {
     #[test]
     fn placeholder_follows_the_text_in_its_own_color_over_several_rows() {
         let (color_bg, color_text) = colors();
-        let weak = TuiColor::from(RgbValue::from_u8(90, 90, 90));
+        let weak = Color::from_u8(90, 90, 90);
         let placeholder = " <ref>\nSquash the commits since a ref";
         let mut input = InputLine::new();
         input.set_text("/squash");
@@ -782,14 +791,14 @@ mod cursor_render_tests {
         let painted = painted(&ops);
         let text: String = painted.iter().map(|(text, _)| text.as_str()).collect();
         assert_eq!(text, "/squash <ref>Squash the commits since a ref");
-        assert_eq!(painted[6], ("h".to_string(), Some(color_text)));
+        assert_eq!(painted[6], ("h".to_string(), color_text.tui()));
         // The cursor sits on the first cell of the placeholder.
-        assert_eq!(painted[7], (" ".to_string(), Some(color_bg)));
-        assert_eq!(painted[8], ("<".to_string(), Some(weak)));
-        assert_eq!(painted.last().map(|(_, color)| *color), Some(Some(weak)));
+        assert_eq!(painted[7], (" ".to_string(), color_bg.tui()));
+        assert_eq!(painted[8], ("<".to_string(), weak.tui()));
+        assert_eq!(painted.last().map(|(_, color)| *color), Some(weak.tui()));
         let pen = pen_before_paint(&ops, "<").expect("the placeholder must set the pen");
-        assert_eq!(pen.color_fg, Some(weak));
-        assert_eq!(pen.color_bg, Some(color_bg));
+        assert_eq!(pen.color_fg, weak.tui());
+        assert_eq!(pen.color_bg, color_bg.tui());
 
         assert_eq!(input.height(Some(placeholder), "", 20, 4), 3);
         assert_eq!(input.height(Some(placeholder), "", 20, 2), 2);
@@ -799,7 +808,7 @@ mod cursor_render_tests {
     #[test]
     fn cursor_and_keys_ignore_the_placeholder() {
         let (color_bg, color_text) = colors();
-        let weak = TuiColor::from(RgbValue::from_u8(90, 90, 90));
+        let weak = Color::from_u8(90, 90, 90);
         let mut input = InputLine::new();
         input.set_text("/squash");
         let mut ops = RenderOpIRVec::new();
@@ -816,8 +825,8 @@ mod cursor_render_tests {
 
         // The cursor ends the typed row; the placeholder starts on the next one.
         let painted = painted(&ops);
-        assert_eq!(painted[7], (" ".to_string(), Some(color_bg)));
-        assert_eq!(painted[8], ("S".to_string(), Some(weak)));
+        assert_eq!(painted[7], (" ".to_string(), color_bg.tui()));
+        assert_eq!(painted[8], ("S".to_string(), weak.tui()));
         let down = InputEvent::Keyboard(KeyPress::Plain {
             key: Key::SpecialKey(SpecialKey::Down),
         });
@@ -827,7 +836,7 @@ mod cursor_render_tests {
     }
 
     #[test]
-    fn mid_line_cursor_grapheme_sets_swapped_pen() {
+    fn mid_line_cursor_grapheme_sets_reversed_pen() {
         let (color_bg, color_text) = colors();
         let mut input = InputLine::new();
         input.set_text("ab");
@@ -845,8 +854,9 @@ mod cursor_render_tests {
         );
 
         let pen = pen_before_paint(&ops, "a").expect("cursor grapheme must set the pen");
-        assert_eq!(pen.color_fg, Some(color_bg));
-        assert_eq!(pen.color_bg, Some(color_text));
+        assert_eq!(pen.color_fg, color_text.tui());
+        assert_eq!(pen.color_bg, color_bg.tui());
+        assert!(pen.attribs.reverse.is_some());
     }
 
     #[test]
@@ -878,6 +888,7 @@ mod cursor_render_tests {
 #[cfg(test)]
 mod wrap_tests {
     use super::*;
+    use crate::tui::theme::Color;
 
     fn down() -> InputEvent {
         InputEvent::Keyboard(KeyPress::Plain {
@@ -1073,9 +1084,9 @@ mod wrap_tests {
         input.set_text("abcdefgh");
         let mut ops = RenderOpIRVec::new();
         let colors = (
-            TuiColor::from(RgbValue::from_u8(0, 0, 0)),
-            TuiColor::from(RgbValue::from_u8(255, 255, 255)),
-            TuiColor::from(RgbValue::from_u8(90, 60, 20)),
+            Color::from_u8(0, 0, 0),
+            Color::from_u8(255, 255, 255),
+            Color::from_u8(90, 60, 20),
         );
         input.render(
             &mut ops,
@@ -1098,9 +1109,9 @@ mod wrap_tests {
         input.set_text("a\nb\nc\nd");
         let mut ops = RenderOpIRVec::new();
         let colors = (
-            TuiColor::from(RgbValue::from_u8(0, 0, 0)),
-            TuiColor::from(RgbValue::from_u8(255, 255, 255)),
-            TuiColor::from(RgbValue::from_u8(90, 60, 20)),
+            Color::from_u8(0, 0, 0),
+            Color::from_u8(255, 255, 255),
+            Color::from_u8(90, 60, 20),
         );
         input.render(
             &mut ops,
@@ -1329,12 +1340,13 @@ mod binding_tests {
 #[cfg(test)]
 mod selection_tests {
     use super::*;
+    use crate::tui::theme::Color;
 
-    fn colors() -> (TuiColor, TuiColor, TuiColor) {
+    fn colors() -> (Color, Color, Color) {
         (
-            TuiColor::from(RgbValue::from_u8(0, 0, 0)),
-            TuiColor::from(RgbValue::from_u8(255, 255, 255)),
-            TuiColor::from(RgbValue::from_u8(90, 60, 20)),
+            Color::from_u8(0, 0, 0),
+            Color::from_u8(255, 255, 255),
+            Color::from_u8(90, 60, 20),
         )
     }
 
@@ -1476,11 +1488,11 @@ mod selection_tests {
         let cells = backgrounds(&mut input);
         let selected: String = cells
             .iter()
-            .filter(|(_, bg)| *bg == Some(color_selection))
+            .filter(|(_, bg)| *bg == color_selection.tui())
             .map(|(text, _)| text.as_str())
             .collect();
         assert_eq!(selected, "one");
-        assert_eq!(cells[3], (" ".to_string(), Some(color_bg)));
+        assert_eq!(cells[3], (" ".to_string(), color_bg.tui()));
     }
 
     #[test]

@@ -78,13 +78,8 @@ pub(super) fn render(
 
         // Fill entire surface area with pane background (covers padding
         // between panes, which the FlexBox layout system does not fill).
-        let bg_rgb = global_data
-            .state
-            .theme
-            .ui_bg("ui.background")
-            .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
-        let bg = TuiColor::from(bg_rgb);
-        let bg_style = new_style!(color_bg: {bg});
+        let bg = global_data.state.theme.ui.background;
+        let bg_style = global_data.state.theme.ui.text.on(bg);
         let mut bg_ops = RenderOpIRVec::new();
         let surface_rows = surface_size.row_height.as_usize();
         let surface_col_count = window_size.col_width.as_usize();
@@ -122,31 +117,21 @@ pub(super) fn render(
 }
 
 fn create_stylesheet(theme: &crate::tui::theme::HelixTheme) -> CommonResult<TuiStylesheet> {
-    let bg = theme
-        .ui_bg("ui.background")
-        .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
+    let bg = theme.ui.background.tui();
     throws_with_return!({
-        let mut styles = tui_stylesheet! {
-            new_style!(
-                id: {crate::tui::pane_component::container_id()}
-                color_bg: {TuiColor::from(bg)}
-            )
-        };
+        let mut container = new_style!(id: {crate::tui::pane_component::container_id()});
+        container.color_bg = bg;
+        let mut styles = tui_stylesheet! { container };
         for col_idx in 0..crate::tui::pane_manager::MAX_PANES {
-            let id = FlexBoxId::new(100 + col_idx as u8);
-            styles.add_style(new_style!(
-                id: {id}
-                padding: {0}
-                color_bg: {TuiColor::from(bg)}
-            ))?;
+            let mut style = new_style!(id: {FlexBoxId::new(100 + col_idx as u8)} padding: {0});
+            style.color_bg = bg;
+            styles.add_style(style)?;
         }
         for slot in 0..crate::tui::pane_manager::MAX_PANES {
-            let id = crate::tui::pane_component::pane_id(slot);
-            styles.add_style(new_style!(
-                id: {id}
-                padding: {0}
-                color_bg: {TuiColor::from(bg)}
-            ))?;
+            let mut style =
+                new_style!(id: {crate::tui::pane_component::pane_id(slot)} padding: {0});
+            style.color_bg = bg;
+            styles.add_style(style)?;
         }
         styles
     })

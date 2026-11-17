@@ -737,34 +737,8 @@ fn render_scrollbar(
         .as_usize())
     .saturating_sub(1);
 
-    // Track: theme scrollbar bg -> virtual ruler -> default.
-    let track_rgb = theme
-        .ui_bg("ui.menu.scroll")
-        .or_else(|| theme.ui_bg("ui.virtual.ruler"))
-        .unwrap_or(crate::tui::widgets::title_row::DEFAULT_STATUSLINE_BG);
-
-    // Thumb: theme scrollbar fg -> selection -> cursorline -> default.
-    let mut thumb_rgb = theme
-        .ui_fg("ui.menu.scroll")
-        .or_else(|| theme.ui_bg("ui.selection"))
-        .or_else(|| theme.ui_bg("ui.cursorline.primary"))
-        .or_else(|| theme.ui_bg("ui.cursorline"))
-        .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG);
-
-    // If thumb and track are the same, force contrast using cursor/text accent.
-    if thumb_rgb == track_rgb {
-        thumb_rgb = theme
-            .ui_bg("ui.cursor")
-            .or_else(|| theme.ui_fg("ui.text.focus"))
-            .or_else(|| theme.ui_fg("ui.text"))
-            .unwrap_or(RgbValue::from_u8(120, 120, 160));
-    }
-    // Last resort: if every theme fallback still collides, hardcode contrast.
-    if thumb_rgb == track_rgb {
-        thumb_rgb = RgbValue::from_u8(120, 120, 160);
-    }
-    let track_bg = TuiColor::from(track_rgb);
-    let thumb_bg = TuiColor::from(thumb_rgb);
+    let track_bg = theme.ui.scroll_track;
+    let thumb_bg = theme.ui.scroll_thumb;
 
     // Double the vertical resolution using half-block characters.
     let sub_rows = visible_rows * 2;
@@ -789,7 +763,7 @@ fn render_scrollbar(
             (false, false) => (' ', track_bg),
         };
 
-        let style = new_style!(color_fg: {bg} color_bg: {track_bg});
+        let style = bg.on(track_bg);
         *render_ops += RenderOpCommon::MoveCursorPositionRelTo(
             origin,
             vp_col(scroll_col as u16) + vp_row(row_offset),

@@ -85,29 +85,13 @@ impl FuzzyPicker {
         results_origin: VPPos,
         result_rows: usize,
         pane_width: usize,
-        display: impl Fn(&K, &crate::tui::state::AppState) -> (String, Option<RgbValue>),
+        display: impl Fn(&K, &crate::tui::state::AppState) -> (String, Option<crate::tui::theme::Color>),
     ) -> RenderOpIRVec {
-        let bg_rgb = state
-            .theme
-            .ui_bg("ui.background")
-            .unwrap_or(crate::tui::widgets::title_row::DEFAULT_BG);
-        let color_bg = TuiColor::from(bg_rgb);
-
-        let match_rgb = state
-            .theme
-            .ui_fg("ui.cursor.match")
-            .unwrap_or(RgbValue::from_u8(255, 200, 60));
-        let normal_rgb = state
-            .theme
-            .ui_fg("ui.text")
-            .unwrap_or(RgbValue::from_u8(170, 170, 200));
-        let selected_rgb = state
-            .theme
-            .ui_bg("ui.selection")
-            .unwrap_or(crate::tui::widgets::title_row::DEFAULT_SELECTION_BG);
-        let color_match_fg = TuiColor::from(match_rgb);
-        let color_normal_fg = TuiColor::from(normal_rgb);
-        let color_selected_bg = TuiColor::from(selected_rgb);
+        let ui = &state.theme.ui;
+        let color_bg = ui.background;
+        let color_match_fg = ui.matched;
+        let color_normal_fg = ui.text;
+        let color_selected_bg = ui.selection;
 
         let mut render_ops = RenderOpIRVec::new();
 
@@ -136,7 +120,7 @@ impl FuzzyPicker {
             } else {
                 color_bg
             };
-            let row_bg_style = new_style!(color_bg: {row_bg});
+            let row_bg_style = color_normal_fg.on(row_bg);
 
             render_ops += RenderOpCommon::ApplyColors(Some(row_bg_style));
             render_ops += RenderOpIR::PaintTextWithAttributes(
@@ -155,7 +139,7 @@ impl FuzzyPicker {
                     let text = format!("{:pad$}{}", "", msg, pad = pad);
                     render_ops += RenderOpIR::PaintTextWithAttributes(
                         text.into(),
-                        Some(new_style!(color_fg: {color_normal_fg} color_bg: {color_bg})),
+                        Some(color_normal_fg.on(color_bg)),
                     );
                 }
                 continue;
@@ -169,7 +153,7 @@ impl FuzzyPicker {
             let (display_str, accent) = display(&picker_state.results[result_idx], state);
             // Rows that supply an accent color (e.g. terminals) render in that
             // color and bold; others use the normal text color.
-            let base_fg = accent.map(TuiColor::from).unwrap_or(color_normal_fg);
+            let base_fg = accent.unwrap_or(color_normal_fg);
             let emphasized = accent.is_some();
             self.query.match_indices(&display_str, &mut indices);
 
@@ -179,9 +163,9 @@ impl FuzzyPicker {
                 // Bold for fuzzy-match characters and for accented rows;
                 // selection is carried by `row_bg`.
                 if is_match || emphasized {
-                    new_style!(bold color_fg: {fg} color_bg: {row_bg})
+                    fg.on_bold(row_bg)
                 } else {
-                    new_style!(color_fg: {fg} color_bg: {row_bg})
+                    fg.on(row_bg)
                 }
             };
             crate::tui::widgets::fuzzy::paint_runs(&mut render_ops, &display_str, style_of);
