@@ -318,12 +318,14 @@ impl PaneManager {
 
     /// Lays out visible panes into columns and rows.
     ///
-    /// Column count is derived from `surface_size.col_width / MIN_PANE_WIDTH`.
+    /// Column count is `surface_size.col_width / TARGET_PANE_WIDTH` rounded to the nearest
+    /// whole number, so the target is the ideal pane width, not a minimum. The width is then
+    /// split evenly between the columns.
     /// Within each column, panes are stacked top-to-bottom using their requested
     /// `PaneSize`. The last pane in each column is stretched to fill any remaining
     /// vertical space in that column.
     pub fn layout(&self, surface_size: VPSize) -> Vec<PaneSlot> {
-        const MIN_PANE_WIDTH: u16 = 100;
+        const TARGET_PANE_WIDTH: u16 = 100;
 
         let surface_cols = surface_size.col_width.as_u16();
         let surface_rows = surface_size.row_height.as_u16();
@@ -331,7 +333,7 @@ impl PaneManager {
             return Vec::new();
         }
 
-        let cols = (surface_cols / MIN_PANE_WIDTH).max(1) as usize;
+        let cols = ((surface_cols + TARGET_PANE_WIDTH / 2) / TARGET_PANE_WIDTH).max(1) as usize;
         let base_col_width = surface_cols / cols as u16;
         let remainder = surface_cols % cols as u16;
 
@@ -1233,6 +1235,35 @@ mod tests {
                 0
             );
         }
+    }
+
+    #[test]
+    fn layout_column_count_rounds_to_the_nearest_target_width() {
+        let columns_at = |width: u16| {
+            let mut manager = make_manager(&[
+                Window::Terminal(0),
+                Window::Terminal(1),
+                Window::Terminal(2),
+            ]);
+            set_all_pane_sizes(&mut manager, PaneSize::Full);
+            let slots = manager.layout(size(width, 24));
+            let mut origins: Vec<u16> = slots
+                .iter()
+                .map(|s| s.box_.style_adjusted_bounds.origin_pos.col_index.as_u16())
+                .collect();
+            origins.sort_unstable();
+            origins.dedup();
+            let widths: Vec<u16> = slots
+                .iter()
+                .map(|s| s.box_.style_adjusted_bounds.bounds_size.col_width.as_u16())
+                .collect();
+            (origins.len(), widths)
+        };
+        assert_eq!(columns_at(149).0, 1);
+        assert_eq!(columns_at(150).0, 2);
+        assert_eq!(columns_at(193).0, 2);
+        assert_eq!(columns_at(249).0, 2);
+        assert!(columns_at(193).1.iter().all(|w| *w == 96 || *w == 97));
     }
 
     #[test]

@@ -3,7 +3,7 @@ use r3bl_tui::*;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-const GUTTER_GAP: &str = "   ";
+const GUTTER_GAP: &str = "  ";
 
 /// Two clicks on the same cell in under this make a double click.
 const MULTI_CLICK: Duration = Duration::from_millis(300);

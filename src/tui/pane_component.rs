@@ -863,7 +863,7 @@ mod tests {
 
         /// A mouse event on character `col` of line `line` (0-based), past the gutter.
         fn mouse(&mut self, kind: MouseInputKind, line: usize, col: usize) -> EventPropagation {
-            let pos = vp_col(self.origin.col_index.as_u16() + 4 + col as u16)
+            let pos = vp_col(self.origin.col_index.as_u16() + 3 + col as u16)
                 + vp_row(self.origin.row_index.as_u16() + 1 + line as u16);
             self.component
                 .handle_event(
