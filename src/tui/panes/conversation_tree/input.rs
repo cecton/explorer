@@ -343,6 +343,23 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                     .set_window_scroll(&window, scroll + crate::tui::pane_manager::WHEEL_STEP);
                 state.pane_manager.clamp_scroll(&window);
             }
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(key @ (SpecialKey::Up | SpecialKey::Down)),
+                mask:
+                    ModifierKeysMask {
+                        shift_key_state: KeyState::Pressed,
+                        ctrl_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) => {
+                let scroll = state.pane_manager.window_scroll(&window);
+                let target = match key {
+                    SpecialKey::Up => scroll.saturating_sub(1),
+                    _ => scroll + 1,
+                };
+                state.pane_manager.set_window_scroll(&window, target);
+                state.pane_manager.clamp_scroll(&window);
+            }
             _ => return EventPropagation::Propagate,
         }
         EventPropagation::ConsumedRender

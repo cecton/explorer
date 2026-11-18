@@ -63,22 +63,21 @@ pub(super) fn render_status_bar(
                     "Bksp:Send to back  b:Branch  ↑↓:Select  /:Search  Enter:Diff  Esc:Clear search".to_string()
                 }
                 Some(Window::CommitDiff(_)) => {
-                    "Bksp:Send to back  Esc:Close  ↑↓PgUp/PgDn:scroll".to_string()
+                    "Bksp:Send to back  Esc:Close".to_string()
                 }
                 Some(Window::ConversationTree) => {
                     "Bksp:Send to back  /:Search  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  dd:Delete  Esc:Clear search"
                         .to_string()
                 }
                 Some(Window::Discussion(_)) => {
-                    "Enter:Send  Shift+Enter:New line  PgUp/PgDn:scroll"
-                        .to_string()
+                    "Enter:Send  Shift+Enter:New line".to_string()
                 }
                 Some(Window::Report(_)) => {
-                    "Bksp:Send to back  Esc:Close  PgUp/PgDn:scroll".to_string()
+                    "Bksp:Send to back  Esc:Close".to_string()
                 }
                 Some(Window::ModelPicker) => model_picker_hint(state),
                 Some(Window::Terminal(_)) if !state.terminal_grabbed => {
-                    "Bksp:Send to back  Enter:grab  ↑↓PgUp/PgDn:scroll".to_string()
+                    "Bksp:Send to back  Enter:grab".to_string()
                 }
                 Some(Window::Terminal(_)) | None => String::new(),
             };

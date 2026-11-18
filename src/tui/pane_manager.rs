@@ -455,7 +455,7 @@ impl PaneManager {
     }
 
     /// Scrolls `window` for a key or wheel event and answers whether the event was one:
-    /// Up/Down by a row, PageUp/PageDown by a page, Home/End and Ctrl+A/Ctrl+E to the
+    /// Up/Down and Shift+Up/Down by a row, PageUp/PageDown by a page, Home/End and Ctrl+A/Ctrl+E to the
     /// ends, the wheel by `WHEEL_STEP`.
     pub fn scroll_for_input(&mut self, window: &Window, input_event: &InputEvent) -> bool {
         let current = self.window_scroll(window);
@@ -470,6 +470,24 @@ impl PaneManager {
                 Key::SpecialKey(SpecialKey::End) => usize::MAX,
                 _ => return false,
             },
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(SpecialKey::Up),
+                mask:
+                    ModifierKeysMask {
+                        shift_key_state: KeyState::Pressed,
+                        ctrl_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) => current.saturating_sub(1),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(SpecialKey::Down),
+                mask:
+                    ModifierKeysMask {
+                        shift_key_state: KeyState::Pressed,
+                        ctrl_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) => current.saturating_add(1),
             InputEvent::Keyboard(KeyPress::WithModifiers { key, mask })
                 if *mask == ModifierKeysMask::new().with_ctrl() =>
             {
@@ -596,6 +614,34 @@ mod tests {
         assert!(manager.scroll_for_input(&window, &ctrl_a));
         assert_eq!(manager.window_scroll(&window), 0);
         assert!(!manager.scroll_for_input(&window, &plain(Key::Character('x'))));
+        let shift = |key| {
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(key),
+                mask: ModifierKeysMask::new().with_shift(),
+            })
+        };
+        assert!(manager.scroll_for_input(&window, &shift(SpecialKey::Down)));
+        assert_eq!(manager.window_scroll(&window), 1);
+        assert!(manager.scroll_for_input(&window, &shift(SpecialKey::Up)));
+        assert!(manager.scroll_for_input(&window, &shift(SpecialKey::Up)));
+        assert_eq!(manager.window_scroll(&window), 0);
+        assert!(!manager.scroll_for_input(&window, &shift(SpecialKey::Left)));
+        let combo = |mask| {
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(SpecialKey::Down),
+                mask,
+            })
+        };
+        assert!(!manager.scroll_for_input(
+            &window,
+            &combo(ModifierKeysMask::new().with_shift().with_ctrl())
+        ));
+        assert!(!manager.scroll_for_input(
+            &window,
+            &combo(ModifierKeysMask::new().with_shift().with_alt())
+        ));
+        assert!(!manager.scroll_for_input(&window, &combo(ModifierKeysMask::new().with_alt())));
+        assert_eq!(manager.window_scroll(&window), 0);
     }
 
     #[test]

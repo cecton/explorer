@@ -618,6 +618,24 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::PageDown),
             }) => scroll + page,
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(SpecialKey::Up),
+                mask:
+                    ModifierKeysMask {
+                        shift_key_state: KeyState::Pressed,
+                        ctrl_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) => scroll.saturating_sub(1),
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(SpecialKey::Down),
+                mask:
+                    ModifierKeysMask {
+                        shift_key_state: KeyState::Pressed,
+                        ctrl_key_state: KeyState::NotPressed,
+                        alt_key_state: KeyState::NotPressed,
+                    },
+            }) => scroll + 1,
             InputEvent::Mouse(
                 mouse @ MouseInput {
                     kind: MouseInputKind::MouseDown(Button::Left),
@@ -2362,6 +2380,56 @@ mod tests {
             );
         }
         crate::tui::test_support::global_data(state)
+    }
+
+    #[test]
+    fn shift_up_and_down_scroll_the_conversation_by_one_row() {
+        use crate::tui::pane_manager::Window;
+        let mut global_data = global_data_with_drafts(&["draft"]);
+        let window = Window::Discussion(0);
+        let pane_manager = &mut global_data.state.pane_manager;
+        pane_manager.set_window_view(&window, 0, 100, 10);
+        let mut component = DiscussionComponent::new(crate::tui::pane_component::pane_id(0));
+        let shift = |key| {
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(key),
+                mask: ModifierKeysMask::new().with_shift(),
+            })
+        };
+        let scroll = |global_data: &GlobalData<
+            crate::tui::state::AppState,
+            crate::signal::AppSignal,
+        >| global_data.state.pane_manager.window_scroll(&window);
+
+        type_into(
+            &mut component,
+            &mut global_data,
+            0,
+            &[shift(SpecialKey::Down)],
+        );
+        assert_eq!(scroll(&global_data), 1);
+        type_into(
+            &mut component,
+            &mut global_data,
+            0,
+            &[shift(SpecialKey::Down)],
+        );
+        assert_eq!(scroll(&global_data), 2);
+        type_into(
+            &mut component,
+            &mut global_data,
+            0,
+            &[shift(SpecialKey::Up)],
+        );
+        assert_eq!(scroll(&global_data), 1);
+        type_into(
+            &mut component,
+            &mut global_data,
+            0,
+            &[shift(SpecialKey::Up), shift(SpecialKey::Up)],
+        );
+        assert_eq!(scroll(&global_data), 0);
+        assert_eq!(global_data.state.discussions[&0].draft.text(), "draft");
     }
 
     #[test]

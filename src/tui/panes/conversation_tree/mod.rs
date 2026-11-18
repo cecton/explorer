@@ -258,6 +258,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn shift_up_and_down_scroll_the_tree_by_one_row_without_moving_the_selection() {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::panes::conversation_tree::test_support::tree_with;
+        let (_tmp, tree) = tree_with(&["a1", "a2"]);
+        let mut state = crate::tui::state::AppState::for_test(camino::Utf8PathBuf::from("/tmp"));
+        *state.conversations.write() = tree;
+        let window = Window::ConversationTree;
+        state.pane_manager.set_window_view(&window, 0, 100, 10);
+        let mut global_data = crate::tui::test_support::global_data(state);
+        let mut component = ConversationTreeComponent::new(crate::tui::pane_component::pane_id(0));
+        let selected = global_data.state.tree_view.selected.clone();
+        let shift = |key| {
+            InputEvent::Keyboard(KeyPress::WithModifiers {
+                key: Key::SpecialKey(key),
+                mask: ModifierKeysMask::new().with_shift(),
+            })
+        };
+        fn send(
+            component: &mut ConversationTreeComponent,
+            global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
+            event: InputEvent,
+        ) {
+            component
+                .handle_event(global_data, event, &mut HasFocus::default())
+                .unwrap();
+        }
+        let mut send =
+            |global_data: &mut GlobalData<_, _>, key| send(&mut component, global_data, shift(key));
+
+        send(&mut global_data, SpecialKey::Down);
+        send(&mut global_data, SpecialKey::Down);
+        send(&mut global_data, SpecialKey::Up);
+        assert_eq!(global_data.state.pane_manager.window_scroll(&window), 1);
+        send(&mut global_data, SpecialKey::Up);
+        send(&mut global_data, SpecialKey::Up);
+        assert_eq!(global_data.state.pane_manager.window_scroll(&window), 0);
+        assert_eq!(global_data.state.tree_view.selected, selected);
+    }
+
+    #[test]
     fn the_title_says_the_repository_is_untrusted() {
         use crate::tui::state::AppState;
         let mut state = AppState::for_test(camino::Utf8PathBuf::from("/tmp"));
