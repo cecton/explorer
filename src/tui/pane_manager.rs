@@ -39,58 +39,6 @@ pub enum Window {
     Report(usize),
 }
 
-/// One of the texts a Discussion window shows, in the order it shows them.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub enum DocPart {
-    Prompt,
-    WorkLog,
-    Thinking,
-    Reply,
-}
-
-/// A point in a window's content used as a text-selection anchor or endpoint.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum SelPoint {
-    /// Point inside a file preview.
-    Preview {
-        /// Zero-based line index in the preview content.
-        line_idx: usize,
-        /// Byte offset within that line.
-        byte_offset: usize,
-    },
-    /// Point inside a terminal pane viewport.
-    Terminal {
-        /// Zero-based row within the visible terminal viewport.
-        viewport_row: usize,
-        /// Zero-based column within that row.
-        col: usize,
-    },
-    /// Point inside a Discussion window.
-    Discussion {
-        /// Text the point lies in.
-        part: DocPart,
-        /// Byte offset within that text.
-        offset: usize,
-    },
-}
-
-/// Active text selection within a single window.
-#[derive(Clone, Debug)]
-pub struct TextSelection {
-    /// Window that owns this selection.
-    pub window: Window,
-    /// Selection start point.
-    pub start: SelPoint,
-    /// Selection end point.
-    pub end: SelPoint,
-    /// Point where the current click/drag sequence began.
-    pub click_anchor: Option<SelPoint>,
-    /// Word boundary pair detected from a single click.
-    pub click_word: Option<(SelPoint, SelPoint)>,
-    /// Whether the selection is still being dragged.
-    pub active: bool,
-}
-
 /// Relative height of a pane within the available vertical space.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -597,22 +545,6 @@ pub(crate) fn ranges_scroll_target(ranges: &[(usize, usize)], page_size: usize) 
     }
 }
 
-/// The 1-indexed line ranges of `ranges` as the `highlight` command writes them:
-/// `12`, `3-7`, `1-3, 8`.
-pub(crate) fn format_line_ranges(ranges: &[(usize, usize)]) -> String {
-    ranges
-        .iter()
-        .map(|&(lo, hi)| {
-            if lo == hi {
-                lo.to_string()
-            } else {
-                format!("{lo}-{hi}")
-            }
-        })
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,14 +625,6 @@ mod tests {
         assert_eq!(super::ranges_scroll_target(&[(30, 32), (40, 41)], 20), 25);
         // Several far apart: the first, since the page cannot show them all.
         assert_eq!(super::ranges_scroll_target(&[(30, 32), (300, 301)], 20), 21);
-    }
-
-    #[test]
-    fn line_ranges_are_formatted_as_the_command_writes_them() {
-        assert_eq!(super::format_line_ranges(&[]), "");
-        assert_eq!(super::format_line_ranges(&[(12, 12)]), "12");
-        assert_eq!(super::format_line_ranges(&[(3, 7)]), "3-7");
-        assert_eq!(super::format_line_ranges(&[(1, 3), (8, 8)]), "1-3, 8");
     }
 
     #[test]

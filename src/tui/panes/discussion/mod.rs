@@ -11,7 +11,7 @@ pub(crate) mod status;
 struct Drag {
     window_id: usize,
     kind: crate::tui::panes::discussion::selection::DragKind,
-    part: crate::tui::pane_manager::DocPart,
+    part: crate::tui::selection::DocPart,
     /// Byte offset under the click.
     anchor: usize,
     /// The revision of the window's texts, and the first work-log entry on screen, when
@@ -29,7 +29,7 @@ impl Drag {
     /// a work log shown from another entry, or a text that left the screen, all leave its
     /// offsets naming text the user never saw. Text appended while a turn runs does not.
     fn still_stands(&self, state: &crate::tui::state::AppState) -> bool {
-        use crate::tui::pane_manager::DocPart;
+        use crate::tui::selection::DocPart;
         let part = self.part;
         let Some(discussion) = state.discussions.get(&self.window_id) else {
             return false;
@@ -106,7 +106,7 @@ impl DiscussionComponent {
         discussion: &crate::tui::state::DiscussionState,
         window_id: usize,
         pos: VPPos,
-    ) -> Option<(crate::tui::pane_manager::DocPart, usize)> {
+    ) -> Option<(crate::tui::selection::DocPart, usize)> {
         use crate::tui::pane_manager::Window;
         let cache = self
             .cache
@@ -671,10 +671,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
         _surface_bounds: VPBoundingBox,
         has_focus: &mut HasFocus,
     ) -> CommonResult {
-        use crate::tui::pane_manager::DocPart;
-        use crate::tui::pane_manager::SelPoint;
-        use crate::tui::pane_manager::TextSelection;
         use crate::tui::pane_manager::Window;
+        use crate::tui::selection::DocPart;
+        use crate::tui::selection::SelPoint;
+        use crate::tui::selection::TextSelection;
         use crate::tui::theme::Color;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
@@ -998,7 +998,7 @@ mod tests {
     }
 
     fn doc_line(
-        part: Option<crate::tui::pane_manager::DocPart>,
+        part: Option<crate::tui::selection::DocPart>,
         spans: Vec<crate::tui::widgets::markdown::Span>,
     ) -> DocLine {
         DocLine {
@@ -1027,8 +1027,8 @@ mod tests {
 
     #[test]
     fn locate_sends_a_row_without_text_to_the_text_around_it() {
-        use crate::tui::pane_manager::DocPart;
         use crate::tui::panes::discussion::document::Doc;
+        use crate::tui::selection::DocPart;
         let doc = Doc::of(
             vec![
                 doc_line(Some(DocPart::Prompt), vec![span("hi", Some(0))]),
@@ -1388,11 +1388,11 @@ mod tests {
         log_start: usize,
         show_work_log: bool,
     ) -> (crate::tui::state::AppState, DiscussionComponent) {
-        use crate::tui::pane_manager::DocPart;
-        use crate::tui::pane_manager::SelPoint;
-        use crate::tui::pane_manager::TextSelection;
         use crate::tui::pane_manager::Window;
         use crate::tui::panes::discussion::selection::DragKind;
+        use crate::tui::selection::DocPart;
+        use crate::tui::selection::SelPoint;
+        use crate::tui::selection::TextSelection;
         use crate::tui::state::DiscussionState;
         let mut state = empty_state();
         let entries: Vec<String> = work_log.iter().map(|entry| (*entry).to_string()).collect();
@@ -1462,7 +1462,7 @@ mod tests {
 
     #[test]
     fn a_drag_survives_the_text_growing_while_a_turn_runs() {
-        use crate::tui::pane_manager::DocPart;
+        use crate::tui::selection::DocPart;
         let (mut state, mut component) = state_with_a_work_log_drag(&["old", "shown"], 1, false);
         // A running turn appends to the work log without moving the content revision.
         let discussion = state.discussions.get_mut(&0).unwrap();
@@ -1666,7 +1666,7 @@ mod tests {
 
     #[test]
     fn the_work_log_text_follows_the_entries_shown() {
-        use crate::tui::pane_manager::DocPart;
+        use crate::tui::selection::DocPart;
         use crate::tui::state::DiscussionState;
         let mut discussion = DiscussionState {
             work_log: vec!["old".into(), "new".into()],

@@ -110,7 +110,7 @@ impl FilePreviewComponent {
             format!(
                 "{}  [{}]",
                 base,
-                crate::tui::pane_manager::format_line_ranges(ranges)
+                crate::tui::command_line::format_line_ranges(ranges)
             )
         } else {
             base
@@ -144,7 +144,7 @@ impl FilePreviewComponent {
         let title = format!(
             "{}  [{}]",
             base,
-            crate::tui::pane_manager::format_line_ranges(ranges)
+            crate::tui::command_line::format_line_ranges(ranges)
         );
         let padded = format!(" {title} ");
         if padded.len() > pane_width {
@@ -375,9 +375,9 @@ impl FilePreviewComponent {
         mouse: MouseInput,
         key: crate::loader::FileKey,
     ) -> bool {
-        use crate::tui::pane_manager::SelPoint;
-        use crate::tui::pane_manager::TextSelection;
         use crate::tui::pane_manager::Window;
+        use crate::tui::selection::SelPoint;
+        use crate::tui::selection::TextSelection;
         let col = mouse.pos.col_index.as_usize();
         let row = mouse.pos.row_index.as_usize();
         let origin_row = self.content_origin_row;
@@ -890,8 +890,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
-        use crate::tui::pane_manager::SelPoint;
         use crate::tui::pane_manager::Window;
+        use crate::tui::selection::SelPoint;
         use crate::tui::theme::Color;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;

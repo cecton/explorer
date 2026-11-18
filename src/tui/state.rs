@@ -251,8 +251,8 @@ fn append_str(text: &mut String, live: &str) -> bool {
 }
 
 impl NodeHighlights {
-    pub fn part(&self, part: crate::tui::pane_manager::DocPart) -> &[(usize, usize)] {
-        use crate::tui::pane_manager::DocPart;
+    pub fn part(&self, part: crate::tui::selection::DocPart) -> &[(usize, usize)] {
+        use crate::tui::selection::DocPart;
         match part {
             DocPart::Prompt => &self.prompt,
             DocPart::Reply => &self.reply,
@@ -263,9 +263,9 @@ impl NodeHighlights {
     /// The ranges of `part`; the work log and thinking have none, highlights cover the prompt and reply.
     pub fn part_mut(
         &mut self,
-        part: crate::tui::pane_manager::DocPart,
+        part: crate::tui::selection::DocPart,
     ) -> Option<&mut Vec<(usize, usize)>> {
-        use crate::tui::pane_manager::DocPart;
+        use crate::tui::selection::DocPart;
         match part {
             DocPart::Prompt => Some(&mut self.prompt),
             DocPart::Reply => Some(&mut self.reply),
@@ -474,7 +474,7 @@ pub struct AppState {
     /// Window whose input holds the mouse selection in progress.
     pub input_drag: Option<crate::tui::pane_manager::Window>,
     pub terminal_grabbed: bool,
-    pub text_selection: Option<crate::tui::pane_manager::TextSelection>,
+    pub text_selection: Option<crate::tui::selection::TextSelection>,
     pub session_dirty: bool,
     /// Whether the repository has uncommitted changes (staged or unstaged),
     /// refreshed periodically by a background `git::is_dirty` check.

@@ -820,10 +820,7 @@ fn command_hint(typed: &str, state: &crate::tui::state::AppState) -> Option<Stri
                 _ => None,
             };
             match current {
-                Some(ranges) => format!(
-                    "current: {}",
-                    crate::tui::pane_manager::format_line_ranges(ranges)
-                ),
+                Some(ranges) => format!("current: {}", format_line_ranges(ranges)),
                 None => "[lines] 12, 3-7, 1-3,8".to_string(),
             }
         }
@@ -1118,9 +1115,33 @@ fn expand_placeholders(
     Ok(result)
 }
 
+/// The 1-indexed line ranges of `ranges` as the `highlight` command writes them:
+/// `12`, `3-7`, `1-3, 8`.
+pub(crate) fn format_line_ranges(ranges: &[(usize, usize)]) -> String {
+    ranges
+        .iter()
+        .map(|&(lo, hi)| {
+            if lo == hi {
+                lo.to_string()
+            } else {
+                format!("{lo}-{hi}")
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn line_ranges_are_formatted_as_the_command_writes_them() {
+        assert_eq!(super::format_line_ranges(&[]), "");
+        assert_eq!(super::format_line_ranges(&[(12, 12)]), "12");
+        assert_eq!(super::format_line_ranges(&[(3, 7)]), "3-7");
+        assert_eq!(super::format_line_ranges(&[(1, 3), (8, 8)]), "1-3, 8");
+    }
 
     #[test]
     fn double_percent_is_a_literal_percent() {

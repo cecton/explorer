@@ -879,7 +879,7 @@ mod tests {
         }
 
         fn selection(&self) -> Option<(usize, usize, usize, usize)> {
-            use crate::tui::pane_manager::SelPoint;
+            use crate::tui::selection::SelPoint;
             let sel = self.global_data.state.text_selection.as_ref()?;
             match (sel.start, sel.end) {
                 (

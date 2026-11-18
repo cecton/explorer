@@ -42,9 +42,9 @@ impl TerminalPaneComponent {
         mouse: MouseInput,
         term_id: usize,
     ) -> bool {
-        use crate::tui::pane_manager::SelPoint;
-        use crate::tui::pane_manager::TextSelection;
         use crate::tui::pane_manager::Window;
+        use crate::tui::selection::SelPoint;
+        use crate::tui::selection::TextSelection;
         let col = mouse.pos.col_index.as_usize();
         let row = mouse.pos.row_index.as_usize();
         let origin_row = self.content_origin_row;
@@ -533,8 +533,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Termin
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
-        use crate::tui::pane_manager::SelPoint;
         use crate::tui::pane_manager::Window;
+        use crate::tui::selection::SelPoint;
         throws!({
             let Some(id) = self.terminal_id(&global_data.state) else {
                 return Ok(());
@@ -875,10 +875,10 @@ pub fn terminal_line_at_viewport_row(
 
 pub fn extract_terminal_text(
     pane: &crate::tui::state::TerminalPane,
-    start: crate::tui::pane_manager::SelPoint,
-    end: crate::tui::pane_manager::SelPoint,
+    start: crate::tui::selection::SelPoint,
+    end: crate::tui::selection::SelPoint,
 ) -> Option<String> {
-    use crate::tui::pane_manager::SelPoint;
+    use crate::tui::selection::SelPoint;
     let (
         SelPoint::Terminal {
             viewport_row: sr,
@@ -1120,7 +1120,7 @@ mod tests {
     #[test]
     fn extracts_the_selected_text_of_the_live_screen() {
         use super::extract_terminal_text;
-        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::selection::SelPoint;
         use crate::tui::state::TerminalPane;
         use r3bl_tui::{OfsBufVT100, vp_height, vp_width};
         use std::sync::Arc;

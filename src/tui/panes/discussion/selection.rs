@@ -44,7 +44,7 @@ pub(crate) fn locate(
     doc: &crate::tui::panes::discussion::document::Doc,
     row: usize,
     col: usize,
-) -> Option<(crate::tui::pane_manager::DocPart, usize)> {
+) -> Option<(crate::tui::selection::DocPart, usize)> {
     let last = doc.len().checked_sub(1)?;
     let (row, col) = if row > last {
         (last, usize::MAX)
@@ -94,9 +94,9 @@ pub(crate) fn remove_range(ranges: &[(usize, usize)], lo: usize, hi: usize) -> V
 pub(crate) fn part_is_on_screen(
     state: &crate::tui::state::AppState,
     discussion: &crate::tui::state::DiscussionState,
-    part: crate::tui::pane_manager::DocPart,
+    part: crate::tui::selection::DocPart,
 ) -> bool {
-    use crate::tui::pane_manager::DocPart;
+    use crate::tui::selection::DocPart;
     match part {
         DocPart::WorkLog => {
             !discussion.shown_work_log().is_empty()
@@ -118,10 +118,10 @@ impl crate::tui::panes::discussion::DiscussionComponent {
         state: &mut crate::tui::state::AppState,
         mouse: &MouseInput,
     ) {
-        use crate::tui::pane_manager::DocPart;
-        use crate::tui::pane_manager::SelPoint;
-        use crate::tui::pane_manager::TextSelection;
         use crate::tui::pane_manager::Window;
+        use crate::tui::selection::DocPart;
+        use crate::tui::selection::SelPoint;
+        use crate::tui::selection::TextSelection;
         let Some(id) = self.window_id(state) else {
             return;
         };
@@ -212,7 +212,7 @@ impl crate::tui::panes::discussion::DiscussionComponent {
     /// Extends the drag to the word under the mouse. A drag never leaves the text it
     /// began in: past it, it reaches that text's start or end.
     pub(crate) fn update_drag(&mut self, state: &mut crate::tui::state::AppState, pos: VPPos) {
-        use crate::tui::pane_manager::SelPoint;
+        use crate::tui::selection::SelPoint;
         use crate::tui::widgets::contrast::DragModifier;
         if !self.drag_stands(state) {
             return;
@@ -286,8 +286,8 @@ impl crate::tui::panes::discussion::DiscussionComponent {
     /// The text a plain drag covers, when it still stands: the source text between its
     /// offsets, in the text the drag began in.
     pub(crate) fn selected_text(&self, state: &crate::tui::state::AppState) -> Option<String> {
-        use crate::tui::pane_manager::SelPoint;
-        use crate::tui::pane_manager::TextSelection;
+        use crate::tui::selection::SelPoint;
+        use crate::tui::selection::TextSelection;
         let drag = self.drag.as_ref()?;
         if !matches!(drag.kind, DragKind::Select) || !drag.still_stands(state) {
             return None;

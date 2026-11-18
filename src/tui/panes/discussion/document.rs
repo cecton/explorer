@@ -5,7 +5,7 @@ const SECTIONS: usize = 4;
 
 pub(crate) struct DocLine {
     /// Text the line shows a piece of; `None` for the blank line between two of them.
-    pub(crate) part: Option<crate::tui::pane_manager::DocPart>,
+    pub(crate) part: Option<crate::tui::selection::DocPart>,
     /// Each span's `src` is a byte offset in the text of `part`.
     pub(crate) spans: Vec<crate::tui::widgets::markdown::Span>,
     /// Set on code block lines, painted instead of the surrounding background.
@@ -131,9 +131,9 @@ impl DocCache {
 /// are joined by a newline.
 pub(crate) fn part_text(
     discussion: &crate::tui::state::DiscussionState,
-    part: crate::tui::pane_manager::DocPart,
+    part: crate::tui::selection::DocPart,
 ) -> Cow<'_, str> {
-    use crate::tui::pane_manager::DocPart;
+    use crate::tui::selection::DocPart;
     match part {
         DocPart::Prompt => Cow::Borrowed(&discussion.prompt),
         DocPart::WorkLog => Cow::Owned(discussion.shown_work_log().join("\n")),
@@ -157,7 +157,7 @@ fn push_wrapped(
     text: &str,
     base: usize,
     width: usize,
-    part: crate::tui::pane_manager::DocPart,
+    part: crate::tui::selection::DocPart,
     fg: crate::tui::theme::Color,
 ) {
     use crate::tui::widgets::markdown::Span;
@@ -193,7 +193,7 @@ pub(crate) fn doc_lines<'a>(
     theme: &crate::tui::theme::HelixTheme,
     width: usize,
 ) -> &'a Doc {
-    use crate::tui::pane_manager::DocPart;
+    use crate::tui::selection::DocPart;
     let mut cache = component.cache.take().unwrap_or_default();
     let text_fg = theme.ui.text;
     let dim_fg = theme.ui.dim;
@@ -417,7 +417,7 @@ mod tests {
         discussion.show_content("do it".to_string(), "other".to_string(), Vec::new());
         layout(&mut component, &discussion, 40);
         assert_eq!(component.cache.as_ref().unwrap().rebuilds, 8);
-        use crate::tui::pane_manager::DocPart;
+        use crate::tui::selection::DocPart;
         let doc = &component.cache.as_ref().unwrap().doc;
         let reply = (0..doc.len())
             .filter_map(|row| doc.line(row))
@@ -434,7 +434,7 @@ mod tests {
         let mut discussion = discussion("do it", "");
         discussion.work_log = vec!["one".to_string(), "two".to_string()];
         let (_, _) = layout(&mut component, &discussion, 40);
-        use crate::tui::pane_manager::DocPart;
+        use crate::tui::selection::DocPart;
         let doc = &component.cache.as_ref().unwrap().doc;
         let offsets: Vec<usize> = (0..doc.len())
             .filter_map(|row| doc.line(row))

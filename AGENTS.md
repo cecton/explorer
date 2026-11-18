@@ -99,6 +99,7 @@ Source is organized in layers. A module imports only from its own layer or a low
 - `src/tui/state.rs` — `AppState`, the one state every component reads; inputs and selections live here beside what they edit, never in a component (a component belongs to a pane slot and a window changes slot whenever the stack moves)
 - `src/tui/focus.rs` — `focus_window`, `close_window` and terminal focus notification: the shared helpers panes call instead of importing `app/`
 - `src/tui/pane_manager.rs` — `PaneManager` and `Window`: focus, resize, stacking and the frame's one layout (`relayout`, run once per event and once per frame; nothing else recomputes it)
+- `src/tui/selection.rs` — `TextSelection`, the one text selection of `AppState`, and the `SelPoint`s and `DocPart`s that address it in a file preview, a terminal or a Discussion
 - `src/tui/pane_component.rs` — the component of a pane slot: a stack of windows with tab headers, routing mouse and commands to the active window
 - `src/tui/panes_renderer.rs` — paints the visible panes of the frame
 - `src/tui/keymap.rs` — configurable shortcuts: `Action`, `Keymap`, key-spec parsing, status-bar hints
