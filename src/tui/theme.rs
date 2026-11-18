@@ -6,8 +6,8 @@ include!("../../themes/themes.rs");
 
 /// A color as the terminal is told to paint it. Helix themes name colors three ways, and
 /// each reaches the screen differently: a hex value is painted as is, one of the 16 color
-/// names (`red`, `light-gray`, …) is the terminal's own palette entry, and a role the
-/// theme leaves unset keeps the terminal's default color.
+/// names (`red`, `light-gray`, …) is the terminal's own palette entry, and a background or
+/// a text the theme leaves unset keeps the terminal's default color.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Color {
     Rgb(RgbValue),
@@ -113,16 +113,26 @@ pub struct Ui {
     /// `ui.menu.scroll` bg, then `ui.virtual.ruler` bg, else `statusline_bg`.
     pub scroll_track: Color,
     /// `ui.menu.scroll` fg, then the bg of `ui.selection`, `ui.cursorline.primary` and
-    /// `ui.cursorline`, else `selection`; `cursor` when that is the track color.
+    /// `ui.cursorline`, else `selection`; `cursor` when that is the track color, then a
+    /// constant when that is still the track color.
     pub scroll_thumb: Color,
 }
 
-#[derive(Clone, PartialEq, Debug, Default)]
+#[derive(Clone, PartialEq, Debug)]
 pub struct HelixTheme {
     name: String,
     styles: HashMap<String, Style>,
     token_colors: [Option<Color>; crate::highlight::TokenKind::COUNT],
     pub ui: Ui,
+}
+
+impl Default for HelixTheme {
+    /// A theme that styles nothing, with its `ui` resolved like any other, as the default
+    /// `AppState` (derived `Default`) needs: a derived default would leave every role at
+    /// the terminal's default. The inherent `HelixTheme::default()` is catppuccin_mocha.
+    fn default() -> Self {
+        Self::build("", "")
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
@@ -600,5 +610,6 @@ mod tests {
         assert_eq!(theme.ui.scroll_track, DEFAULT_STATUSLINE_BG);
         assert_ne!(theme.ui.scroll_thumb, theme.ui.scroll_track);
         assert_eq!(theme.ui.ruler, None);
+        assert_eq!(<HelixTheme as Default>::default().ui, theme.ui);
     }
 }

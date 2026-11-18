@@ -723,10 +723,10 @@ mod cursor_render_tests {
     }
 
     // The cursor cell must be preceded by an explicit `ApplyColors` that sets the pen to
-    // the text's colors, reversed (a block cursor). The compositor reads a painted cell's colors from
-    // the current pen, not from the style handed to the paint op, so without this the
-    // cursor inherits whatever the previously rendered pane left behind and can vanish in
-    // non-top / non-left panes.
+    // the text's colors, reversed (a block cursor). The compositor reads a painted cell's
+    // colors from the current pen, not from the style handed to the paint op, so without
+    // this the cursor inherits whatever the previously rendered pane left behind and can
+    // vanish in non-top / non-left panes.
     #[test]
     fn end_of_line_cursor_sets_reversed_pen() {
         let (color_bg, color_text) = colors();

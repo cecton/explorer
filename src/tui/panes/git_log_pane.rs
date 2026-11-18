@@ -741,6 +741,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                                 } else {
                                     normal_fg.on(bg)
                                 };
+                                render_ops += RenderOpCommon::ApplyColors(Some(sep_style));
                                 render_ops += RenderOpIR::PaintTextWithAttributes(
                                     " ".into(),
                                     Some(sep_style),
@@ -755,6 +756,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                             } else {
                                 fg.on(bg)
                             };
+                            render_ops += RenderOpCommon::ApplyColors(Some(style));
                             render_ops += RenderOpIR::PaintTextWithAttributes(
                                 git_ref.name.clone().into(),
                                 Some(style),
@@ -771,6 +773,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                                 } else {
                                     normal_fg.on(bg)
                                 };
+                                render_ops += RenderOpCommon::ApplyColors(Some(sep_style));
                                 render_ops += RenderOpIR::PaintTextWithAttributes(
                                     " ".into(),
                                     Some(sep_style),
@@ -781,6 +784,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                             } else {
                                 fg.on(bg)
                             };
+                            render_ops += RenderOpCommon::ApplyColors(Some(style));
                             render_ops +=
                                 RenderOpIR::PaintTextWithAttributes("...".into(), Some(style));
                         }
@@ -943,7 +947,7 @@ fn commit_type_color(theme: &crate::tui::theme::HelixTheme, ty: &str) -> crate::
         "build" => "type",
         "ci" => "constant",
         "chore" | "revert" => "operator",
-        _ => "ui.text",
+        _ => return theme.ui.text,
     };
     theme.color_for_scope(scope)
 }

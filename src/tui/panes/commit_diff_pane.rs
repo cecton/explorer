@@ -222,6 +222,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
                         if text.chars().count() > pane_width.saturating_sub(1) {
                             text = text.chars().take(pane_width.saturating_sub(1)).collect();
                         }
+                        render_ops += RenderOpCommon::ApplyColors(Some(style));
                         render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
                     }
                 }

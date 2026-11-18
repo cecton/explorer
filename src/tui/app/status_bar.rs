@@ -168,9 +168,12 @@ pub(super) fn render_status_bar(
     if combined_width > 0 && total_width > combined_width + 2 {
         let start_col = total_width - combined_width - 1;
         render_ops += RenderOpCommon::MoveCursorPositionAbs(vp_col(start_col as u16) + row_idx);
+        render_ops += RenderOpCommon::ApplyColors(Some(normal_style));
         render_ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(normal_style));
         if let Some((bar, label)) = dirty {
+            render_ops += RenderOpCommon::ApplyColors(Some(normal_style));
             render_ops += RenderOpIR::PaintTextWithAttributes(bar.into(), Some(normal_style));
+            render_ops += RenderOpCommon::ApplyColors(Some(dirty_style));
             render_ops += RenderOpIR::PaintTextWithAttributes(label.into(), Some(dirty_style));
         }
         if after_fits && let Some((text, counting_down)) = after_agents {
@@ -179,6 +182,7 @@ pub(super) fn render_status_bar(
             } else {
                 normal_style
             };
+            render_ops += RenderOpCommon::ApplyColors(Some(style));
             render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
         }
         if usage_fits {
@@ -188,9 +192,11 @@ pub(super) fn render_status_bar(
                     Some(USAGE_WARNING_PERCENT..) => warning_style,
                     _ => normal_style,
                 };
+                render_ops += RenderOpCommon::ApplyColors(Some(style));
                 render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
             }
         }
+        render_ops += RenderOpCommon::ApplyColors(Some(normal_style));
         render_ops += RenderOpIR::PaintTextWithAttributes(clock.into(), Some(normal_style));
     }
 

@@ -621,8 +621,12 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Termin
                     origin,
                     vp_col(0) + vp_row(row_idx as u16),
                 );
+                // The pen still holds the last run's color: set the terminal's own
+                // default first, so the blank rows do not take that color.
+                let blank = TuiStyle::default();
+                render_ops += RenderOpCommon::ApplyColors(Some(blank));
                 render_ops +=
-                    RenderOpIR::PaintTextWithAttributes(" ".repeat(pane_width).into(), None);
+                    RenderOpIR::PaintTextWithAttributes(" ".repeat(pane_width).into(), Some(blank));
             }
             if let Some(rect) = selection_rect {
                 overlay_selection(&mut render_ops, &lines, origin, rect, selection_bg);

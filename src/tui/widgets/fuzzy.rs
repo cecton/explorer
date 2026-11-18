@@ -171,6 +171,7 @@ pub(crate) fn paint_runs(
         let style = style_at(index);
         if current != Some(style) {
             if let Some(done) = current {
+                *ops += r3bl_tui::RenderOpCommon::ApplyColors(Some(done));
                 *ops += r3bl_tui::RenderOpIR::PaintTextWithAttributes(
                     text[start..byte].into(),
                     Some(done),
@@ -181,6 +182,7 @@ pub(crate) fn paint_runs(
         }
     }
     if let Some(done) = current {
+        *ops += r3bl_tui::RenderOpCommon::ApplyColors(Some(done));
         *ops += r3bl_tui::RenderOpIR::PaintTextWithAttributes(text[start..].into(), Some(done));
     }
 }
@@ -347,6 +349,28 @@ mod tests {
             })
             .collect();
         assert_eq!(painted, ["hello", " world"]);
+    }
+
+    /// The compositor takes a color the style leaves `None` (the terminal's default) from
+    /// the pen, so each run sets the pen to its own style before it is painted.
+    #[test]
+    fn each_run_sets_the_pen_to_its_style() {
+        #[allow(clippy::wildcard_imports)] // the style macros: see AGENTS.md
+        use r3bl_tui::*;
+        let mut ops = RenderOpIRVec::new();
+        let bold = new_style!(bold);
+        let plain = new_style!();
+        paint_runs(&mut ops, "hello world", |index| {
+            if index < 5 { bold } else { plain }
+        });
+        let mut pen = None;
+        for op in ops.iter() {
+            match op {
+                RenderOpIR::Common(RenderOpCommon::ApplyColors(style)) => pen = *style,
+                RenderOpIR::PaintTextWithAttributes(_, style) => assert_eq!(pen, *style),
+                _ => {}
+            }
+        }
     }
 
     #[test]
