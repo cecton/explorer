@@ -17,8 +17,8 @@ impl ThemePickerComponent {
     }
 }
 
-impl crate::tui::widgets::title_row::TitleRow for ThemePickerComponent {
-    fn render_title_row(
+impl ThemePickerComponent {
+    pub(crate) fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
@@ -145,18 +145,18 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ThemeP
             }
 
             let result_ops = self.picker.render_results(
-                &global_data.state,
+                &global_data.state.theme,
                 &global_data.state.theme_picker,
                 origin,
                 total_rows,
                 pane_width,
-                |name, _state| (name.clone(), None),
+                |name| (name.clone(), None),
             );
             let result_count = global_data.state.theme_picker.results.len();
 
-            self.picker.publish_geometry(
-                &mut global_data.state.pane_manager,
+            global_data.state.pane_manager.set_window_view(
                 &Window::ThemePicker,
+                self.picker.scroll_offset,
                 result_count,
                 total_rows,
             );

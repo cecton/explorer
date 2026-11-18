@@ -52,8 +52,8 @@ impl CommitDiffPaneComponent {
     }
 }
 
-impl crate::tui::widgets::title_row::TitleRow for CommitDiffPaneComponent {
-    fn render_title_row(
+impl CommitDiffPaneComponent {
+    pub(crate) fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,

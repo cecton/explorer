@@ -119,8 +119,8 @@ impl ReportComponent {
     }
 }
 
-impl crate::tui::widgets::title_row::TitleRow for ReportComponent {
-    fn render_title_row(
+impl ReportComponent {
+    pub(crate) fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,

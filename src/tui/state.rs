@@ -6,47 +6,6 @@ use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 use std::time::Duration;
 
-#[derive(Clone, Debug)]
-pub struct FuzzyPickerState<T> {
-    pub query: crate::tui::widgets::input_line::InputLine,
-    /// The candidates the query kept, best match first. Only the keys: the chars a row
-    /// highlights are matched for the rows a frame paints, not for all of them.
-    pub results: Vec<T>,
-    pub selected: Option<T>,
-}
-
-// Manual `Default` avoids the `T: Default` bound the derive would add; the
-// picker's fields (`InputLine`, `Vec`, `Option`) are all `Default` for any `T`.
-impl<T> Default for FuzzyPickerState<T> {
-    fn default() -> Self {
-        use crate::tui::widgets::input_line::InputLine;
-        Self {
-            query: InputLine::new(),
-            results: Vec::new(),
-            selected: None,
-        }
-    }
-}
-
-impl<T: Clone + PartialEq> FuzzyPickerState<T> {
-    pub fn reset(&mut self) {
-        self.results.clear();
-        self.selected = None;
-        self.query.clear();
-    }
-
-    pub fn resolve_selected_index(&self) -> usize {
-        let key = match &self.selected {
-            None => return 0,
-            Some(k) => k,
-        };
-        self.results
-            .iter()
-            .position(|result_key| result_key == key)
-            .unwrap_or(0)
-    }
-}
-
 /// What a git log window shows the history of. A commit source points the walk at
 /// that commit, so the newest entry is the commit itself.
 #[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -71,7 +30,7 @@ pub struct GitLogWindowState {
     /// Where the history walk starts.
     pub source: LogSource,
     pub branch_picking: bool,
-    pub branch_picker: FuzzyPickerState<usize>,
+    pub branch_picker: crate::tui::widgets::fuzzy_picker::FuzzyPickerState<usize>,
 }
 
 /// View state of the Conversation Tree window.
@@ -449,8 +408,9 @@ pub struct AppState {
     /// Per-file highlight ranges (1-indexed, inclusive).
     pub highlight_ranges: HashMap<crate::loader::FileKey, Vec<(usize, usize)>>,
     pub leader_active: bool,
-    pub window_picker: FuzzyPickerState<crate::tui::pane_manager::Window>,
-    pub theme_picker: FuzzyPickerState<String>,
+    pub window_picker:
+        crate::tui::widgets::fuzzy_picker::FuzzyPickerState<crate::tui::pane_manager::Window>,
+    pub theme_picker: crate::tui::widgets::fuzzy_picker::FuzzyPickerState<String>,
     pub theme: crate::tui::theme::HelixTheme,
     pub saved_theme: crate::tui::theme::HelixTheme,
     /// Terminal panes keyed by their unique ID.
@@ -490,7 +450,7 @@ pub struct AppState {
     /// Model last picked during this run, offered to new conversations.
     pub last_picked_model: Option<crate::model_spec::ModelSpec>,
     /// Model Picker entries are indexes into `models.specs`.
-    pub model_picker: FuzzyPickerState<usize>,
+    pub model_picker: crate::tui::widgets::fuzzy_picker::FuzzyPickerState<usize>,
     /// What the open Model Picker is choosing a model for.
     pub model_picker_purpose: Option<ModelPickerPurpose>,
     /// Turns in progress, by node.
@@ -642,6 +602,7 @@ impl AppState {
         use crate::tui::pane_manager::PaneManager;
         use crate::tui::pane_manager::Window;
         use crate::tui::theme::HelixTheme;
+        use crate::tui::widgets::fuzzy_picker::FuzzyPickerState;
         let saved_theme = theme.clone();
         let mut pane_manager = PaneManager::new();
         pane_manager.push_window(Window::WindowPicker);

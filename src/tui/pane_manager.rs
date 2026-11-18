@@ -489,6 +489,21 @@ impl PaneManager {
         self.window_states.entry(*window).or_default().scroll_max = scroll_max;
     }
 
+    /// Sets the scroll offset, total content height and rendered page size of `window`
+    /// at once: what the last paint showed, for the scrollbar and the paging keys.
+    pub fn set_window_view(
+        &mut self,
+        window: &Window,
+        scroll: usize,
+        scroll_max: usize,
+        page_size: usize,
+    ) {
+        let view = self.window_states.entry(*window).or_default();
+        view.scroll = scroll;
+        view.scroll_max = scroll_max;
+        view.page_size = page_size;
+    }
+
     /// Scrolls `window` for a key or wheel event and answers whether the event was one:
     /// Up/Down by a row, PageUp/PageDown by a page, Home/End and Ctrl+A/Ctrl+E to the
     /// ends, the wheel by `WHEEL_STEP`.

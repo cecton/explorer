@@ -1,6 +1,7 @@
 //! The repository's import rules, checked: a module-level `use` is refused unless it is
 //! the one allowed glob (`use r3bl_tui::*;`) or a `std`/`core`/`alloc` import,
 //! and `super::` and `self::` paths are refused outside a `#[cfg(test)]` module.
+//! A widget (`src/tui/widgets/`) names only other widgets, the theme and `util`.
 //!
 //! The rules read the source as rustfmt writes it: a module-level item starts at column
 //! zero, and the `}` that closes a module is the only one there.
@@ -8,6 +9,9 @@
 use std::process::Command;
 
 const ALLOWED: [&str; 4] = ["use std::", "use core::", "use alloc::", "use r3bl_tui::*;"];
+
+/// What a widget may name of this crate: widgets take values, never the app's state.
+const WIDGET_DEPENDENCIES: [&str; 3] = ["crate::tui::widgets", "crate::tui::theme", "crate::util"];
 
 pub(crate) fn run() -> xtask_watch::anyhow::Result<()> {
     let files = Command::new("git")
@@ -72,6 +76,9 @@ pub(crate) fn run() -> xtask_watch::anyhow::Result<()> {
             }
         }
         failures.extend(long_variant_paths(file, &text, &enums));
+        if file.starts_with("src/tui/widgets/") {
+            failures.extend(widget_dependencies(file, &text));
+        }
     }
     if failures.is_empty() {
         println!("imports: clean");
@@ -209,6 +216,27 @@ fn long_variant_paths(
                         first_line + offset
                     ));
                 }
+            }
+        }
+    }
+    failures
+}
+
+/// Every `crate::` path of a widget file outside `WIDGET_DEPENDENCIES`.
+fn widget_dependencies(file: &str, text: &str) -> Vec<String> {
+    let mut failures = Vec::new();
+    for (index, line) in text.lines().enumerate() {
+        for (path, _) in crate_paths(&mask_line(line)) {
+            let allowed = WIDGET_DEPENDENCIES.iter().any(|dependency| {
+                path.strip_prefix(dependency)
+                    .is_some_and(|rest| rest.is_empty() || rest.starts_with("::"))
+            });
+            if !allowed {
+                failures.push(format!(
+                    "{file}:{}: `{path}` — a widget takes values and names only \
+                     `crate::tui::widgets`, `crate::tui::theme` and `crate::util`",
+                    index + 1
+                ));
             }
         }
     }
@@ -383,6 +411,24 @@ mod joined_tests {
             "doc comment leaked"
         );
         assert!(masked.contains("pub struct ReportComponent"), "code kept");
+    }
+}
+
+#[cfg(test)]
+mod widget_tests {
+    #[test]
+    fn a_widget_may_name_widgets_the_theme_and_util() {
+        let text = "fn a(t: &crate::tui::theme::HelixTheme) -> crate::util::text::X {\n    crate::tui::widgets::fuzzy::matched(&[], 0)\n}\n";
+        assert!(super::widget_dependencies("w.rs", text).is_empty());
+    }
+
+    #[test]
+    fn a_widget_naming_the_state_is_reported() {
+        let text = "// crate::tui::state in a comment is fine\nfn a(s: &crate::tui::state::AppState) {}\nfn b(t: &crate::tui::themes::X) {}\n";
+        let failures = super::widget_dependencies("w.rs", text);
+        assert_eq!(failures.len(), 2, "{failures:?}");
+        assert!(failures[0].starts_with("w.rs:2:"), "{failures:?}");
+        assert!(failures[1].starts_with("w.rs:3:"), "{failures:?}");
     }
 }
 

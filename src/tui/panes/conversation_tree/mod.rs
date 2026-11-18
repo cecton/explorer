@@ -125,8 +125,8 @@ impl ConversationTreeComponent {
     }
 }
 
-impl crate::tui::widgets::title_row::TitleRow for ConversationTreeComponent {
-    fn render_title_row(
+impl ConversationTreeComponent {
+    pub(crate) fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,

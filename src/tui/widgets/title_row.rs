@@ -1,16 +1,6 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
 
-pub(crate) trait TitleRow {
-    fn render_title_row(
-        &self,
-        ops: &mut RenderOpIRVec,
-        pane_box: &FlexBox,
-        focused: bool,
-        state: &mut crate::tui::state::AppState,
-    ) -> usize;
-}
-
 /// The background and the text of a title bar: a focused one wears the selection.
 pub(crate) fn title_bar_colors(
     focused: bool,

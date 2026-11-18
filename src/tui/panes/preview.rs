@@ -1220,8 +1220,8 @@ fn subtract_ranges(snapshot: &[(usize, usize)], lo: usize, hi: usize) -> Vec<(us
     result
 }
 
-impl crate::tui::widgets::title_row::TitleRow for FilePreviewComponent {
-    fn render_title_row(
+impl FilePreviewComponent {
+    pub(crate) fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,

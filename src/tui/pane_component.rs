@@ -238,8 +238,8 @@ impl PaneComponent {
     }
 }
 
-impl crate::tui::widgets::title_row::TitleRow for PaneComponent {
-    fn render_title_row(
+impl PaneComponent {
+    pub(crate) fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
@@ -247,39 +247,32 @@ impl crate::tui::widgets::title_row::TitleRow for PaneComponent {
         state: &mut crate::tui::state::AppState,
     ) -> usize {
         use crate::tui::pane_manager::Window;
-        use crate::tui::widgets::title_row::TitleRow;
         let Some(window) = self.active_window(state) else {
             return 0;
         };
         match window {
-            Window::WindowPicker => {
-                TitleRow::render_title_row(&self.picker, ops, pane_box, focused, state)
-            }
-            Window::ThemePicker => {
-                TitleRow::render_title_row(&self.theme_picker, ops, pane_box, focused, state)
-            }
-            Window::FilePreview(_) => {
-                TitleRow::render_title_row(&self.preview, ops, pane_box, focused, state)
-            }
-            Window::Terminal(_) => {
-                TitleRow::render_title_row(&self.terminal, ops, pane_box, focused, state)
-            }
+            Window::WindowPicker => self.picker.render_title_row(ops, pane_box, focused, state),
+            Window::ThemePicker => self
+                .theme_picker
+                .render_title_row(ops, pane_box, focused, state),
+            Window::FilePreview(_) => self.preview.render_title_row(ops, pane_box, focused, state),
+            Window::Terminal(_) => self
+                .terminal
+                .render_title_row(ops, pane_box, focused, state),
             Window::GitLog(_) => self.git_log.render_title_row(ops, pane_box, focused, state),
-            Window::CommitDiff(_) => {
-                TitleRow::render_title_row(&self.commit_diff, ops, pane_box, focused, state)
-            }
-            Window::ConversationTree => {
-                TitleRow::render_title_row(&self.conversation_tree, ops, pane_box, focused, state)
-            }
+            Window::CommitDiff(_) => self
+                .commit_diff
+                .render_title_row(ops, pane_box, focused, state),
+            Window::ConversationTree => self
+                .conversation_tree
+                .render_title_row(ops, pane_box, focused, state),
             Window::Discussion(_) => self
                 .discussion
                 .render_title_row(ops, pane_box, focused, state),
-            Window::Report(_) => {
-                TitleRow::render_title_row(&self.report, ops, pane_box, focused, state)
-            }
-            Window::ModelPicker => {
-                TitleRow::render_title_row(&self.model_picker, ops, pane_box, focused, state)
-            }
+            Window::Report(_) => self.report.render_title_row(ops, pane_box, focused, state),
+            Window::ModelPicker => self
+                .model_picker
+                .render_title_row(ops, pane_box, focused, state),
         }
     }
 }
@@ -536,7 +529,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
         has_focus: &mut HasFocus,
     ) -> CommonResult {
         use crate::tui::pane_manager::Window;
-        use crate::tui::widgets::title_row::TitleRow;
         throws!({
             let mut title_ops = RenderOpIRVec::new();
             let focused = has_focus.get_id() == Some(self.id);

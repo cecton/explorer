@@ -1,6 +1,47 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
 
+#[derive(Clone, Debug)]
+pub struct FuzzyPickerState<T> {
+    pub query: crate::tui::widgets::input_line::InputLine,
+    /// The candidates the query kept, best match first. Only the keys: the chars a row
+    /// highlights are matched for the rows a frame paints, not for all of them.
+    pub results: Vec<T>,
+    pub selected: Option<T>,
+}
+
+// Manual `Default` avoids the `T: Default` bound the derive would add; the
+// picker's fields (`InputLine`, `Vec`, `Option`) are all `Default` for any `T`.
+impl<T> Default for FuzzyPickerState<T> {
+    fn default() -> Self {
+        use crate::tui::widgets::input_line::InputLine;
+        Self {
+            query: InputLine::new(),
+            results: Vec::new(),
+            selected: None,
+        }
+    }
+}
+
+impl<T: Clone + PartialEq> FuzzyPickerState<T> {
+    pub fn reset(&mut self) {
+        self.results.clear();
+        self.selected = None;
+        self.query.clear();
+    }
+
+    pub fn resolve_selected_index(&self) -> usize {
+        let key = match &self.selected {
+            None => return 0,
+            Some(k) => k,
+        };
+        self.results
+            .iter()
+            .position(|result_key| result_key == key)
+            .unwrap_or(0)
+    }
+}
+
 pub struct FuzzyPicker {
     pub scroll_offset: usize,
     /// The query the painted rows are highlighted with, kept across frames so its pattern
@@ -20,14 +61,14 @@ impl FuzzyPicker {
         &mut self,
         input_event: &InputEvent,
         page_size: usize,
-        picker_state: &mut crate::tui::state::FuzzyPickerState<K>,
+        picker_state: &mut FuzzyPickerState<K>,
     ) -> Option<EventPropagation> {
         let count = picker_state.results.len();
         if count == 0 {
             return None;
         }
 
-        let current = Self::resolve_selected_index(&picker_state.selected, &picker_state.results);
+        let current = picker_state.resolve_selected_index();
 
         let new = match input_event {
             InputEvent::Keyboard(KeyPress::Plain {
@@ -65,29 +106,16 @@ impl FuzzyPicker {
         Some(EventPropagation::ConsumedRender)
     }
 
-    /// What the last paint showed, for the scrollbar and the paging keys.
-    pub fn publish_geometry(
-        &self,
-        pane_manager: &mut crate::tui::pane_manager::PaneManager,
-        window: &crate::tui::pane_manager::Window,
-        result_count: usize,
-        rows: usize,
-    ) {
-        pane_manager.set_window_scroll(window, self.scroll_offset);
-        pane_manager.set_window_scroll_max(window, result_count);
-        pane_manager.set_window_page_size(window, rows);
-    }
-
     pub fn render_results<K: Clone + PartialEq>(
         &mut self,
-        state: &crate::tui::state::AppState,
-        picker_state: &crate::tui::state::FuzzyPickerState<K>,
+        theme: &crate::tui::theme::HelixTheme,
+        picker_state: &FuzzyPickerState<K>,
         results_origin: VPPos,
         result_rows: usize,
         pane_width: usize,
-        display: impl Fn(&K, &crate::tui::state::AppState) -> (String, Option<crate::tui::theme::Color>),
+        display: impl Fn(&K) -> (String, Option<crate::tui::theme::Color>),
     ) -> RenderOpIRVec {
-        let ui = &state.theme.ui;
+        let ui = &theme.ui;
         let color_bg = ui.background;
         let color_match_fg = ui.matched;
         let color_normal_fg = ui.text;
@@ -95,8 +123,7 @@ impl FuzzyPicker {
 
         let mut render_ops = RenderOpIRVec::new();
 
-        let selected_idx =
-            Self::resolve_selected_index(&picker_state.selected, &picker_state.results);
+        let selected_idx = picker_state.resolve_selected_index();
         let result_count = picker_state.results.len();
         self.query.set(picker_state.query.text());
         let mut indices = Vec::new();
@@ -150,7 +177,7 @@ impl FuzzyPicker {
                 vp_col(0) + vp_row(row_offset),
             );
 
-            let (display_str, accent) = display(&picker_state.results[result_idx], state);
+            let (display_str, accent) = display(&picker_state.results[result_idx]);
             // Rows that supply an accent color (e.g. terminals) render in that
             // color and bold; others use the normal text color.
             let base_fg = accent.unwrap_or(color_normal_fg);
@@ -172,16 +199,5 @@ impl FuzzyPicker {
         }
 
         render_ops
-    }
-
-    fn resolve_selected_index<K: PartialEq>(selected: &Option<K>, results: &[K]) -> usize {
-        let key = match selected {
-            None => return 0,
-            Some(k) => k,
-        };
-        results
-            .iter()
-            .position(|result_key| result_key == key)
-            .unwrap_or(0)
     }
 }

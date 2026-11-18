@@ -293,8 +293,8 @@ impl TerminalPaneComponent {
     }
 }
 
-impl crate::tui::widgets::title_row::TitleRow for TerminalPaneComponent {
-    fn render_title_row(
+impl TerminalPaneComponent {
+    pub(crate) fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,

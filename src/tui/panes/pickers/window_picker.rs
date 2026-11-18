@@ -91,8 +91,8 @@ impl WindowPickerComponent {
     }
 }
 
-impl crate::tui::widgets::title_row::TitleRow for WindowPickerComponent {
-    fn render_title_row(
+impl WindowPickerComponent {
+    pub(crate) fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
@@ -324,14 +324,15 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Window
                     Self::open_windows_results(&snapshot, &state.pane_manager.window_stack);
             }
 
-            let accents = row_accents(&global_data.state.theme);
+            let state = &global_data.state;
+            let accents = row_accents(&state.theme);
             let result_ops = self.picker.render_results(
-                &global_data.state,
-                &global_data.state.window_picker,
+                &state.theme,
+                &state.window_picker,
                 origin,
                 total_rows,
                 pane_width,
-                |window, state| match window {
+                |window| match window {
                     Window::FilePreview(key) => {
                         let snapshot = state.files.load_full();
                         let file = &snapshot[key.0];
@@ -369,11 +370,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Window
                     }
                 },
             );
-            let result_count = global_data.state.window_picker.results.len();
+            let result_count = state.window_picker.results.len();
 
-            self.picker.publish_geometry(
-                &mut global_data.state.pane_manager,
+            global_data.state.pane_manager.set_window_view(
                 &Window::WindowPicker,
+                self.picker.scroll_offset,
                 result_count,
                 total_rows,
             );

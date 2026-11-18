@@ -269,8 +269,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
         use crate::signal::AppSignal;
         use crate::tui::pane_manager::Window;
         use crate::tui::state::AppState;
-        use crate::tui::state::FuzzyPickerState;
         use crate::tui::state::LogSource;
+        use crate::tui::widgets::fuzzy_picker::FuzzyPickerState;
         let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;
         let Some(window_id) = self.window_id(state) else {
@@ -597,12 +597,12 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                     let results_origin =
                         vp_col(origin.col_index.as_u16()) + vp_row(origin.row_index.as_u16());
                     let picker_ops = self.branch_fuzzy.render_results(
-                        state,
+                        &state.theme,
                         &win.branch_picker,
                         results_origin,
                         total_rows,
                         pane_width,
-                        |idx, state| match state.git_refs.as_ref().and_then(|refs| refs.get(*idx)) {
+                        |idx| match state.git_refs.as_ref().and_then(|refs| refs.get(*idx)) {
                             Some(git_ref) => {
                                 let accent = match git_ref.kind {
                                     RefKind::Tag => tag_rgb,

@@ -129,8 +129,8 @@ pub(crate) fn run_model_match(text: &str, state: &crate::tui::state::AppState) -
     scored.into_iter().map(|(idx, _)| idx).collect()
 }
 
-impl crate::tui::widgets::title_row::TitleRow for ModelPickerComponent {
-    fn render_title_row(
+impl ModelPickerComponent {
+    pub(crate) fn render_title_row(
         &self,
         ops: &mut RenderOpIRVec,
         pane_box: &FlexBox,
@@ -238,13 +238,14 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ModelP
                 return Ok(());
             }
 
+            let state = &global_data.state;
             let result_ops = self.picker.render_results(
-                &global_data.state,
-                &global_data.state.model_picker,
+                &state.theme,
+                &state.model_picker,
                 origin,
                 total_rows,
                 pane_width,
-                |idx, state| {
+                |idx| {
                     let text = state
                         .models
                         .specs
@@ -254,10 +255,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ModelP
                     (text, None)
                 },
             );
-            let result_count = global_data.state.model_picker.results.len();
-            self.picker.publish_geometry(
-                &mut global_data.state.pane_manager,
+            let result_count = state.model_picker.results.len();
+            global_data.state.pane_manager.set_window_view(
                 &Window::ModelPicker,
+                self.picker.scroll_offset,
                 result_count,
                 total_rows,
             );
