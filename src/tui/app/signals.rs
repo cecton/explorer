@@ -12,61 +12,55 @@ pub(super) fn handle(
     use crate::tui::after_agents::AfterAgents;
     use crate::tui::pane_manager::Window;
     use crate::tui::panes::discussion::DiscussionComponent;
-    use crate::tui::panes::git_log_pane::GitLogPaneComponent;
     use crate::tui::panes::pickers::window_picker::WindowPickerComponent;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     crate::tui::app::sync_has_focus(&global_data.state, has_focus);
 
-    if let AppSignal::OpenTerminal { cmd, cwd } = action {
-        let cmd = cmd.clone();
-        let cwd = cwd.clone();
-        return crate::tui::panes::terminal::spawn::open(
-            global_data,
-            crate::tui::panes::terminal::spawn::Request {
-                cmd,
-                cwd: Some(cwd),
-                pane_size: None,
-                id: None,
-                replace_window: None,
-                event_tx: &app.terminal_event_tx,
-            },
-        );
-    }
-    if let AppSignal::OpenEditor { cmd, cwd, file_key } = action {
-        let cmd = cmd.clone();
-        let cwd = cwd.clone();
-        let key = *file_key;
-        return crate::tui::panes::terminal::spawn::open(
-            global_data,
-            crate::tui::panes::terminal::spawn::Request {
-                cmd: Some(cmd),
-                cwd: Some(cwd),
-                pane_size: None,
-                id: None,
-                replace_window: Some(Window::FilePreview(key)),
-                event_tx: &app.terminal_event_tx,
-            },
-        );
-    }
-    if let AppSignal::SetCargoFeatures(selection) = action {
-        global_data.state.cargo_features = selection.clone();
-        global_data.state.mark_session_dirty();
-        crate::lsp::set_cargo_features(selection.clone());
-        // The restart drops the colors of every file, and the new server holds none of
-        // them open: each preview of the window stack asks again, queued behind the
-        // restart it must follow, and the warmup colors the rest.
-        for window in global_data.state.pane_manager.window_stack.iter() {
-            if let Window::FilePreview(key) = window {
-                crate::lsp::send_file_request(key.0);
-            }
-        }
-        return Ok(EventPropagation::ConsumedRender);
-    }
     throws_with_return!({
+        // These arms never touch `state`, so they may hand the whole `global_data` on.
         let state = &mut global_data.state;
         let mut propagation = EventPropagation::ConsumedRender;
         match action {
+            AppSignal::OpenTerminal { cmd, cwd } => {
+                return crate::tui::panes::terminal::spawn::open(
+                    global_data,
+                    crate::tui::panes::terminal::spawn::Request {
+                        cmd: cmd.clone(),
+                        cwd: Some(cwd.clone()),
+                        pane_size: None,
+                        id: None,
+                        replace_window: None,
+                        event_tx: &app.terminal_event_tx,
+                    },
+                );
+            }
+            AppSignal::OpenEditor { cmd, cwd, file_key } => {
+                return crate::tui::panes::terminal::spawn::open(
+                    global_data,
+                    crate::tui::panes::terminal::spawn::Request {
+                        cmd: Some(cmd.clone()),
+                        cwd: Some(cwd.clone()),
+                        pane_size: None,
+                        id: None,
+                        replace_window: Some(Window::FilePreview(*file_key)),
+                        event_tx: &app.terminal_event_tx,
+                    },
+                );
+            }
+            AppSignal::SetCargoFeatures(selection) => {
+                state.cargo_features = selection.clone();
+                state.mark_session_dirty();
+                crate::lsp::set_cargo_features(selection.clone());
+                // The restart drops the colors of every file, and the new server holds none of
+                // them open: each preview of the window stack asks again, queued behind the
+                // restart it must follow, and the warmup colors the rest.
+                for window in state.pane_manager.window_stack.iter() {
+                    if let Window::FilePreview(key) = window {
+                        crate::lsp::send_file_request(key.0);
+                    }
+                }
+            }
             AppSignal::FilesChanged(changes) => {
                 // The reads already happened on the watcher thread; this is the one turn that
                 // publishes them, and it invalidates the offsets they make stale right after.
@@ -92,13 +86,6 @@ pub(super) fn handle(
                 }
                 crate::tui::symbols::files_changed(state, &touched);
             }
-            AppSignal::OpenTerminal { .. } => {}
-            AppSignal::OpenEditor { .. } => {
-                // Handled as early return above; unreachable here.
-            }
-            AppSignal::SetCargoFeatures(_) => {
-                // Handled as early return above; unreachable here.
-            }
             AppSignal::SymbolHighlight(answer) => {
                 tracing::debug!(
                     "AppSignal::SymbolHighlight: qn={:?} group_id={:?} origin_locs={} ref_locs={}",
@@ -110,114 +97,25 @@ pub(super) fn handle(
                 crate::tui::symbols::answered(state, answer);
             }
             AppSignal::GitLogLoaded { id, result } => {
-                if let Some(win) = state.git_logs.get_mut(id) {
-                    match result {
-                        Ok(entries) => {
-                            win.entries = Some(std::sync::Arc::clone(entries));
-                            win.error = None;
-                            let count = win
-                                .entries
-                                .as_ref()
-                                .map_or(0, |history| history.entries.len());
-                            if win.selected >= count {
-                                win.selected = count.saturating_sub(1);
-                            }
-                            crate::tui::panes::git_log_pane::apply_filter(win);
-                        }
-                        Err(e) => win.error = Some(e.clone()),
-                    }
-                }
+                crate::tui::panes::git_log_pane::log_loaded(state, *id, result);
             }
             AppSignal::GitHistoryChanged => {
-                // Every open log window now holds stale entries; reload each from its own source.
-                let main_tx = global_data.main_thread_channel_sender.clone();
-                for (id, source) in state
-                    .git_logs
-                    .iter()
-                    .map(|(id, win)| (*id, win.source.clone()))
-                    .collect::<Vec<_>>()
-                {
-                    GitLogPaneComponent::reload_log(
-                        state.repo.clone(),
-                        main_tx.clone(),
-                        id,
-                        &source,
-                    );
-                }
-                if let Some(repo) = state.repo.clone() {
-                    tokio::task::spawn_blocking(move || {
-                        let result = crate::git::load_refs(&repo).map(Arc::new);
-                        crate::signal::send(&main_tx, AppSignal::GitRefsLoaded(result));
-                    });
-                }
+                crate::tui::panes::git_log_pane::history_changed(
+                    state,
+                    global_data.main_thread_channel_sender.clone(),
+                );
             }
             AppSignal::GitRefsLoaded(result) => {
-                if let Ok(refs) = result {
-                    state.git_refs = Some(std::sync::Arc::clone(refs));
-                }
-                let picking: Vec<usize> = state
-                    .git_logs
-                    .iter()
-                    .filter(|(_, win)| win.branch_picking)
-                    .map(|(id, _)| *id)
-                    .collect();
-                for id in picking {
-                    GitLogPaneComponent::refresh_branch_results_for_window(state, id);
-                }
+                crate::tui::panes::git_log_pane::refs_loaded(state, result);
             }
             AppSignal::CommitDiffLoaded { id, result } => {
-                let still_open = state
-                    .pane_manager
-                    .window_stack
-                    .iter()
-                    .any(|w| matches!(w, Window::CommitDiff(other) if other == id));
-                if still_open {
-                    let entry = state.commit_diffs.entry(*id).or_default();
-                    match result {
-                        Ok(lines) => {
-                            entry.lines = Some(std::sync::Arc::clone(lines));
-                            entry.error = None;
-                        }
-                        Err(e) => entry.error = Some(e.clone()),
-                    }
-                }
+                crate::tui::panes::commit_diff_pane::diff_loaded(state, *id, result);
             }
             AppSignal::ConversationsLoaded => {
-                state.tree_view.loaded = true;
-                let tree = Arc::clone(&state.conversations);
-                let tree = tree.read();
-                state
-                    .tree_view
-                    .expanded
-                    .retain(|id| tree.node(id).is_some());
-                state
-                    .discussion_highlights
-                    .retain(|id, _| tree.node(id).is_some());
-                // Session-restored discussion windows: load their node, or close
-                // the ones whose node no longer exists.
-                let restored: Vec<(usize, bool)> = state
-                    .discussions
-                    .iter()
-                    .filter_map(|(id, discussion)| {
-                        let node = discussion.node.as_ref()?;
-                        let exists = match discussion.agent {
-                            Some(index) => tree.agent(node, index).is_some(),
-                            None => tree.node(node).is_some(),
-                        };
-                        Some((*id, exists))
-                    })
-                    .collect();
-                for (id, exists) in restored {
-                    if exists {
-                        DiscussionComponent::load_content(
-                            state,
-                            global_data.main_thread_channel_sender.clone(),
-                            id,
-                        );
-                    } else {
-                        crate::tui::focus::close_window(state, Window::Discussion(id));
-                    }
-                }
+                crate::tui::panes::conversation_tree::conversations_loaded(
+                    state,
+                    global_data.main_thread_channel_sender.clone(),
+                );
             }
             AppSignal::NodeContentLoaded {
                 window_id,
@@ -226,21 +124,9 @@ pub(super) fn handle(
                 reply,
                 work_log,
             } => {
-                if let Some(discussion) = state.discussions.get_mut(window_id)
-                    && discussion.node.as_ref() == Some(node)
-                {
-                    discussion.show_content(prompt.clone(), reply.clone(), work_log.clone());
-                    discussion.loaded = true;
-                    if discussion.model.is_none() {
-                        let tree = state.conversations.read();
-                        discussion.model = match discussion.agent {
-                            Some(index) => tree
-                                .agent(node, index)
-                                .and_then(|agent| agent.meta.model_spec()),
-                            None => tree.node(node).and_then(|node| node.meta.model_spec()),
-                        };
-                    }
-                }
+                crate::tui::panes::discussion::content_loaded(
+                    state, *window_id, node, prompt, reply, work_log,
+                );
             }
             AppSignal::ModelsFetched { endpoint, result } => {
                 if let Err(e) = result {

@@ -898,6 +898,65 @@ pub(crate) fn apply_filter(win: &mut crate::tui::state::GitLogWindowState) {
     }
 }
 
+/// Shows the entries a reload read, or its error; the selection follows the new list.
+pub(crate) fn log_loaded(
+    state: &mut crate::tui::state::AppState,
+    id: usize,
+    result: &Result<Arc<crate::git::LogHistory>, String>,
+) {
+    let Some(win) = state.git_logs.get_mut(&id) else {
+        return;
+    };
+    match result {
+        Ok(entries) => {
+            win.entries = Some(Arc::clone(entries));
+            win.error = None;
+            let count = win
+                .entries
+                .as_ref()
+                .map_or(0, |history| history.entries.len());
+            if win.selected >= count {
+                win.selected = count.saturating_sub(1);
+            }
+            apply_filter(win);
+        }
+        Err(e) => win.error = Some(e.clone()),
+    }
+}
+
+/// Reloads every log window and the refs after the history or the refs moved.
+pub(crate) fn history_changed(state: &crate::tui::state::AppState, main_tx: crate::signal::MainTx) {
+    use crate::signal::AppSignal;
+    for (id, win) in &state.git_logs {
+        GitLogPaneComponent::reload_log(state.repo.clone(), main_tx.clone(), *id, &win.source);
+    }
+    if let Some(repo) = state.repo.clone() {
+        tokio::task::spawn_blocking(move || {
+            let result = crate::git::load_refs(&repo).map(Arc::new);
+            crate::signal::send(&main_tx, AppSignal::GitRefsLoaded(result));
+        });
+    }
+}
+
+/// Keeps refs read without error, and refreshes the branch pickers that are open.
+pub(crate) fn refs_loaded(
+    state: &mut crate::tui::state::AppState,
+    result: &Result<Arc<Vec<crate::git::GitRef>>, String>,
+) {
+    if let Ok(refs) = result {
+        state.git_refs = Some(Arc::clone(refs));
+    }
+    let picking: Vec<usize> = state
+        .git_logs
+        .iter()
+        .filter(|(_, win)| win.branch_picking)
+        .map(|(id, _)| *id)
+        .collect();
+    for id in picking {
+        GitLogPaneComponent::refresh_branch_results_for_window(state, id);
+    }
+}
+
 fn visible_len(win: &crate::tui::state::GitLogWindowState) -> usize {
     let total = win
         .entries

@@ -52,6 +52,31 @@ impl CommitDiffPaneComponent {
     }
 }
 
+/// Keeps a loaded diff only while a window still shows its commit.
+pub(crate) fn diff_loaded(
+    state: &mut crate::tui::state::AppState,
+    id: [u8; 20],
+    result: &Result<std::sync::Arc<Vec<crate::git::DiffLine>>, String>,
+) {
+    use crate::tui::pane_manager::Window;
+    let still_open = state
+        .pane_manager
+        .window_stack
+        .iter()
+        .any(|w| matches!(w, Window::CommitDiff(other) if *other == id));
+    if !still_open {
+        return;
+    }
+    let entry = state.commit_diffs.entry(id).or_default();
+    match result {
+        Ok(lines) => {
+            entry.lines = Some(std::sync::Arc::clone(lines));
+            entry.error = None;
+        }
+        Err(e) => entry.error = Some(e.clone()),
+    }
+}
+
 impl CommitDiffPaneComponent {
     pub(crate) fn render_title_row(
         &self,

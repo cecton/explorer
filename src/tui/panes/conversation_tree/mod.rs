@@ -215,6 +215,44 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal>
     }
 }
 
+/// Drops the state of vanished nodes; each restored Discussion loads or closes.
+pub(crate) fn conversations_loaded(
+    state: &mut crate::tui::state::AppState,
+    main_tx: crate::signal::MainTx,
+) {
+    use crate::tui::pane_manager::Window;
+    use crate::tui::panes::discussion::DiscussionComponent;
+    state.tree_view.loaded = true;
+    let tree = std::sync::Arc::clone(&state.conversations);
+    let tree = tree.read();
+    state
+        .tree_view
+        .expanded
+        .retain(|id| tree.node(id).is_some());
+    state
+        .discussion_highlights
+        .retain(|id, _| tree.node(id).is_some());
+    let restored: Vec<(usize, bool)> = state
+        .discussions
+        .iter()
+        .filter_map(|(id, discussion)| {
+            let node = discussion.node.as_ref()?;
+            let exists = match discussion.agent {
+                Some(index) => tree.agent(node, index).is_some(),
+                None => tree.node(node).is_some(),
+            };
+            Some((*id, exists))
+        })
+        .collect();
+    for (id, exists) in restored {
+        if exists {
+            DiscussionComponent::load_content(state, main_tx.clone(), id);
+        } else {
+            crate::tui::focus::close_window(state, Window::Discussion(id));
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -320,6 +358,59 @@ mod tests {
             &HashSet::from([id.clone()])
         ));
         assert_eq!(asked.get(), 1, "a node being retitled is not asked");
+    }
+
+    #[tokio::test]
+    async fn a_loaded_tree_prunes_what_vanished_and_closes_its_discussions() {
+        use crate::conversation::NodeId;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::panes::conversation_tree::test_support::tree_with;
+        use crate::tui::state::AppState;
+        use crate::tui::state::DiscussionState;
+        let (_tmp, tree) = tree_with(&["a1"]);
+        let mut state = AppState::for_test(camino::Utf8PathBuf::from("/tmp"));
+        *state.conversations.write() = tree;
+        let (kept, gone) = (NodeId::new("a1"), NodeId::new("gone"));
+        state.tree_view.expanded = HashSet::from([kept.clone(), gone.clone()]);
+        for node in [&kept, &gone] {
+            state
+                .discussion_highlights
+                .insert(node.clone(), Default::default());
+        }
+        for (id, node) in [(0, &kept), (1, &gone)] {
+            state.discussions.insert(
+                id,
+                DiscussionState {
+                    node: Some(node.clone()),
+                    ..Default::default()
+                },
+            );
+            state.pane_manager.push_window(Window::Discussion(id));
+        }
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
+
+        conversations_loaded(&mut state, main_tx);
+
+        assert!(state.tree_view.loaded);
+        assert_eq!(state.tree_view.expanded, HashSet::from([kept.clone()]));
+        assert_eq!(
+            state.discussion_highlights.keys().collect::<Vec<_>>(),
+            vec![&kept]
+        );
+        assert!(state.discussions.contains_key(&0));
+        assert!(!state.discussions.contains_key(&1));
+        assert!(
+            !state
+                .pane_manager
+                .window_stack
+                .contains(&Window::Discussion(1))
+        );
+        assert!(
+            state
+                .pane_manager
+                .window_stack
+                .contains(&Window::Discussion(0))
+        );
     }
 
     #[test]

@@ -924,6 +924,34 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
     }
 }
 
+/// Shows loaded content unless the window has moved to another node since.
+pub(crate) fn content_loaded(
+    state: &mut crate::tui::state::AppState,
+    window_id: usize,
+    node: &crate::conversation::NodeId,
+    prompt: &str,
+    reply: &str,
+    work_log: &[String],
+) {
+    let Some(discussion) = state.discussions.get_mut(&window_id) else {
+        return;
+    };
+    if discussion.node.as_ref() != Some(node) {
+        return;
+    }
+    discussion.show_content(prompt.to_string(), reply.to_string(), work_log.to_vec());
+    discussion.loaded = true;
+    if discussion.model.is_none() {
+        let tree = state.conversations.read();
+        discussion.model = match discussion.agent {
+            Some(index) => tree
+                .agent(node, index)
+                .and_then(|agent| agent.meta.model_spec()),
+            None => tree.node(node).and_then(|node| node.meta.model_spec()),
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
