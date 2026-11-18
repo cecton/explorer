@@ -38,7 +38,8 @@ impl ClickTracker {
 pub struct FilePreviewComponent {
     id: FlexBoxId,
     error: Option<(String, Instant)>,
-    drag_snapshot: Option<Vec<(usize, usize)>>,
+    /// Highlights of the file when the current range drag started; empty when none is active.
+    drag_snapshot: Vec<(usize, usize)>,
     drag_start_line: Option<usize>,
     drag_modifier: Option<crate::tui::widgets::contrast::DragModifier>,
     /// Cached geometry of the content area at last render, used for mouse event handling.
@@ -60,7 +61,7 @@ impl FilePreviewComponent {
         Self {
             id,
             error: None,
-            drag_snapshot: None,
+            drag_snapshot: Vec::new(),
             drag_start_line: None,
             drag_modifier: None,
             content_origin_row: 0,
@@ -329,7 +330,8 @@ impl FilePreviewComponent {
         line: usize,
         modifier: crate::tui::widgets::contrast::DragModifier,
     ) {
-        self.drag_snapshot = Some(state.highlights(key).to_vec());
+        self.drag_snapshot.clear();
+        self.drag_snapshot.extend_from_slice(state.highlights(key));
         self.drag_start_line = Some(line);
         self.drag_modifier = Some(modifier);
     }
@@ -346,7 +348,7 @@ impl FilePreviewComponent {
         let Some(modifier) = self.drag_modifier else {
             return;
         };
-        let snapshot: &[(usize, usize)] = self.drag_snapshot.as_deref().unwrap_or(&[]);
+        let snapshot = self.drag_snapshot.as_slice();
         let lo = start.min(current_line);
         let hi = start.max(current_line);
         use crate::tui::widgets::contrast::DragModifier;
@@ -358,7 +360,7 @@ impl FilePreviewComponent {
     }
 
     pub fn end_drag(&mut self) {
-        self.drag_snapshot = None;
+        self.drag_snapshot.clear();
         self.drag_start_line = None;
         self.drag_modifier = None;
     }
@@ -703,7 +705,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
         self.preview_drag_active = false;
         self.text_drag_active = false;
         self.clicks.clear();
-        self.drag_snapshot = None;
+        self.drag_snapshot.clear();
         self.drag_start_line = None;
         self.drag_modifier = None;
     }
