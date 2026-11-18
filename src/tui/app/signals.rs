@@ -8,7 +8,6 @@ pub(super) fn handle(
     has_focus: &mut HasFocus,
 ) -> CommonResult<EventPropagation> {
     use crate::agent::mcp::McpStatus;
-    use crate::conversation::NodeStatus;
     use crate::signal::AppSignal;
     use crate::tui::after_agents::AfterAgents;
     use crate::tui::pane_manager::Window;
@@ -238,9 +237,7 @@ pub(super) fn handle(
                             Some(index) => tree
                                 .agent(node, index)
                                 .and_then(|agent| agent.meta.model_spec()),
-                            None => tree
-                                .node(node)
-                                .and_then(crate::tui::panes::discussion::launch::node_model),
+                            None => tree.node(node).and_then(|node| node.meta.model_spec()),
                         };
                     }
                 }
@@ -296,56 +293,11 @@ pub(super) fn handle(
                 );
             }
             AppSignal::TurnFinished { node, outcome } => {
-                let finished = state.running_turns.remove(node);
-                if let Some(handle) = &finished {
-                    let (reply, work_log) = {
-                        let live = handle.live.lock();
-                        (live.reply.clone(), live.work_log.clone())
-                    };
-                    for (id, discussion) in state.discussions.iter_mut() {
-                        if discussion.node.as_ref() == Some(node) && discussion.agent.is_none() {
-                            discussion.show_finished_turn(&reply, &work_log);
-                            if outcome.status == NodeStatus::Done {
-                                discussion.thinking.clear();
-                                state
-                                    .pane_manager
-                                    .set_window_scroll(&Window::Discussion(*id), 0);
-                            }
-                        }
-                    }
-                }
-                let updated = state
-                    .conversations
-                    .write()
-                    .update_meta(node, |meta| meta.record_outcome(outcome));
-                if let Err(e) = updated {
-                    tracing::warn!("failed to save the outcome of {}: {e}", node.as_str());
-                }
-                // A failed turn does not hand its prompt back: the input stays as the
-                // user left it, and a message sent there resumes the turn.
-                //
-                // What the user sent that the turn never read goes back to the input
-                // rather than vanishing with it.
-                if let Some(handle) = &finished {
-                    DiscussionComponent::restore_injected(state, node, handle);
-                }
-                // A turn may have moved HEAD or discarded its work: refresh what shows git state.
-                let main_tx = global_data.main_thread_channel_sender.clone();
-                // A cancel cuts its sub-agent short, without the signal of its end.
-                DiscussionComponent::reload_agent_windows(state, main_tx.clone(), node, None);
-                for (id, win) in &state.git_logs {
-                    GitLogPaneComponent::reload_log(
-                        state.repo.clone(),
-                        main_tx.clone(),
-                        *id,
-                        &win.source,
-                    );
-                }
-                DiscussionComponent::release_queue(state, main_tx.clone());
-                crate::tui::after_agents::arm(state, main_tx);
-                crate::tui::app::tick::spawn_dirty_check(
+                DiscussionComponent::turn_finished(
                     state,
                     global_data.main_thread_channel_sender.clone(),
+                    node,
+                    outcome,
                 );
             }
             AppSignal::NodeTitleReady { node, title } => {
@@ -400,10 +352,7 @@ pub(super) fn handle(
             }
             AppSignal::Housekeeping => {
                 crate::tui::app::tick::maybe_save_session(state, &app.root);
-                crate::tui::app::tick::spawn_dirty_check(
-                    state,
-                    global_data.main_thread_channel_sender.clone(),
-                );
+                state.spawn_dirty_check(global_data.main_thread_channel_sender.clone());
                 app.log_lsp_health();
                 propagation = EventPropagation::Consumed;
             }

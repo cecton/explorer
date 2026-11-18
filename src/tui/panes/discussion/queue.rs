@@ -165,4 +165,58 @@ impl crate::tui::panes::discussion::DiscussionComponent {
             }
         }
     }
+
+    /// Settles the turn of `node` that ended with `outcome` and moves the queue on.
+    pub(crate) fn turn_finished(
+        state: &mut crate::tui::state::AppState,
+        main_tx: crate::signal::MainTx,
+        node: &crate::conversation::NodeId,
+        outcome: &crate::conversation::metadata::TurnOutcome,
+    ) {
+        use crate::conversation::NodeStatus;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::panes::git_log_pane::GitLogPaneComponent;
+        let finished = state.running_turns.remove(node);
+        if let Some(handle) = &finished {
+            let (reply, work_log) = {
+                let live = handle.live.lock();
+                (live.reply.clone(), live.work_log.clone())
+            };
+            for (id, discussion) in state.discussions.iter_mut() {
+                if discussion.node.as_ref() == Some(node) && discussion.agent.is_none() {
+                    discussion.show_finished_turn(&reply, &work_log);
+                    if outcome.status == NodeStatus::Done {
+                        discussion.thinking.clear();
+                        state
+                            .pane_manager
+                            .set_window_scroll(&Window::Discussion(*id), 0);
+                    }
+                }
+            }
+        }
+        let updated = state
+            .conversations
+            .write()
+            .update_meta(node, |meta| meta.record_outcome(outcome));
+        if let Err(e) = updated {
+            tracing::warn!("failed to save the outcome of {}: {e}", node.as_str());
+        }
+        // A failed turn does not hand its prompt back: the input stays as the
+        // user left it, and a message sent there resumes the turn.
+        //
+        // What the user sent that the turn never read goes back to the input
+        // rather than vanishing with it.
+        if let Some(handle) = &finished {
+            Self::restore_injected(state, node, handle);
+        }
+        // A cancel cuts its sub-agent short, without the signal of its end.
+        Self::reload_agent_windows(state, main_tx.clone(), node, None);
+        // A turn may have moved HEAD or discarded its work: refresh what shows git state.
+        for (id, win) in &state.git_logs {
+            GitLogPaneComponent::reload_log(state.repo.clone(), main_tx.clone(), *id, &win.source);
+        }
+        Self::release_queue(state, main_tx.clone());
+        crate::tui::after_agents::arm(state, main_tx.clone());
+        state.spawn_dirty_check(main_tx);
+    }
 }

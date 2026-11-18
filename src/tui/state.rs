@@ -509,6 +509,18 @@ impl AppState {
         self.session_dirty = true;
     }
 
+    /// Rechecks the dirty status off the main thread; the answer comes back as `DirtyStatusLoaded`.
+    pub fn spawn_dirty_check(&self, main_tx: crate::signal::MainTx) {
+        use crate::signal::AppSignal;
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        tokio::task::spawn_blocking(move || {
+            let result = crate::git::is_dirty(&repo);
+            crate::signal::send(&main_tx, AppSignal::DirtyStatusLoaded(result));
+        });
+    }
+
     /// The input `window` shows right now, if any.
     pub fn open_input(
         &mut self,

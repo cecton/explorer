@@ -112,11 +112,6 @@ pub(crate) fn launch_window(
     }
 }
 
-/// The model a node was run with, when its metadata names one completely.
-pub(crate) fn node_model(node: &crate::conversation::Node) -> Option<crate::model_spec::ModelSpec> {
-    node.meta.model_spec()
-}
-
 /// Whether the node shown by Discussion window `id` has a turn running.
 pub(crate) fn window_is_running(state: &crate::tui::state::AppState, id: usize) -> bool {
     state
@@ -172,13 +167,6 @@ pub(crate) fn node_mode(node: &crate::conversation::Node) -> crate::agent::Mode 
         Some(NodeType::Commit) => Mode::Commit,
         _ => Mode::Feedback,
     }
-}
-
-/// Why a prompt in `mode` cannot start while `running` turns are in progress: turns
-/// run one at a time, since a feedback turn experiments freely in the working tree
-/// and a commit turn must have it clean and to itself.
-pub(crate) fn lock_refusal(running: &[crate::agent::Mode]) -> Option<&'static str> {
-    (!running.is_empty()).then_some("another turn is running; wait for it to finish")
 }
 
 /// How the turn of `node` ended, for the note a resume sends: `None` when it ran to
@@ -378,7 +366,7 @@ pub(crate) fn start_turn(
     if !state.trusted {
         return Err(Refusal::Untrusted);
     }
-    // A compact turn changes nothing, so it runs under the shared lock like feedback.
+    // A compact turn changes nothing, so it runs as feedback.
     let (mode, node_type, compact) = match kind {
         TurnKind::Prompt(Mode::Feedback) | TurnKind::Continue(Mode::Feedback) => {
             (Mode::Feedback, NodeType::Feedback, None)
@@ -428,13 +416,11 @@ pub(crate) fn start_turn(
             "this node is not complete; continue from its parent".to_string()
         }));
     }
-    let running: Vec<Mode> = state
-        .running_turns
-        .values()
-        .map(|handle| handle.mode)
-        .collect();
-    if let Some(reason) = lock_refusal(&running) {
-        return Err(Refusal::Busy(reason));
+    // One turn at a time: a feedback turn experiments in the tree, a commit turn needs it alone.
+    if !state.running_turns.is_empty() {
+        return Err(Refusal::Busy(
+            "another turn is running; wait for it to finish",
+        ));
     }
     if crate::git::status_short(&state.root).is_ok_and(|status| !status.trim().is_empty()) {
         return Err(Refusal::DirtyTree);

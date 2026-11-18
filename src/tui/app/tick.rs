@@ -21,22 +21,6 @@ pub(super) fn every(
     });
 }
 
-/// Rechecks the working-tree dirty status off the main thread (it walks the index and
-/// the worktree); the answer comes back as `DirtyStatusLoaded`.
-pub(super) fn spawn_dirty_check(
-    state: &crate::tui::state::AppState,
-    main_tx: crate::signal::MainTx,
-) {
-    use crate::signal::AppSignal;
-    let Some(repo) = state.repo.clone() else {
-        return;
-    };
-    tokio::task::spawn_blocking(move || {
-        let result = crate::git::is_dirty(&repo);
-        crate::signal::send(&main_tx, AppSignal::DirtyStatusLoaded(result));
-    });
-}
-
 /// The local minute since the epoch: the status-bar clock shows a new text when it changes.
 pub(super) fn clock_minute() -> i64 {
     let now = crate::util::time::now_secs();

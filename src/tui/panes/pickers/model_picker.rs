@@ -53,7 +53,7 @@ impl ModelPickerComponent {
                 .conversations
                 .read()
                 .node(node)
-                .and_then(crate::tui::panes::discussion::launch::node_model),
+                .and_then(|node| node.meta.model_spec()),
         };
         state.model_picker.selected =
             current.and_then(|model| state.models.specs.iter().position(|spec| *spec == model));

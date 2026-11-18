@@ -177,11 +177,7 @@ impl DiscussionComponent {
                 .node_dir(node)
                 .map(|dir| crate::conversation::files::read_input(&dir))
                 .unwrap_or_default();
-            (
-                source.parent.clone(),
-                draft,
-                crate::tui::panes::discussion::launch::node_model(source),
-            )
+            (source.parent.clone(), draft, source.meta.model_spec())
         };
         let id = state.next_id();
         state.discussions.insert(
@@ -223,9 +219,7 @@ impl DiscussionComponent {
                     Some(index) => tree
                         .agent(&node, index)
                         .and_then(|agent| agent.meta.model_spec()),
-                    None => tree
-                        .node(&node)
-                        .and_then(crate::tui::panes::discussion::launch::node_model),
+                    None => tree.node(&node).and_then(|node| node.meta.model_spec()),
                 }
             };
             state.discussions.insert(
@@ -939,9 +933,7 @@ mod tests {
     use crate::tui::panes::discussion::launch::Refusal;
     use crate::tui::panes::discussion::launch::TurnKind;
     use crate::tui::panes::discussion::launch::compose_launch;
-    use crate::tui::panes::discussion::launch::lock_refusal;
     use crate::tui::panes::discussion::launch::node_mode;
-    use crate::tui::panes::discussion::launch::node_model;
     use crate::tui::panes::discussion::launch::start_turn;
     use crate::tui::panes::discussion::queue::drop_queue_entry;
     use crate::tui::panes::discussion::queue::move_queued;
@@ -1144,14 +1136,14 @@ mod tests {
     }
 
     #[test]
-    fn node_model_needs_endpoint_model_and_a_known_effort() {
+    fn model_spec_needs_endpoint_model_and_a_known_effort() {
         let (_tmp, tree, id) =
             node_with_metadata("endpoint: router\nmodel: org/model-x\neffort: high\n");
-        let spec = node_model(tree.node(&id).unwrap()).unwrap();
+        let spec = tree.node(&id).unwrap().meta.model_spec().unwrap();
         assert_eq!(spec.to_string(), "router/org/model-x/high");
 
         let (_tmp, tree, id) = node_with_metadata("endpoint: router\nmodel: m\n");
-        assert!(node_model(tree.node(&id).unwrap()).is_none());
+        assert!(tree.node(&id).unwrap().meta.model_spec().is_none());
     }
 
     #[test]
@@ -2188,16 +2180,6 @@ mod tests {
             Some("this window moved on since the prompt was queued")
         );
         assert_eq!(state.discussions[&0].draft.text(), "go");
-    }
-
-    #[test]
-    fn lock_excludes_every_turn_while_one_is_running() {
-        use crate::agent::Mode;
-        use Mode::{Commit, Feedback};
-        assert!(lock_refusal(&[]).is_none());
-        assert!(lock_refusal(&[Feedback]).is_some());
-        assert!(lock_refusal(&[Commit]).is_some());
-        assert!(lock_refusal(&[Feedback, Commit]).is_some());
     }
 
     #[test]
