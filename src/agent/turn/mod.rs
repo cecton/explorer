@@ -439,17 +439,17 @@ async fn run_own_loop(
         });
         return Ok(());
     }
+    let subagents = Subagents {
+        config: Arc::clone(&request.agent),
+        mode: request.mode,
+        date: request.date.clone(),
+        repo: request.repo.clone(),
+        spec: spec.clone(),
+    };
     let tool_context = ToolContext {
         root: request.root.clone(),
         tree: Arc::clone(&request.tree),
         node: request.node.clone(),
-        subagents: Some(Subagents {
-            config: Arc::clone(&request.agent),
-            mode: request.mode,
-            date: request.date.clone(),
-            repo: request.repo.clone(),
-            spec: spec.clone(),
-        }),
         background: Arc::default(),
         mcp: mcp.clone(),
     };
@@ -459,6 +459,7 @@ async fn run_own_loop(
     };
     crate::agent::agent_loop::run(
         &tool_context,
+        Some(&subagents),
         target,
         &request.session,
         &system,
@@ -479,6 +480,7 @@ async fn run_own_loop(
         messages.push(nudge);
         crate::agent::agent_loop::run(
             &tool_context,
+            Some(&subagents),
             target,
             &request.session,
             &system,

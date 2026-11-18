@@ -666,7 +666,7 @@ fn format_result(result: &serde_json::Value) -> Result<String, String> {
     {
         parts.push(structured.to_string());
     }
-    let mut text = crate::agent::tools::truncate_middle(&parts.join("\n"), MAX_OUTPUT_BYTES);
+    let mut text = crate::util::text::truncate_middle(&parts.join("\n"), MAX_OUTPUT_BYTES);
     if text.is_empty() {
         text.push_str("(no output)");
     }

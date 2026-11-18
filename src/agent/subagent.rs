@@ -827,12 +827,13 @@ async fn run_own_loop(
         root: context.root.clone(),
         tree: Arc::clone(&context.tree),
         node: context.node.clone(),
-        subagents: None,
         background: Arc::clone(&context.background),
         mcp: context.mcp.clone(),
     };
+    // A sub-agent never starts another.
     crate::agent::agent_loop::run(
         &tool_context,
+        None,
         target,
         &launch.session,
         &system,

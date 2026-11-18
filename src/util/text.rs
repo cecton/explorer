@@ -128,6 +128,28 @@ pub(crate) fn key_values(metadata: &str) -> impl Iterator<Item = (&str, &str)> {
     })
 }
 
+/// Keeps the head and the tail of an output that is too long.
+pub(crate) fn truncate_middle(text: &str, max_bytes: usize) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
+    }
+    let half = max_bytes / 2;
+    let mut head_end = half;
+    while !text.is_char_boundary(head_end) {
+        head_end -= 1;
+    }
+    let mut tail_start = text.len() - half;
+    while !text.is_char_boundary(tail_start) {
+        tail_start += 1;
+    }
+    format!(
+        "{}\n[... {} bytes omitted ...]\n{}",
+        &text[..head_end],
+        tail_start - head_end,
+        &text[tail_start..]
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -191,5 +213,13 @@ mod tests {
     fn key_values_skips_blank_and_valueless_lines() {
         let pairs: Vec<(&str, &str)> = key_values("a: 1\nno value\nb:  \nc: two words\n").collect();
         assert_eq!(pairs, vec![("a", "1"), ("c", "two words")]);
+    }
+
+    #[test]
+    fn truncate_middle_keeps_head_and_tail() {
+        let text = "a".repeat(50) + &"b".repeat(50);
+        let cut = truncate_middle(&text, 20);
+        assert!(cut.starts_with("aaaaaaaaaa\n[... 80 bytes omitted ...]\n"));
+        assert!(cut.ends_with("bbbbbbbbbb"));
     }
 }

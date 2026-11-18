@@ -19,9 +19,6 @@ pub struct ToolContext {
     pub tree: Arc<parking_lot::RwLock<crate::conversation::ConversationTree>>,
     /// The node whose turn is running.
     pub node: crate::conversation::NodeId,
-    /// What the turn lends to its sub-agents; `None` for a sub-agent, which cannot
-    /// call one in turn.
-    pub subagents: Option<crate::agent::subagent::Subagents>,
     /// Background commands of the turn, shared with its sub-agents.
     pub background: Arc<Background>,
     /// Tools of the MCP servers running when the turn started.
@@ -45,13 +42,14 @@ impl Drop for Background {
     }
 }
 
-/// The tools advertised to the model: the `agent` tool only when sub-agents can run,
-/// then the tools of the MCP servers.
-pub fn specs(context: &ToolContext) -> Vec<crate::agent::llm::ToolSpec> {
+/// The tools advertised to the model: the built-in ones, then `agent` when the run has
+/// sub-agents, then the tools of the MCP servers.
+pub fn specs(
+    context: &ToolContext,
+    agent: Option<crate::agent::llm::ToolSpec>,
+) -> Vec<crate::agent::llm::ToolSpec> {
     let mut specs = base_specs();
-    if let Some(subagents) = &context.subagents {
-        specs.push(crate::agent::subagent::spec(&subagents.config.roles));
-    }
+    specs.extend(agent);
     specs.extend(context.mcp.specs());
     specs
 }
@@ -198,9 +196,6 @@ fn base_specs() -> Vec<crate::agent::llm::ToolSpec> {
 
 /// Short description of a call for the status line, e.g. `shell cargo check`.
 pub fn describe(call: &crate::agent::ToolCall) -> String {
-    if call.name == crate::agent::subagent::TOOL {
-        return crate::agent::subagent::describe(&call.arguments);
-    }
     let arg = |key: &str| call.arguments.get(key).and_then(serde_json::Value::as_str);
     let detail = match (arg("pattern"), arg("command"), arg("path")) {
         (Some(pattern), _, Some(path)) => format!("{pattern} in {path}"),
@@ -527,28 +522,6 @@ fn grep(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, Str
     Ok(out)
 }
 
-/// Keeps the head and the tail of an output that is too long.
-pub(super) fn truncate_middle(text: &str, max_bytes: usize) -> String {
-    if text.len() <= max_bytes {
-        return text.to_string();
-    }
-    let half = max_bytes / 2;
-    let mut head_end = half;
-    while !text.is_char_boundary(head_end) {
-        head_end -= 1;
-    }
-    let mut tail_start = text.len() - half;
-    while !text.is_char_boundary(tail_start) {
-        tail_start += 1;
-    }
-    format!(
-        "{}\n[... {} bytes omitted ...]\n{}",
-        &text[..head_end],
-        tail_start - head_end,
-        &text[tail_start..]
-    )
-}
-
 async fn shell(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
     let command = str_arg(args, "command")?;
     let timeout = args
@@ -588,7 +561,7 @@ async fn shell(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<Stri
         }
         text.push_str(&stderr);
     }
-    let mut text = truncate_middle(&text, SHELL_MAX_OUTPUT_BYTES);
+    let mut text = crate::util::text::truncate_middle(&text, SHELL_MAX_OUTPUT_BYTES);
     if !text.is_empty() && !text.ends_with('\n') {
         text.push('\n');
     }
@@ -666,7 +639,6 @@ mod tests {
             root: root.to_owned(),
             tree: Arc::default(),
             node: NodeId::new("current"),
-            subagents: None,
             background: Arc::default(),
             mcp: McpTools::default(),
         }
@@ -888,7 +860,6 @@ mod tests {
             root: root.clone(),
             tree: Arc::new(parking_lot::RwLock::new(ConversationTree::load(&store))),
             node: NodeId::new("n1"),
-            subagents: None,
             background: Arc::default(),
             mcp: McpTools::default(),
         };
@@ -941,14 +912,6 @@ mod tests {
     }
 
     #[test]
-    fn truncate_middle_keeps_head_and_tail() {
-        let text = "a".repeat(50) + &"b".repeat(50);
-        let cut = truncate_middle(&text, 20);
-        assert!(cut.starts_with("aaaaaaaaaa\n[... 80 bytes omitted ...]\n"));
-        assert!(cut.ends_with("bbbbbbbbbb"));
-    }
-
-    #[test]
     fn describe_shows_the_main_argument() {
         let shell = call(
             "shell",
@@ -983,7 +946,7 @@ mod tests {
     #[tokio::test]
     async fn write_creates_files_inside_the_repository_only() {
         let (_tmp, root) = repo();
-        let names: Vec<String> = specs(&context(&root))
+        let names: Vec<String> = specs(&context(&root), None)
             .into_iter()
             .map(|spec| spec.name)
             .collect();
@@ -1083,7 +1046,6 @@ mod tests {
             root: root.clone(),
             tree: Arc::new(parking_lot::RwLock::new(ConversationTree::load(&store))),
             node: NodeId::new("n2"),
-            subagents: None,
             background: Arc::default(),
             mcp: McpTools::default(),
         };

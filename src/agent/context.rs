@@ -117,13 +117,35 @@ fn read_transcript(dir: &camino::Utf8Path) -> Option<Vec<crate::agent::Message>>
     (!messages.is_empty()).then_some(messages)
 }
 
+/// Repairs a transcript that ends inside a round: an assistant message asking for
+/// tool calls whose results never arrived, because the turn died mid-stream or
+/// mid-tool. The calls are answered with a note, so replaying the transcript is a
+/// valid sequence that shows where the work stopped.
+fn repair_tail(messages: &mut Vec<crate::agent::Message>) {
+    use crate::agent::Message;
+    let Some(Message::Assistant { tool_calls, .. }) = messages.last_mut() else {
+        return;
+    };
+    if tool_calls.is_empty() {
+        return;
+    }
+    let calls = std::mem::take(tool_calls);
+    for call in calls {
+        messages.push(Message::Tool {
+            call_id: call.id,
+            name: call.name,
+            content: "[interrupted before this call ran]".to_string(),
+        });
+    }
+}
+
 /// What an ancestor contributes to the context: its exact transcript, or, when it has
 /// none, its prompt and reply as plain text. A transcript cut inside a round is
 /// repaired, so replaying it is a valid sequence.
 pub fn ancestor_messages(dir: &camino::Utf8Path) -> Vec<crate::agent::Message> {
     use crate::agent::Message;
     if let Some(mut messages) = read_transcript(dir) {
-        crate::agent::agent_loop::repair_tail(&mut messages);
+        repair_tail(&mut messages);
         return messages;
     }
     let (prompt, reply) = crate::conversation::files::read_prompt_and_reply(dir);
@@ -671,5 +693,42 @@ mod tests {
         assert!(text.contains("14:32"));
         assert!(text.contains("14:47"));
         assert!(text.contains("`date`"));
+    }
+
+    #[test]
+    fn a_tail_left_inside_a_round_gets_synthetic_tool_results() {
+        use crate::agent::Message;
+        use crate::agent::ToolCall;
+        let mut messages = vec![
+            Message::User {
+                content: "hi".into(),
+                injected: false,
+            },
+            Message::Assistant {
+                content: "looking".into(),
+                tool_calls: vec![ToolCall {
+                    id: "c1".into(),
+                    name: "read".into(),
+                    arguments: serde_json::json!({"path": "a.txt"}),
+                }],
+            },
+        ];
+        repair_tail(&mut messages);
+        assert_eq!(
+            messages[2..],
+            [Message::Tool {
+                call_id: "c1".into(),
+                name: "read".into(),
+                content: "[interrupted before this call ran]".into(),
+            }]
+        );
+
+        // A valid tail is left alone.
+        let mut done = vec![Message::Assistant {
+            content: "done".into(),
+            tool_calls: Vec::new(),
+        }];
+        repair_tail(&mut done);
+        assert_eq!(done.len(), 1);
     }
 }

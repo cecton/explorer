@@ -162,31 +162,13 @@ fn stall_error(call: &crate::agent::ToolCall, limit: u32) -> String {
     )
 }
 
-/// Repairs a transcript that ends inside a round: an assistant message asking for
-/// tool calls whose results never arrived, because the turn died mid-stream or
-/// mid-tool. The calls are answered with a note, so replaying the transcript is a
-/// valid sequence that shows where the work stopped.
-pub fn repair_tail(messages: &mut Vec<crate::agent::Message>) {
-    use crate::agent::Message;
-    let Some(Message::Assistant { tool_calls, .. }) = messages.last_mut() else {
-        return;
-    };
-    if tool_calls.is_empty() {
-        return;
-    }
-    let calls = std::mem::take(tool_calls);
-    for call in calls {
-        messages.push(Message::Tool {
-            call_id: call.id,
-            name: call.name,
-            content: "[interrupted before this call ran]".to_string(),
-        });
-    }
-}
-
 /// Our own agent loop, until an answer asks for no tool; boxed, as sub-agents recurse into it.
+/// `subagents` is what the run lends to the `agent` tool; `None` for a sub-agent, which
+/// cannot start one in turn.
+#[allow(clippy::too_many_arguments)] // the turn's inputs; two call sites
 pub fn run<'a>(
     context: &'a crate::agent::tools::ToolContext,
+    subagents: Option<&'a crate::agent::subagent::Subagents>,
     target: &'a crate::agent::llm::LlmTarget,
     session: &'a str,
     system: &'a str,
@@ -195,12 +177,14 @@ pub fn run<'a>(
     limits: Limits,
 ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
     Box::pin(run_loop(
-        context, target, session, system, messages, recorder, limits,
+        context, subagents, target, session, system, messages, recorder, limits,
     ))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_loop(
     context: &crate::agent::tools::ToolContext,
+    subagents: Option<&crate::agent::subagent::Subagents>,
     target: &crate::agent::llm::LlmTarget,
     session: &str,
     system: &str,
@@ -210,7 +194,10 @@ async fn run_loop(
 ) -> Result<(), String> {
     use crate::agent::Message;
     use crate::agent::ToolCall;
-    let tool_specs = crate::agent::tools::specs(context);
+    // The `agent` tool is advertised only when sub-agents can run.
+    let agent_spec =
+        subagents.map(|subagents| crate::agent::subagent::spec(&subagents.config.roles));
+    let tool_specs = crate::agent::tools::specs(context, agent_spec);
     let mut warned = false;
     let mut stalls = StallDetector::new(limits.repeat_limit);
     let mut nameless_rounds = 0;
@@ -320,9 +307,14 @@ async fn run_loop(
         let mut failed: Option<&ToolCall> = None;
         let mut nudged: Vec<&ToolCall> = Vec::new();
         for call in &response.tool_calls {
-            recorder.tool_call(crate::agent::tools::describe(call));
-            let content = match &context.subagents {
-                Some(subagents) if call.name == crate::agent::subagent::TOOL => {
+            let is_agent = call.name == crate::agent::subagent::TOOL;
+            recorder.tool_call(if is_agent {
+                crate::agent::subagent::describe(&call.arguments)
+            } else {
+                crate::agent::tools::describe(call)
+            });
+            let content = match subagents {
+                Some(subagents) if is_agent => {
                     crate::agent::subagent::run(context, subagents, call, recorder).await
                 }
                 _ => crate::agent::tools::run(context, call).await,
@@ -358,10 +350,7 @@ async fn run_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        Nudge, Stall, StallDetector, nudge_text, repair_tail, signature, stall_text, time_nudge,
-    };
-    use crate::agent::Message;
+    use super::{Nudge, Stall, StallDetector, nudge_text, signature, stall_text, time_nudge};
     use crate::agent::ToolCall;
     use std::time::Duration;
 
@@ -494,40 +483,5 @@ mod tests {
         let firm = nudge_text(Nudge::Firm, Duration::from_secs(960), budget);
         assert!(firm.contains("16m of the 15m"));
         assert!(firm.contains("Do not start anything new"));
-    }
-
-    #[test]
-    fn a_tail_left_inside_a_round_gets_synthetic_tool_results() {
-        let mut messages = vec![
-            Message::User {
-                content: "hi".into(),
-                injected: false,
-            },
-            Message::Assistant {
-                content: "looking".into(),
-                tool_calls: vec![ToolCall {
-                    id: "c1".into(),
-                    name: "read".into(),
-                    arguments: serde_json::json!({"path": "a.txt"}),
-                }],
-            },
-        ];
-        repair_tail(&mut messages);
-        assert_eq!(
-            messages[2..],
-            [Message::Tool {
-                call_id: "c1".into(),
-                name: "read".into(),
-                content: "[interrupted before this call ran]".into(),
-            }]
-        );
-
-        // A valid tail is left alone.
-        let mut done = vec![Message::Assistant {
-            content: "done".into(),
-            tool_calls: Vec::new(),
-        }];
-        repair_tail(&mut done);
-        assert_eq!(done.len(), 1);
     }
 }
