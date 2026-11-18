@@ -405,8 +405,8 @@ pub struct AppState {
     pub repo: Option<gix::ThreadSafeRepository>,
     /// Pane stack, sizes, layout, and focus state.
     pub pane_manager: crate::tui::pane_manager::PaneManager,
-    /// Per-file highlight ranges (1-indexed, inclusive).
-    pub highlight_ranges: HashMap<crate::loader::FileKey, Vec<(usize, usize)>>,
+    /// Each previewed file's search, title bar input and highlights.
+    pub previews: HashMap<crate::loader::FileKey, PreviewState>,
     pub leader_active: bool,
     pub window_picker:
         crate::tui::widgets::fuzzy_picker::FuzzyPickerState<crate::tui::pane_manager::Window>,
@@ -481,11 +481,6 @@ pub struct AppState {
     pub is_dirty: bool,
     pub symbol_highlights: Vec<SymbolHighlightGroup>,
     pub next_palette_index: usize,
-    /// Per-file regex search (vim-style `/` `?` `n` `N`). Transient — never persisted to the
-    /// session file, mirroring `text_selection`.
-    pub search: HashMap<crate::loader::FileKey, PreviewSearch>,
-    /// The input open in a file preview's title bar, by file. Transient like `search`.
-    pub preview_inputs: HashMap<crate::loader::FileKey, PreviewInput>,
     /// The `<leader>:` command line, open over the status bar. Transient.
     pub command_line: Option<crate::tui::command_line::CommandLine>,
     /// Configurable top-level (leader + global) key bindings.
@@ -507,6 +502,51 @@ impl AppState {
 
     pub fn mark_session_dirty(&mut self) {
         self.session_dirty = true;
+    }
+
+    /// The highlighted line ranges of `key`, empty when it has none.
+    pub fn highlights(&self, key: crate::loader::FileKey) -> &[(usize, usize)] {
+        self.previews
+            .get(&key)
+            .map_or(&[], |preview| preview.highlights.as_slice())
+    }
+
+    /// The state of `key`'s preview, created empty if it has none yet.
+    pub fn preview_mut(&mut self, key: crate::loader::FileKey) -> &mut PreviewState {
+        self.previews.entry(key).or_default()
+    }
+
+    /// Replaces the highlights of `key`; an empty `ranges` clears them.
+    pub fn set_highlights(&mut self, key: crate::loader::FileKey, ranges: Vec<(usize, usize)>) {
+        self.preview_mut(key).highlights = ranges;
+        self.prune_preview(key);
+    }
+
+    /// Replaces the search of `key`; `None` clears it.
+    pub fn set_search(&mut self, key: crate::loader::FileKey, search: Option<PreviewSearch>) {
+        self.preview_mut(key).search = search;
+        self.prune_preview(key);
+    }
+
+    /// Replaces the title bar input of `key`; `None` closes it.
+    pub fn set_input(&mut self, key: crate::loader::FileKey, input: Option<PreviewInput>) {
+        self.preview_mut(key).input = input;
+        self.prune_preview(key);
+    }
+
+    /// What closing `key`'s window drops: its search and its input. The highlights stay.
+    pub fn close_preview(&mut self, key: crate::loader::FileKey) {
+        if let Some(preview) = self.previews.get_mut(&key) {
+            preview.search = None;
+            preview.input = None;
+        }
+        self.prune_preview(key);
+    }
+
+    fn prune_preview(&mut self, key: crate::loader::FileKey) {
+        if self.previews.get(&key).is_some_and(PreviewState::is_empty) {
+            self.previews.remove(&key);
+        }
     }
 
     /// Rechecks the dirty status off the main thread; the answer comes back as `DirtyStatusLoaded`.
@@ -546,9 +586,11 @@ impl AppState {
             Window::ConversationTree if self.tree_view.search_active => {
                 Some(&mut self.tree_view.query)
             }
-            Window::FilePreview(key) => {
-                self.preview_inputs.get_mut(key).map(PreviewInput::line_mut)
-            }
+            Window::FilePreview(key) => self
+                .previews
+                .get_mut(key)
+                .and_then(|preview| preview.input.as_mut())
+                .map(PreviewInput::line_mut),
             Window::WindowPicker => Some(&mut self.window_picker.query),
             Window::ThemePicker => Some(&mut self.theme_picker.query),
             Window::ModelPicker => Some(&mut self.model_picker.query),
@@ -627,7 +669,7 @@ impl AppState {
             root,
             repo,
             pane_manager,
-            highlight_ranges: HashMap::new(),
+            previews: HashMap::new(),
             leader_active: false,
             window_picker: FuzzyPickerState::default(),
             theme_picker: FuzzyPickerState::default(),
@@ -670,8 +712,6 @@ impl AppState {
             is_dirty: false,
             symbol_highlights: Vec::new(),
             next_palette_index: 0,
-            search: HashMap::new(),
-            preview_inputs: HashMap::new(),
             command_line: None,
             keymap,
             cargo_features: CargoFeatureSelection::default(),
@@ -746,6 +786,23 @@ pub struct SymbolHighlightGroup {
 pub enum SearchDirection {
     Forward,
     Backward,
+}
+
+/// The state of one previewed file, kept in `AppState::previews`.
+#[derive(Clone, Default)]
+pub struct PreviewState {
+    /// Regex search (vim-style `/` `?` `n` `N`), never saved; dropped when the window closes.
+    pub search: Option<PreviewSearch>,
+    /// The input open in the title bar; dropped when the window closes.
+    pub input: Option<PreviewInput>,
+    /// Highlighted line ranges (1-indexed, inclusive), saved by path; kept on close.
+    pub highlights: Vec<(usize, usize)>,
+}
+
+impl PreviewState {
+    fn is_empty(&self) -> bool {
+        self.search.is_none() && self.input.is_none() && self.highlights.is_empty()
+    }
 }
 
 /// The input open in a file preview's title bar: the `/` `?` search.

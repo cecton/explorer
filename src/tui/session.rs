@@ -114,7 +114,11 @@ impl Session {
             .collect();
 
         let mut highlight_ranges = HashMap::new();
-        for (key, ranges) in &state.highlight_ranges {
+        for (key, preview) in &state.previews {
+            let ranges = &preview.highlights;
+            if ranges.is_empty() {
+                continue;
+            }
             if let Some(path) = crate::loader::path_for_file_key(&snapshot, *key)
                 && let Ok(rel) = path.strip_prefix(&state.root)
             {
@@ -318,11 +322,14 @@ impl Session {
         }
 
         let snapshot = state.files.load();
-        state.highlight_ranges.clear();
+        let keys: Vec<_> = state.previews.keys().copied().collect();
+        for key in keys {
+            state.set_highlights(key, Vec::new());
+        }
         for (rel, ranges) in self.highlight_ranges {
             let abs = state.root.join(&rel);
             if let Some(key) = crate::loader::file_key_for_path(&snapshot, &abs) {
-                state.highlight_ranges.insert(key, ranges);
+                state.set_highlights(key, ranges);
             }
         }
 
@@ -711,8 +718,8 @@ mod tests {
         );
         assert_eq!(snapshot[0].path, root.join("missing.rs"));
 
-        assert_eq!(state.highlight_ranges.len(), 1);
-        assert_eq!(state.highlight_ranges.get(&FileKey(0)), Some(&vec![(1, 5)]));
+        assert_eq!(state.previews.len(), 1);
+        assert_eq!(state.highlights(FileKey(0)), [(1, 5)]);
     }
 
     #[test]

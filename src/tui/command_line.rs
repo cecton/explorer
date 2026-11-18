@@ -521,7 +521,8 @@ fn run_highlight(run: &mut CommandRun<'_>) -> Result<(), String> {
         return Err("highlight needs a file preview in focus".to_string());
     };
     if run.argument.is_empty() {
-        if run.state.highlight_ranges.remove(&key).is_some() {
+        if !run.state.highlights(key).is_empty() {
+            run.state.set_highlights(key, Vec::new());
             run.state.mark_session_dirty();
         }
         return Ok(());
@@ -531,7 +532,7 @@ fn run_highlight(run: &mut CommandRun<'_>) -> Result<(), String> {
         .ok_or_else(|| "highlight: expected lines like 12, 3-7 or 1-3,8".to_string())?;
     let page_size = run.state.pane_manager.window_page_size(&window);
     let target = crate::tui::pane_manager::ranges_scroll_target(&ranges, page_size);
-    run.state.highlight_ranges.insert(key, ranges);
+    run.state.set_highlights(key, ranges);
     run.state.pane_manager.set_window_scroll(&window, target);
     run.state.pane_manager.clamp_scroll(&window);
     run.state.mark_session_dirty();
@@ -816,12 +817,13 @@ fn command_hint(typed: &str, state: &crate::tui::state::AppState) -> Option<Stri
         }
         (HIGHLIGHT, None, _) => {
             let current = match state.command_line.as_ref().and_then(|line| line.origin) {
-                Some(Window::FilePreview(key)) => state.highlight_ranges.get(&key),
-                _ => None,
+                Some(Window::FilePreview(key)) => state.highlights(key),
+                _ => &[],
             };
-            match current {
-                Some(ranges) => format!("current: {}", format_line_ranges(ranges)),
-                None => "[lines] 12, 3-7, 1-3,8".to_string(),
+            if current.is_empty() {
+                "[lines] 12, 3-7, 1-3,8".to_string()
+            } else {
+                format!("current: {}", format_line_ranges(current))
             }
         }
         ("mcp", None, _) => {

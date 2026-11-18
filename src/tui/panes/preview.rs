@@ -106,7 +106,8 @@ impl FilePreviewComponent {
         } else {
             rel.as_str().to_string()
         };
-        let title = if let Some(ranges) = state.highlight_ranges.get(&key) {
+        let ranges = state.highlights(key);
+        let title = if !ranges.is_empty() {
             format!(
                 "{}  [{}]",
                 base,
@@ -127,7 +128,7 @@ impl FilePreviewComponent {
         pane_width: usize,
     ) -> Option<(usize, usize)> {
         let key = self.file_key(state)?;
-        let ranges = state.highlight_ranges.get(&key)?;
+        let ranges = state.highlights(key);
         if ranges.is_empty() {
             return None;
         }
@@ -194,25 +195,24 @@ impl FilePreviewComponent {
     ) {
         use crate::tui::state::PreviewInput;
         use crate::tui::state::PreviewSearch;
-        let Some(PreviewInput::Search(input, direction)) = state.preview_inputs.get(&key) else {
+        let Some(PreviewInput::Search(input, direction)) =
+            state.previews.get(&key).and_then(|p| p.input.as_ref())
+        else {
             return;
         };
         let (pattern, direction) = (input.text().to_string(), *direction);
         if pattern.is_empty() {
-            state.search.remove(&key);
+            state.set_search(key, None);
             return;
         }
         match regex::Regex::new(&pattern) {
             Ok(regex) => {
-                state.search.insert(
-                    key,
-                    PreviewSearch {
-                        pattern,
-                        regex,
-                        direction,
-                        current: None,
-                    },
-                );
+                state.preview_mut(key).search = Some(PreviewSearch {
+                    pattern,
+                    regex,
+                    direction,
+                    current: None,
+                });
                 self.goto_match(state, key, direction);
             }
             Err(e) => {
@@ -233,7 +233,7 @@ impl FilePreviewComponent {
         use crate::tui::state::SearchDirection;
         // Collect non-empty matches in document order: (line_idx, start_byte, end_byte) per line.
         let matches: Vec<(usize, usize, usize)> = {
-            let Some(search) = state.search.get(&key) else {
+            let Some(search) = state.previews.get(&key).and_then(|p| p.search.as_ref()) else {
                 return;
             };
             let snapshot = state.files.load();
@@ -252,14 +252,18 @@ impl FilePreviewComponent {
         };
 
         if matches.is_empty() {
-            if let Some(search) = state.search.get_mut(&key) {
+            if let Some(search) = state.previews.get_mut(&key).and_then(|p| p.search.as_mut()) {
                 search.current = None;
             }
             self.error = Some(("no matches".to_string(), Instant::now()));
             return;
         }
 
-        let current = state.search.get(&key).and_then(|s| s.current);
+        let current = state
+            .previews
+            .get(&key)
+            .and_then(|p| p.search.as_ref())
+            .and_then(|s| s.current);
         let window = Window::FilePreview(key);
         let scroll = state.pane_manager.window_scroll(&window);
         let target_idx = match direction {
@@ -286,7 +290,7 @@ impl FilePreviewComponent {
         };
 
         let (line_idx, start, _end) = matches[target_idx];
-        if let Some(search) = state.search.get_mut(&key) {
+        if let Some(search) = state.previews.get_mut(&key).and_then(|p| p.search.as_mut()) {
             search.current = Some((line_idx, start));
         }
         self.scroll_to_range(state, key, line_idx + 1, line_idx + 1);
@@ -299,14 +303,9 @@ impl FilePreviewComponent {
         line_1_indexed: usize,
     ) -> bool {
         state
-            .highlight_ranges
-            .get(&file_key)
-            .map(|ranges| {
-                ranges
-                    .iter()
-                    .any(|&(lo, hi)| line_1_indexed >= lo && line_1_indexed <= hi)
-            })
-            .unwrap_or(false)
+            .highlights(file_key)
+            .iter()
+            .any(|&(lo, hi)| line_1_indexed >= lo && line_1_indexed <= hi)
     }
 
     /// Returns the `FileKey` this pane slot should render, or `None` if the slot holds a
@@ -330,7 +329,7 @@ impl FilePreviewComponent {
         line: usize,
         modifier: crate::tui::widgets::contrast::DragModifier,
     ) {
-        self.drag_snapshot = state.highlight_ranges.get(&key).cloned();
+        self.drag_snapshot = Some(state.highlights(key).to_vec());
         self.drag_start_line = Some(line);
         self.drag_modifier = Some(modifier);
     }
@@ -355,11 +354,7 @@ impl FilePreviewComponent {
             DragModifier::Shift => union_ranges(snapshot, lo, hi),
             DragModifier::Ctrl => subtract_ranges(snapshot, lo, hi),
         };
-        if new_ranges.is_empty() {
-            state.highlight_ranges.remove(&key);
-        } else {
-            state.highlight_ranges.insert(key, new_ranges);
-        }
+        state.set_highlights(key, new_ranges);
     }
 
     pub fn end_drag(&mut self) {
@@ -575,10 +570,9 @@ impl FilePreviewComponent {
                 let rel_y = row.saturating_sub(origin_row);
                 let line = (scroll + rel_y + 1).clamp(1, scroll_max.max(1));
 
-                let before = state.highlight_ranges.get(&key).cloned();
+                let before = state.highlights(key).to_vec();
                 self.update_drag(state, key, line);
-                let after = state.highlight_ranges.get(&key).cloned();
-                if before != after {
+                if before != state.highlights(key) {
                     state.mark_session_dirty();
                 }
                 return true;
@@ -736,28 +730,33 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
             };
             let window = Window::FilePreview(key);
 
-            if let Some(PreviewInput::Search(..)) = global_data.state.preview_inputs.get(&key) {
+            if let Some(PreviewInput::Search(..)) = global_data
+                .state
+                .previews
+                .get(&key)
+                .and_then(|p| p.input.as_ref())
+            {
                 match input_event {
                     InputEvent::Keyboard(KeyPress::Plain {
                         key: Key::SpecialKey(SpecialKey::Enter),
                     }) => {
                         self.commit_search(&mut global_data.state, key);
-                        global_data.state.preview_inputs.remove(&key);
+                        global_data.state.set_input(key, None);
                         self.repaint_when_error_expires(global_data);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     InputEvent::Keyboard(KeyPress::Plain {
                         key: Key::SpecialKey(SpecialKey::Esc),
                     }) => {
-                        global_data.state.search.remove(&key);
-                        global_data.state.preview_inputs.remove(&key);
+                        global_data.state.set_search(key, None);
+                        global_data.state.set_input(key, None);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     InputEvent::Keyboard(KeyPress::WithModifiers {
                         key: Key::Character('c'),
                         mask,
                     }) if mask == ModifierKeysMask::new().with_ctrl() => {
-                        if let Some(input) = global_data.state.preview_inputs.get_mut(&key) {
+                        if let Some(input) = global_data.state.preview_mut(key).input.as_mut() {
                             input.line_mut().clear();
                         }
                         return Ok(EventPropagation::ConsumedRender);
@@ -768,15 +767,16 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                     }) if mask == ModifierKeysMask::new().with_ctrl()
                         && global_data
                             .state
-                            .preview_inputs
+                            .previews
                             .get(&key)
+                            .and_then(|p| p.input.as_ref())
                             .is_some_and(|input| input.line().text().is_empty()) =>
                     {
-                        global_data.state.preview_inputs.remove(&key);
+                        global_data.state.set_input(key, None);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     _ => {
-                        if let Some(input) = global_data.state.preview_inputs.get_mut(&key) {
+                        if let Some(input) = global_data.state.preview_mut(key).input.as_mut() {
                             input.line_mut().handle_key(&input_event);
                         }
                         return Ok(EventPropagation::ConsumedRender);
@@ -805,23 +805,28 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                 } else {
                     SearchDirection::Backward
                 };
-                let prefill = global_data
-                    .state
+                let preview = global_data.state.preview_mut(key);
+                let prefill = preview
                     .search
-                    .get(&key)
+                    .as_ref()
                     .map(|s| s.pattern.clone())
                     .unwrap_or_default();
-                global_data.state.preview_inputs.insert(
-                    key,
-                    PreviewInput::Search(InputLine::with_text(prefill), direction),
-                );
+                preview.input = Some(PreviewInput::Search(
+                    InputLine::with_text(prefill),
+                    direction,
+                ));
                 return Ok(EventPropagation::ConsumedRender);
             }
 
             if let InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character(c @ ('n' | 'N')),
             }) = input_event
-                && let Some(stored) = global_data.state.search.get(&key).map(|s| s.direction)
+                && let Some(stored) = global_data
+                    .state
+                    .previews
+                    .get(&key)
+                    .and_then(|p| p.search.as_ref())
+                    .map(|s| s.direction)
             {
                 let direction = if c == 'n' {
                     stored
@@ -1049,7 +1054,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                             None,
                         ));
                     }
-                    if let Some(search) = state.search.get(&file_key) {
+                    if let Some(search) = state
+                        .previews
+                        .get(&file_key)
+                        .and_then(|p| p.search.as_ref())
+                    {
                         for m in search.regex.find_iter(line) {
                             if m.start() >= m.end() {
                                 continue;
@@ -1233,7 +1242,8 @@ impl FilePreviewComponent {
         let theme = &state.theme;
         let input = self
             .file_key(state)
-            .and_then(|key| state.preview_inputs.get_mut(&key));
+            .and_then(|key| state.previews.get_mut(&key))
+            .and_then(|p| p.input.as_mut());
         if let Some(input) = input {
             let prompt = match input {
                 PreviewInput::Search(_, SearchDirection::Forward) => "/",

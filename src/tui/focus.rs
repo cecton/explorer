@@ -64,7 +64,7 @@ pub(crate) fn close_window(
             state.discussions.remove(&id);
         }
         Window::FilePreview(key) => {
-            state.preview_inputs.remove(&key);
+            state.close_preview(key);
         }
         Window::Report(id) => {
             state.reports.remove(&id);
@@ -214,14 +214,14 @@ mod tests {
         let key = FileKey(7);
         focus_window(&mut state, Window::ConversationTree);
         focus_window(&mut state, Window::FilePreview(key));
-        state.preview_inputs.insert(
-            key,
-            PreviewInput::Search(Default::default(), SearchDirection::Forward),
-        );
+        state.preview_mut(key).input = Some(PreviewInput::Search(
+            Default::default(),
+            SearchDirection::Forward,
+        ));
 
         close_window(&mut state, Window::FilePreview(key));
 
-        assert!(state.preview_inputs.is_empty());
+        assert!(state.previews.is_empty());
         assert!(
             !state
                 .pane_manager
@@ -234,6 +234,43 @@ mod tests {
         );
         assert!(!state.terminal_grabbed);
         assert!(state.session_dirty);
+    }
+
+    #[test]
+    fn closing_a_preview_keeps_only_its_highlights() {
+        let mut state = empty_state();
+        let key = FileKey(7);
+        focus_window(&mut state, Window::FilePreview(key));
+        state.set_highlights(key, vec![(2, 4)]);
+        state.preview_mut(key).input = Some(PreviewInput::Search(
+            Default::default(),
+            SearchDirection::Forward,
+        ));
+
+        close_window(&mut state, Window::FilePreview(key));
+
+        let preview = &state.previews[&key];
+        assert!(preview.input.is_none());
+        assert!(preview.search.is_none());
+        assert_eq!(preview.highlights, [(2, 4)]);
+    }
+
+    #[test]
+    fn clearing_a_preview_without_highlights_leaves_no_entry() {
+        let mut state = empty_state();
+        let key = FileKey(7);
+        state.set_input(
+            key,
+            Some(PreviewInput::Search(
+                Default::default(),
+                SearchDirection::Forward,
+            )),
+        );
+        assert_eq!(state.previews.len(), 1);
+
+        state.set_input(key, None);
+
+        assert!(state.previews.is_empty());
     }
 
     #[test]
