@@ -222,10 +222,22 @@ pub(super) fn arguments_detail(arguments: &serde_json::Value) -> String {
 
 /// Runs one tool call. A failure is returned as text for the model, never raised.
 pub async fn run(context: &ToolContext, call: &crate::agent::ToolCall) -> String {
+    match try_run(context, call).await {
+        Ok(text) => text,
+        Err(error) => format!("error: {error}"),
+    }
+}
+
+/// Runs one tool call, a failure kept apart from the text: an MCP client reports one as
+/// an error of the call, where the model reads the other as its result.
+pub async fn try_run(
+    context: &ToolContext,
+    call: &crate::agent::ToolCall,
+) -> Result<String, String> {
     use crate::agent::mcp::McpTools;
     let args = call.arguments.clone();
     let root = context.root.as_path();
-    let result = match call.name.as_str() {
+    match call.name.as_str() {
         "conversation" => {
             let tree = Arc::clone(&context.tree);
             let node = context.node.clone();
@@ -256,8 +268,7 @@ pub async fn run(context: &ToolContext, call: &crate::agent::ToolCall) -> String
         "shell" => shell(root, &args).await,
         name if McpTools::is_tool(name) => context.mcp.call(name, args).await,
         other => Err(format!("unknown tool: {other}")),
-    };
-    result.unwrap_or_else(|error| format!("error: {error}"))
+    }
 }
 
 async fn blocking(

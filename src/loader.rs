@@ -194,19 +194,25 @@ fn compute_line_starts(content: &str) -> Vec<usize> {
 
 pub fn find_git_root() -> PathBuf {
     let start = env::current_dir().expect("cannot get current directory");
-    find_git_root_from(start)
+    let start = camino::Utf8PathBuf::from_path_buf(start).expect("current directory is not UTF-8");
+    find_git_root_from(&start)
+        .map(camino::Utf8PathBuf::into_std_path_buf)
+        .unwrap_or_else(|| panic!("no git repository found (no {GIT_DIR} in any parent)"))
 }
 
-fn find_git_root_from(start: PathBuf) -> PathBuf {
-    let mut dir = start;
+/// The repository root above `start`, or `None` when there is no `.git` in any parent.
+/// Unlike [`find_git_root`], this never panics: a subcommand that has to report the
+/// failure instead of the UI needs it.
+pub fn find_git_root_from(start: &camino::Utf8Path) -> Option<camino::Utf8PathBuf> {
+    let mut dir = camino::Utf8PathBuf::from(start);
     loop {
-        // `.git` is a directory in a normal checkout but a `gitdir:` file in a
-        // linked worktree, so only existence can be required here.
-        if dir.join(".git").exists() {
-            return dir;
+        // `.git` is a directory in a normal checkout but a `gitdir:` file in a linked
+        // worktree, so only existence can be required here.
+        if dir.join(GIT_DIR).exists() {
+            return Some(dir);
         }
         if !dir.pop() {
-            panic!("no git repository found (no .git in any parent)");
+            return None;
         }
     }
 }
@@ -478,8 +484,18 @@ mod tests {
             "-C", "main", "worktree", "add", "-q", "../wt", "-b", "topic",
         ]);
 
-        let worktree = root.join("wt").into_std_path_buf();
-        assert!(!worktree.join(".git").is_dir(), "worktree .git is a file");
-        assert_eq!(find_git_root_from(worktree), root.join("wt"));
+        let worktree = root.join("wt");
+        assert!(
+            !worktree.join(".git").as_std_path().is_dir(),
+            "worktree .git is a file"
+        );
+        assert_eq!(
+            find_git_root_from(&worktree).as_deref(),
+            Some(worktree.as_path())
+        );
+        assert_eq!(
+            find_git_root_from(&root.join("main")).as_deref(),
+            Some(root.join("main").as_path())
+        );
     }
 }

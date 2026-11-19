@@ -5,6 +5,7 @@ pub mod context;
 pub mod llm;
 pub mod mcp;
 pub mod models;
+pub mod serve;
 pub mod subagent;
 pub mod tools;
 pub mod turn;

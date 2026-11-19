@@ -357,10 +357,9 @@ fn arguments(invocation: &Invocation<'_>) -> Vec<String> {
         }
         Resume::Continue(session) => args.extend(["--resume", session].map(str::to_string)),
     }
-    if let Some(config) = invocation.mcp.claude_config() {
-        args.push("--mcp-config".to_string());
-        args.push(config);
-    }
+    let config = invocation.mcp.claude_config(invocation.root);
+    args.push("--mcp-config".to_string());
+    args.push(config);
     // Only the servers of this repository, never those of the user's own setup.
     args.push("--strict-mcp-config".to_string());
     args
@@ -717,17 +716,17 @@ mod tests {
         let forked = joined(&invocation(Resume::Fork("abc")));
         assert!(forked.contains("--model opus --effort high"));
         assert!(!forked.contains("--disallowedTools"));
-        assert!(forked.ends_with("--resume abc --fork-session --strict-mcp-config"));
-        assert!(!forked.contains("--mcp-config"));
+        assert!(forked.contains("--resume abc --fork-session --mcp-config"));
+        assert!(forked.ends_with("--strict-mcp-config"));
         assert!(forked.contains("--append-system-prompt SYSTEM"));
         assert!(forked.contains("--system-prompt-snapshot off"));
         assert!(!forked.contains("--bare"));
-        // A repository's settings file and its hooks are code it supplies.
+        // A repository's settings file, and the hooks it declares, are code it supplies.
         assert!(forked.contains("--setting-sources user"));
         assert!(forked.contains(r#"{"attribution":{"commit":"","pr":""},"disableAllHooks":true}"#));
 
         let continued = joined(&invocation(Resume::Continue("abc")));
-        assert!(continued.ends_with("--resume abc --strict-mcp-config"));
+        assert!(continued.contains("--resume abc --mcp-config"));
 
         let default_effort = ClaudeTarget {
             model: "haiku".to_string(),
@@ -742,6 +741,10 @@ mod tests {
         assert!(!fresh.contains("--resume"));
         assert!(fresh.contains("--setting-sources user"));
         assert!(fresh.contains("--input-format stream-json"));
+        // Every run carries Explorer's own tools, even one whose repository has no MCP
+        // server of its own: a claude-code turn reads the conversation tree through them.
+        assert!(fresh.contains("--mcp-config"));
+        assert!(fresh.contains("explorer"));
     }
 
     #[test]

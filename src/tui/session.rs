@@ -457,6 +457,36 @@ impl std::fmt::Display for SessionError {
 
 impl std::error::Error for SessionError {}
 
+/// The MCP servers a session saves, without reading the rest of it: the tools of a
+/// repository are what a client outside Explorer asks for, and nothing else in the
+/// session concerns it.
+#[derive(Debug, Default, serde::Deserialize)]
+struct McpOnly {
+    #[serde(default)]
+    mcp_servers: Vec<crate::agent::mcp::McpServerDecl>,
+}
+
+/// The MCP servers of the repository at `repo_root`, empty when it has no session.
+pub fn session_mcp_servers(repo_root: &camino::Utf8Path) -> Vec<crate::agent::mcp::McpServerDecl> {
+    let Some(path) = session_file_path(repo_root) else {
+        return Vec::new();
+    };
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(error) => {
+            tracing::warn!("failed to read session: {error}");
+            return Vec::new();
+        }
+    };
+    match serde_json::from_str::<McpOnly>(&content) {
+        Ok(only) => only.mcp_servers,
+        Err(error) => {
+            tracing::warn!("failed to parse session: {error}");
+            Vec::new()
+        }
+    }
+}
+
 pub fn load_session(repo_root: &camino::Utf8Path) -> Option<Session> {
     let path = session_file_path(repo_root)?;
     let content = match std::fs::read_to_string(&path) {
@@ -1136,5 +1166,27 @@ mod tests {
 
         // Clean up.
         let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn the_session_mcp_servers_are_read_without_the_rest_of_the_file() {
+        let (_dir, root) = temp_root();
+        let decl = crate::agent::mcp::McpServerDecl {
+            name: "demo".to_string(),
+            program: "/bin/demo".to_string(),
+        };
+        let only = serde_json::json!({"mcp_servers": [decl]});
+        let path = session_file_path(&root).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, only.to_string()).unwrap();
+        assert_eq!(session_mcp_servers(&root), [decl.clone()].as_slice());
+
+        // A file this module cannot parse yields none rather than failing the caller.
+        std::fs::write(&path, "{ not json").unwrap();
+        assert!(session_mcp_servers(&root).is_empty());
+
+        // A repository with no session has none either.
+        std::fs::remove_file(&path).unwrap();
+        assert!(session_mcp_servers(&root).is_empty());
     }
 }

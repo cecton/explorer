@@ -68,6 +68,14 @@ fn fmt_md(root: &camino::Utf8Path, paths: &[camino::Utf8PathBuf]) -> i32 {
     }
 }
 
+/// The repository root above the current directory, for the subcommand that has to report
+/// a missing repository rather than panic on it.
+fn resolve_git_root() -> Option<camino::Utf8PathBuf> {
+    let cwd = std::env::current_dir().ok()?;
+    let cwd = camino::Utf8PathBuf::from_path_buf(cwd).ok()?;
+    loader::find_git_root_from(&cwd)
+}
+
 #[tokio::main]
 async fn main() {
     let args = cli::parse_args();
@@ -85,6 +93,30 @@ async fn main() {
             .with_ansi(false)
             .compact()
             .init();
+    }
+
+    // Before the root lookup below, which panics outside a repository: a server started
+    // from one must say so instead of dying on a client that cannot see why.
+    if let Some(serve) = &args.mcp_serve {
+        let Some(root) = serve.root.clone().or_else(resolve_git_root) else {
+            eprintln!("no git repository found (no .git in any parent)");
+            std::process::exit(2);
+        };
+        // Absolute, so the tools comparing a path against the root do not read `..` away.
+        let root = match root.canonicalize_utf8() {
+            Ok(root) => root,
+            Err(error) => {
+                eprintln!("{root}: {error}");
+                std::process::exit(2);
+            }
+        };
+        // The session is read here, not in the server: a client that was given the
+        // repository's servers already starts them itself.
+        let servers = match serve.own_tools_only {
+            true => Vec::new(),
+            false => tui::session::session_mcp_servers(&root),
+        };
+        std::process::exit(agent::serve::serve(root, servers).await);
     }
 
     let root = camino::Utf8PathBuf::from_path_buf(loader::find_git_root())

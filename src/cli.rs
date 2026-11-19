@@ -6,6 +6,18 @@ pub struct Args {
     pub scan: bool,
     /// `fmt-md [paths]`: formats the markdown and exits; `Some(empty)` means the working tree.
     pub fmt_md: Option<Vec<camino::Utf8PathBuf>>,
+    /// `mcp-serve [root] [--own-tools-only]`: serves Explorer's own agent tools over
+    /// stdio as an MCP server.
+    pub mcp_serve: Option<McpServe>,
+}
+
+/// What an `mcp-serve` subcommand was asked for.
+pub struct McpServe {
+    /// The repository the tools act on; `None` means the one above the working directory.
+    pub root: Option<camino::Utf8PathBuf>,
+    /// Serve only Explorer's own tools, without starting the repository's MCP servers:
+    /// the client already has them from its own configuration.
+    pub own_tools_only: bool,
 }
 
 pub fn parse_args() -> Args {
@@ -14,13 +26,14 @@ pub fn parse_args() -> Args {
         eprintln!("{error}");
         std::process::exit(2);
     });
-    let fmt_md = match subcommand.as_deref() {
-        Some("fmt-md") => true,
+    let (fmt_md, serving) = match subcommand.as_deref() {
+        Some("fmt-md") => (true, false),
+        Some("mcp-serve") => (false, true),
         Some(other) => {
             eprintln!("unknown subcommand '{other}'");
             std::process::exit(2);
         }
-        None => false,
+        None => (false, false),
     };
     let log_file: Option<String> = args
         .opt_value_from_str("--log-file")
@@ -41,9 +54,18 @@ pub fn parse_args() -> Args {
     };
     let theme: Option<String> = args.opt_value_from_str("--theme").expect("invalid --theme");
     let scan = args.contains("--scan");
+    // Both subcommands take their own options after their name, so they are read from
+    // what is left once the global ones are gone. Only `mcp-serve` knows this one.
+    let own_tools_only = serving && args.contains("--own-tools-only");
+    let rest: Vec<std::ffi::OsString> = args.finish();
+    let utf8 = |arg: std::ffi::OsString| {
+        camino::Utf8PathBuf::from_path_buf(arg.into()).unwrap_or_else(|arg| {
+            eprintln!("{} is not valid UTF-8", arg.display());
+            std::process::exit(2)
+        })
+    };
     let fmt_md = fmt_md.then(|| {
-        args.finish()
-            .into_iter()
+        rest.iter()
             // A `--` ends the options; any other option is refused, not read as a path.
             .filter(|path| path.to_str() != Some("--"))
             .map(|path| {
@@ -51,12 +73,17 @@ pub fn parse_args() -> Args {
                     eprintln!("unknown option {}", path.display());
                     std::process::exit(2);
                 }
-                camino::Utf8PathBuf::from_path_buf(path.into()).unwrap_or_else(|path| {
-                    eprintln!("{} is not valid UTF-8", path.display());
-                    std::process::exit(2)
-                })
+                utf8(path.clone())
             })
             .collect()
+    });
+    let mcp_serve = serving.then(|| McpServe {
+        root: rest
+            .into_iter()
+            // Not filtered on UTF-8: `utf8` must refuse a non-UTF-8 path, not skip it.
+            .find(|arg| !arg.as_encoded_bytes().starts_with(b"-"))
+            .map(utf8),
+        own_tools_only,
     });
     Args {
         log_file,
@@ -64,5 +91,6 @@ pub fn parse_args() -> Args {
         theme,
         scan,
         fmt_md,
+        mcp_serve,
     }
 }

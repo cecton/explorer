@@ -228,20 +228,20 @@ impl McpTools {
         self.host.call(server, tool, arguments).await
     }
 
-    /// The `--mcp-config` of a Claude Code run, which starts the servers itself.
-    pub fn claude_config(&self) -> Option<String> {
-        if self.servers.is_empty() {
-            return None;
+    /// The `--mcp-config` of a Claude Code run, which starts the servers itself: the
+    /// repository's own, and Explorer's, which serves the `conversation` and
+    /// `format_markdown` tools a client has no other way to reach.
+    pub fn claude_config(&self, root: &camino::Utf8Path) -> String {
+        let mut servers: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
+        for server in &self.servers {
+            let config = serde_json::json!({"command": server.decl.program, "args": []});
+            servers.insert(server.decl.name.clone(), config);
         }
-        let servers: serde_json::Map<String, serde_json::Value> = self
-            .servers
-            .iter()
-            .map(|server| {
-                let config = serde_json::json!({"command": server.decl.program, "args": []});
-                (server.decl.name.clone(), config)
-            })
-            .collect();
-        Some(serde_json::json!({ "mcpServers": servers }).to_string())
+        // The run gets the repository's servers from the loop above, so Explorer's own
+        // server would only offer them a second time under longer names.
+        let (name, config) = crate::agent::serve::claude_server(root, true);
+        servers.insert(name, config);
+        serde_json::json!({ "mcpServers": servers }).to_string()
     }
 }
 
@@ -677,10 +677,26 @@ fn format_result(result: &serde_json::Value) -> Result<String, String> {
     }
 }
 
+/// Writes `script` to `path` and makes it executable, then waits until it can actually be
+/// executed: a child another test forks while the script is open for writing makes the
+/// next `exec` fail with `ETXTBSY`.
+#[cfg(test)]
+pub(crate) fn write_script(path: &std::path::Path, script: &str) {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::write(path, script).unwrap();
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    while let Err(error) = std::process::Command::new(path)
+        .stdin(Stdio::null())
+        .status()
+    {
+        assert_eq!(error.raw_os_error(), Some(libc::ETXTBSY), "{error}");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::os::unix::fs::PermissionsExt;
 
     /// Answers the handshake, slowly once `slow-start` exists in its directory (writing its
     /// pid to `started`), lists four tools plus one whose name no endpoint accepts, and
@@ -704,16 +720,7 @@ done
     fn fake_server() -> (tempfile::TempDir, McpServerDecl) {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("fake-mcp");
-        std::fs::write(&path, FAKE_SERVER).unwrap();
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
-        // A child another test forks while the script is open for writing causes ETXTBSY.
-        while let Err(error) = std::process::Command::new(&path)
-            .stdin(Stdio::null())
-            .status()
-        {
-            assert_eq!(error.raw_os_error(), Some(libc::ETXTBSY), "{error}");
-            std::thread::sleep(Duration::from_millis(10));
-        }
+        write_script(&path, FAKE_SERVER);
         let decl = McpServerDecl {
             name: "fake".to_string(),
             program: path.to_str().unwrap().to_string(),
@@ -773,11 +780,29 @@ done
                 .await
                 .is_err()
         );
-        let config: serde_json::Value =
-            serde_json::from_str(&tools.claude_config().unwrap()).unwrap();
+        let root = camino::Utf8Path::new("/repo");
+        let config: serde_json::Value = serde_json::from_str(&tools.claude_config(root)).unwrap();
+        // The repository's server keeps its plain name, and Explorer's own tools are there
+        // too, without the repository's servers offered a second time.
         assert_eq!(
-            config,
-            serde_json::json!({"mcpServers": {"fake": {"command": decl.program, "args": []}}})
+            config["mcpServers"]["fake"],
+            serde_json::json!({"command": decl.program, "args": []})
+        );
+        assert_eq!(
+            config["mcpServers"]["explorer"]["args"],
+            serde_json::json!(["mcp-serve", "/repo", crate::agent::serve::OWN_TOOLS_ONLY])
+        );
+    }
+
+    #[tokio::test]
+    async fn a_repository_with_no_servers_still_gets_explorers_own_tools() {
+        let (_tmp, _decl) = fake_server();
+        let tools = crate::agent::mcp::McpTools::default();
+        let config: serde_json::Value =
+            serde_json::from_str(&tools.claude_config(camino::Utf8Path::new("/repo"))).unwrap();
+        assert_eq!(
+            config["mcpServers"]["explorer"]["args"],
+            serde_json::json!(["mcp-serve", "/repo", crate::agent::serve::OWN_TOOLS_ONLY])
         );
     }
 
