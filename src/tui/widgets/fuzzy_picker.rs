@@ -196,7 +196,7 @@ impl FuzzyPicker {
 
             if index >= count {
                 if count == 0 && offset == 0 {
-                    let msg = "No results";
+                    let msg = crate::tui::widgets::text_layout::truncate("No results", width);
                     let pad = width.saturating_sub(msg.len()) / 2;
                     render_ops += RenderOpIR::PaintTextWithAttributes(
                         format!("{:pad$}{msg}", "", pad = pad).into(),
@@ -209,6 +209,9 @@ impl FuzzyPicker {
             render_ops +=
                 RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(offset as u16));
             let PickerRow { text, accent } = &rows[index];
+            // A row longer than the list is cut at its edge: a long path would otherwise
+            // paint over the frame and past the box.
+            let text = &crate::tui::widgets::text_layout::truncate(text, width);
             let base_fg = accent.unwrap_or(row_fg);
             let emphasized = accent.is_some();
             self.query.match_indices(text, &mut indices);

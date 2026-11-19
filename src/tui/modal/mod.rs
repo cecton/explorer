@@ -126,8 +126,10 @@ impl ModalBox {
             .clamp(1, MAX_WIDTH)
             .max(3)
             .min(cols);
-        let max_rows = (surface_rows / 2).max(CHROME_ROWS as u16).min(surface_rows);
-        let rows = (results + CHROME_ROWS).clamp(CHROME_ROWS, max_rows as usize);
+        // No `clamp`: its bounds cross on a terminal shorter than the frame, and it panics.
+        // A one-row screen gets its one row, with no frame above or below.
+        let max_rows = (surface_rows / 2).max(CHROME_ROWS as u16).min(surface_rows) as usize;
+        let rows = (results + CHROME_ROWS).min(max_rows).max(1);
         Self {
             origin: vp_col((cols - width) / 2) + vp_row((surface_rows - rows as u16) / 2),
             width: width as usize,
@@ -343,6 +345,20 @@ mod tests {
         assert_eq!(list.origin, modal.origin + vp_col(1) + vp_row(2));
     }
 
+    /// A terminal only a row or two tall still draws its modal: the height gives way, it
+    /// never asks for bounds it cannot honour.
+    #[test]
+    fn a_surface_shorter_than_the_frame_still_has_a_box() {
+        for rows in 1..=3u16 {
+            let modal = ModalBox::for_modal(size(40, rows), 5);
+            assert!(modal.rows <= rows as usize, "{rows} rows: {modal:?}");
+            assert!(
+                modal.origin.row_index.as_u16() + modal.rows as u16 <= rows,
+                "{rows} rows: {modal:?}"
+            );
+        }
+    }
+
     /// A surface too small for the box still paints inside itself: the height gives way
     /// first, and a width too narrow for a frame keeps the fill alone.
     #[test]
@@ -435,6 +451,61 @@ mod tests {
             char_at(screen, pipeline, top - 1, left + 1),
             Some('x'),
             "above the box is the pane"
+        );
+    }
+
+    /// A row longer than the list keeps its text inside: a long path in a narrow modal
+    /// would otherwise paint over the frame and past the box.
+    #[test]
+    fn a_row_too_wide_for_the_list_stops_at_its_edge() {
+        use crate::tui::widgets::fuzzy_picker::PickerColors;
+        use crate::tui::widgets::fuzzy_picker::PickerRow;
+        let modal = ModalBox::for_modal(size(20, 12), 3);
+        let list = modal.list_box();
+        let rows = vec![PickerRow::plain("a/very/long/path/that/does/not/fit.rs")];
+        use crate::tui::widgets::fuzzy::Kind;
+        let mut painter = crate::tui::widgets::fuzzy_picker::FuzzyPicker::new(Kind::Plain);
+        let ops = painter.render_results(
+            PickerColors::in_overlay(&crate::tui::theme::HelixTheme::default()),
+            "",
+            &rows,
+            0,
+            0,
+            list.origin,
+            list.rows,
+            list.width,
+        );
+        let mut pipeline = render_pipeline!();
+        pipeline.push(
+            ZOrder::High,
+            modal.render_frame(
+                crate::tui::theme::Color::default(),
+                crate::tui::theme::Color::from_u8(200, 200, 200),
+                "",
+            ),
+        );
+        pipeline.push(ZOrder::High, ops);
+
+        // Every cell of the box's edge column is the frame, and the cell just outside it is
+        // untouched: the row's text stopped at the edge.
+        let screen = size(20, 12);
+        let (top, left) = (
+            modal.origin.row_index.as_u16(),
+            modal.origin.col_index.as_u16(),
+        );
+        let right = left + modal.width as u16 - 1;
+        for offset in 1..modal.rows as u16 - 1 {
+            assert_eq!(
+                char_at(screen, pipeline.clone(), top + offset, right),
+                Some('│'),
+                "row {} of the frame",
+                offset
+            );
+        }
+        assert_eq!(
+            char_at(screen, pipeline.clone(), top + 2, right + 1),
+            None,
+            "nothing is painted past the box"
         );
     }
 

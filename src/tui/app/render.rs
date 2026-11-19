@@ -10,6 +10,7 @@ pub(super) fn render(
     >,
     has_focus: &mut HasFocus,
 ) -> CommonResult {
+    use crate::tui::modal::Modal;
     use crate::tui::panes_renderer::PanesRenderer;
     crate::tui::app::sync_has_focus(&global_data.state, has_focus);
 
@@ -21,7 +22,11 @@ pub(super) fn render(
             best_results = Some(results);
         }
     }
-    if let Some(results) = best_results {
+    // A match started before the picker closed can land after it: it belongs to a picker
+    // that is no longer in front, and the list it would overwrite is not on screen.
+    if let Some(results) = best_results
+        && matches!(global_data.state.modal, Some(Modal::WindowPicker))
+    {
         global_data.state.window_picker.results = results;
     }
 
