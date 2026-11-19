@@ -2,7 +2,7 @@
 use r3bl_tui::*;
 
 pub(super) fn components(
-    app: &crate::tui::app::AppMain,
+    _app: &crate::tui::app::AppMain,
     component_registry_map: &mut ComponentRegistryMap<
         crate::tui::state::AppState,
         crate::signal::AppSignal,
@@ -10,7 +10,6 @@ pub(super) fn components(
     has_focus: &mut HasFocus,
 ) {
     use crate::tui::pane_component::PaneComponent;
-    use std::sync::Arc;
     for slot in 0..crate::tui::pane_manager::MAX_PANES {
         let pane_id = crate::tui::pane_component::pane_id(slot);
         if let ContainsResult::DoesNotContain =
@@ -19,12 +18,7 @@ pub(super) fn components(
             ComponentRegistry::put(
                 component_registry_map,
                 pane_id,
-                PaneComponent::new_boxed(
-                    slot,
-                    pane_id,
-                    app.picker_results_tx.clone(),
-                    Arc::clone(&app.picker_generation),
-                ),
+                PaneComponent::new_boxed(slot, pane_id),
             );
         }
     }
@@ -173,7 +167,7 @@ pub(super) fn background_services(
     }
 
     for endpoint in &global_data.state.agent.endpoints {
-        crate::tui::panes::pickers::model_picker::fetch_models(endpoint, notify_tx.clone());
+        crate::tui::modal::model_picker::fetch_models(endpoint, notify_tx.clone());
     }
 
     // Request full tokens for session-restored file previews.

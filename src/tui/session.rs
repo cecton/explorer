@@ -386,7 +386,7 @@ fn pane_record_from_window(
             }
         }
         // A report is read and gone: it is never part of the session.
-        Window::WindowPicker | Window::ThemePicker | Window::ModelPicker | Window::Report(_) => {
+        Window::Report(_) => {
             return None;
         }
         Window::GitLog(id) => {

@@ -237,7 +237,13 @@ impl GitLogPaneComponent {
         };
         if let Some((input_line, prompt)) = input_mode {
             crate::tui::widgets::title_row::render_input_title(
-                ops, pane_box, input_line, prompt, focused, theme, 1,
+                ops,
+                pane_box,
+                input_line,
+                prompt,
+                focused,
+                crate::tui::widgets::title_row::BarColors::in_pane(focused, theme),
+                1,
             )
         } else {
             crate::tui::widgets::title_row::render_pane_title(
@@ -374,11 +380,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                     kind: MouseInputKind::ScrollUp | MouseInputKind::ScrollDown,
                     ..
                 }) => {
-                    self.branch_fuzzy.handle_navigation(
-                        &input_event,
-                        self.content_row_count.max(1),
-                        &mut win.branch_picker,
-                    );
+                    win.branch_picker
+                        .navigate(&input_event, self.content_row_count.max(1));
                     return Ok(EventPropagation::ConsumedRender);
                 }
                 InputEvent::Mouse(MouseInput {
@@ -390,7 +393,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                         .row_index
                         .as_usize()
                         .saturating_sub(self.content_origin_row);
-                    let idx = self.branch_fuzzy.scroll_offset + rel;
+                    let idx = win.branch_picker.scroll_offset + rel;
                     if let Some(k) = win.branch_picker.results.get(idx) {
                         win.branch_picker.selected = Some(*k);
                     }
@@ -592,26 +595,54 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
             let mut render_ops = RenderOpIRVec::new();
 
             if branch_picking {
+                // The branch list paints in the pane itself: its rows are read by value, and
+                // only its scroll offset takes a mutable borrow, after every read is done.
                 let (branch_rgb, tag_rgb) = ref_colors(&state.theme);
-                if let Some(win) = state.git_logs.get(&window_id) {
-                    let results_origin =
-                        vp_col(origin.col_index.as_u16()) + vp_row(origin.row_index.as_u16());
+                let picked = state.git_logs.get(&window_id).map(|win| {
+                    let rows: Vec<crate::tui::widgets::fuzzy_picker::PickerRow> = win
+                        .branch_picker
+                        .results
+                        .iter()
+                        .map(
+                            |idx| match state.git_refs.as_ref().and_then(|refs| refs.get(*idx)) {
+                                Some(git_ref) => match git_ref.kind {
+                                    RefKind::Tag => {
+                                        crate::tui::widgets::fuzzy_picker::PickerRow::accented(
+                                            git_ref.name.clone(),
+                                            tag_rgb,
+                                        )
+                                    }
+                                    _ => crate::tui::widgets::fuzzy_picker::PickerRow::accented(
+                                        git_ref.name.clone(),
+                                        branch_rgb,
+                                    ),
+                                },
+                                None => crate::tui::widgets::fuzzy_picker::PickerRow::plain(""),
+                            },
+                        )
+                        .collect();
+                    (
+                        rows,
+                        win.branch_picker.selected_index(),
+                        win.branch_picker.query.text().to_string(),
+                    )
+                });
+                let colors = crate::tui::widgets::fuzzy_picker::PickerColors::in_pane(&state.theme);
+                if let Some((rows, selected, query)) = picked {
+                    let scroll = state
+                        .git_logs
+                        .get_mut(&window_id)
+                        .map(|win| win.branch_picker.scroll_to_selection(selected, total_rows))
+                        .unwrap_or(0);
                     let picker_ops = self.branch_fuzzy.render_results(
-                        &state.theme,
-                        &win.branch_picker,
-                        results_origin,
+                        colors,
+                        &query,
+                        &rows,
+                        selected,
+                        scroll,
+                        vp_col(origin.col_index.as_u16()) + vp_row(origin.row_index.as_u16()),
                         total_rows,
                         pane_width,
-                        |idx| match state.git_refs.as_ref().and_then(|refs| refs.get(*idx)) {
-                            Some(git_ref) => {
-                                let accent = match git_ref.kind {
-                                    RefKind::Tag => tag_rgb,
-                                    _ => branch_rgb,
-                                };
-                                (git_ref.name.clone(), Some(accent))
-                            }
-                            None => (String::new(), None),
-                        },
                     );
                     global_data.pipeline.push(ZOrder::Normal, picker_ops);
                 }

@@ -10,9 +10,10 @@ pub(super) fn handle(
     use crate::agent::mcp::McpStatus;
     use crate::signal::AppSignal;
     use crate::tui::after_agents::AfterAgents;
+    use crate::tui::modal::Modal;
+    use crate::tui::modal::window_picker;
     use crate::tui::pane_manager::Window;
     use crate::tui::panes::discussion::DiscussionComponent;
-    use crate::tui::panes::pickers::window_picker::WindowPickerComponent;
     use std::sync::Arc;
     use std::sync::atomic::Ordering;
     crate::tui::app::sync_has_focus(&global_data.state, has_focus);
@@ -71,13 +72,10 @@ pub(super) fn handle(
                     touched.created.len(),
                     touched.removed.len()
                 );
-                if state
-                    .pane_manager
-                    .window_stack
-                    .contains(&Window::WindowPicker)
+                if matches!(state.modal, Some(Modal::WindowPicker))
                     && !state.window_picker.query.text().is_empty()
                 {
-                    WindowPickerComponent::spawn_match(
+                    window_picker::spawn_match(
                         &*state,
                         Arc::clone(&app.picker_generation),
                         app.picker_results_tx.clone(),
@@ -134,14 +132,10 @@ pub(super) fn handle(
                 }
                 let agent = Arc::clone(&state.agent);
                 state.models.set_list(&agent, endpoint, result.clone());
-                if state
-                    .pane_manager
-                    .window_stack
-                    .contains(&Window::ModelPicker)
-                {
+                if matches!(state.modal, Some(Modal::ModelPicker(_))) {
                     let query = state.model_picker.query.text().to_string();
                     state.model_picker.results =
-                        crate::tui::panes::pickers::model_picker::run_model_match(&query, state);
+                        crate::tui::modal::model_picker::run_model_match(&query, state);
                 }
             }
             AppSignal::UsageFetched { endpoint, usage } => {

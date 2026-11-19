@@ -414,6 +414,17 @@ pub struct AppState {
     /// Each previewed file's search, title bar input and highlights.
     pub previews: HashMap<crate::loader::FileKey, PreviewState>,
     pub leader_active: bool,
+    /// The modal painted over every pane, if one is open: while it is, no pane takes input.
+    pub modal: Option<crate::tui::modal::Modal>,
+    /// The window that had the keyboard before the modal opened, and gets it back when the
+    /// modal closes.
+    pub modal_origin: Option<crate::tui::pane_manager::Window>,
+    /// Rows the open modal's list shows at once, as the last frame painted it: the page a
+    /// PageUp/PageDown moves by.
+    pub modal_page_size: usize,
+    /// The box the open modal's list was painted in, as the last frame put it: a wheel over
+    /// it moves the list, a wheel anywhere else moves nothing.
+    pub modal_box: Option<crate::tui::modal::ModalBox>,
     pub window_picker:
         crate::tui::widgets::fuzzy_picker::FuzzyPickerState<crate::tui::pane_manager::Window>,
     pub theme_picker: crate::tui::widgets::fuzzy_picker::FuzzyPickerState<String>,
@@ -457,8 +468,6 @@ pub struct AppState {
     pub last_picked_model: Option<crate::model_spec::ModelSpec>,
     /// Model Picker entries are indexes into `models.specs`.
     pub model_picker: crate::tui::widgets::fuzzy_picker::FuzzyPickerState<usize>,
-    /// What the open Model Picker is choosing a model for.
-    pub model_picker_purpose: Option<ModelPickerPurpose>,
     /// Turns in progress, by node.
     pub running_turns: HashMap<crate::conversation::NodeId, crate::agent::turn::TurnHandle>,
     /// Animation step shared by every spinner on screen; advanced by `TurnTick`.
@@ -599,9 +608,6 @@ impl AppState {
                 .get_mut(key)
                 .and_then(|preview| preview.input.as_mut())
                 .map(PreviewInput::line_mut),
-            Window::WindowPicker => Some(&mut self.window_picker.query),
-            Window::ThemePicker => Some(&mut self.theme_picker.query),
-            Window::ModelPicker => Some(&mut self.model_picker.query),
             Window::ConversationTree
             | Window::Terminal(_)
             | Window::CommitDiff(_)
@@ -662,13 +668,10 @@ impl AppState {
         use crate::agent::mcp::McpHost;
         use crate::config::CargoFeatureSelection;
         use crate::tui::pane_manager::PaneManager;
-        use crate::tui::pane_manager::Window;
         use crate::tui::theme::HelixTheme;
         use crate::tui::widgets::fuzzy_picker::FuzzyPickerState;
         let saved_theme = theme.clone();
-        let mut pane_manager = PaneManager::new();
-        pane_manager.push_window(Window::WindowPicker);
-        pane_manager.focused_window = Some(Window::WindowPicker);
+        let pane_manager = PaneManager::new();
         let repo = gix::ThreadSafeRepository::open(root.as_std_path()).ok();
         let mcp = Arc::new(McpHost::new(root.clone()));
 
@@ -679,6 +682,10 @@ impl AppState {
             pane_manager,
             previews: HashMap::new(),
             leader_active: false,
+            modal: None,
+            modal_origin: None,
+            modal_page_size: 0,
+            modal_box: None,
             window_picker: FuzzyPickerState::default(),
             theme_picker: FuzzyPickerState::default(),
             theme,
@@ -702,7 +709,6 @@ impl AppState {
             mcp,
             last_picked_model: None,
             model_picker: FuzzyPickerState::default(),
-            model_picker_purpose: None,
             running_turns: HashMap::new(),
             spinner_tick: 0,
             queued_turns: Vec::new(),

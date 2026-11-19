@@ -112,6 +112,12 @@ pub(super) fn render(
             );
         }
 
+        // A modal is painted last, at a layer of its own: every pane and the status bar have
+        // already painted the cells it stands on, and its box covers them.
+        if let Some(modal_ops) = crate::tui::modal::render(&mut global_data.state, surface_size) {
+            pipeline.push(ZOrder::High, modal_ops);
+        }
+
         global_data.pipeline = pipeline;
     });
 }

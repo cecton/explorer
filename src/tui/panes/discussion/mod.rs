@@ -316,8 +316,8 @@ impl DiscussionComponent {
     /// for any other turn is queued, and stays in the input until its turn starts. A
     /// refused send keeps the draft and explains itself in the window's notice.
     fn send(state: &mut crate::tui::state::AppState, main_tx: crate::signal::MainTx, id: usize) {
+        use crate::tui::modal::model_picker;
         use crate::tui::panes::discussion::launch::Refusal;
-        use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
         use crate::tui::state::ModelPickerPurpose;
         use crate::tui::state::PendingTurn;
         if Self::inject(state, id) {
@@ -338,7 +338,7 @@ impl DiscussionComponent {
             return;
         }
         if !has_model {
-            ModelPickerComponent::open(state, main_tx, ModelPickerPurpose::Window(id));
+            model_picker::open(state, main_tx, ModelPickerPurpose::Window(id));
             return;
         }
         match crate::tui::panes::discussion::launch::launch_window(state, main_tx, id) {
@@ -1632,8 +1632,8 @@ mod tests {
 
     #[tokio::test]
     async fn the_model_of_a_window_whose_turn_runs_cannot_be_changed() {
-        use crate::tui::pane_manager::Window;
-        use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
+        use crate::tui::modal::Modal;
+        use crate::tui::modal::model_picker;
         use crate::tui::state::ModelPickerPurpose;
         let (_tmp, mut state) = state_with_failed_child();
         state.agent = agent_with_endpoint();
@@ -1642,13 +1642,11 @@ mod tests {
         let node = start_turn(&mut state, main_tx.clone(), feedback_launch()).unwrap();
         state.discussions.get_mut(&0).unwrap().node = Some(node);
 
-        ModelPickerComponent::open(&mut state, main_tx, ModelPickerPurpose::Window(0));
+        model_picker::open(&mut state, main_tx, ModelPickerPurpose::Window(0));
 
         assert!(
-            !state
-                .pane_manager
-                .window_stack
-                .contains(&Window::ModelPicker)
+            !matches!(state.modal, Some(Modal::ModelPicker(_))),
+            "the picker of a running turn never opens"
         );
         assert_eq!(
             state.discussions[&0].notice.as_deref(),

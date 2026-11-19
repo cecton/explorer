@@ -27,7 +27,10 @@ pub(super) fn render_status_bar(
     // Two global keys sharing a modifier read as one chord: `Ctrl+↑/↓`, not `Ctrl+↑/Ctrl+↓`.
     let global_pair = |a: Action, b: Action| state.keymap.global_pair(a, b);
 
-    let (leader_text, rest_text) = if state.leader_active {
+    let (leader_text, rest_text) = if let Some(modal) = state.modal.as_ref() {
+        // A modal takes every key there is: the bar says what it takes, and nothing else.
+        (format!(" {} ", modal.title()), modal.hint().to_string())
+    } else if state.leader_active {
         (
             " Leader ".to_string(),
             format!(
@@ -52,10 +55,6 @@ pub(super) fn render_status_bar(
     } else {
         let pane = {
             let rest = match state.pane_manager.focused_window.as_ref() {
-                Some(Window::WindowPicker) => {
-                    "Esc:Close picker  Enter:Open  Ctrl+X:Close window".to_string()
-                }
-                Some(Window::ThemePicker) => "Esc:Cancel  Enter:Save".to_string(),
                 Some(Window::FilePreview(_)) => {
                     "e:Edit  Bksp:Send to back  ::Command".to_string()
                 }
@@ -75,7 +74,6 @@ pub(super) fn render_status_bar(
                 Some(Window::Report(_)) => {
                     "Bksp:Send to back  Esc:Close".to_string()
                 }
-                Some(Window::ModelPicker) => model_picker_hint(state),
                 Some(Window::Terminal(_)) if !state.terminal_grabbed => {
                     "Bksp:Send to back  Enter:grab".to_string()
                 }
@@ -211,15 +209,23 @@ fn clock_text(now: i64, offset_secs: i32) -> String {
 const USAGE_WARNING_PERCENT: u32 = 75;
 const USAGE_ERROR_PERCENT: u32 = 90;
 
-/// The endpoint the focused window spends: the model of a Discussion window, the
-/// endpoint of the Conversation Tree's selected node or sub-agent run (for a queued
-/// row, the model of the window holding the prompt), the selected row of the Model
-/// Picker.
+/// The endpoint the spending on screen belongs to: the selected row of the open Model
+/// Picker, else the model of a Discussion window, else the endpoint of the Conversation
+/// Tree's selected node or sub-agent run (for a queued row, the model of the window holding
+/// the prompt).
 fn focused_endpoint(state: &crate::tui::state::AppState) -> Option<String> {
+    use crate::tui::modal::Modal;
     use crate::tui::pane_manager::Window;
     use crate::tui::state::RowTarget;
     let window_endpoint =
         |id: &usize| Some(state.discussions.get(id)?.model.as_ref()?.endpoint.clone());
+    if let Some(Modal::ModelPicker(_)) = state.modal {
+        let picker = &state.model_picker;
+        let selected = picker
+            .selected
+            .or_else(|| picker.results.first().copied())?;
+        return Some(state.models.specs.get(selected)?.endpoint.clone());
+    }
     match state.pane_manager.focused_window.as_ref()? {
         Window::Discussion(id) => window_endpoint(id),
         Window::ConversationTree => match state.tree_view.selected.as_ref()? {
@@ -233,13 +239,6 @@ fn focused_endpoint(state: &crate::tui::state::AppState) -> Option<String> {
                 .clone(),
             RowTarget::Queued { window, .. } => window_endpoint(window),
         },
-        Window::ModelPicker => {
-            let picker = &state.model_picker;
-            let selected = picker
-                .selected
-                .or_else(|| picker.results.first().copied())?;
-            Some(state.models.specs.get(selected)?.endpoint.clone())
-        }
         _ => None,
     }
 }
@@ -278,17 +277,6 @@ pub(super) fn poll_openrouter_usage(
             crate::agent::turn::report_usage(endpoint.clone(), None, main_tx.clone());
         }
     }
-}
-
-fn model_picker_hint(state: &crate::tui::state::AppState) -> String {
-    let errors = state.models.errors();
-    if !errors.is_empty() {
-        return errors.join("  ");
-    }
-    if state.agent.endpoints.is_empty() {
-        return "No endpoint: declare one in config.kdl and its token in auth.kdl".to_string();
-    }
-    "Esc:Cancel  Enter:Select".to_string()
 }
 
 /// A message that must not be cut off by the regular hints: a failure, or a pending

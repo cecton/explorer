@@ -1,7 +1,5 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
-use std::sync::Arc;
-use std::sync::atomic::AtomicU64;
 
 /// Dispatcher component for a single pane slot. Holds both inner component types and
 /// delegates to the correct one based on the window its slot holds in `window_stack`, whose
@@ -9,14 +7,11 @@ use std::sync::atomic::AtomicU64;
 pub struct PaneComponent {
     pub id: FlexBoxId,
     pub slot: usize,
-    picker: crate::tui::panes::pickers::window_picker::WindowPickerComponent,
-    theme_picker: crate::tui::panes::pickers::theme_picker::ThemePickerComponent,
     git_log: crate::tui::panes::git_log_pane::GitLogPaneComponent,
     commit_diff: crate::tui::panes::commit_diff_pane::CommitDiffPaneComponent,
     report: crate::tui::panes::report_pane::ReportComponent,
     conversation_tree: crate::tui::panes::conversation_tree::ConversationTreeComponent,
     discussion: crate::tui::panes::discussion::DiscussionComponent,
-    model_picker: crate::tui::panes::pickers::model_picker::ModelPickerComponent,
     preview: crate::tui::panes::preview::FilePreviewComponent,
     terminal: crate::tui::panes::terminal::TerminalPaneComponent,
     /// Origin row of the content area (below title bar), used for scrollbar mouse events.
@@ -39,32 +34,22 @@ impl PaneComponent {
     pub fn new_boxed(
         slot: usize,
         id: FlexBoxId,
-        picker_results_tx: tokio::sync::mpsc::Sender<
-            crate::tui::panes::pickers::window_picker::PickerResultMsg,
-        >,
-        picker_generation: Arc<AtomicU64>,
     ) -> BoxedSafeComponent<crate::tui::state::AppState, crate::signal::AppSignal> {
         use crate::tui::panes::commit_diff_pane::CommitDiffPaneComponent;
         use crate::tui::panes::conversation_tree::ConversationTreeComponent;
         use crate::tui::panes::discussion::DiscussionComponent;
         use crate::tui::panes::git_log_pane::GitLogPaneComponent;
-        use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
-        use crate::tui::panes::pickers::theme_picker::ThemePickerComponent;
-        use crate::tui::panes::pickers::window_picker::WindowPickerComponent;
         use crate::tui::panes::preview::FilePreviewComponent;
         use crate::tui::panes::report_pane::ReportComponent;
         use crate::tui::panes::terminal::TerminalPaneComponent;
         Box::new(Self {
             id,
             slot,
-            picker: WindowPickerComponent::new(id, picker_results_tx, picker_generation),
-            theme_picker: ThemePickerComponent::new(id),
             git_log: GitLogPaneComponent::new(id),
             commit_diff: CommitDiffPaneComponent::new(id),
             report: ReportComponent::new(id),
             conversation_tree: ConversationTreeComponent::new(id),
             discussion: DiscussionComponent::new(id),
-            model_picker: ModelPickerComponent::new(id),
             preview: FilePreviewComponent::new(id),
             terminal: TerminalPaneComponent::new(id, slot),
             content_origin_row: 0,
@@ -170,7 +155,6 @@ impl PaneComponent {
         target: usize,
     ) -> EventPropagation {
         use crate::tui::pane_manager::Window;
-        use crate::tui::theme::HelixTheme;
         match window {
             Window::FilePreview(_) => {
                 state.pane_manager.set_window_scroll(window, target);
@@ -185,42 +169,6 @@ impl PaneComponent {
             | Window::Discussion(_) => {
                 state.pane_manager.set_window_scroll(window, target);
                 state.pane_manager.clamp_scroll(window);
-                EventPropagation::ConsumedRender
-            }
-            Window::WindowPicker => {
-                let scroll_max = state.pane_manager.window_scroll_max(window);
-                if scroll_max == 0 {
-                    return EventPropagation::ConsumedRender;
-                }
-                let idx = target.min(scroll_max.saturating_sub(1));
-                if let Some(key) = state.window_picker.results.get(idx) {
-                    state.window_picker.selected = Some(*key);
-                }
-                EventPropagation::ConsumedRender
-            }
-            Window::ThemePicker => {
-                let scroll_max = state.pane_manager.window_scroll_max(window);
-                if scroll_max == 0 {
-                    return EventPropagation::ConsumedRender;
-                }
-                let idx = target.min(scroll_max.saturating_sub(1));
-                if let Some(name) = state.theme_picker.results.get(idx) {
-                    state.theme_picker.selected = Some(name.clone());
-                    if let Some(theme) = HelixTheme::from_name(name) {
-                        state.theme = theme;
-                    }
-                }
-                EventPropagation::ConsumedRender
-            }
-            Window::ModelPicker => {
-                let scroll_max = state.pane_manager.window_scroll_max(window);
-                if scroll_max == 0 {
-                    return EventPropagation::ConsumedRender;
-                }
-                let idx = target.min(scroll_max.saturating_sub(1));
-                if let Some(key) = state.model_picker.results.get(idx) {
-                    state.model_picker.selected = Some(*key);
-                }
                 EventPropagation::ConsumedRender
             }
             Window::Terminal(id) => {
@@ -251,10 +199,6 @@ impl PaneComponent {
             return 0;
         };
         match window {
-            Window::WindowPicker => self.picker.render_title_row(ops, pane_box, focused, state),
-            Window::ThemePicker => self
-                .theme_picker
-                .render_title_row(ops, pane_box, focused, state),
             Window::FilePreview(_) => self.preview.render_title_row(ops, pane_box, focused, state),
             Window::Terminal(_) => self
                 .terminal
@@ -270,9 +214,6 @@ impl PaneComponent {
                 .discussion
                 .render_title_row(ops, pane_box, focused, state),
             Window::Report(_) => self.report.render_title_row(ops, pane_box, focused, state),
-            Window::ModelPicker => self
-                .model_picker
-                .render_title_row(ops, pane_box, focused, state),
         }
     }
 }
@@ -332,14 +273,11 @@ fn scroll_from_y(
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneComponent {
     fn reset(&mut self) {
-        self.picker.reset();
-        self.theme_picker.reset();
         self.git_log.reset();
         self.commit_diff.reset();
         self.report.reset();
         self.conversation_tree.reset();
         self.discussion.reset();
-        self.model_picker.reset();
         self.preview.reset();
         self.terminal.reset();
     }
@@ -457,18 +395,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
         }
 
         match active_window {
-            Some(Window::WindowPicker) => r3bl_tui::Component::handle_event(
-                &mut self.picker,
-                global_data,
-                input_event,
-                has_focus,
-            ),
-            Some(Window::ThemePicker) => r3bl_tui::Component::handle_event(
-                &mut self.theme_picker,
-                global_data,
-                input_event,
-                has_focus,
-            ),
             Some(Window::FilePreview(_)) => r3bl_tui::Component::handle_event(
                 &mut self.preview,
                 global_data,
@@ -507,12 +433,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
             ),
             Some(Window::Report(_)) => r3bl_tui::Component::handle_event(
                 &mut self.report,
-                global_data,
-                input_event,
-                has_focus,
-            ),
-            Some(Window::ModelPicker) => r3bl_tui::Component::handle_event(
-                &mut self.model_picker,
                 global_data,
                 input_event,
                 has_focus,
@@ -634,16 +554,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                     self.report
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
                 }
-                Some(Window::WindowPicker) => {
-                    self.picker
-                        .render(global_data, inner_bounds, surface_bounds, has_focus)?
-                }
-                Some(Window::ThemePicker) => self.theme_picker.render(
-                    global_data,
-                    inner_bounds,
-                    surface_bounds,
-                    has_focus,
-                )?,
                 Some(Window::FilePreview(_)) => {
                     self.preview
                         .render(global_data, inner_bounds, surface_bounds, has_focus)?
@@ -670,12 +580,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                     self.discussion
                         .render(global_data, content_box, surface_bounds, has_focus)?
                 }
-                Some(Window::ModelPicker) => self.model_picker.render(
-                    global_data,
-                    inner_bounds,
-                    surface_bounds,
-                    has_focus,
-                )?,
                 None => {}
             };
 
@@ -842,8 +746,7 @@ mod tests {
             state.pane_manager.relayout(size);
             let pane_box = *state.pane_manager.slot_box(0).unwrap();
             let mut global_data = crate::tui::test_support::global_data(state);
-            let (tx, _) = tokio::sync::mpsc::channel(1);
-            let mut component = PaneComponent::new_boxed(0, pane_id(0), tx, Arc::default());
+            let mut component = PaneComponent::new_boxed(0, pane_id(0));
             let origin = pane_box.style_adjusted_bounds.origin_pos;
             component
                 .render(

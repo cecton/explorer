@@ -1,6 +1,37 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
 
+/// The colors of an input painted in a bar: the bar itself, its text, and the background of
+/// a mouse selection. A bar already wearing the selection color takes the other title bar's
+/// background for the selection, so the two are never the same cell color.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct BarColors {
+    pub bar: crate::tui::theme::Color,
+    pub text: crate::tui::theme::Color,
+    pub selection: crate::tui::theme::Color,
+}
+
+impl BarColors {
+    /// A pane's title bar: focused it wears `ui.selection`, else the status line's colors.
+    pub(crate) fn in_pane(focused: bool, theme: &crate::tui::theme::HelixTheme) -> Self {
+        let (bar, text) = title_bar_colors(focused, theme);
+        Self {
+            bar,
+            text,
+            selection: title_selection_bg(focused, theme),
+        }
+    }
+
+    /// A modal's query line: the overlay surface, its text and its selected row's bar.
+    pub(crate) fn in_overlay(theme: &crate::tui::theme::HelixTheme) -> Self {
+        Self {
+            bar: theme.ui.overlay,
+            text: theme.ui.overlay_fg,
+            selection: theme.ui.overlay_selected,
+        }
+    }
+}
+
 /// The background and the text of a title bar: a focused one wears the selection.
 pub(crate) fn title_bar_colors(
     focused: bool,
@@ -33,14 +64,14 @@ pub(crate) fn half_height(pane_box: &FlexBox) -> usize {
     .max(1)
 }
 
-/// Paints `input` on the title colors in at most `max_rows` rows; answers the rows taken.
+/// Paints `input` on a bar's colors in at most `max_rows` rows; answers the rows taken.
 pub(crate) fn render_input_title(
     ops: &mut RenderOpIRVec,
     pane_box: &FlexBox,
     input: &mut crate::tui::widgets::input_line::InputLine,
     prompt: &str,
     focused: bool,
-    theme: &crate::tui::theme::HelixTheme,
+    colors: BarColors,
     max_rows: usize,
 ) -> usize {
     let origin = pane_box.style_adjusted_bounds.origin_pos;
@@ -50,8 +81,11 @@ pub(crate) fn render_input_title(
         .col_width
         .as_u16();
     let height = input.height(None, prompt, width, max_rows);
-    let (color_bg, color_fg) = title_bar_colors(focused, theme);
-    let color_selection = title_selection_bg(focused, theme);
+    let BarColors {
+        bar: color_bg,
+        text: color_fg,
+        selection: color_selection,
+    } = colors;
     let bg_style = color_fg.on(color_bg);
     for row_offset in 0..height {
         *ops +=

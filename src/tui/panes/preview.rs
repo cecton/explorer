@@ -1262,7 +1262,7 @@ impl FilePreviewComponent {
                 input.line_mut(),
                 prompt,
                 focused,
-                theme,
+                crate::tui::widgets::title_row::BarColors::in_pane(focused, theme),
                 crate::tui::widgets::title_row::half_height(pane_box),
             )
         } else {

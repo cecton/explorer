@@ -15,15 +15,28 @@ pub(super) fn handle(
     use crate::tui::keymap::Action;
     use crate::tui::pane_manager::Window;
     use crate::tui::panes::git_log_pane::GitLogPaneComponent;
-    use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
     use crate::tui::state::GitLogWindowState;
     use crate::tui::state::LogSource;
     use crate::tui::state::ModelPickerPurpose;
     use crate::tui::state::RowTarget;
-    use crate::tui::theme::HelixTheme;
     crate::tui::app::sync_has_focus(&global_data.state, has_focus);
     let surface_size = crate::tui::app::surface_size(global_data.window_size);
     global_data.state.pane_manager.relayout(surface_size);
+
+    // A modal is in front of every pane and of every shortcut: it takes the event, and no
+    // other path below this line runs. A resize still asks for the frame it moved.
+    if global_data.state.modal.is_some() {
+        if let InputEvent::Resize(_) = input_event {
+            return Ok(EventPropagation::ConsumedRender);
+        }
+        let senders = crate::tui::modal::window_picker::Senders {
+            generation: &app.picker_generation,
+            results_tx: &app.picker_results_tx,
+        };
+        let main_tx = global_data.main_thread_channel_sender.clone();
+        crate::tui::modal::dispatch(&mut global_data.state, input_event, senders, main_tx);
+        return Ok(EventPropagation::ConsumedRender);
+    }
 
     if crate::tui::after_agents::cancel_on_input(&mut global_data.state, &input_event) {
         return Ok(EventPropagation::ConsumedRender);
@@ -69,10 +82,7 @@ pub(super) fn handle(
                 }
             }
             Some(Action::OpenWindowPicker) => {
-                let state = &mut global_data.state;
-                crate::tui::focus::focus_window(state, Window::WindowPicker);
-                state.window_picker.selected = None;
-                state.window_picker.query.clear();
+                crate::tui::modal::window_picker::open(&mut global_data.state);
                 return Ok(EventPropagation::ConsumedRender);
             }
             Some(Action::OpenTerminal) => {
@@ -94,23 +104,7 @@ pub(super) fn handle(
                 return Ok(EventPropagation::ConsumedRender);
             }
             Some(Action::OpenThemePicker) => {
-                let state = &mut global_data.state;
-                if !state
-                    .pane_manager
-                    .window_stack
-                    .contains(&Window::ThemePicker)
-                {
-                    state.saved_theme = state.theme.clone();
-                }
-                let all_themes: Vec<String> =
-                    HelixTheme::theme_names().map(str::to_string).collect();
-                crate::tui::focus::focus_window(state, Window::ThemePicker);
-                state.theme_picker.selected = all_themes
-                    .iter()
-                    .find(|name| name.as_str() == state.theme.name())
-                    .cloned();
-                state.theme_picker.results = all_themes;
-                state.theme_picker.query.clear();
+                crate::tui::modal::theme_picker::open(&mut global_data.state);
                 return Ok(EventPropagation::ConsumedRender);
             }
             Some(Action::OpenGitLog) => {
@@ -170,7 +164,7 @@ pub(super) fn handle(
                 {
                     let main_tx = global_data.main_thread_channel_sender.clone();
                     let purpose = ModelPickerPurpose::Window(id);
-                    ModelPickerComponent::open(&mut global_data.state, main_tx, purpose);
+                    crate::tui::modal::model_picker::open(&mut global_data.state, main_tx, purpose);
                 }
                 return Ok(EventPropagation::ConsumedRender);
             }

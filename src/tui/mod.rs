@@ -3,6 +3,7 @@ pub(crate) mod app;
 mod command_line;
 mod focus;
 pub(crate) mod keymap;
+mod modal;
 mod pane_component;
 mod pane_manager;
 mod panes;

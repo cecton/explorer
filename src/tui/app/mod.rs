@@ -13,10 +13,9 @@ mod tick;
 pub struct AppMain {
     files: Arc<arc_swap::ArcSwap<Vec<Arc<crate::loader::LoadedFile>>>>,
     root: camino::Utf8PathBuf,
-    picker_results_tx:
-        tokio::sync::mpsc::Sender<crate::tui::panes::pickers::window_picker::PickerResultMsg>,
+    picker_results_tx: tokio::sync::mpsc::Sender<crate::tui::modal::window_picker::PickerResultMsg>,
     picker_results_rx:
-        tokio::sync::mpsc::Receiver<crate::tui::panes::pickers::window_picker::PickerResultMsg>,
+        tokio::sync::mpsc::Receiver<crate::tui::modal::window_picker::PickerResultMsg>,
     picker_generation: Arc<AtomicU64>,
     exit_tx: Arc<OnceLock<crate::signal::MainTx>>,
     terminal_event_tx: tokio::sync::mpsc::UnboundedSender<(usize, PtyOutputEvent)>,
@@ -247,6 +246,13 @@ pub async fn run(
                 }
             }
         });
+    }
+
+    // Nothing to restore means the first key of the run has no window to land on: the window
+    // picker opens over the empty frame, as the panes it would list are none.
+    let mut initial_state = initial_state;
+    if initial_state.pane_manager.window_stack.is_empty() {
+        crate::tui::modal::window_picker::open(&mut initial_state);
     }
 
     let app = AppMain::new_boxed(files, root, exit_tx);

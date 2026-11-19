@@ -69,10 +69,7 @@ pub(crate) fn close_window(
         Window::Report(id) => {
             state.reports.remove(&id);
         }
-        Window::ConversationTree
-        | Window::WindowPicker
-        | Window::ThemePicker
-        | Window::ModelPicker => {}
+        Window::ConversationTree => {}
     }
     state.pane_manager.remove_window(&window);
     refocus(state, old);

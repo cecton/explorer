@@ -145,13 +145,14 @@ impl ConversationTreeComponent {
             );
             return 1;
         }
+        let colors = crate::tui::widgets::title_row::BarColors::in_pane(focused, &state.theme);
         crate::tui::widgets::title_row::render_input_title(
             ops,
             pane_box,
             &mut state.tree_view.query,
             "/",
             focused,
-            &state.theme,
+            colors,
             1,
         )
     }

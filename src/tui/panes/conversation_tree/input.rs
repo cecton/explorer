@@ -139,10 +139,10 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
         shown: Shown<'_>,
         input_event: &InputEvent,
     ) -> EventPropagation {
+        use crate::tui::modal::model_picker;
         use crate::tui::pane_manager::Window;
         use crate::tui::panes::conversation_tree::layout::Fold;
         use crate::tui::panes::discussion::DiscussionComponent;
-        use crate::tui::panes::pickers::model_picker::ModelPickerComponent;
         use crate::tui::state::ModelPickerPurpose;
         use crate::tui::state::RowTarget;
         let Shown { rows, index, page } = shown;
@@ -280,7 +280,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             }) => {
                 if let Some(id) = rows.get(index).and_then(|row| row.target.node()) {
                     let purpose = ModelPickerPurpose::Duplicate(id.clone());
-                    ModelPickerComponent::open(state, main_tx, purpose);
+                    model_picker::open(state, main_tx, purpose);
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {

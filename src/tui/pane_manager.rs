@@ -10,18 +10,13 @@ pub const WHEEL_STEP: usize = 3;
 
 /// A pane that can appear in the window stack.
 ///
-/// Each variant is unique: there is at most one `WindowPicker`, one `ThemePicker`, one
-/// `ConversationTree`, and at most one `FilePreview`/`CommitDiff` per key (file/commit id)
-/// in the stack at any time.
+/// Each variant is unique: there is at most one `ConversationTree`, and at most one
+/// `FilePreview`/`CommitDiff` per key (file/commit id) in the stack at any time. The pickers
+/// are not here: they are modals, painted over the panes and taking every event while open.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub enum Window {
     /// Preview of the file identified by `FileKey`.
     FilePreview(crate::loader::FileKey),
-    /// Fuzzy picker of open windows and, once a query is typed, of files by name.
-    #[allow(clippy::enum_variant_names)]
-    WindowPicker,
-    /// Theme picker overlay with live preview.
-    ThemePicker,
     /// Embedded terminal pane identified by its session id.
     Terminal(usize),
     /// Git log pane listing first-parent history of HEAD or a chosen ref.
@@ -33,8 +28,6 @@ pub enum Window {
     ConversationTree,
     /// One conversation node: its prompt and reply. Identified by a window id.
     Discussion(usize),
-    /// Fuzzy picker of `endpoint/model/effort` entries.
-    ModelPicker,
     /// Markdown to read and nothing else: not part of the conversation, never saved.
     Report(usize),
 }
@@ -441,6 +434,7 @@ impl PaneManager {
 
     /// Sets the scroll offset, total content height and rendered page size of `window`
     /// at once: what the last paint showed, for the scrollbar and the paging keys.
+    #[cfg(test)]
     pub fn set_window_view(
         &mut self,
         window: &Window,
@@ -675,7 +669,7 @@ mod tests {
 
     #[test]
     fn single_full_pane_uses_full_height() {
-        let manager = make_manager(&[Window::WindowPicker]);
+        let manager = make_manager(&[Window::ConversationTree]);
         let slots = manager.layout(size(80, 24));
         assert_eq!(slots.len(), 1);
         assert_eq!(
@@ -691,7 +685,7 @@ mod tests {
 
     #[test]
     fn two_columns_for_wide_surface() {
-        let manager = make_manager(&[Window::WindowPicker, Window::ThemePicker]);
+        let manager = make_manager(&[Window::ConversationTree, Window::GitLog(1)]);
         let slots = manager.layout(size(240, 24));
         assert_eq!(slots.len(), 2);
         assert_eq!(
@@ -716,7 +710,7 @@ mod tests {
 
     #[test]
     fn half_panes_stack_in_one_column() {
-        let mut manager = make_manager(&[Window::WindowPicker, Window::ThemePicker]);
+        let mut manager = make_manager(&[Window::ConversationTree, Window::GitLog(1)]);
         for state in manager.window_states.values_mut() {
             state.pane_size = PaneSize::Half;
         }
@@ -745,18 +739,18 @@ mod tests {
     #[test]
     fn last_full_pane_shrinks_to_fill_remaining_space() {
         let mut manager = make_manager(&[
-            Window::WindowPicker,
-            Window::ThemePicker,
+            Window::ConversationTree,
+            Window::GitLog(1),
             Window::Terminal(0),
         ]);
         manager
             .window_states
-            .get_mut(&Window::WindowPicker)
+            .get_mut(&Window::ConversationTree)
             .unwrap()
             .pane_size = PaneSize::Full;
         manager
             .window_states
-            .get_mut(&Window::ThemePicker)
+            .get_mut(&Window::GitLog(1))
             .unwrap()
             .pane_size = PaneSize::Half;
         manager
@@ -842,15 +836,15 @@ mod tests {
 
     #[test]
     fn quarter_and_half_leftover_absorbed_into_last_pane() {
-        let mut manager = make_manager(&[Window::WindowPicker, Window::ThemePicker]);
+        let mut manager = make_manager(&[Window::ConversationTree, Window::GitLog(1)]);
         manager
             .window_states
-            .get_mut(&Window::WindowPicker)
+            .get_mut(&Window::ConversationTree)
             .unwrap()
             .pane_size = PaneSize::Quarter;
         manager
             .window_states
-            .get_mut(&Window::ThemePicker)
+            .get_mut(&Window::GitLog(1))
             .unwrap()
             .pane_size = PaneSize::Half;
         let slots = manager.layout(size(80, 24));
@@ -879,8 +873,8 @@ mod tests {
     #[test]
     fn meaningful_leftover_stays_in_same_column() {
         let mut manager = make_manager(&[
-            Window::WindowPicker,
-            Window::ThemePicker,
+            Window::ConversationTree,
+            Window::GitLog(1),
             Window::Terminal(0),
             Window::Terminal(1),
         ]);
@@ -914,18 +908,18 @@ mod tests {
     #[test]
     fn leftover_always_absorbed_into_last_pane() {
         let mut manager = make_manager(&[
-            Window::WindowPicker,
-            Window::ThemePicker,
+            Window::ConversationTree,
+            Window::GitLog(1),
             Window::Terminal(0),
         ]);
         manager
             .window_states
-            .get_mut(&Window::WindowPicker)
+            .get_mut(&Window::ConversationTree)
             .unwrap()
             .pane_size = PaneSize::Quarter;
         manager
             .window_states
-            .get_mut(&Window::ThemePicker)
+            .get_mut(&Window::GitLog(1))
             .unwrap()
             .pane_size = PaneSize::Quarter;
         manager
@@ -976,25 +970,25 @@ mod tests {
     #[test]
     fn move_forward_and_backward() {
         let mut manager = make_manager(&[
-            Window::WindowPicker,
-            Window::ThemePicker,
+            Window::ConversationTree,
+            Window::GitLog(1),
             Window::Terminal(0),
         ]);
-        manager.move_backward(&Window::WindowPicker);
+        manager.move_backward(&Window::ConversationTree);
         assert_eq!(
             manager.window_stack,
             vec![
-                Window::ThemePicker,
-                Window::WindowPicker,
+                Window::GitLog(1),
+                Window::ConversationTree,
                 Window::Terminal(0)
             ]
         );
-        manager.move_forward(&Window::WindowPicker);
+        manager.move_forward(&Window::ConversationTree);
         assert_eq!(
             manager.window_stack,
             vec![
-                Window::WindowPicker,
-                Window::ThemePicker,
+                Window::ConversationTree,
+                Window::GitLog(1),
                 Window::Terminal(0)
             ]
         );
@@ -1009,26 +1003,26 @@ mod tests {
     #[test]
     fn cycle_focus_forward_wraps() {
         let mut manager = make_manager(&[
-            Window::WindowPicker,
-            Window::ThemePicker,
+            Window::ConversationTree,
+            Window::GitLog(1),
             Window::Terminal(0),
         ]);
         set_all_pane_sizes(&mut manager, PaneSize::Quarter);
         manager.focused_window = Some(Window::Terminal(0));
         manager.relayout(size(80, 24));
         manager.cycle_focus(1);
-        assert_eq!(manager.focused_window, Some(Window::WindowPicker));
+        assert_eq!(manager.focused_window, Some(Window::ConversationTree));
     }
 
     #[test]
     fn cycle_focus_backward_wraps() {
         let mut manager = make_manager(&[
-            Window::WindowPicker,
-            Window::ThemePicker,
+            Window::ConversationTree,
+            Window::GitLog(1),
             Window::Terminal(0),
         ]);
         set_all_pane_sizes(&mut manager, PaneSize::Quarter);
-        manager.focused_window = Some(Window::WindowPicker);
+        manager.focused_window = Some(Window::ConversationTree);
         manager.relayout(size(80, 24));
         manager.cycle_focus(-1);
         assert_eq!(manager.focused_window, Some(Window::Terminal(0)));
@@ -1036,32 +1030,32 @@ mod tests {
 
     #[test]
     fn cycle_focus_empty_visible_is_noop() {
-        let mut manager = make_manager(&[Window::WindowPicker]);
+        let mut manager = make_manager(&[Window::ConversationTree]);
         manager.cycle_focus(1);
-        assert_eq!(manager.focused_window, Some(Window::WindowPicker));
+        assert_eq!(manager.focused_window, Some(Window::ConversationTree));
     }
 
     #[test]
     fn cycle_focus_wraps_to_second_when_focused_not_visible() {
         let mut manager = make_manager(&[
-            Window::WindowPicker,
-            Window::ThemePicker,
+            Window::ConversationTree,
+            Window::GitLog(1),
             Window::Terminal(0),
         ]);
         set_all_pane_sizes(&mut manager, PaneSize::Quarter);
         manager.focused_window = Some(Window::Terminal(99));
         manager.relayout(size(80, 24));
         manager.cycle_focus(1);
-        assert_eq!(manager.focused_window, Some(Window::ThemePicker));
+        assert_eq!(manager.focused_window, Some(Window::GitLog(1)));
     }
 
     #[test]
     fn resize_focused_grows_and_shrinks() {
-        let mut manager = make_manager(&[Window::WindowPicker]);
-        manager.focused_window = Some(Window::WindowPicker);
+        let mut manager = make_manager(&[Window::ConversationTree]);
+        manager.focused_window = Some(Window::ConversationTree);
         manager
             .window_states
-            .get_mut(&Window::WindowPicker)
+            .get_mut(&Window::ConversationTree)
             .unwrap()
             .pane_size = PaneSize::Half;
         manager.resize_focused(ResizeDelta::Shrink);
@@ -1069,7 +1063,7 @@ mod tests {
         assert_eq!(
             manager
                 .window_states
-                .get(&Window::WindowPicker)
+                .get(&Window::ConversationTree)
                 .unwrap()
                 .pane_size,
             PaneSize::Quarter
@@ -1079,7 +1073,7 @@ mod tests {
         assert_eq!(
             manager
                 .window_states
-                .get(&Window::WindowPicker)
+                .get(&Window::ConversationTree)
                 .unwrap()
                 .pane_size,
             PaneSize::Half
@@ -1184,14 +1178,14 @@ mod tests {
 
     #[test]
     fn layout_zero_surface_returns_empty() {
-        let manager = make_manager(&[Window::WindowPicker, Window::ThemePicker]);
+        let manager = make_manager(&[Window::ConversationTree, Window::GitLog(1)]);
         let slots = manager.layout(size(0, 0));
         assert!(slots.is_empty());
     }
 
     #[test]
     fn layout_narrow_surface_uses_one_column() {
-        let mut manager = make_manager(&[Window::WindowPicker, Window::ThemePicker]);
+        let mut manager = make_manager(&[Window::ConversationTree, Window::GitLog(1)]);
         set_all_pane_sizes(&mut manager, PaneSize::Half);
         let slots = manager.layout(size(80, 24));
         assert_eq!(slots.len(), 2);

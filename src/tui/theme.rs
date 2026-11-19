@@ -70,6 +70,7 @@ const DEFAULT_ERROR_FG: Color = Color::from_u8(220, 80, 80);
 const DEFAULT_WARNING_FG: Color = Color::from_u8(220, 170, 80);
 const DEFAULT_MATCH_FG: Color = Color::from_u8(255, 200, 60);
 const DEFAULT_SCROLL_THUMB: Color = Color::from_u8(120, 120, 160);
+const DEFAULT_OVERLAY_BORDER: Color = Color::from_u8(120, 120, 160);
 
 /// The colors of Explorer's own surfaces, resolved once when the theme is built so every
 /// pane paints a role the same way. Each role names the theme keys it is read from.
@@ -116,6 +117,18 @@ pub struct Ui {
     /// `ui.cursorline`, else `selection`; `cursor` when that is the track color, then a
     /// constant when that is still the track color.
     pub scroll_thumb: Color,
+    /// The surface a modal paints over everything else: `ui.popup` bg, then `ui.menu` bg,
+    /// else `statusline_bg`.
+    pub overlay: Color,
+    /// `ui.popup` fg, else `text`.
+    pub overlay_fg: Color,
+    /// The row a modal's selection sits on: `ui.menu.selected` bg, then `ui.selection`,
+    /// else `selection`; `cursor` when that is the surface color, then a constant.
+    pub overlay_selected: Color,
+    /// The text of a selected modal row: `ui.menu.selected` fg, else `text`.
+    pub overlay_selected_fg: Color,
+    /// The modal's frame: `ui.window` fg, then `dim`, else a constant.
+    pub overlay_border: Color,
 }
 
 #[derive(Clone, PartialEq, Debug)]
@@ -239,6 +252,28 @@ impl HelixTheme {
         if scroll_thumb == scroll_track {
             scroll_thumb = DEFAULT_SCROLL_THUMB;
         }
+        let overlay = bg("ui.popup")
+            .or_else(|| bg("ui.menu"))
+            .unwrap_or(statusline_bg);
+        // `ui.selection` and `ui.popup` are the same color in seventeen of the bundled
+        // themes: a bar painted in the surface color is no bar at all.
+        let mut overlay_selected = bg("ui.menu.selected").unwrap_or(selection);
+        if overlay_selected == overlay {
+            overlay_selected = cursor;
+        }
+        if overlay_selected == overlay {
+            overlay_selected = DEFAULT_SELECTION_BG;
+        }
+        // `ui.window` is the border of Helix's own popups. Twenty-four bundled themes paint
+        // it the popup's color, and ten give the popup the background color, where the frame
+        // is the only thing that tells the modal apart from the panes: it always has a color.
+        let mut overlay_border = fg("ui.window").unwrap_or(dim);
+        if overlay_border == overlay {
+            overlay_border = dim;
+        }
+        if overlay_border == overlay {
+            overlay_border = DEFAULT_OVERLAY_BORDER;
+        }
         Ui {
             background,
             text,
@@ -261,6 +296,11 @@ impl HelixTheme {
             ruler,
             scroll_track,
             scroll_thumb,
+            overlay,
+            overlay_fg: fg("ui.popup").unwrap_or(text),
+            overlay_selected,
+            overlay_selected_fg: fg("ui.menu.selected").unwrap_or(text),
+            overlay_border,
         }
     }
 
@@ -610,6 +650,23 @@ mod tests {
         assert_eq!(theme.ui.scroll_track, DEFAULT_STATUSLINE_BG);
         assert_ne!(theme.ui.scroll_thumb, theme.ui.scroll_track);
         assert_eq!(theme.ui.ruler, None);
+        assert_eq!(theme.ui.overlay, DEFAULT_STATUSLINE_BG);
+        assert_eq!(theme.ui.overlay_fg, Color::Default);
+        assert_ne!(theme.ui.overlay_selected, theme.ui.overlay);
+        assert_ne!(theme.ui.overlay_border, theme.ui.overlay);
         assert_eq!(<HelixTheme as Default>::default().ui, theme.ui);
+    }
+
+    /// A modal's bar and frame are what mark it out from the panes, so no bundled theme may
+    /// paint either in the surface color: `ui.selection` tracks `ui.popup` in seventeen of
+    /// them and `ui.window` tracks the popup surface in twenty-four.
+    #[test]
+    fn every_bundled_theme_paints_a_visible_modal() {
+        for name in HelixTheme::theme_names() {
+            let theme = theme(name);
+            let ui = &theme.ui;
+            assert_ne!(ui.overlay_selected, ui.overlay, "{name}: selection bar");
+            assert_ne!(ui.overlay_border, ui.overlay, "{name}: frame");
+        }
     }
 }
