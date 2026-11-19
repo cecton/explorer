@@ -37,7 +37,6 @@ impl ClickTracker {
 
 pub struct FilePreviewComponent {
     id: FlexBoxId,
-    error: Option<(String, Instant)>,
     /// Highlights of the file when the current range drag started; empty when none is active.
     drag_snapshot: Vec<(usize, usize)>,
     drag_start_line: Option<usize>,
@@ -60,7 +59,6 @@ impl FilePreviewComponent {
     pub fn new(id: FlexBoxId) -> Self {
         Self {
             id,
-            error: None,
             drag_snapshot: Vec::new(),
             drag_start_line: None,
             drag_modifier: None,
@@ -74,14 +72,19 @@ impl FilePreviewComponent {
         }
     }
 
-    /// Repaints once the error just set has expired. The 1s `Tick` repaints only on
-    /// change, so nothing else would take the message off the title bar.
+    /// Repaints once the error just set for `key` has expired. The 1s `Tick` repaints only
+    /// on change, so nothing else would take the message off the title bar.
     fn repaint_when_error_expires(
-        &self,
         global_data: &GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
+        key: crate::loader::FileKey,
     ) {
         use crate::signal::AppSignal;
-        if self.error.is_none() {
+        if global_data
+            .state
+            .previews
+            .get(&key)
+            .is_none_or(|preview| preview.error.is_none())
+        {
             return;
         }
         let main_tx = global_data.main_thread_channel_sender.clone();
@@ -91,13 +94,15 @@ impl FilePreviewComponent {
         });
     }
 
-    fn title_text_render(&self, state: &crate::tui::state::AppState) -> Option<(String, bool)> {
-        if let Some((msg, set_at)) = &self.error
+    fn title_text_render(
+        state: &crate::tui::state::AppState,
+        key: crate::loader::FileKey,
+    ) -> (String, bool) {
+        if let Some((msg, set_at)) = state.previews.get(&key).and_then(|p| p.error.as_ref())
             && set_at.elapsed() < ERROR_SHOWN_FOR
         {
-            return Some((msg.clone(), false));
+            return (msg.clone(), false);
         }
-        let key = self.file_key(state)?;
         let snapshot = state.files.load();
         let file = &snapshot[key.0];
         let removed = file.removed.load(std::sync::atomic::Ordering::Relaxed);
@@ -117,7 +122,7 @@ impl FilePreviewComponent {
         } else {
             base
         };
-        Some((title, removed))
+        (title, removed)
     }
 
     /// Returns the highlight range (lo, hi) at the given column within the title bar,
@@ -217,7 +222,7 @@ impl FilePreviewComponent {
                 self.goto_match(state, key, direction);
             }
             Err(e) => {
-                self.error = Some((format!("bad regex: {e}"), Instant::now()));
+                state.preview_mut(key).error = Some((format!("bad regex: {e}"), Instant::now()));
             }
         }
     }
@@ -256,7 +261,7 @@ impl FilePreviewComponent {
             if let Some(search) = state.previews.get_mut(&key).and_then(|p| p.search.as_mut()) {
                 search.current = None;
             }
-            self.error = Some(("no matches".to_string(), Instant::now()));
+            state.preview_mut(key).error = Some(("no matches".to_string(), Instant::now()));
             return;
         }
 
@@ -744,7 +749,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                     }) => {
                         self.commit_search(&mut global_data.state, key);
                         global_data.state.set_input(key, None);
-                        self.repaint_when_error_expires(global_data);
+                        Self::repaint_when_error_expires(global_data, key);
                         return Ok(EventPropagation::ConsumedRender);
                     }
                     InputEvent::Keyboard(KeyPress::Plain {
@@ -839,7 +844,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                     }
                 };
                 self.goto_match(&mut global_data.state, key, direction);
-                self.repaint_when_error_expires(global_data);
+                Self::repaint_when_error_expires(global_data, key);
                 return Ok(EventPropagation::ConsumedRender);
             }
 
@@ -1262,7 +1267,8 @@ impl FilePreviewComponent {
             )
         } else {
             let (title, removed) = self
-                .title_text_render(state)
+                .file_key(state)
+                .map(|key| Self::title_text_render(state, key))
                 .unwrap_or_else(|| (String::new(), false));
             crate::tui::widgets::title_row::render_pane_title(
                 ops, pane_box, &title, removed, theme, focused,
@@ -1713,6 +1719,64 @@ mod paint_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The title a pane slot shows, as `render_title_row` finds it when no input is open.
+    fn slot_title(
+        component: &FilePreviewComponent,
+        state: &crate::tui::state::AppState,
+    ) -> Option<String> {
+        component
+            .file_key(state)
+            .map(|key| FilePreviewComponent::title_text_render(state, key).0)
+    }
+
+    /// A search error belongs to the file it was typed in: after a window is pushed in
+    /// front, the slot shows the new file's name and the error moves with its file.
+    #[test]
+    fn a_search_error_stays_with_its_file_when_the_stack_moves() {
+        use crate::loader::FileKey;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::PreviewInput;
+        use crate::tui::state::SearchDirection;
+        use crate::tui::widgets::input_line::InputLine;
+        let dir = tempfile::tempdir().unwrap();
+        let files = ["a.txt", "b.txt"].map(|name| {
+            let path = dir.path().join(name);
+            std::fs::write(&path, "one\ntwo\n").unwrap();
+            crate::loader::LoadedFile::load(path).unwrap()
+        });
+        let mut state = crate::tui::state::AppState::for_test_with_files(
+            files.to_vec(),
+            camino::Utf8PathBuf::from("/tmp/nowhere"),
+        );
+        let (a, b) = (FileKey(0), FileKey(1));
+        state.pane_manager.push_window(Window::FilePreview(a));
+        let mut first_slot = FilePreviewComponent::new(crate::tui::pane_component::pane_id(0));
+        let second_slot = FilePreviewComponent::new(crate::tui::pane_component::pane_id(1));
+
+        state.set_input(
+            a,
+            Some(PreviewInput::Search(
+                InputLine::with_text("("),
+                SearchDirection::Forward,
+            )),
+        );
+        first_slot.commit_search(&mut state, a);
+        state.set_input(a, None);
+        let error = slot_title(&first_slot, &state).unwrap();
+        assert!(error.starts_with("bad regex"), "{error}");
+
+        state.pane_manager.push_window(Window::FilePreview(b));
+        let title = slot_title(&first_slot, &state).unwrap();
+        assert!(title.ends_with("b.txt"), "{title}");
+        assert_eq!(slot_title(&second_slot, &state), Some(error));
+
+        crate::tui::focus::close_window(&mut state, Window::FilePreview(a));
+        assert!(
+            !state.previews.contains_key(&a),
+            "closing the window drops the error"
+        );
+    }
 
     #[test]
     fn clicks_count_only_while_they_repeat_on_one_cell_in_time() {

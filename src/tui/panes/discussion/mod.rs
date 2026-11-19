@@ -43,7 +43,6 @@ impl Drag {
 
 pub struct DiscussionComponent {
     id: FlexBoxId,
-    cache: Option<crate::tui::panes::discussion::document::DocCache>,
     /// Screen row and column of the document area at last render, and its height, used
     /// for mouse event handling.
     doc_origin: (usize, usize),
@@ -57,7 +56,6 @@ impl DiscussionComponent {
     pub fn new(id: FlexBoxId) -> Self {
         Self {
             id,
-            cache: None,
             doc_origin: (0, 0),
             doc_rows: 0,
             doc_width: 0,
@@ -108,10 +106,7 @@ impl DiscussionComponent {
         pos: VPPos,
     ) -> Option<(crate::tui::selection::DocPart, usize)> {
         use crate::tui::pane_manager::Window;
-        let cache = self
-            .cache
-            .as_ref()
-            .filter(|cache| cache.shows(window_id, discussion))?;
+        let cache = Some(&discussion.doc_cache).filter(|cache| cache.shows(discussion))?;
         let (origin_row, origin_col) = self.doc_origin;
         let row = pos
             .row_index
@@ -500,7 +495,6 @@ impl DiscussionComponent {
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for DiscussionComponent {
     fn reset(&mut self) {
-        self.cache = None;
         self.drag = None;
     }
 
@@ -837,8 +831,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                 discussion,
             );
             let running = output.is_some();
+            let Some(discussion) = state.discussions.get_mut(&window_id) else {
+                return Ok(());
+            };
             let doc = crate::tui::panes::discussion::document::doc_lines(
-                self, discussion, window_id, shown, theme, doc_width,
+                discussion, shown, theme, doc_width,
             );
             let line_count = doc.len();
             let max_scroll = line_count.saturating_sub(doc_rows);
@@ -2380,6 +2377,72 @@ mod tests {
             );
         }
         crate::tui::test_support::global_data(state)
+    }
+
+    /// A window pushed in front moves a Discussion to the next pane slot; the document it
+    /// had laid out goes with it rather than staying with the slot.
+    #[test]
+    fn a_discussion_moved_to_another_slot_is_not_laid_out_again() {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::DiscussionState;
+        let mut state = empty_state();
+        for id in [0, 1] {
+            state.discussions.insert(
+                id,
+                DiscussionState {
+                    reply: "the answer\n\nin two paragraphs".to_string(),
+                    ..Default::default()
+                },
+            );
+        }
+        state.pane_manager.push_window(Window::Discussion(0));
+        let mut global_data = crate::tui::test_support::global_data(state);
+        let frame = FlexBox {
+            style_adjusted_bounds: VPBoundingBox::new(
+                vp_col(0) + vp_row(0),
+                vp_width(40) + vp_height(12),
+            ),
+            ..FlexBox::default()
+        };
+        let render = |component: &mut DiscussionComponent,
+                      global_data: &mut GlobalData<
+            crate::tui::state::AppState,
+            crate::signal::AppSignal,
+        >| {
+            component
+                .render(
+                    global_data,
+                    frame,
+                    frame.style_adjusted_bounds,
+                    &mut HasFocus::default(),
+                )
+                .unwrap();
+        };
+        let rebuilds = |global_data: &GlobalData<
+            crate::tui::state::AppState,
+            crate::signal::AppSignal,
+        >| global_data.state.discussions[&0].doc_cache.rebuilds;
+
+        let mut first_slot = DiscussionComponent::new(crate::tui::pane_component::pane_id(0));
+        let mut second_slot = DiscussionComponent::new(crate::tui::pane_component::pane_id(1));
+        render(&mut first_slot, &mut global_data);
+        let laid_out = rebuilds(&global_data);
+        assert!(laid_out > 0, "the first frame lays the document out");
+
+        global_data
+            .state
+            .pane_manager
+            .push_window(Window::Discussion(1));
+        assert_eq!(
+            global_data.state.pane_manager.slot_window(1),
+            Some(Window::Discussion(0))
+        );
+        render(&mut second_slot, &mut global_data);
+        assert_eq!(
+            rebuilds(&global_data),
+            laid_out,
+            "the window keeps its document in its new slot"
+        );
     }
 
     #[test]

@@ -3,6 +3,7 @@ use std::borrow::Cow;
 /// The texts a window shows, in the order it shows them.
 const SECTIONS: usize = 4;
 
+#[derive(Clone)]
 pub(crate) struct DocLine {
     /// Text the line shows a piece of; `None` for the blank line between two of them.
     pub(crate) part: Option<crate::tui::selection::DocPart>,
@@ -15,7 +16,7 @@ pub(crate) struct DocLine {
 /// The document of one window: the wrapped lines of each text, in the order the window
 /// shows them. Each text is laid out on its own, so a running turn re-wraps what it
 /// changes and leaves the rest of the document alone.
-#[derive(Default)]
+#[derive(Clone, Default)]
 pub(crate) struct Doc {
     prompt: Vec<DocLine>,
     thinking: Vec<DocLine>,
@@ -81,10 +82,10 @@ impl Doc {
 }
 
 /// The lines a window was laid out from, so that a frame at the same width with the same
-/// texts takes the document as it is.
-#[derive(Default)]
+/// texts takes the document as it is. It lives in the window's `DiscussionState`, so a
+/// window that changes pane slot keeps its document.
+#[derive(Clone, Default)]
 pub(crate) struct DocCache {
-    window_id: usize,
     width: usize,
     /// Name of the theme the lines were laid out with: every span carries the color it
     /// was rendered with, so a new theme is a new document.
@@ -103,20 +104,15 @@ pub(crate) struct DocCache {
     work_log_base: usize,
     /// How many texts were laid out again, for the tests that pin the caching.
     #[cfg(test)]
-    rebuilds: usize,
+    pub(crate) rebuilds: usize,
     pub(crate) doc: Doc,
 }
 
 impl DocCache {
     /// Whether the document was laid out from the texts and view settings `discussion`
     /// has now.
-    pub(crate) fn shows(
-        &self,
-        window_id: usize,
-        discussion: &crate::tui::state::DiscussionState,
-    ) -> bool {
-        self.window_id == window_id
-            && self.content_revision == discussion.content_revision
+    pub(crate) fn shows(&self, discussion: &crate::tui::state::DiscussionState) -> bool {
+        self.content_revision == discussion.content_revision
             && self.node_shown == discussion.node.is_some()
             && self.prompt_len == discussion.prompt.len()
             && self.reply_len == discussion.reply.len()
@@ -185,16 +181,29 @@ fn ends_with_blank(lines: &[DocLine]) -> bool {
     lines.last().is_some_and(|line| line.part.is_none())
 }
 
+/// The document of `discussion` at `width`, laid out again only where its texts, the width
+/// or the theme changed since the last frame.
 pub(crate) fn doc_lines<'a>(
-    component: &'a mut crate::tui::panes::discussion::DiscussionComponent,
-    discussion: &crate::tui::state::DiscussionState,
-    window_id: usize,
+    discussion: &'a mut crate::tui::state::DiscussionState,
     work_log_shown: bool,
     theme: &crate::tui::theme::HelixTheme,
     width: usize,
 ) -> &'a Doc {
+    // Taken out for the layout, which reads the texts of the same state.
+    let mut cache = std::mem::take(&mut discussion.doc_cache);
+    lay_out(&mut cache, discussion, work_log_shown, theme, width);
+    discussion.doc_cache = cache;
+    &discussion.doc_cache.doc
+}
+
+fn lay_out(
+    cache: &mut DocCache,
+    discussion: &crate::tui::state::DiscussionState,
+    work_log_shown: bool,
+    theme: &crate::tui::theme::HelixTheme,
+    width: usize,
+) {
     use crate::tui::selection::DocPart;
-    let mut cache = component.cache.take().unwrap_or_default();
     let text_fg = theme.ui.text;
     let dim_fg = theme.ui.dim;
     let shown = discussion.node.is_some();
@@ -202,9 +211,8 @@ pub(crate) fn doc_lines<'a>(
     // A text replaced as a whole may have the length of what it replaced: only the
     // revision tells them apart, and every section is laid out again for it. A new theme
     // is the same kind of change, since every span carries the color it was given.
-    let replaced = cache.content_revision != discussion.content_revision
-        || cache.window_id != window_id
-        || cache.theme != theme.name();
+    let replaced =
+        cache.content_revision != discussion.content_revision || cache.theme != theme.name();
 
     if width_changed
         || replaced
@@ -307,7 +315,6 @@ pub(crate) fn doc_lines<'a>(
         }
     }
 
-    cache.window_id = window_id;
     cache.width = width;
     if cache.theme != theme.name() {
         cache.theme.clear();
@@ -315,8 +322,6 @@ pub(crate) fn doc_lines<'a>(
     }
     cache.content_revision = discussion.content_revision;
     cache.doc.refresh();
-    component.cache = Some(cache);
-    &component.cache.as_ref().unwrap().doc
 }
 
 #[cfg(test)]
@@ -338,12 +343,6 @@ mod tests {
     use super::*;
     use crate::tui::state::DiscussionState;
 
-    fn component() -> crate::tui::panes::discussion::DiscussionComponent {
-        crate::tui::panes::discussion::DiscussionComponent::new(
-            crate::tui::pane_component::pane_id(0),
-        )
-    }
-
     fn discussion(prompt: &str, reply: &str) -> DiscussionState {
         DiscussionState {
             node: Some(crate::conversation::NodeId::new("2026-11-11T10-00-00Z")),
@@ -355,70 +354,53 @@ mod tests {
     }
 
     /// The document of `discussion` at `width`, and how many texts this laid out again.
-    fn layout(
-        component: &mut crate::tui::panes::discussion::DiscussionComponent,
-        discussion: &DiscussionState,
-        width: usize,
-    ) -> (usize, usize) {
+    fn layout(discussion: &mut DiscussionState, width: usize) -> (usize, usize) {
         let theme = crate::tui::theme::HelixTheme::default();
-        let rows = doc_lines(component, discussion, 0, true, &theme, width).len();
-        let laid_out = component.cache.as_ref().unwrap().rebuilds;
-        (rows, laid_out)
+        let rows = doc_lines(discussion, true, &theme, width).len();
+        (rows, discussion.doc_cache.rebuilds)
     }
 
     #[test]
     fn a_frame_with_the_same_texts_lays_nothing_out_again() {
-        let mut component = component();
-        let discussion = discussion("do it", "done");
-        layout(&mut component, &discussion, 40);
-        let (_, laid_out) = layout(&mut component, &discussion, 40);
+        let mut discussion = discussion("do it", "done");
+        layout(&mut discussion, 40);
+        let (_, laid_out) = layout(&mut discussion, 40);
         assert_eq!(laid_out, 4, "one per text, on the first frame only");
     }
 
     #[test]
     fn each_text_is_laid_out_again_only_when_it_changes() {
-        let mut component = component();
         let mut discussion = discussion("do it", "");
         discussion.work_log = vec!["one".to_string()];
-        layout(&mut component, &discussion, 40);
-        assert_eq!(component.cache.as_ref().unwrap().rebuilds, 4);
+        layout(&mut discussion, 40);
+        assert_eq!(discussion.doc_cache.rebuilds, 4);
 
         // A work-log entry appends its lines to the ones already laid out.
         discussion.work_log.push("two".to_string());
-        layout(&mut component, &discussion, 40);
-        assert_eq!(
-            component.cache.as_ref().unwrap().rebuilds,
-            4,
-            "the work log alone"
-        );
+        layout(&mut discussion, 40);
+        assert_eq!(discussion.doc_cache.rebuilds, 4, "the work log alone");
 
         discussion.reply.push_str("the answer\n\nin two paragraphs");
-        layout(&mut component, &discussion, 40);
-        assert_eq!(
-            component.cache.as_ref().unwrap().rebuilds,
-            5,
-            "the reply alone"
-        );
+        layout(&mut discussion, 40);
+        assert_eq!(discussion.doc_cache.rebuilds, 5, "the reply alone");
 
-        layout(&mut component, &discussion, 20);
+        layout(&mut discussion, 20);
         assert_eq!(
-            component.cache.as_ref().unwrap().rebuilds,
-            9,
+            discussion.doc_cache.rebuilds, 9,
             "a new width lays every text out again"
         );
     }
 
     #[test]
     fn a_text_replaced_with_one_of_the_same_length_is_laid_out_again() {
-        let mut component = component();
         let mut discussion = discussion("do it", "first");
-        layout(&mut component, &discussion, 40);
+        layout(&mut discussion, 40);
 
         discussion.show_content("do it".to_string(), "other".to_string(), Vec::new());
-        layout(&mut component, &discussion, 40);
-        assert_eq!(component.cache.as_ref().unwrap().rebuilds, 8);
+        layout(&mut discussion, 40);
+        assert_eq!(discussion.doc_cache.rebuilds, 8);
         use crate::tui::selection::DocPart;
-        let doc = &component.cache.as_ref().unwrap().doc;
+        let doc = &discussion.doc_cache.doc;
         let reply = (0..doc.len())
             .filter_map(|row| doc.line(row))
             .filter(|line| line.part == Some(DocPart::Reply))
@@ -430,12 +412,11 @@ mod tests {
 
     #[test]
     fn the_work_log_lines_carry_the_offsets_of_the_joined_entries() {
-        let mut component = component();
         let mut discussion = discussion("do it", "");
         discussion.work_log = vec!["one".to_string(), "two".to_string()];
-        let (_, _) = layout(&mut component, &discussion, 40);
+        let (_, _) = layout(&mut discussion, 40);
         use crate::tui::selection::DocPart;
-        let doc = &component.cache.as_ref().unwrap().doc;
+        let doc = &discussion.doc_cache.doc;
         let offsets: Vec<usize> = (0..doc.len())
             .filter_map(|row| doc.line(row))
             .filter(|line| line.part == Some(DocPart::WorkLog))
@@ -455,38 +436,36 @@ mod tests {
             mocha.ui.text, light.ui.text,
             "the two themes paint body text differently"
         );
-        let colors = |component: &crate::tui::panes::discussion::DiscussionComponent| {
-            let doc = &component.cache.as_ref().unwrap().doc;
+        let colors = |discussion: &DiscussionState| {
+            let doc = &discussion.doc_cache.doc;
             (0..doc.len())
                 .filter_map(|row| doc.line(row))
                 .flat_map(|line| line.spans.iter().map(|span| span.fg))
                 .collect::<Vec<_>>()
         };
 
-        let mut component = component();
-        let discussion = discussion("do it", "**done**");
-        doc_lines(&mut component, &discussion, 0, true, &mocha, 40);
-        let before = colors(&component);
+        let mut discussion = discussion("do it", "**done**");
+        doc_lines(&mut discussion, true, &mocha, 40);
+        let before = colors(&discussion);
 
-        doc_lines(&mut component, &discussion, 0, true, &light, 40);
-        assert_eq!(component.cache.as_ref().unwrap().rebuilds, 8);
+        doc_lines(&mut discussion, true, &light, 40);
+        assert_eq!(discussion.doc_cache.rebuilds, 8);
         assert_ne!(
             before,
-            colors(&component),
+            colors(&discussion),
             "a new theme repaints the document it was laid out from"
         );
 
         // And the same theme again is not a change.
-        doc_lines(&mut component, &discussion, 0, true, &light, 40);
-        assert_eq!(component.cache.as_ref().unwrap().rebuilds, 8);
+        doc_lines(&mut discussion, true, &light, 40);
+        assert_eq!(discussion.doc_cache.rebuilds, 8);
     }
 
     #[test]
     fn a_row_past_the_end_of_a_document_has_no_line() {
-        let mut component = component();
-        let discussion = discussion("do it", "");
-        let (rows, _) = layout(&mut component, &discussion, 40);
-        let doc = &component.cache.as_ref().unwrap().doc;
+        let mut discussion = discussion("do it", "");
+        let (rows, _) = layout(&mut discussion, 40);
+        let doc = &discussion.doc_cache.doc;
         assert!(doc.line(rows).is_none());
         assert!(doc.line(0).is_some());
     }

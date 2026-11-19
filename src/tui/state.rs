@@ -98,15 +98,21 @@ pub struct DiscussionState {
     pub model: Option<crate::model_spec::ModelSpec>,
     /// Why the last send was refused; cleared by the next edit.
     pub notice: Option<String>,
+    /// The document laid out from the texts above, kept with the window rather than the
+    /// pane slot, so a window moved to another slot is not laid out again.
+    pub(crate) doc_cache: crate::tui::panes::discussion::document::DocCache,
 }
 
 /// What a report window shows: a title and the markdown under it.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 pub struct ReportState {
     pub title: String,
     pub markdown: String,
     /// Moves whenever the report is replaced, which no length tells apart.
     pub revision: u64,
+    /// The markdown last laid out, kept with the window rather than the pane slot, so a
+    /// window moved to another slot is not laid out again.
+    pub(crate) cache: Option<crate::tui::panes::report_pane::ReportCache>,
 }
 
 /// Handed out process-wide for the same reason as `ConversationTree`'s: a report is
@@ -534,11 +540,13 @@ impl AppState {
         self.prune_preview(key);
     }
 
-    /// What closing `key`'s window drops: its search and its input. The highlights stay.
+    /// What closing `key`'s window drops: its search, its input and its error. The
+    /// highlights stay.
     pub fn close_preview(&mut self, key: crate::loader::FileKey) {
         if let Some(preview) = self.previews.get_mut(&key) {
             preview.search = None;
             preview.input = None;
+            preview.error = None;
         }
         self.prune_preview(key);
     }
@@ -797,11 +805,17 @@ pub struct PreviewState {
     pub input: Option<PreviewInput>,
     /// Highlighted line ranges (1-indexed, inclusive), saved by path; kept on close.
     pub highlights: Vec<(usize, usize)>,
+    /// The last search error and when it was set, shown in the title bar for a few
+    /// seconds; dropped when the window closes.
+    pub error: Option<(String, std::time::Instant)>,
 }
 
 impl PreviewState {
     fn is_empty(&self) -> bool {
-        self.search.is_none() && self.input.is_none() && self.highlights.is_empty()
+        self.search.is_none()
+            && self.input.is_none()
+            && self.highlights.is_empty()
+            && self.error.is_none()
     }
 }
 

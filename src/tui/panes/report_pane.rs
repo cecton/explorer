@@ -6,61 +6,50 @@ use r3bl_tui::*;
 /// nothing behind when it closes.
 pub struct ReportComponent {
     id: FlexBoxId,
-    /// The markdown of the report last laid out, kept so a frame at the same width with
-    /// the same report does not render it again. Laying out a long one costs milliseconds.
-    cache: Option<ReportCache>,
-    /// How many times the markdown was laid out, for the test that pins the caching.
-    #[cfg(test)]
-    renders: usize,
 }
 
-struct ReportCache {
-    id: usize,
+/// The markdown of a report as last laid out, kept in its `ReportState` so a frame at the
+/// same width with the same report does not render it again. Laying out a long one costs
+/// milliseconds.
+#[derive(Clone)]
+pub(crate) struct ReportCache {
     revision: u64,
     width: usize,
     theme: String,
     lines: Vec<crate::tui::widgets::markdown::MdLine>,
+    /// How many times the markdown was laid out, for the tests that pin the caching.
+    #[cfg(test)]
+    renders: usize,
 }
 
 impl ReportComponent {
     pub fn new(id: FlexBoxId) -> Self {
-        Self {
-            id,
-            cache: None,
-            #[cfg(test)]
-            renders: 0,
-        }
+        Self { id }
     }
 
     /// The rendered lines of `report` at `width`, laid out only when the report, the width
     /// or the theme moved since the last frame.
     fn lines<'a>(
-        &'a mut self,
-        id: usize,
-        report: &crate::tui::state::ReportState,
+        report: &'a mut crate::tui::state::ReportState,
         width: usize,
         theme: &crate::tui::theme::HelixTheme,
     ) -> &'a [crate::tui::widgets::markdown::MdLine] {
-        let stale = self.cache.as_ref().is_none_or(|cache| {
-            cache.id != id
-                || cache.revision != report.revision
-                || cache.width != width
-                || cache.theme != theme.name()
+        let stale = report.cache.as_ref().is_none_or(|cache| {
+            cache.revision != report.revision || cache.width != width || cache.theme != theme.name()
         });
         if stale {
             #[cfg(test)]
-            {
-                self.renders += 1;
-            }
-            self.cache = Some(ReportCache {
-                id,
+            let renders = report.cache.as_ref().map_or(0, |cache| cache.renders) + 1;
+            report.cache = Some(ReportCache {
                 revision: report.revision,
                 width,
                 theme: theme.name().to_string(),
                 lines: crate::tui::widgets::markdown::render(&report.markdown, theme, width),
+                #[cfg(test)]
+                renders,
             });
         }
-        &self.cache.as_ref().expect("just laid out").lines
+        &report.cache.as_ref().expect("just laid out").lines
     }
 
     fn active_report(&self, state: &crate::tui::state::AppState) -> Option<usize> {
@@ -113,6 +102,7 @@ impl ReportComponent {
                 title,
                 markdown,
                 revision: crate::tui::state::next_report_revision(),
+                cache: None,
             },
         );
         id
@@ -140,9 +130,7 @@ impl ReportComponent {
 }
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for ReportComponent {
-    fn reset(&mut self) {
-        self.cache = None;
-    }
+    fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
         self.id
@@ -203,10 +191,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
             if rows == 0 || width == 0 {
                 return Ok(());
             }
-            let Some(report) = state.reports.get(&id) else {
+            let Some(report) = state.reports.get_mut(&id) else {
                 return Ok(());
             };
-            let lines = self.lines(id, report, width, &state.theme);
+            let lines = Self::lines(report, width, &state.theme);
             let window = Window::Report(id);
             let pane_bg = state.theme.ui.background;
             let text_fg = state.theme.ui.text;
@@ -349,7 +337,13 @@ mod tests {
         let id = ReportComponent::show(&mut state, "t".to_string(), "# one\n\n- a".to_string());
         let mut global_data = crate::tui::test_support::global_data(state);
         let mut component = ReportComponent::new(crate::tui::pane_component::pane_id(0));
-        let laid_out = |component: &ReportComponent| component.renders;
+        // The count lives in the report's own cache, so a replaced report starts it again.
+        let laid_out = |state: &crate::tui::state::AppState| {
+            state.reports[&id]
+                .cache
+                .as_ref()
+                .map_or(0, |cache| cache.renders)
+        };
 
         component
             .render(
@@ -359,7 +353,7 @@ mod tests {
                 &mut HasFocus::default(),
             )
             .unwrap();
-        let first = laid_out(&component);
+        let first = laid_out(&global_data.state);
         assert_eq!(first, 1, "a frame renders the markdown");
         component
             .render(
@@ -370,7 +364,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            laid_out(&component),
+            laid_out(&global_data.state),
             first,
             "a second frame at the same width keeps the rendered lines"
         );
@@ -384,7 +378,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            laid_out(&component),
+            laid_out(&global_data.state),
             first + 1,
             "a new width lays the markdown out again"
         );
@@ -399,7 +393,11 @@ mod tests {
                 &mut HasFocus::default(),
             )
             .unwrap();
-        assert_eq!(laid_out(&component), first + 2, "the width moved back");
+        assert_eq!(
+            laid_out(&global_data.state),
+            first + 2,
+            "the width moved back"
+        );
 
         // A new report of the same length in the same window is a new layout, which no
         // length would tell apart.
@@ -416,8 +414,8 @@ mod tests {
                 &mut HasFocus::default(),
             )
             .unwrap();
-        let second = laid_out(&component);
-        assert_eq!(second, first + 3, "a replaced report is laid out again");
+        let second = laid_out(&global_data.state);
+        assert_eq!(second, 1, "a replaced report is laid out again");
         component
             .render(
                 &mut global_data,
@@ -427,7 +425,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(
-            laid_out(&component),
+            laid_out(&global_data.state),
             second,
             "the frame after a replacement keeps the lines it laid out"
         );
@@ -448,8 +446,60 @@ mod tests {
                     &mut HasFocus::default(),
                 )
                 .unwrap();
-            assert_eq!(laid_out(&component), expected, "{why}");
+            assert_eq!(laid_out(&global_data.state), expected, "{why}");
         }
+    }
+
+    /// A window pushed in front moves the report to the next pane slot; the markdown it
+    /// had laid out goes with it rather than staying with the slot.
+    #[test]
+    fn a_report_moved_to_another_slot_is_not_laid_out_again() {
+        use crate::tui::pane_manager::Window;
+        let mut state = empty_state();
+        let id = ReportComponent::show(&mut state, "t".to_string(), "# one\n\n- a".to_string());
+        let mut global_data = crate::tui::test_support::global_data(state);
+        let renders = |state: &crate::tui::state::AppState| {
+            state.reports[&id]
+                .cache
+                .as_ref()
+                .map_or(0, |cache| cache.renders)
+        };
+        let frame = frame_box(80, 24);
+
+        let mut first_slot = ReportComponent::new(crate::tui::pane_component::pane_id(0));
+        first_slot
+            .render(
+                &mut global_data,
+                frame,
+                frame.style_adjusted_bounds,
+                &mut HasFocus::default(),
+            )
+            .unwrap();
+        assert_eq!(renders(&global_data.state), 1);
+
+        let other = global_data.state.next_id();
+        global_data
+            .state
+            .pane_manager
+            .push_window(Window::Discussion(other));
+        assert_eq!(
+            global_data.state.pane_manager.slot_window(1),
+            Some(Window::Report(id))
+        );
+        let mut second_slot = ReportComponent::new(crate::tui::pane_component::pane_id(1));
+        second_slot
+            .render(
+                &mut global_data,
+                frame,
+                frame.style_adjusted_bounds,
+                &mut HasFocus::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            renders(&global_data.state),
+            1,
+            "the report keeps its lines in its new slot"
+        );
     }
 
     /// The box a pane of `cols` columns and `rows` rows is given, at the terminal's top left.

@@ -60,6 +60,7 @@ impl Span {
 
 /// One rendered row. `bg` set marks a code block line, painted with that background
 /// instead of the pane background.
+#[derive(Clone)]
 pub struct MdLine {
     pub spans: Vec<Span>,
     pub bg: Option<crate::tui::theme::Color>,
