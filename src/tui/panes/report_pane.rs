@@ -13,7 +13,6 @@ pub struct ReportComponent {
 /// milliseconds.
 #[derive(Clone)]
 pub(crate) struct ReportCache {
-    revision: u64,
     width: usize,
     theme: String,
     lines: Vec<crate::tui::widgets::markdown::MdLine>,
@@ -27,21 +26,21 @@ impl ReportComponent {
         Self { id }
     }
 
-    /// The rendered lines of `report` at `width`, laid out only when the report, the width
-    /// or the theme moved since the last frame.
+    /// The rendered lines of `report` at `width`, laid out only when the width or the theme
+    /// moved since the last frame (a new report starts with no cache).
     fn lines<'a>(
         report: &'a mut crate::tui::state::ReportState,
         width: usize,
         theme: &crate::tui::theme::HelixTheme,
     ) -> &'a [crate::tui::widgets::markdown::MdLine] {
-        let stale = report.cache.as_ref().is_none_or(|cache| {
-            cache.revision != report.revision || cache.width != width || cache.theme != theme.name()
-        });
+        let stale = report
+            .cache
+            .as_ref()
+            .is_none_or(|cache| cache.width != width || cache.theme != theme.name());
         if stale {
             #[cfg(test)]
             let renders = report.cache.as_ref().map_or(0, |cache| cache.renders) + 1;
             report.cache = Some(ReportCache {
-                revision: report.revision,
                 width,
                 theme: theme.name().to_string(),
                 lines: crate::tui::widgets::markdown::render(&report.markdown, theme, width),
@@ -101,7 +100,6 @@ impl ReportComponent {
             ReportState {
                 title,
                 markdown,
-                revision: crate::tui::state::next_report_revision(),
                 cache: None,
             },
         );
