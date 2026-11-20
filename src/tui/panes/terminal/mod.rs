@@ -76,7 +76,7 @@ impl TerminalPaneComponent {
                 let rel_col = col - origin_col;
 
                 let word_bounds = global_data.state.with_terminal(term_id, |pane| {
-                    let (line, _) =
+                    let line =
                         crate::tui::panes::terminal::terminal_line_at_viewport_row(pane, rel_row);
                     let (ws, we) =
                         crate::tui::panes::terminal::terminal_word_bounds(&line, rel_col);
@@ -141,25 +141,11 @@ impl TerminalPaneComponent {
                     .saturating_sub(origin_col)
                     .min(col_count.saturating_sub(1));
 
-                let click_anchor_row = global_data.state.text_selection.as_ref().and_then(|sel| {
-                    match sel.click_anchor {
-                        Some(SelPoint::Terminal { viewport_row, .. }) => Some(viewport_row),
-                        _ => None,
-                    }
+                let word_bounds = global_data.state.with_terminal(term_id, |pane| {
+                    let line =
+                        crate::tui::panes::terminal::terminal_line_at_viewport_row(pane, rel_row);
+                    crate::tui::panes::terminal::terminal_word_bounds(&line, rel_col)
                 });
-
-                let (word_bounds, cur_line_len) = global_data
-                    .state
-                    .with_terminal(term_id, |pane| {
-                        let (line, count) =
-                            crate::tui::panes::terminal::terminal_line_at_viewport_row(
-                                pane, rel_row,
-                            );
-                        let wb = crate::tui::panes::terminal::terminal_word_bounds(&line, rel_col);
-                        let cl = click_anchor_row.filter(|&ar| ar != rel_row).map(|_| count);
-                        (Some(wb), cl)
-                    })
-                    .unwrap_or((None, None));
 
                 let state = &mut global_data.state;
                 let Some(ref mut sel) = state.text_selection else {
@@ -203,21 +189,6 @@ impl TerminalPaneComponent {
                             col: word_end,
                         };
                     }
-                    return true;
-                }
-
-                if let Some(anchor_row) = click_anchor_row
-                    && anchor_row != rel_row
-                    && let Some(cur_len) = cur_line_len
-                {
-                    sel.start = SelPoint::Terminal {
-                        viewport_row: anchor_row,
-                        col: 0,
-                    };
-                    sel.end = SelPoint::Terminal {
-                        viewport_row: rel_row,
-                        col: cur_len,
-                    };
                     return true;
                 }
 
@@ -744,7 +715,9 @@ fn render_lines_to_ir(
 }
 
 /// Compute half-open column ranges for each row in a terminal text selection.
-/// `sr`/`er` and `sc`/`ec` are raw coordinates (may be in any order).
+/// `sr`/`er` and `sc`/`ec` are raw coordinates (may be in any order). A selection that
+/// spans rows takes whole lines, whichever way it was dragged; only a selection inside one
+/// row keeps its columns.
 /// `line_lengths` gives the length of each visible row, starting at `line_offset`.
 /// Returns `(row_idx, col_start, col_end)` tuples where `col_start < col_end`.
 fn compute_terminal_selection_ranges(
@@ -755,8 +728,12 @@ fn compute_terminal_selection_ranges(
     line_lengths: &[usize],
     line_offset: usize,
 ) -> Vec<(usize, usize, usize)> {
+    let (sc, ec) = if sr == er {
+        (sc.min(ec), sc.max(ec))
+    } else {
+        (0, usize::MAX)
+    };
     let (sr, er) = (sr.min(er), sr.max(er));
-    let (sc, ec) = (sc.min(ec), sc.max(ec));
 
     let mut ranges = Vec::with_capacity(er - sr + 1);
     for row_idx in sr..=er {
@@ -867,10 +844,10 @@ fn trimmed_pixel_char_line(line: &[PixelChar]) -> (String, usize) {
 pub fn terminal_line_at_viewport_row(
     pane: &crate::tui::state::TerminalPane,
     viewport_row: usize,
-) -> (String, usize) {
+) -> String {
     let scroll_offset = pane.scroll_offset.min(pane.ofs_buf.get_history_len());
     terminal_row(&pane.ofs_buf, scroll_offset, viewport_row)
-        .map_or((String::new(), 0), trimmed_pixel_char_line)
+        .map_or_else(String::new, |line| trimmed_pixel_char_line(line).0)
 }
 
 pub fn extract_terminal_text(
@@ -893,9 +870,6 @@ pub fn extract_terminal_text(
         return None;
     };
     let (sr, er) = (sr.min(er), sr.max(er));
-    let (raw_sc, raw_ec) = (sc, ec);
-    let mut sc = raw_sc.min(raw_ec);
-    let mut ec = raw_sc.max(raw_ec);
 
     let scroll_offset = pane.scroll_offset.min(pane.ofs_buf.get_history_len());
 
@@ -912,11 +886,6 @@ pub fn extract_terminal_text(
 
     if lines.is_empty() {
         return None;
-    }
-
-    if sr != er {
-        sc = 0;
-        ec = line_lengths.last().copied().unwrap_or(0);
     }
 
     let ranges = compute_terminal_selection_ranges(sr, sc, er, ec, &line_lengths, sr);
@@ -945,8 +914,28 @@ pub fn extract_terminal_text(
 
 #[cfg(test)]
 mod tests {
-    use super::{terminal_word_bounds, trimmed_pixel_char_line};
+    use super::{compute_terminal_selection_ranges, terminal_word_bounds, trimmed_pixel_char_line};
     use r3bl_tui::{PixelChar, PixelCharLine, TuiStyle};
+
+    /// Dragging up from (row 3, col 2) to (row 1, col 9) highlights what dragging down
+    /// from (1, 9) to (3, 2) does: whole lines, the same ones that are copied.
+    #[test]
+    fn a_selection_over_several_rows_takes_whole_lines_either_way_it_was_dragged() {
+        let lengths = [10, 4, 8, 6];
+        let down = compute_terminal_selection_ranges(1, 9, 3, 2, &lengths, 0);
+        let up = compute_terminal_selection_ranges(3, 2, 1, 9, &lengths, 0);
+        assert_eq!(down, [(1, 0, 4), (2, 0, 8), (3, 0, 6)]);
+        assert_eq!(up, down);
+    }
+
+    #[test]
+    fn a_selection_inside_one_row_keeps_its_columns() {
+        let lengths = [10, 12];
+        let right = compute_terminal_selection_ranges(1, 3, 1, 8, &lengths, 0);
+        let left = compute_terminal_selection_ranges(1, 8, 1, 3, &lengths, 0);
+        assert_eq!(right, [(1, 3, 8)]);
+        assert_eq!(left, right);
+    }
 
     #[test]
     fn empty_line() {
