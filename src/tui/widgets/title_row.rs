@@ -142,12 +142,13 @@ pub(crate) fn render_pane_title(
 }
 
 fn truncate_title(padded: &str, width: usize) -> String {
-    if padded.chars().count() <= width {
+    if crate::tui::widgets::text_layout::display_width(padded) <= width {
         return padded.to_string();
     }
-    let max_chars = width.saturating_sub(1);
-    let truncated: String = padded.chars().take(max_chars).collect();
-    format!("{truncated}…")
+    format!(
+        "{}…",
+        crate::tui::widgets::text_layout::truncate(padded, width.saturating_sub(1))
+    )
 }
 
 #[cfg(test)]
@@ -158,8 +159,23 @@ mod tests {
     fn truncate_title_never_splits_multibyte_chars() {
         let title = "commit abcdef0 né抵 — summary text that is long";
         let out = truncate_title(title, 21);
-        assert!(out.chars().count() <= 21);
+        assert!(crate::tui::widgets::text_layout::display_width(&out) <= 21);
         assert!(out.ends_with('…'));
         assert_eq!(truncate_title("short", 21), "short");
+    }
+
+    /// A CJK title is two columns a char: it is cut by columns, never past the pane.
+    #[test]
+    fn truncate_title_counts_columns_not_chars() {
+        let title = " 抵抵抵抵抵抵抵抵抵抵 ";
+        for width in 1..=24 {
+            let out = truncate_title(title, width);
+            assert!(
+                crate::tui::widgets::text_layout::display_width(&out) <= width,
+                "{width}: {out:?}"
+            );
+        }
+        assert_eq!(truncate_title(title, 24), title);
+        assert_eq!(truncate_title(title, 9), " 抵抵抵…");
     }
 }

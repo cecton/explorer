@@ -243,10 +243,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
                         );
                         let fg = Self::kind_color(&state.theme, line.kind);
                         let style = fg.on(pane_bg);
-                        let mut text = line.text.clone();
-                        if text.chars().count() > pane_width.saturating_sub(1) {
-                            text = text.chars().take(pane_width.saturating_sub(1)).collect();
-                        }
+                        let text = diff_row_text(&line.text, pane_width);
                         render_ops += RenderOpCommon::ApplyColors(Some(style));
                         render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
                     }
@@ -256,6 +253,12 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
             global_data.pipeline.push(ZOrder::Normal, render_ops);
         });
     }
+}
+
+/// The part of a diff line that fits a pane `pane_width` columns wide, one column short of
+/// its edge.
+fn diff_row_text(text: &str, pane_width: usize) -> String {
+    crate::tui::widgets::text_layout::truncate(text, pane_width.saturating_sub(1))
 }
 
 fn paint_centered(
@@ -281,4 +284,22 @@ fn paint_centered(
     render_ops += RenderOpCommon::MoveCursorPositionRelTo(*origin, vp_col(0) + vp_row(0));
     render_ops += RenderOpCommon::ApplyColors(Some(style));
     render_ops += RenderOpIR::PaintTextWithAttributes(padded.into(), Some(style));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A CJK diff line is cut by columns, a column short of the pane's edge.
+    #[test]
+    fn a_wide_diff_line_never_reaches_the_edge_of_the_pane() {
+        for pane_width in 1..20 {
+            let text = diff_row_text("+抵抵抵抵抵抵抵抵抵抵", pane_width);
+            assert!(
+                crate::tui::widgets::text_layout::display_width(&text)
+                    <= pane_width.saturating_sub(1),
+                "{pane_width}: {text:?}"
+            );
+        }
+    }
 }

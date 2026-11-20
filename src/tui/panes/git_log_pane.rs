@@ -714,7 +714,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                     };
                     let matches = row_matches.get(row_offset).map_or(&[][..], Vec::as_slice);
                     let (left, summary) = log_row_parts(entry, pane_width);
-                    let left_chars = left.chars().count();
+                    let left_width = crate::tui::widgets::text_layout::display_width(&left);
                     render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                         origin,
                         vp_col(0) + vp_row(row_offset as u16),
@@ -748,13 +748,17 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
 
                     if let Some(entry_refs) = history.refs.get(&entry.id) {
                         let available = pane_width
-                            .saturating_sub(left_chars)
-                            .saturating_sub(summary.chars().count())
+                            .saturating_sub(left_width)
+                            .saturating_sub(crate::tui::widgets::text_layout::display_width(
+                                &summary,
+                            ))
                             .saturating_sub(2);
                         let (shown, ellipsis_kind) = layout_refs(available, entry_refs);
-                        let names_width =
-                            shown.iter().map(|r| r.name.chars().count()).sum::<usize>()
-                                + shown.len().saturating_sub(1);
+                        let names_width = shown
+                            .iter()
+                            .map(|r| crate::tui::widgets::text_layout::display_width(&r.name))
+                            .sum::<usize>()
+                            + shown.len().saturating_sub(1);
                         let ell_width = match ellipsis_kind {
                             Some(_) if shown.is_empty() => 3,
                             Some(_) => 4,
@@ -1044,9 +1048,10 @@ fn commit_type_color(theme: &crate::tui::theme::HelixTheme, ty: &str) -> crate::
 
 fn log_row_parts(entry: &crate::git::LogEntry, pane_width: usize) -> (String, String) {
     let gap = "   ";
-    let max_chars = pane_width.saturating_sub(1);
-    let summary_max = max_chars.saturating_sub(entry.date.chars().count() + gap.len());
-    let summary: String = entry.summary.chars().take(summary_max).collect();
+    let max_width = pane_width.saturating_sub(1);
+    let summary_max = max_width
+        .saturating_sub(crate::tui::widgets::text_layout::display_width(&entry.date) + gap.len());
+    let summary = crate::tui::widgets::text_layout::truncate(&entry.summary, summary_max);
     (format!("{}{gap}", entry.date), summary)
 }
 
@@ -1062,7 +1067,10 @@ fn layout_refs(
     let mut shown: Vec<&GitRef> = refs.iter().collect();
     let mut ellipsis_kind: Option<RefKind> = None;
     loop {
-        let mut width = shown.iter().map(|r| r.name.chars().count()).sum::<usize>()
+        let mut width = shown
+            .iter()
+            .map(|r| crate::tui::widgets::text_layout::display_width(&r.name))
+            .sum::<usize>()
             + shown.len().saturating_sub(1);
         if ellipsis_kind.is_some() {
             width += if shown.is_empty() { 3 } else { 4 };
@@ -1192,6 +1200,40 @@ mod tests {
         let (left, summary) = log_row_parts(&entry, 60);
         assert_eq!(left, "1970-01-01 00:00   ");
         assert_eq!(summary, "feat: x");
+    }
+
+    /// A CJK summary is two columns a char: the row stays a column short of the pane's edge.
+    #[test]
+    fn log_row_parts_counts_columns_of_wide_summaries() {
+        let entry = entry_with_summary("抵抵抵抵抵抵抵抵抵抵抵抵抵抵抵抵抵抵抵抵");
+        for pane_width in 20..60 {
+            let (left, summary) = log_row_parts(&entry, pane_width);
+            assert!(
+                crate::tui::widgets::text_layout::display_width(&left)
+                    + crate::tui::widgets::text_layout::display_width(&summary)
+                    < pane_width,
+                "{pane_width}: {summary:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn layout_refs_counts_columns_of_wide_names() {
+        use crate::git::{GitRef, RefKind};
+        let refs: Vec<GitRef> = ["抵抵抵", "抵抵"]
+            .iter()
+            .map(|name| GitRef {
+                name: (*name).to_string(),
+                kind: RefKind::Branch,
+            })
+            .collect();
+        // 6 + 1 + 4 columns do not fit 10: the second name is dropped for an ellipsis (6 + 4).
+        let (shown, ellipsis) = layout_refs(10, &refs);
+        assert_eq!(shown.len(), 1);
+        assert!(ellipsis.is_some());
+        let (shown, ellipsis) = layout_refs(11, &refs);
+        assert_eq!(shown.len(), 2);
+        assert!(ellipsis.is_none());
     }
 
     #[test]
