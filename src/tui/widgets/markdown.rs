@@ -343,11 +343,14 @@ pub(crate) fn render(
                 r.push_blank();
             }
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => {
-                r.flush_content();
+                r.flush_pending_text();
                 r.in_code = true;
                 r.code_bg = r.theme.ui.ruler;
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
+                // An empty fence that opens an item has no line to take its marker,
+                // so the marker is flushed here, before the blank.
+                r.flush_content();
                 r.in_code = false;
                 r.code_bg = None;
                 r.push_blank();
@@ -634,22 +637,29 @@ impl Renderer<'_> {
         }
     }
 
+    /// The lines of a code block, wrapped, behind the prefixes of the items and quotes
+    /// around it. The background stripe covers the whole row, prefix included.
     fn push_code_lines(&mut self, text: &str, src: Option<usize>) {
         let bg = self.code_bg;
         let style = InlineStyle {
             fg: self.fg("markup.raw"),
             ..self.plain
         };
+        let (first, cont) = self.prefixes();
+        let room = self.width.saturating_sub(spans_width(&cont)).max(1);
+        let mut prefix = first;
         for (at, line) in lines_with_offsets(text) {
-            for (piece_at, piece) in crate::tui::widgets::text_layout::wrap(line, self.width) {
-                self.lines.push(MdLine {
-                    spans: vec![Span {
-                        src: src.map(|start| start + at + piece_at),
-                        ..Span::of(piece, style)
-                    }],
-                    bg,
+            for (piece_at, piece) in crate::tui::widgets::text_layout::wrap(line, room) {
+                let mut spans = std::mem::replace(&mut prefix, cont.clone());
+                spans.push(Span {
+                    src: src.map(|start| start + at + piece_at),
+                    ..Span::of(piece, style)
                 });
+                self.lines.push(MdLine { spans, bg });
             }
+        }
+        if let Some(item) = self.items.last_mut() {
+            item.flushed = true;
         }
     }
 
@@ -1137,6 +1147,24 @@ mod tests {
         );
         let blank = texts("- note:\n  <!--\n\n  -->", 40);
         assert_eq!(blank[..3], ["• note:", "  <!--", "  "], "{blank:?}");
+    }
+
+    #[test]
+    fn code_blocks_keep_the_prefix_of_their_item_and_quote() {
+        let item = texts("- item\n\n  ```\n  code\n  ```", 40);
+        assert_eq!(item[..3], ["• item", "", "  code"], "{item:?}");
+        assert_eq!(texts("> ```\n> code\n> ```", 40), ["> code"]);
+        assert_eq!(texts("- ```\n  code\n  ```", 40), ["• code"]);
+        assert_eq!(
+            texts("- a\n- ```\n  ```\n- b", 40),
+            ["• a", "• ", "", "• b"]
+        );
+        assert_eq!(texts("```\ncode\n```", 40), ["code"]);
+        let long = texts("> ```\n> aaaabbbbccccdddd\n> ```", 10);
+        assert!(
+            long.len() > 1 && long.iter().all(|l| l.starts_with("> ")),
+            "{long:?}"
+        );
     }
 
     #[test]
