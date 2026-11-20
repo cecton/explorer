@@ -540,7 +540,8 @@ fn run_highlight(run: &mut CommandRun<'_>) -> Result<(), String> {
 }
 
 /// The ranges `text` names, comma-separated lines (`12`) or ranges (`3-7`) of a file of
-/// `max` lines, clamped to it; what is not a line number is skipped. `None` when nothing
+/// `max` lines; a range ending past the last line is cut to it, one starting past it is
+/// skipped, and what is not a line number is skipped. `None` when nothing
 /// is left.
 fn parse_line_ranges(text: &str, max: usize) -> Option<Vec<(usize, usize)>> {
     if max == 0 {
@@ -553,8 +554,9 @@ fn parse_line_ranges(text: &str, max: usize) -> Option<Vec<(usize, usize)>> {
             else {
                 continue;
             };
-            if start > 0 && end > 0 {
-                ranges.push((start.min(end).min(max), start.max(end).min(max)));
+            let (low, high) = (start.min(end), start.max(end));
+            if low > 0 && low <= max {
+                ranges.push((low, high.min(max)));
             }
         } else if let Ok(line) = spec.parse::<usize>()
             && line > 0
@@ -1465,6 +1467,10 @@ mod tests {
             Some(vec![(4, 9), (50, 60)])
         );
         assert_eq!(parse_line_ranges("0, 70, x, 3-", 60), None);
+        // A range that starts past the last line is skipped like a line past it.
+        assert_eq!(parse_line_ranges("70-80", 60), None);
+        assert_eq!(parse_line_ranges("80-70", 60), None);
+        assert_eq!(parse_line_ranges("70-80, 5", 60), Some(vec![(5, 5)]));
         assert_eq!(parse_line_ranges("x, 5", 60), Some(vec![(5, 5)]));
         assert_eq!(parse_line_ranges("3-7, 1", 0), None);
     }
