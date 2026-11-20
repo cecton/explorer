@@ -17,6 +17,7 @@ pub struct ClaudeTarget {
 }
 
 /// The session a run starts from.
+#[derive(Clone, Copy)]
 pub enum Resume<'a> {
     /// A new session with no history.
     Fresh,
@@ -24,17 +25,6 @@ pub enum Resume<'a> {
     Fork(&'a str),
     /// The node's own session, appended to in place.
     Continue(&'a str),
-}
-
-pub struct Invocation<'a> {
-    pub target: &'a ClaudeTarget,
-    pub root: &'a camino::Utf8Path,
-    /// Appended to Claude Code's own system prompt.
-    pub system: &'a str,
-    pub prompt: &'a str,
-    pub resume: Resume<'a>,
-    /// The MCP servers of the turn; the CLI starts them itself.
-    pub mcp: &'a crate::agent::mcp::McpTools,
 }
 
 /// What every run of one turn has in common: only the prompt and the session it starts
@@ -67,7 +57,7 @@ impl Run<'_> {
                 opening = open_fresh(ancestors, &opening).await?;
                 anchored = true;
             }
-            let attempt = run(&self.invocation(&opening, resume), recorder).await;
+            let attempt = run(&self, &opening, resume, recorder).await;
             match attempt {
                 Ok(()) => return Ok(()),
                 Err(RunError::Failed(error)) => return Err(error),
@@ -85,26 +75,12 @@ impl Run<'_> {
         session: &str,
         recorder: &mut crate::agent::turn::live::Recorder,
     ) -> Result<(), String> {
-        run(
-            &self.invocation(prompt, Resume::Continue(session)),
-            recorder,
-        )
-        .await
-        .map_err(|error| match error {
-            RunError::SessionGone => "the Claude Code session of this turn is gone".to_string(),
-            RunError::Failed(error) => error,
-        })
-    }
-
-    fn invocation<'a>(&'a self, prompt: &'a str, resume: Resume<'a>) -> Invocation<'a> {
-        Invocation {
-            target: self.target,
-            root: self.root,
-            system: self.system,
-            prompt,
-            resume,
-            mcp: self.mcp,
-        }
+        run(&self, prompt, Resume::Continue(session), recorder)
+            .await
+            .map_err(|error| match error {
+                RunError::SessionGone => "the Claude Code session of this turn is gone".to_string(),
+                RunError::Failed(error) => error,
+            })
     }
 }
 
@@ -122,7 +98,7 @@ async fn open_fresh(ancestors: &[camino::Utf8PathBuf], prompt: &str) -> Result<S
     })
 }
 
-pub enum RunError {
+enum RunError {
     /// The session to resume no longer exists; nothing was run.
     SessionGone,
     Failed(String),
@@ -314,7 +290,7 @@ fn parse_line(line: &str) -> Vec<StreamEvent> {
     }
 }
 
-fn arguments(invocation: &Invocation<'_>) -> Vec<String> {
+fn arguments(config: &Run<'_>, resume: Resume<'_>) -> Vec<String> {
     use crate::model_spec::Effort;
     let mut args: Vec<String> = [
         "-p",
@@ -339,25 +315,25 @@ fn arguments(invocation: &Invocation<'_>) -> Vec<String> {
         "--system-prompt-snapshot",
         "off",
         "--append-system-prompt",
-        invocation.system,
+        config.system,
         "--model",
-        &invocation.target.model,
+        &config.target.model,
     ]
     .iter()
     .map(|arg| arg.to_string())
     .collect();
-    if invocation.target.effort != Effort::Default {
+    if config.target.effort != Effort::Default {
         args.push("--effort".to_string());
-        args.push(invocation.target.effort.as_str().to_string());
+        args.push(config.target.effort.as_str().to_string());
     }
-    match invocation.resume {
+    match resume {
         Resume::Fresh => {}
         Resume::Fork(session) => {
             args.extend(["--resume", session, "--fork-session"].map(str::to_string));
         }
         Resume::Continue(session) => args.extend(["--resume", session].map(str::to_string)),
     }
-    let config = invocation.mcp.claude_config(invocation.root);
+    let config = config.mcp.claude_config(config.root);
     args.push("--mcp-config".to_string());
     args.push(config);
     // Only the servers of this repository, never those of the user's own setup.
@@ -407,8 +383,10 @@ fn input_frame(content: &str) -> String {
 
 /// Runs the CLI once and feeds its output to `recorder`. The session id is recorded as
 /// soon as it is known, so it survives a failure or a cancellation.
-pub async fn run(
-    invocation: &Invocation<'_>,
+async fn run(
+    config: &Run<'_>,
+    prompt: &str,
+    resume: Resume<'_>,
     recorder: &mut crate::agent::turn::live::Recorder,
 ) -> Result<(), RunError> {
     use crate::agent::turn::live::Injector;
@@ -419,8 +397,8 @@ pub async fn run(
     // The recorder may come from a run that closed it: a commit nudge, a lost session.
     injector.open();
     let mut child = tokio::process::Command::new("claude")
-        .args(arguments(invocation))
-        .current_dir(invocation.root)
+        .args(arguments(config, resume))
+        .current_dir(config.root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -433,7 +411,7 @@ pub async fn run(
         .map(|pid| crate::util::process::GroupGuard::new(pid, libc::SIGTERM));
 
     // stdin stays open for steering; the run ends once `Settling` lets stdin close.
-    let first = input_frame(invocation.prompt);
+    let first = input_frame(prompt);
     let settled = Arc::new(AtomicBool::new(false));
     let steering = child.stdin.take().map(|mut stdin| {
         let injector = injector.clone();
@@ -518,7 +496,7 @@ pub async fn run(
         None => String::new(),
     };
 
-    let resumed = !matches!(invocation.resume, Resume::Fresh);
+    let resumed = !matches!(resume, Resume::Fresh);
     match outcome {
         Some((None, _)) => Ok(()),
         Some((Some(_), true)) if resumed => Err(RunError::SessionGone),
@@ -703,17 +681,15 @@ mod tests {
             effort: Effort::High,
         };
         let mcp = McpTools::default();
-        let invocation = |resume| Invocation {
+        let config = Run {
             target: &target,
             root: camino::Utf8Path::new("/repo"),
             system: "SYSTEM",
-            prompt: "hi",
-            resume,
             mcp: &mcp,
         };
-        let joined = |invocation: &Invocation<'_>| arguments(invocation).join(" ");
+        let joined = |config: &Run<'_>, resume| arguments(config, resume).join(" ");
 
-        let forked = joined(&invocation(Resume::Fork("abc")));
+        let forked = joined(&config, Resume::Fork("abc"));
         assert!(forked.contains("--model opus --effort high"));
         assert!(!forked.contains("--disallowedTools"));
         assert!(forked.contains("--resume abc --fork-session --mcp-config"));
@@ -725,18 +701,18 @@ mod tests {
         assert!(forked.contains("--setting-sources user"));
         assert!(forked.contains(r#"{"attribution":{"commit":"","pr":""},"disableAllHooks":true}"#));
 
-        let continued = joined(&invocation(Resume::Continue("abc")));
+        let continued = joined(&config, Resume::Continue("abc"));
         assert!(continued.contains("--resume abc --mcp-config"));
 
         let default_effort = ClaudeTarget {
             model: "haiku".to_string(),
             effort: Effort::Default,
         };
-        let fresh = Invocation {
+        let fresh = Run {
             target: &default_effort,
-            ..invocation(Resume::Fresh)
+            ..config
         };
-        let fresh = joined(&fresh);
+        let fresh = joined(&fresh, Resume::Fresh);
         assert!(!fresh.contains("--effort"));
         assert!(!fresh.contains("--resume"));
         assert!(fresh.contains("--setting-sources user"));
