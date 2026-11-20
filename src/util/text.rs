@@ -62,14 +62,8 @@ pub fn word_bounds(content: &str, cursor_byte: usize) -> (usize, usize) {
     } else {
         let is_url_boundary = |c: char| c.is_whitespace() || matches!(c, '"' | ')' | ']' | '}');
         let end = scan_forward!(_i, c => !is_url_boundary(c));
-        let mut url = None;
-        let _start = scan_backward!(i, c => {
-            let res = !is_url_boundary(c);
-            if res && content[i..end].contains("://") && url::Url::parse(&content[i..end]).is_ok() {
-                url = Some((i, end));
-            }
-            res
-        });
+        let run_start = scan_backward!(_i, c => !is_url_boundary(c));
+        let url = url_start(content, run_start, cursor_byte, end).map(|start| (start, end));
         if let Some((start, end)) = url {
             (start, end)
         } else {
@@ -79,6 +73,60 @@ pub fn word_bounds(content: &str, cursor_byte: usize) -> (usize, usize) {
             (start, end)
         }
     }
+}
+
+/// Earliest URL start in `run_start..=cursor` ending at `end`: one parse per scheme class and `:`.
+fn url_start(content: &str, run_start: usize, cursor: usize, end: usize) -> Option<usize> {
+    let run = &content[run_start..end];
+    let last_authority = run.rfind("://")? + run_start;
+    let is_scheme_char = |c: char| c.is_ascii_alphanumeric() || matches!(c, '+' | '-' | '.');
+    let mut scheme_from = 0;
+    for (colon, _) in run.match_indices(':') {
+        let scheme = &run[scheme_from..colon];
+        let scheme_at = run_start + scheme_from;
+        scheme_from = colon + 1;
+        let begin = scheme
+            .char_indices()
+            .rev()
+            .take_while(|&(_, c)| is_scheme_char(c))
+            .last()
+            .map_or(scheme.len(), |(i, _)| i);
+        // `Url::parse` trims the C0 controls in front of its input.
+        let lead = scheme[..begin]
+            .char_indices()
+            .rev()
+            .take_while(|&(_, c)| c <= ' ')
+            .last()
+            .map_or(begin, |(i, _)| i);
+        let mut tried = [false; 3];
+        for (offset, _) in scheme[begin..]
+            .char_indices()
+            .filter(|(_, c)| c.is_ascii_alphabetic())
+        {
+            let start = scheme_at + begin + offset;
+            let from = if offset == 0 { scheme_at + lead } else { start };
+            if from > cursor || from > last_authority {
+                return None;
+            }
+            let name = &scheme[begin + offset..];
+            let class = if name.eq_ignore_ascii_case("file") {
+                0
+            } else if ["http", "https", "ws", "wss", "ftp"]
+                .iter()
+                .any(|special| name.eq_ignore_ascii_case(special))
+            {
+                1
+            } else {
+                2
+            };
+            if !std::mem::replace(&mut tried[class], true)
+                && url::Url::parse(&content[from..end]).is_ok()
+            {
+                return Some(from);
+            }
+        }
+    }
+    None
 }
 
 /// Range covered by a drag from `word`, clicked at `anchor`, to the word under
@@ -191,6 +239,37 @@ mod tests {
     #[test]
     fn word_bounds_multibyte() {
         assert_eq!(of("héllo", 3), "héllo");
+    }
+
+    #[test]
+    fn word_bounds_long_run_without_whitespace_is_fast() {
+        let run = "a".repeat(200_000);
+        let started = std::time::Instant::now();
+        assert_eq!(of(&run, 100_000).len(), run.len());
+        let refused = "x://[".repeat(40_000);
+        assert_eq!(of(&refused, 100_000), "x");
+        let urls = "http://a/".repeat(20_000);
+        assert_eq!(of(&urls, 100_000).len(), urls.len());
+        assert!(started.elapsed() < std::time::Duration::from_secs(2));
+    }
+
+    #[test]
+    fn word_bounds_url_after_junk_scheme_chars() {
+        assert_eq!(of("(1http://a.b/c x", 8), "http://a.b/c");
+        assert_eq!(of("x=\"ssh+git://h/p\" y", 10), "ssh+git://h/p");
+    }
+
+    #[test]
+    fn word_bounds_url_starting_with_control_chars() {
+        // `Url::parse` trims the C0 controls in front of a URL, so the URL starts at them.
+        assert_eq!(of("x=\u{1}http://a.b/c y", 3), "\u{1}http://a.b/c");
+        assert_eq!(of("\u{1}http://a.b/c", 0), "\u{1}http://a.b/c");
+    }
+
+    #[test]
+    fn word_bounds_url_whose_earlier_scheme_letters_do_not_parse() {
+        // `xhttp` is non-special, so its backslash host fails; `http` parses as special.
+        assert_eq!(of("xhttp://a\\b", 8), "http://a\\b");
     }
 
     #[test]
