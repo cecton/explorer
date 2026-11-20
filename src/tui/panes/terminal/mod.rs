@@ -35,7 +35,8 @@ impl TerminalPaneComponent {
         Some(id)
     }
 
-    /// Takes the text selection in terminal `term_id`, except on a mouse-tracking alternate screen.
+    /// Takes the text selection in terminal `term_id`, except while the program has the
+    /// mouse: a grabbed terminal whose program asked for mouse tracking.
     pub(crate) fn handle_mouse(
         &mut self,
         global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
@@ -55,18 +56,22 @@ impl TerminalPaneComponent {
         let in_content_rows = row >= origin_row && row < origin_row + row_count;
         let in_content_cols = col >= origin_col && col < origin_col + col_count;
 
-        let (is_alternate, mouse_tracking_active) = global_data
+        // The mouse belongs to the program once it asked for it and the terminal is
+        // grabbed, on the primary screen as on the alternate one; the selection waits for
+        // the terminal to be ungrabbed.
+        let mouse_tracking_active = global_data
             .state
             .with_terminal(term_id, |p| {
-                let alt = p.ofs_buf.get_terminal_mode().active_screen_buffer
-                    == ActiveScreenBuffer::Alternate;
-                let mouse = p.ofs_buf.get_terminal_mode().mouse_tracking_mode
-                    != MouseTrackingMode::Disabled;
-                (alt, mouse)
+                p.ofs_buf.get_terminal_mode().mouse_tracking_mode != MouseTrackingMode::Disabled
             })
-            .unwrap_or((false, false));
+            .unwrap_or(false);
 
-        let selection_blocked = is_alternate && mouse_tracking_active;
+        let selection_blocked = global_data.state.terminal_grabbed && mouse_tracking_active;
+        // A drag begun before the program took the mouse ends here, so its release reaches
+        // the program and no selection is left behind.
+        if selection_blocked && self.text_drag_active {
+            self.cancel_drag(&mut global_data.state);
+        }
 
         match mouse.kind {
             MouseInputKind::MouseDown(Button::Left)
@@ -916,6 +921,98 @@ pub fn extract_terminal_text(
 mod tests {
     use super::{compute_terminal_selection_ranges, terminal_word_bounds, trimmed_pixel_char_line};
     use r3bl_tui::{PixelChar, PixelCharLine, TuiStyle};
+
+    /// A terminal on the primary screen (no alternate screen) whose program asked for
+    /// mouse tracking, like `fzf --height`.
+    fn tracking_terminal_state(grabbed: bool) -> crate::tui::state::AppState {
+        use crate::tui::state::{AppState, TerminalPane};
+        use r3bl_tui::{OfsBufVT100, vp_height, vp_width};
+        use std::sync::Arc;
+        let mut ofs_buf = OfsBufVT100::new_empty(vp_width(20) + vp_height(5));
+        let _unused = ofs_buf.apply_ansi_bytes("\x1b[?1000h\x1b[?1006hhello world");
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let pane = TerminalPane {
+            ofs_buf,
+            title: None,
+            pty_input_tx: Arc::new(tx),
+            child_killer: None,
+            last_size: vp_width(20) + vp_height(5),
+            is_command_pane: false,
+            exited: false,
+            exit_code: None,
+            exit_signal: None,
+            scroll_offset: 0,
+            cwd: camino::Utf8PathBuf::from("/"),
+            command: None,
+            flush_pending: Default::default(),
+        };
+        let mut state = AppState::for_test(camino::Utf8PathBuf::from("/tmp/nowhere"));
+        state
+            .terminal_panes
+            .insert(0, Arc::new(parking_lot::Mutex::new(pane)));
+        state.terminal_grabbed = grabbed;
+        state
+    }
+
+    fn click_in_terminal(grabbed: bool) -> (bool, bool) {
+        use r3bl_tui::{Button, MouseInput, MouseInputKind, vp_col, vp_row};
+        let mut state = tracking_terminal_state(grabbed);
+        let tracking = state
+            .with_terminal(0, |p| {
+                p.ofs_buf.get_terminal_mode().mouse_tracking_mode
+                    != r3bl_tui::MouseTrackingMode::Disabled
+            })
+            .unwrap();
+        assert!(tracking, "the program asked for the mouse");
+        let mut component = super::TerminalPaneComponent::new(r3bl_tui::FlexBoxId::new(2), 0);
+        component.content_col_count = 20;
+        component.content_row_count = 5;
+        let mut global_data = crate::tui::test_support::global_data(std::mem::take(&mut state));
+        let taken = component.handle_mouse(
+            &mut global_data,
+            MouseInput {
+                pos: vp_col(3) + vp_row(0),
+                kind: MouseInputKind::MouseDown(Button::Left),
+                maybe_modifier_keys: None,
+            },
+            0,
+        );
+        (taken, global_data.state.text_selection.is_some())
+    }
+
+    #[test]
+    fn a_grabbed_terminal_whose_program_has_the_mouse_takes_no_selection() {
+        assert_eq!(click_in_terminal(true), (false, false));
+    }
+
+    #[test]
+    fn an_ungrabbed_terminal_selects_even_when_the_program_asked_for_the_mouse() {
+        assert_eq!(click_in_terminal(false), (true, true));
+    }
+
+    #[test]
+    fn a_drag_that_the_program_takes_the_mouse_during_ends_without_a_selection() {
+        use r3bl_tui::{Button, MouseInput, MouseInputKind, vp_col, vp_row};
+        let mut state = tracking_terminal_state(false);
+        let mut component = super::TerminalPaneComponent::new(r3bl_tui::FlexBoxId::new(2), 0);
+        component.content_col_count = 20;
+        component.content_row_count = 5;
+        let mut global_data = crate::tui::test_support::global_data(std::mem::take(&mut state));
+        let press = MouseInput {
+            pos: vp_col(3) + vp_row(0),
+            kind: MouseInputKind::MouseDown(Button::Left),
+            maybe_modifier_keys: None,
+        };
+        assert!(component.handle_mouse(&mut global_data, press, 0));
+        global_data.state.terminal_grabbed = true;
+        let release = MouseInput {
+            kind: MouseInputKind::MouseUp(Button::Left),
+            ..press
+        };
+        assert!(!component.handle_mouse(&mut global_data, release, 0));
+        assert!(global_data.state.text_selection.is_none());
+        assert!(!global_data.state.mouse_drag_active);
+    }
 
     /// Dragging up from (row 3, col 2) to (row 1, col 9) highlights what dragging down
     /// from (1, 9) to (3, 2) does: whole lines, the same ones that are copied.
