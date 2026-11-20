@@ -754,7 +754,8 @@ mod tests {
     }
 
     fn result(id: &str) -> crate::agent::Message {
-        crate::agent::Message::Tool {
+        use crate::agent::Message;
+        Message::Tool {
             call_id: id.into(),
             name: "read".into(),
             content: "ok".into(),
