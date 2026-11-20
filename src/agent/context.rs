@@ -118,25 +118,34 @@ fn read_transcript(dir: &camino::Utf8Path) -> Option<Vec<crate::agent::Message>>
 }
 
 /// Repairs a transcript that ends inside a round: an assistant message asking for
-/// tool calls whose results never arrived, because the turn died mid-stream or
-/// mid-tool. The calls are answered with a note, so replaying the transcript is a
-/// valid sequence that shows where the work stopped.
+/// tool calls, some or all of whose results never arrived, because the turn died
+/// mid-stream or mid-tool. Each call without a result is answered with a note, so
+/// replaying the transcript is a valid sequence that shows where the work stopped.
 fn repair_tail(messages: &mut Vec<crate::agent::Message>) {
     use crate::agent::Message;
-    let Some(Message::Assistant { tool_calls, .. }) = messages.last_mut() else {
+    let Some(start) = messages
+        .iter()
+        .rposition(|m| matches!(m, Message::Assistant { .. }))
+    else {
         return;
     };
-    if tool_calls.is_empty() {
+    let Message::Assistant { tool_calls, .. } = &messages[start] else {
         return;
-    }
-    let calls = std::mem::take(tool_calls);
-    for call in calls {
-        messages.push(Message::Tool {
-            call_id: call.id,
-            name: call.name,
+    };
+    let missing: Vec<Message> = tool_calls
+        .iter()
+        .filter(|call| {
+            !messages[start + 1..]
+                .iter()
+                .any(|m| matches!(m, Message::Tool { call_id, .. } if *call_id == call.id))
+        })
+        .map(|call| Message::Tool {
+            call_id: call.id.clone(),
+            name: call.name.clone(),
             content: "[interrupted before this call ran]".to_string(),
-        });
-    }
+        })
+        .collect();
+    messages.extend(missing);
 }
 
 /// What an ancestor contributes to the context: its exact transcript, or, when it has
@@ -714,6 +723,10 @@ mod tests {
             },
         ];
         repair_tail(&mut messages);
+        assert!(matches!(
+            &messages[1],
+            Message::Assistant { tool_calls, .. } if tool_calls.len() == 1
+        ));
         assert_eq!(
             messages[2..],
             [Message::Tool {
@@ -730,5 +743,63 @@ mod tests {
         }];
         repair_tail(&mut done);
         assert_eq!(done.len(), 1);
+    }
+
+    fn call(id: &str) -> crate::agent::ToolCall {
+        crate::agent::ToolCall {
+            id: id.into(),
+            name: "read".into(),
+            arguments: serde_json::json!({}),
+        }
+    }
+
+    fn result(id: &str) -> crate::agent::Message {
+        crate::agent::Message::Tool {
+            call_id: id.into(),
+            name: "read".into(),
+            content: "ok".into(),
+        }
+    }
+
+    #[test]
+    fn a_round_cut_after_some_results_answers_only_the_missing_calls() {
+        use crate::agent::Message;
+        let mut messages = vec![
+            Message::Assistant {
+                content: String::new(),
+                tool_calls: vec![call("c1"), call("c2"), call("c3")],
+            },
+            result("c1"),
+        ];
+        repair_tail(&mut messages);
+        let ids: Vec<&str> = messages
+            .iter()
+            .filter_map(|m| match m {
+                Message::Tool { call_id, .. } => Some(call_id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(ids, ["c1", "c2", "c3"]);
+        assert_eq!(messages[1], result("c1"));
+        assert!(matches!(
+            &messages[0],
+            Message::Assistant { tool_calls, .. } if tool_calls.len() == 3
+        ));
+    }
+
+    #[test]
+    fn a_fully_answered_round_is_left_alone() {
+        use crate::agent::Message;
+        let mut messages = vec![
+            Message::Assistant {
+                content: String::new(),
+                tool_calls: vec![call("c1"), call("c2")],
+            },
+            result("c1"),
+            result("c2"),
+        ];
+        let before = messages.clone();
+        repair_tail(&mut messages);
+        assert_eq!(messages, before);
     }
 }
