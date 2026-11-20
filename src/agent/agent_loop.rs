@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 const CHINESE_DETECTION_THRESHOLD: f32 = 0.5;
 
 /// Checks if text contains excessive Chinese characters (CJK Unified Ideographs and
-/// related blocks). Returns true if 50% or more of characters are Chinese.
+/// related blocks). Returns true if more than 50% of characters are Chinese.
 fn has_excessive_chinese(text: &str) -> bool {
     let total_chars: u32 = text.chars().count() as u32;
     if total_chars == 0 {
@@ -265,12 +265,16 @@ async fn run_loop(
             messages.push(answer);
         }
 
-        // Inject correction if excessive Chinese was detected.
-        if detected_chinese {
-            let correction = Message::User {
-                content: "Continue responding in English only. Your previous response contained too much non-English text.".to_string(),
-                injected: true,
-            };
+        // The correction for excessive Chinese joins the history once the round is
+        // complete: right after the answer when it calls no tool, else after the tool
+        // results, since nothing may sit between an assistant's calls and their results.
+        let mut correction = detected_chinese.then(|| Message::User {
+            content: "Continue responding in English only. Your previous response contained too much non-English text.".to_string(),
+            injected: true,
+        });
+        if response.tool_calls.is_empty()
+            && let Some(correction) = correction.take()
+        {
             recorder.message(&correction);
             messages.push(correction);
         }
@@ -333,6 +337,10 @@ async fn run_loop(
             messages.push(result);
         }
         recorder.activity(None);
+        if let Some(correction) = correction {
+            recorder.message(&correction);
+            messages.push(correction);
+        }
         if let Some(call) = failed {
             return Err(stall_error(call, limits.repeat_limit));
         }
@@ -350,9 +358,19 @@ async fn run_loop(
 
 #[cfg(test)]
 mod tests {
-    use super::{Nudge, Stall, StallDetector, nudge_text, signature, stall_text, time_nudge};
+    use super::{
+        Nudge, Stall, StallDetector, has_excessive_chinese, nudge_text, signature, stall_text,
+        time_nudge,
+    };
     use crate::agent::ToolCall;
     use std::time::Duration;
+
+    #[test]
+    fn chinese_is_excessive_only_above_half_of_the_characters() {
+        assert!(has_excessive_chinese("\u{4f60}\u{597d}\u{4e16}a"));
+        assert!(!has_excessive_chinese("\u{4f60}\u{597d}ab"));
+        assert!(!has_excessive_chinese(""));
+    }
 
     fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
         ToolCall {
