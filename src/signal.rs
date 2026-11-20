@@ -110,7 +110,7 @@ pub enum AppSignal {
         usage: crate::usage::Usage,
     },
     /// The shared spinner advances one frame (`SPINNER_INTERVAL`); renders only while
-    /// a turn runs.
+    /// a turn runs and the conversation tree or a Discussion is shown.
     TurnTick,
     /// The turn of `node` started a sub-agent, already recorded in the tree.
     SubagentStarted {

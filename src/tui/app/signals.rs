@@ -145,7 +145,8 @@ pub(super) fn handle(
             AppSignal::TurnTick => {
                 state.spinner_tick =
                     (state.spinner_tick + 1) % crate::agent::turn::SPINNER.len() as u8;
-                if state.running_turns.is_empty() {
+                let visible = state.pane_manager.visible();
+                if !tick_repaints(!state.running_turns.is_empty(), visible) {
                     propagation = EventPropagation::Consumed;
                 }
             }
@@ -248,4 +249,46 @@ pub(super) fn handle(
 
         propagation
     });
+}
+
+/// Whether a `TurnTick` changes anything on screen: only a running turn animates, and
+/// only the conversation tree and a Discussion show it.
+fn tick_repaints(turn_running: bool, visible: &[crate::tui::pane_manager::PaneSlot]) -> bool {
+    use crate::tui::pane_manager::Window;
+    turn_running
+        && visible.iter().any(|slot| {
+            matches!(
+                slot.window,
+                Window::ConversationTree | Window::Discussion(_)
+            )
+        })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::pane_manager::{PaneSlot, Window};
+
+    fn slot(window: Window) -> PaneSlot {
+        PaneSlot {
+            slot: 0,
+            window,
+            box_: FlexBox::default(),
+        }
+    }
+
+    #[test]
+    fn a_tick_repaints_only_for_a_running_turn_shown_by_the_tree_or_a_discussion() {
+        assert!(tick_repaints(true, &[slot(Window::Discussion(1))]));
+        assert!(tick_repaints(
+            true,
+            &[slot(Window::GitLog(1)), slot(Window::ConversationTree)]
+        ));
+        assert!(!tick_repaints(
+            true,
+            &[slot(Window::GitLog(1)), slot(Window::Terminal(2))]
+        ));
+        assert!(!tick_repaints(true, &[]));
+        assert!(!tick_repaints(false, &[slot(Window::Discussion(1))]));
+    }
 }

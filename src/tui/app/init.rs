@@ -80,10 +80,10 @@ pub(super) fn background_services(
         Err(e) => tracing::warn!("watcher failed to start: {e}"),
     }
 
-    // Each period gets its own signal. Only `Tick` and `TurnTick` (while a turn runs)
-    // may repaint, so timers that fire together cost at most two renders. The first
-    // tick of each interval is immediate: the dirty flag and the OpenRouter spending
-    // are loaded at startup.
+    // Each period gets its own signal. Only `Tick` and `TurnTick` (while a turn runs and
+    // the tree or a Discussion is shown) may repaint, so timers that fire together cost
+    // at most two renders. The first tick of each interval is immediate: the dirty flag
+    // and the OpenRouter spending are loaded at startup.
     crate::tui::app::tick::every(&notify_tx, Duration::from_secs(1), AppSignal::Tick);
     crate::tui::app::tick::every(&notify_tx, Duration::from_secs(5), AppSignal::Housekeeping);
     crate::tui::app::tick::every(&notify_tx, Duration::from_secs(60), AppSignal::UsagePollDue);
