@@ -477,14 +477,10 @@ pub(crate) fn render(
                     ..r.plain
                 };
                 let src = verbatim(&text);
+                r.flush_pending_text();
+                // Unlike a paragraph's, its spaces stay as typed.
                 for (at, line) in lines_with_offsets(&text) {
-                    r.lines.push(MdLine {
-                        spans: vec![Span {
-                            src: src.map(|start| start + at),
-                            ..Span::of(line, style)
-                        }],
-                        bg: None,
-                    });
+                    r.push_html_line(line, style, src.map(|start| start + at));
                 }
             }
             pulldown_cmark::Event::FootnoteReference(name) => {
@@ -616,6 +612,26 @@ impl Renderer<'_> {
 
     fn push_content(&mut self, text: &str, style: InlineStyle, src: Option<usize>) {
         push_run(&mut self.content, text, style, src);
+    }
+
+    /// One line of block HTML, wrapped, behind the prefixes of the items and quotes around it.
+    fn push_html_line(&mut self, line: &str, style: InlineStyle, src: Option<usize>) {
+        let (first, cont) = self.prefixes();
+        let room = self.width.saturating_sub(spans_width(&cont)).max(1);
+        let mut prefix = first;
+        for (piece_at, piece) in crate::tui::widgets::text_layout::wrap(line, room) {
+            let mut spans = std::mem::replace(&mut prefix, cont.clone());
+            if !piece.is_empty() {
+                spans.push(Span {
+                    src: src.map(|start| start + piece_at),
+                    ..Span::of(piece, style)
+                });
+            }
+            self.lines.push(MdLine { spans, bg: None });
+        }
+        if let Some(item) = self.items.last_mut() {
+            item.flushed = true;
+        }
     }
 
     fn push_code_lines(&mut self, text: &str, src: Option<usize>) {
@@ -1094,6 +1110,33 @@ mod tests {
             texts("returns Vec<String> here", 40),
             ["returns Vec<String> here"]
         );
+    }
+
+    #[test]
+    fn block_html_keeps_the_prefix_of_its_item_and_quote() {
+        let item = texts("- note:\n  <div>x</div>", 40);
+        assert_eq!(item[0], "• note:");
+        assert_eq!(item[1], "  <div>x</div>", "{item:?}");
+        let quote = texts("> <div>x</div>", 40);
+        assert_eq!(quote, ["> <div>x</div>"]);
+        let bare = texts("- <div>x</div>", 40);
+        assert_eq!(bare, ["• <div>x</div>"]);
+        assert_eq!(texts("<div>x</div>", 40), ["<div>x</div>"]);
+    }
+
+    #[test]
+    fn block_html_keeps_its_spaces_and_wraps_behind_the_prefix() {
+        assert_eq!(
+            texts("<pre>\n  a   b\n    c\n</pre>", 40),
+            ["<pre>", "  a   b", "    c", "</pre>"]
+        );
+        let long = texts("> <div>aaaa bbbb cccc</div>", 12);
+        assert!(
+            long.len() > 1 && long.iter().all(|l| l.starts_with("> ")),
+            "{long:?}"
+        );
+        let blank = texts("- note:\n  <!--\n\n  -->", 40);
+        assert_eq!(blank[..3], ["• note:", "  <!--", "  "], "{blank:?}");
     }
 
     #[test]
