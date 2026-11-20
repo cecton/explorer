@@ -94,15 +94,12 @@ impl FilePreviewComponent {
         });
     }
 
-    fn title_text_render(
+    /// The file's path in the title, and whether the file was deleted: what comes before the
+    /// highlight ranges.
+    fn base_title(
         state: &crate::tui::state::AppState,
         key: crate::loader::FileKey,
     ) -> (String, bool) {
-        if let Some((msg, set_at)) = state.previews.get(&key).and_then(|p| p.error.as_ref())
-            && set_at.elapsed() < ERROR_SHOWN_FOR
-        {
-            return (msg.clone(), false);
-        }
         let snapshot = state.files.load();
         let file = &snapshot[key.0];
         let removed = file.removed.load(std::sync::atomic::Ordering::Relaxed);
@@ -112,16 +109,32 @@ impl FilePreviewComponent {
         } else {
             rel.as_str().to_string()
         };
-        let ranges = state.highlights(key);
-        let title = if !ranges.is_empty() {
-            format!(
-                "{}  [{}]",
-                base,
-                crate::tui::command_line::format_line_ranges(ranges)
-            )
-        } else {
-            base
-        };
+        (base, removed)
+    }
+
+    /// `base` followed by the highlight ranges: `app/x.rs  [3-5, 9]`, or `base` alone.
+    fn title_with_ranges(base: &str, ranges: &[(usize, usize)]) -> String {
+        if ranges.is_empty() {
+            return base.to_string();
+        }
+        format!(
+            "{}  [{}]",
+            base,
+            crate::tui::command_line::format_line_ranges(ranges)
+        )
+    }
+
+    fn title_text_render(
+        state: &crate::tui::state::AppState,
+        key: crate::loader::FileKey,
+    ) -> (String, bool) {
+        if let Some((msg, set_at)) = state.previews.get(&key).and_then(|p| p.error.as_ref())
+            && set_at.elapsed() < ERROR_SHOWN_FOR
+        {
+            return (msg.clone(), false);
+        }
+        let (base, removed) = Self::base_title(state, key);
+        let title = Self::title_with_ranges(&base, state.highlights(key));
         (title, removed)
     }
 
@@ -139,27 +152,17 @@ impl FilePreviewComponent {
             return None;
         }
 
-        let snapshot = state.files.load();
-        let file = &snapshot[key.0];
-        let rel = file.path.strip_prefix(&state.root).unwrap_or(&file.path);
-        let base = if file.removed.load(std::sync::atomic::Ordering::Relaxed) {
-            format!("[deleted] {rel}")
-        } else {
-            rel.as_str().to_string()
-        };
-
-        let title = format!(
-            "{}  [{}]",
-            base,
-            crate::tui::command_line::format_line_ranges(ranges)
-        );
+        let (base, _) = Self::base_title(state, key);
+        let title = Self::title_with_ranges(&base, ranges);
         let padded = format!(" {title} ");
-        if padded.len() > pane_width {
+        if crate::tui::widgets::text_layout::display_width(&padded) > pane_width {
             return None;
         }
 
-        let bracket_pos = padded.find('[')?;
-        let mut current_col = bracket_pos + 1;
+        // The last `[` opens the ranges: the path may hold one (`app/[id]/page.tsx`).
+        let bracket_pos = padded.rfind('[')?;
+        let mut current_col =
+            crate::tui::widgets::text_layout::display_width(&padded[..bracket_pos]) + 1;
         for &(lo, hi) in ranges.iter() {
             let text = if lo == hi {
                 lo.to_string()
@@ -1719,6 +1722,63 @@ mod paint_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A preview of `rel` under a temp root, highlighted on lines 3-5 and 9.
+    fn highlighted_preview(
+        rel: &str,
+    ) -> (
+        tempfile::TempDir,
+        FilePreviewComponent,
+        crate::tui::state::AppState,
+    ) {
+        use crate::tui::pane_manager::Window;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(rel);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, "one\n").unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let file = crate::loader::LoadedFile::load(path).unwrap();
+        let mut state = crate::tui::state::AppState::for_test_with_files(vec![file], root);
+        let key = crate::loader::FileKey(0);
+        state.pane_manager.push_window(Window::FilePreview(key));
+        state.preview_mut(key).highlights = vec![(3, 5), (9, 9)];
+        let component = FilePreviewComponent::new(crate::tui::pane_component::pane_id(0));
+        (dir, component, state)
+    }
+
+    /// The title is ` <path>  [3-5, 9] `; a click lands on the range whose text is under it.
+    fn assert_title_ranges(rel: &str, removed: bool, prefix_width: usize) {
+        let (_dir, component, state) = highlighted_preview(rel);
+        if removed {
+            state.files.load()[0]
+                .removed
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        let at = |col| component.range_at_title_col(&state, col, 200);
+        assert_eq!(at(prefix_width), Some((3, 5)), "{rel}: the 3 of 3-5");
+        assert_eq!(at(prefix_width + 2), Some((3, 5)), "{rel}: the 5 of 3-5");
+        assert_eq!(at(prefix_width + 5), Some((9, 9)), "{rel}: the 9");
+        assert_eq!(at(prefix_width - 1), None, "{rel}: the bracket");
+        assert_eq!(at(prefix_width + 3), None, "{rel}: the comma");
+    }
+
+    #[test]
+    fn a_title_click_finds_the_range_when_the_path_holds_a_bracket() {
+        // " app/[id]/page.tsx  [" is 21 wide.
+        assert_title_ranges("app/[id]/page.tsx", false, 21);
+    }
+
+    #[test]
+    fn a_title_click_finds_the_range_when_the_path_is_not_ascii() {
+        // " café/ü.rs  [" is 13 columns wide, 15 bytes.
+        assert_title_ranges("café/ü.rs", false, 13);
+    }
+
+    #[test]
+    fn a_title_click_finds_the_range_of_a_deleted_file() {
+        // " [deleted] src/main.rs  [" is 25 wide.
+        assert_title_ranges("src/main.rs", true, 25);
+    }
 
     /// The title a pane slot shows, as `render_title_row` finds it when no input is open.
     fn slot_title(
