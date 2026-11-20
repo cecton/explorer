@@ -466,7 +466,6 @@ impl FilePreviewComponent {
                                         byte_offset: bounds.1,
                                     },
                                 )),
-                                active: true,
                             });
                             self.text_drag_active = true;
                             state.mouse_drag_active = true;
@@ -517,7 +516,6 @@ impl FilePreviewComponent {
                                 },
                                 click_anchor: None,
                                 click_word: None,
-                                active: true,
                             });
                             self.text_drag_active = true;
                             state.mouse_drag_active = true;
@@ -993,7 +991,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                 .state
                 .text_selection
                 .as_ref()
-                .is_some_and(|sel| sel.window == window && sel.active);
+                .is_some_and(|sel| sel.window == window);
             if has_text_selection {
                 let (s, e) = match (
                     global_data.state.text_selection.as_ref().unwrap().start,

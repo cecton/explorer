@@ -180,7 +180,6 @@ impl crate::tui::panes::discussion::DiscussionComponent {
                     end: point(word.0),
                     click_anchor: Some(point(anchor)),
                     click_word: Some((point(word.0), point(word.1))),
-                    active: true,
                 });
                 DragKind::Select
             }

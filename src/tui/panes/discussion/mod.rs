@@ -785,7 +785,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                             offset: start,
                         },
                     end: SelPoint::Discussion { offset: end, .. },
-                    active: true,
                     ..
                 }) if *selected == window => Some((*part, (*start.min(end), *start.max(end)))),
                 _ => None,
@@ -1468,7 +1467,6 @@ mod tests {
             end: point(shown.len()),
             click_anchor: Some(point(0)),
             click_word: Some((point(0), point(shown.len()))),
-            active: true,
         });
         state.mouse_drag_active = true;
         (state, component)

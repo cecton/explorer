@@ -49,6 +49,4 @@ pub struct TextSelection {
     pub click_anchor: Option<SelPoint>,
     /// Word boundary pair detected from a single click.
     pub click_word: Option<(SelPoint, SelPoint)>,
-    /// Whether the selection is still being dragged.
-    pub active: bool,
 }

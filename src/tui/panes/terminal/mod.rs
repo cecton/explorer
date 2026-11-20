@@ -114,7 +114,6 @@ impl TerminalPaneComponent {
                                 col: we,
                             },
                         )),
-                        active: true,
                     });
                 } else {
                     state.text_selection = Some(TextSelection {
@@ -129,7 +128,6 @@ impl TerminalPaneComponent {
                         },
                         click_anchor: None,
                         click_word: None,
-                        active: true,
                     });
                 }
                 self.text_drag_active = true;
@@ -550,7 +548,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Termin
 
             let selection_bg = global_data.state.theme.ui.selection;
             let selection_rect = global_data.state.text_selection.as_ref().and_then(|sel| {
-                if sel.window != Window::Terminal(id) || !sel.active {
+                if sel.window != Window::Terminal(id) {
                     return None;
                 }
                 match (sel.start, sel.end) {
