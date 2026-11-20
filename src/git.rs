@@ -71,14 +71,21 @@ pub fn commit_type_prefix(summary: &str) -> Option<(&'static str, usize)> {
     }
 }
 
+/// Classifies each line of a unified diff. `---` and `+++` are file lines only until the
+/// first `@@` of a file: inside a hunk a line starting with `-` or `+` is a removed or
+/// added line, even when its content makes it read `--- x` or `+++ x`. A `diff --git`
+/// line starts the next file.
 pub fn classify_diff(text: &str) -> Vec<DiffLine> {
+    let mut in_hunk = false;
     text.lines()
         .map(|line| {
             let kind = if line.starts_with("diff --git ") || line.starts_with("Binary files ") {
+                in_hunk = false;
                 DiffKind::FileHeader
             } else if line.starts_with("@@") {
+                in_hunk = true;
                 DiffKind::Hunk
-            } else if line.starts_with("+++") || line.starts_with("---") {
+            } else if !in_hunk && (line.starts_with("+++") || line.starts_with("---")) {
                 DiffKind::File
             } else if line.starts_with('+') {
                 DiffKind::Add
@@ -597,6 +604,68 @@ mod tests {
         );
         assert_eq!(lines[0].text, "diff --git a/src/lib.rs b/src/lib.rs");
         assert_eq!(lines[5].text, "-removed line");
+    }
+
+    #[test]
+    fn classify_diff_reads_dashes_and_pluses_inside_a_hunk_as_changes() {
+        let lines = classify_diff(
+            "diff --git a/q.sql b/q.sql\n\
+             --- a/q.sql\n\
+             +++ b/q.sql\n\
+             @@ -1,2 +1,2 @@\n\
+             --- comment\n\
+             +++ x\n\
+             \x20context\n",
+        );
+        let kinds: Vec<DiffKind> = lines.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                DiffKind::FileHeader,
+                DiffKind::File,
+                DiffKind::File,
+                DiffKind::Hunk,
+                DiffKind::Del,
+                DiffKind::Add,
+                DiffKind::Context,
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_diff_gives_every_file_of_a_diff_its_own_header() {
+        let lines = classify_diff(
+            "diff --git a/a b/a\n\
+             --- a/a\n\
+             +++ b/a\n\
+             @@ -1 +1 @@\n\
+             -old\n\
+             +new\n\
+             diff --git a/b b/b\n\
+             --- a/b\n\
+             +++ b/b\n\
+             @@ -1 +1 @@\n\
+             --- old\n\
+             +new\n",
+        );
+        let kinds: Vec<DiffKind> = lines.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                DiffKind::FileHeader,
+                DiffKind::File,
+                DiffKind::File,
+                DiffKind::Hunk,
+                DiffKind::Del,
+                DiffKind::Add,
+                DiffKind::FileHeader,
+                DiffKind::File,
+                DiffKind::File,
+                DiffKind::Hunk,
+                DiffKind::Del,
+                DiffKind::Add,
+            ]
+        );
     }
 
     #[test]
