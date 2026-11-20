@@ -588,7 +588,15 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                 Some(Window::Discussion(_)) => self.discussion.scrollbar_rows(),
                 _ => self.content_row_count as usize,
             };
-            self.scrollbar_row_count = scrollbar_rows as u16;
+            // No scrollbar is painted where the window has no scroll metrics (a terminal on
+            // its alternate screen): that column belongs to the window.
+            let has_scrollbar = active_window
+                .is_some_and(|window| scroll_metrics(&global_data.state, &window).is_some());
+            self.scrollbar_row_count = if has_scrollbar {
+                scrollbar_rows as u16
+            } else {
+                0
+            };
 
             // Render scrollbar on the rightmost column if there's an active window.
             if let Some(window) = active_window {
@@ -779,6 +787,70 @@ mod tests {
                 _ => None,
             }
         }
+    }
+
+    /// A click on the rightmost column of a full-screen program reaches the program.
+    #[test]
+    fn a_click_on_the_rightmost_column_of_a_full_screen_program_reaches_it() {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::{AppState, TerminalPane};
+        let mut ofs_buf = OfsBufVT100::new_empty(vp_width(20) + vp_height(5));
+        let _unused = ofs_buf.apply_ansi_bytes("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let pane = TerminalPane {
+            ofs_buf,
+            title: None,
+            pty_input_tx: std::sync::Arc::new(tx),
+            child_killer: None,
+            last_size: vp_width(20) + vp_height(5),
+            is_command_pane: false,
+            exited: false,
+            exit_code: None,
+            exit_signal: None,
+            scroll_offset: 0,
+            cwd: camino::Utf8PathBuf::from("/"),
+            command: None,
+            flush_pending: Default::default(),
+        };
+        let mut state = AppState::for_test(camino::Utf8PathBuf::from("/tmp/nowhere"));
+        state
+            .terminal_panes
+            .insert(0, std::sync::Arc::new(parking_lot::Mutex::new(pane)));
+        state.pane_manager.push_window(Window::Terminal(0));
+        state.pane_manager.focused_window = Some(Window::Terminal(0));
+        state.terminal_grabbed = true;
+        let size = vp_width(80) + vp_height(24);
+        state.pane_manager.relayout(size);
+        let pane_box = *state.pane_manager.slot_box(0).unwrap();
+        let mut global_data = crate::tui::test_support::global_data(state);
+        let mut component = PaneComponent::new_boxed(0, pane_id(0));
+        let origin = pane_box.style_adjusted_bounds.origin_pos;
+        let bounds = VPBoundingBox::new(origin, size);
+        component
+            .render(&mut global_data, pane_box, bounds, &mut HasFocus::default())
+            .unwrap();
+
+        let last_col = origin.col_index.as_u16()
+            + pane_box
+                .style_adjusted_bounds
+                .bounds_size
+                .col_width
+                .as_u16()
+            - 1;
+        let click = InputEvent::Mouse(MouseInput {
+            pos: vp_col(last_col) + vp_row(origin.row_index.as_u16() + 1),
+            kind: MouseInputKind::MouseDown(Button::Left),
+            maybe_modifier_keys: None,
+        });
+        // Rendering may have sent a resize first; only a write is the click.
+        while rx.try_recv().is_ok() {}
+        component
+            .handle_event(&mut global_data, click, &mut HasFocus::default())
+            .unwrap();
+        assert!(
+            matches!(rx.try_recv(), Ok(PtyInputEvent::Write(_))),
+            "the click was written to the program"
+        );
     }
 
     #[test]
