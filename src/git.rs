@@ -448,58 +448,40 @@ pub fn load_commit_diff(repo: &gix::ThreadSafeRepository, id: [u8; 20]) -> Resul
 
     let mut out = String::new();
     for change in changes {
-        let (location, source_location, old_id, new_id, entry_mode) = match change {
+        let (location, old_id, new_id, entry_mode) = match change {
             gix::object::tree::diff::ChangeDetached::Modification {
                 location,
                 previous_id,
                 id,
                 entry_mode,
                 ..
-            } => (location, None, Some(previous_id), Some(id), entry_mode),
+            } => (location, Some(previous_id), Some(id), entry_mode),
             gix::object::tree::diff::ChangeDetached::Addition {
                 location,
                 id,
                 entry_mode,
                 ..
-            } => (location, None, None, Some(id), entry_mode),
+            } => (location, None, Some(id), entry_mode),
             gix::object::tree::diff::ChangeDetached::Deletion {
                 location,
                 id,
                 entry_mode,
                 ..
-            } => (location, None, Some(id), None, entry_mode),
+            } => (location, Some(id), None, entry_mode),
             gix::object::tree::diff::ChangeDetached::Rewrite {
                 location,
-                source_location,
                 source_id,
                 id,
                 entry_mode,
                 ..
-            } => (
-                location,
-                Some(source_location),
-                Some(source_id),
-                Some(id),
-                entry_mode,
-            ),
+            } => (location, Some(source_id), Some(id), entry_mode),
         };
         let path = String::from_utf8_lossy(&location).into_owned();
         if matches!(
             entry_mode.kind(),
             gix::objs::tree::EntryKind::Blob | gix::objs::tree::EntryKind::BlobExecutable
         ) {
-            let source_path = source_location
-                .as_deref()
-                .map(|p| String::from_utf8_lossy(p).into_owned());
-            file_diff(
-                &repo,
-                algorithm,
-                &path,
-                source_path.as_deref(),
-                old_id,
-                new_id,
-                &mut out,
-            )?;
+            file_diff(&repo, algorithm, &path, old_id, new_id, &mut out)?;
         }
     }
     Ok(out)
@@ -509,7 +491,6 @@ fn file_diff(
     repo: &gix::Repository,
     algorithm: gix::diff::blob::Algorithm,
     path: &str,
-    source_path: Option<&str>,
     old_id: Option<gix::ObjectId>,
     new_id: Option<gix::ObjectId>,
     out: &mut String,
@@ -526,17 +507,14 @@ fn file_diff(
     let old_label = if old_id.is_none() {
         "/dev/null".to_string()
     } else {
-        format!("a/{}", source_path.unwrap_or(path))
+        format!("a/{path}")
     };
     let new_label = if new_id.is_none() {
         "/dev/null".to_string()
     } else {
         format!("b/{path}")
     };
-    out.push_str(&format!(
-        "diff --git a/{} b/{path}\n",
-        source_path.unwrap_or(path)
-    ));
+    out.push_str(&format!("diff --git a/{path} b/{path}\n"));
     out.push_str(&format!("--- {old_label}\n"));
     out.push_str(&format!("+++ {new_label}\n"));
 
@@ -568,8 +546,8 @@ fn blob_data(repo: &gix::Repository, id: gix::ObjectId) -> Result<Vec<u8>, Strin
         .map_err(|e| format!("find object {id}: {e}"))?
         .try_into_blob()
         .map_err(|e| format!("load blob {id}: {e}"))?
-        .data
-        .clone())
+        .detach()
+        .data)
 }
 
 #[cfg(test)]
