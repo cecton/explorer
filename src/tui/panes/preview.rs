@@ -124,14 +124,32 @@ impl FilePreviewComponent {
         )
     }
 
+    /// The search error the title bar shows instead of the path, while it is fresh.
+    fn shown_error(
+        state: &crate::tui::state::AppState,
+        key: crate::loader::FileKey,
+    ) -> Option<&str> {
+        state
+            .previews
+            .get(&key)
+            .and_then(|p| p.error.as_ref())
+            .filter(|(_, set_at)| set_at.elapsed() < ERROR_SHOWN_FOR)
+            .map(|(msg, _)| msg.as_str())
+    }
+
+    /// Whether the title bar shows the highlight ranges: not while an error or the search input
+    /// takes its place.
+    fn shows_ranges(state: &crate::tui::state::AppState, key: crate::loader::FileKey) -> bool {
+        Self::shown_error(state, key).is_none()
+            && state.previews.get(&key).is_none_or(|p| p.input.is_none())
+    }
+
     fn title_text_render(
         state: &crate::tui::state::AppState,
         key: crate::loader::FileKey,
     ) -> (String, bool) {
-        if let Some((msg, set_at)) = state.previews.get(&key).and_then(|p| p.error.as_ref())
-            && set_at.elapsed() < ERROR_SHOWN_FOR
-        {
-            return (msg.clone(), false);
+        if let Some(msg) = Self::shown_error(state, key) {
+            return (msg.to_string(), false);
         }
         let (base, removed) = Self::base_title(state, key);
         let title = Self::title_with_ranges(&base, state.highlights(key));
@@ -139,7 +157,8 @@ impl FilePreviewComponent {
     }
 
     /// Returns the highlight range (lo, hi) at the given column within the title bar,
-    /// or None if no range is at that column or the title is truncated.
+    /// or None if no range is at that column, the title is truncated, or the title shows
+    /// an error or the search input instead of the ranges.
     pub fn range_at_title_col(
         &self,
         state: &crate::tui::state::AppState,
@@ -148,7 +167,7 @@ impl FilePreviewComponent {
     ) -> Option<(usize, usize)> {
         let key = self.file_key(state)?;
         let ranges = state.highlights(key);
-        if ranges.is_empty() {
+        if ranges.is_empty() || !Self::shows_ranges(state, key) {
             return None;
         }
 
@@ -1830,6 +1849,31 @@ mod tests {
     fn a_title_click_finds_the_range_when_the_path_is_not_ascii() {
         // " café/ü.rs  [" is 13 columns wide, 15 bytes.
         assert_title_ranges("café/ü.rs", false, 13);
+    }
+
+    /// While the title shows a search error or the search input is open, no range is under a
+    /// click: the ranges are not painted.
+    #[test]
+    fn a_title_click_finds_no_range_while_the_title_shows_something_else() {
+        use crate::tui::state::PreviewInput;
+        use crate::tui::widgets::input_line::InputLine;
+        let (_dir, component, mut state) = highlighted_preview("src/main.rs");
+        let key = crate::loader::FileKey(0);
+        // " src/main.rs  [" is 15 wide; the 3 of 3-5 is under column 15.
+        assert_eq!(component.range_at_title_col(&state, 15, 200), Some((3, 5)));
+        state.preview_mut(key).error = Some(("no match".to_string(), std::time::Instant::now()));
+        assert_eq!(component.range_at_title_col(&state, 15, 200), None, "error");
+        state.preview_mut(key).error = Some((
+            "old".to_string(),
+            std::time::Instant::now() - ERROR_SHOWN_FOR - Duration::from_secs(1),
+        ));
+        assert_eq!(component.range_at_title_col(&state, 15, 200), Some((3, 5)));
+        state.preview_mut(key).error = None;
+        state.preview_mut(key).input = Some(PreviewInput::Search(
+            InputLine::new(),
+            crate::tui::state::SearchDirection::Forward,
+        ));
+        assert_eq!(component.range_at_title_col(&state, 15, 200), None, "input");
     }
 
     #[test]
