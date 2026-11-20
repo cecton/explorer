@@ -255,7 +255,7 @@ pub fn render(
 ) -> RenderOpIRVec {
     use crate::tui::widgets::fuzzy_picker::{PickerColors, PickerRow};
     let accents = row_accents(&state.theme);
-    let view = crate::tui::modal::list::visible(&mut state.window_picker, list);
+    let view = crate::tui::modal::list::visible(&mut state.window_picker, list.rows);
     let rows: Vec<PickerRow> = state.window_picker.results[view.range]
         .iter()
         .map(|window| row_text(state, window, &accents))

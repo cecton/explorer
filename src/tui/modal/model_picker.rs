@@ -157,7 +157,7 @@ pub fn render(
     list: &crate::tui::modal::ModalBox,
 ) -> RenderOpIRVec {
     use crate::tui::widgets::fuzzy_picker::{PickerColors, PickerRow};
-    let view = crate::tui::modal::list::visible(&mut state.model_picker, list);
+    let view = crate::tui::modal::list::visible(&mut state.model_picker, list.rows);
     let mut rows: Vec<PickerRow> = state.model_picker.results[view.range]
         .iter()
         .map(|index| {

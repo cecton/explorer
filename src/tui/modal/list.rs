@@ -43,13 +43,13 @@ pub(crate) struct Visible {
 /// builds the rows of these, never of all the results.
 pub(crate) fn visible(
     picker_state: &mut crate::tui::widgets::fuzzy_picker::FuzzyPickerState<impl Clone + PartialEq>,
-    list: &crate::tui::modal::ModalBox,
+    rows: usize,
 ) -> Visible {
     let selected = picker_state.selected_index();
-    let scroll = picker_state.scroll_to_selection(selected, list.rows);
+    let scroll = picker_state.scroll_to_selection(selected, rows);
     let count = picker_state.results.len();
     let start = scroll.min(count);
-    let end = start.saturating_add(list.rows).min(count);
+    let end = start.saturating_add(rows).min(count);
     Visible {
         range: start..end,
         selected: selected.saturating_sub(start),

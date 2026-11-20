@@ -658,7 +658,7 @@ mod tests {
             ..Default::default()
         };
         let list = ModalBox::for_modal(size(80, 24), picker.results.len()).list_box();
-        let view = crate::tui::modal::list::visible(&mut picker, &list);
+        let view = crate::tui::modal::list::visible(&mut picker, list.rows);
         assert_eq!(view.range.len(), list.rows);
         assert!(view.range.contains(&12_345));
         assert_eq!(view.range.start + view.selected, 12_345);

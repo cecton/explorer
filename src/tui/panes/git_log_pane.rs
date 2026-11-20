@@ -595,13 +595,16 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
             let mut render_ops = RenderOpIRVec::new();
 
             if branch_picking {
-                // The branch list paints in the pane itself: its rows are read by value, and
-                // only its scroll offset takes a mutable borrow, after every read is done.
+                // Builds only the rows in view, once the scroll offset follows the selection.
                 let (branch_rgb, tag_rgb) = ref_colors(&state.theme);
-                let picked = state.git_logs.get(&window_id).map(|win| {
+                let shown = state.git_logs.get_mut(&window_id).map(|win| {
+                    crate::tui::modal::list::visible(&mut win.branch_picker, total_rows)
+                });
+                let picked = shown.and_then(|view| {
+                    let win = state.git_logs.get(&window_id)?;
                     let rows: Vec<crate::tui::widgets::fuzzy_picker::PickerRow> = win
                         .branch_picker
-                        .results
+                        .results[view.range]
                         .iter()
                         .map(
                             |idx| match state.git_refs.as_ref().and_then(|refs| refs.get(*idx)) {
@@ -621,25 +624,20 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                             },
                         )
                         .collect();
-                    (
+                    Some((
                         rows,
-                        win.branch_picker.selected_index(),
+                        view.selected,
                         win.branch_picker.query.text().to_string(),
-                    )
+                    ))
                 });
                 let colors = crate::tui::widgets::fuzzy_picker::PickerColors::in_pane(&state.theme);
                 if let Some((rows, selected, query)) = picked {
-                    let scroll = state
-                        .git_logs
-                        .get_mut(&window_id)
-                        .map(|win| win.branch_picker.scroll_to_selection(selected, total_rows))
-                        .unwrap_or(0);
                     let picker_ops = self.branch_fuzzy.render_results(
                         colors,
                         &query,
                         &rows,
                         Some(selected),
-                        scroll,
+                        0,
                         vp_col(origin.col_index.as_u16()) + vp_row(origin.row_index.as_u16()),
                         total_rows,
                         pane_width,
@@ -1092,6 +1090,33 @@ fn layout_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// With 20,000 refs a frame builds the rows of the visible ones only, and the selection
+    /// is relative to the first of them.
+    #[test]
+    fn the_branch_list_shows_only_the_rows_in_view() {
+        use crate::tui::widgets::fuzzy_picker::FuzzyPickerState;
+        let shown = |picker: &mut FuzzyPickerState<usize>| {
+            let view = crate::tui::modal::list::visible(picker, 10);
+            (view.range, view.selected)
+        };
+        let mut picker = FuzzyPickerState::<usize> {
+            results: (0..20_000).collect(),
+            selected: Some(0),
+            ..Default::default()
+        };
+        assert_eq!(shown(&mut picker), (0..10, 0));
+        picker.selected = Some(12);
+        assert_eq!(shown(&mut picker), (3..13, 9), "scrolled to it");
+        picker.selected = Some(19_999);
+        assert_eq!(shown(&mut picker), (19_990..20_000, 9));
+        picker.results.truncate(4);
+        picker.selected = Some(2);
+        picker.scroll_offset = 0;
+        assert_eq!(shown(&mut picker), (0..4, 2), "fewer than the rows");
+        picker.results.clear();
+        assert_eq!(shown(&mut picker), (0..0, 0), "no results");
+    }
 
     fn entry_with_summary(summary: &str) -> crate::git::LogEntry {
         use crate::git::LogEntry;
