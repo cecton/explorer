@@ -28,7 +28,7 @@ struct Painted {
 }
 
 impl Painted {
-    /// Graphemes that fit on one row.
+    /// Display columns that fit on one row.
     fn capacity(&self) -> usize {
         self.width.saturating_sub(self.prompt_width).max(1)
     }
@@ -50,30 +50,85 @@ struct VisualRow {
     len: usize,
 }
 
-/// Splits `text` into screen rows of at most `capacity` graphemes. A row that is exactly
-/// full is followed by another one, possibly empty, where the cursor can sit.
+/// Splits `text` into screen rows of at most `capacity` display columns, a row ending
+/// where the next grapheme would not fit (a grapheme wider than a row stands alone). A row
+/// that is exactly full is followed by another one, possibly empty, where the cursor can sit.
 fn visual_rows(text: &str, capacity: usize) -> Vec<VisualRow> {
     use unicode_segmentation::UnicodeSegmentation;
     let capacity = capacity.max(1);
     let mut rows = Vec::new();
     let mut offset = 0;
     for line in text.split('\n') {
-        let count = line.graphemes(true).count();
-        let mut done = 0;
-        loop {
-            let len = (count - done).min(capacity);
-            rows.push(VisualRow {
-                start: offset + done,
-                len,
-            });
-            done += len;
-            if len < capacity {
-                break;
+        let mut start = 0;
+        let mut len = 0;
+        let mut used = 0;
+        for grapheme in line.graphemes(true) {
+            let width = crate::tui::widgets::text_layout::display_width(grapheme);
+            if len > 0 && used + width > capacity {
+                rows.push(VisualRow {
+                    start: offset + start,
+                    len,
+                });
+                start += len;
+                len = 0;
+                used = 0;
             }
+            len += 1;
+            used += width;
         }
-        offset += count + 1;
+        rows.push(VisualRow {
+            start: offset + start,
+            len,
+        });
+        if len > 0 && used >= capacity {
+            rows.push(VisualRow {
+                start: offset + start + len,
+                len: 0,
+            });
+        }
+        offset += start + len + 1;
     }
     rows
+}
+
+/// The index, among `graphemes`, of the one whose columns hold display column `column`;
+/// their count when it is past the last one.
+fn grapheme_at_column<'a>(graphemes: impl Iterator<Item = &'a str>, column: usize) -> usize {
+    let mut used = 0;
+    let mut count = 0;
+    for grapheme in graphemes {
+        let width = crate::tui::widgets::text_layout::display_width(grapheme);
+        if column < used + width {
+            return count;
+        }
+        used += width;
+        count += 1;
+    }
+    count
+}
+
+/// The index, in the text, of the grapheme that display column `column` of `rows[index]`
+/// puts the cursor on. Inside the row's `capacity` but past its graphemes, a row a soft wrap
+/// ends is held on its last grapheme: the position after it is the next row's start, which
+/// would put the cursor one row further down.
+fn cursor_in_row(
+    text: &str,
+    rows: &[VisualRow],
+    index: usize,
+    column: usize,
+    capacity: usize,
+) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let row = rows[index];
+    let at = grapheme_at_column(text.graphemes(true).skip(row.start).take(row.len), column);
+    let wrapped = rows
+        .get(index + 1)
+        .is_some_and(|next| next.start == row.start + row.len);
+    if at == row.len && wrapped && column < capacity {
+        row.start + row.len.saturating_sub(1)
+    } else {
+        row.start + at
+    }
 }
 
 fn row_of_cursor(rows: &[VisualRow], cursor: usize) -> usize {
@@ -116,6 +171,7 @@ impl InputLine {
     /// they differ past the end of a row. `None` outside the cells the input was last
     /// painted on, unless `clamp` brings the position back into them.
     fn locate(&self, pos: VPPos, clamp: bool) -> Option<(usize, usize)> {
+        use unicode_segmentation::UnicodeSegmentation;
         let painted = self.painted?;
         let (row, col) = (pos.row_index.as_usize(), pos.col_index.as_usize());
         let inside = (painted.row..painted.row + painted.rows).contains(&row)
@@ -127,14 +183,15 @@ impl InputLine {
             .saturating_sub(painted.row)
             .min(painted.rows.saturating_sub(1));
         let column = col.saturating_sub(painted.col + painted.prompt_width);
-        let rows = visual_rows(&self.text, painted.capacity());
-        Some(match rows.get(self.scroll + screen_row) {
-            Some(row) => (
-                row.start + column.min(row.len),
-                row.start + column.min(row.len.saturating_sub(1)),
-            ),
+        let capacity = painted.capacity();
+        let rows = visual_rows(&self.text, capacity);
+        let index = self.scroll + screen_row;
+        Some(match rows.get(index) {
+            Some(row) => {
+                let cursor = cursor_in_row(&self.text, &rows, index, column, capacity);
+                (cursor, cursor.min(row.start + row.len.saturating_sub(1)))
+            }
             None => {
-                use unicode_segmentation::UnicodeSegmentation;
                 let end = self.text.graphemes(true).count();
                 (end, end)
             }
@@ -234,6 +291,7 @@ impl InputLine {
     /// Moves the cursor one screen row up or down, keeping its column. Returns false at
     /// the first or last row so the caller can use the key for something else.
     fn move_vertically(&mut self, down: bool) -> bool {
+        use unicode_segmentation::UnicodeSegmentation;
         let capacity = self
             .painted
             .map_or(usize::MAX, |painted| painted.capacity());
@@ -247,11 +305,17 @@ impl InputLine {
                 None => return false,
             }
         };
-        let Some(row) = rows.get(target) else {
+        if target >= rows.len() {
             return false;
-        };
-        let column = self.cursor - rows[current].start;
-        self.cursor = row.start + column.min(row.len);
+        }
+        let column: usize = self
+            .text
+            .graphemes(true)
+            .skip(rows[current].start)
+            .take(self.cursor - rows[current].start)
+            .map(crate::tui::widgets::text_layout::display_width)
+            .sum();
+        self.cursor = cursor_in_row(&self.text, &rows, target, column, capacity);
         true
     }
 
@@ -529,8 +593,8 @@ impl InputLine {
         width: u16,
         max_rows: usize,
     ) -> usize {
-        use unicode_segmentation::UnicodeSegmentation;
-        let capacity = (width as usize).saturating_sub(prompt.graphemes(true).count());
+        let capacity = (width as usize)
+            .saturating_sub(crate::tui::widgets::text_layout::display_width(prompt));
         let shown = format!("{}{}", self.text, placeholder.unwrap_or_default());
         visual_rows(&shown, capacity).len().min(max_rows).max(1)
     }
@@ -557,7 +621,7 @@ impl InputLine {
         ),
     ) {
         use unicode_segmentation::UnicodeSegmentation;
-        let prompt_width = prompt.graphemes(true).count();
+        let prompt_width = crate::tui::widgets::text_layout::display_width(prompt);
         let capacity = (width as usize).saturating_sub(prompt_width).max(1);
         let (color_bg, color_text, color_selection) = colors;
         let text_style = color_text.on(color_bg);
@@ -657,9 +721,13 @@ impl InputLine {
                 paint_run(ops, &mut run, style, &mut pen);
             }
             if focused && row_idx == cursor_row && cursor == visual.start + visual.len {
+                let row_width: usize = graphemes[visual.start..visual.start + visual.len]
+                    .iter()
+                    .map(|gr| crate::tui::widgets::text_layout::display_width(gr))
+                    .sum();
                 ops += RenderOpCommon::MoveCursorPositionRelTo(
                     origin,
-                    vp_col((prompt_width + visual.len) as u16) + vp_row(screen_row as u16),
+                    vp_col((prompt_width + row_width) as u16) + vp_row(screen_row as u16),
                 );
                 ops += RenderOpCommon::ApplyColors(Some(cursor_style));
                 ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(cursor_style));
@@ -933,6 +1001,71 @@ mod wrap_tests {
     fn a_full_row_is_followed_by_a_row_for_the_cursor() {
         assert_eq!(spans("abcd", 4), [(0, 4), (4, 0)]);
         assert_eq!(spans("abcd\nef", 4), [(0, 4), (4, 0), (5, 2)]);
+    }
+
+    /// Wide graphemes are two columns: a row ends where the next one would not fit.
+    #[test]
+    fn rows_wrap_by_display_columns() {
+        // 4 columns: two wide chars, then the third moves down.
+        assert_eq!(spans("日本語", 4), [(0, 2), (2, 1)]);
+        // 5 columns: two wide chars and a column left that the third cannot use.
+        assert_eq!(spans("日本語", 5), [(0, 2), (2, 1)]);
+        // Exactly full by columns, so the cursor gets a row of its own.
+        assert_eq!(spans("日本", 4), [(0, 2), (2, 0)]);
+        // A grapheme wider than the row stands alone.
+        assert_eq!(spans("日", 1), [(0, 1), (1, 0)]);
+        // Mixed width: "a日b" at 3 columns is a, 日 | b.
+        assert_eq!(spans("a日b", 3), [(0, 2), (2, 1)]);
+    }
+
+    #[test]
+    fn the_vertical_keys_keep_the_column_in_display_columns() {
+        let mut input = InputLine::new();
+        input.set_text("日a\nxyz");
+        input.cursor = 1;
+        assert!(input.handle_key(&down()));
+        // The cursor was 2 columns in: under the "z" of "xyz", not the "y".
+        assert_eq!(input.cursor, 5);
+        assert!(input.handle_key(&up()));
+        assert_eq!(input.cursor, 1);
+    }
+
+    /// The cursor block after wide text sits past its columns, not past its graphemes.
+    #[test]
+    fn the_cursor_after_wide_text_sits_past_its_columns() {
+        let mut input = InputLine::with_text("日本");
+        let mut ops = RenderOpIRVec::new();
+        input.render(
+            &mut ops,
+            None,
+            "> ",
+            vp_col(0) + vp_row(0),
+            10,
+            2,
+            true,
+            (
+                Color::from_u8(0, 0, 0),
+                Color::from_u8(255, 255, 255),
+                Color::from_u8(9, 9, 9),
+            ),
+        );
+        let list: Vec<_> = ops.iter().collect();
+        let block = list
+            .iter()
+            .position(
+                |op| matches!(op, RenderOpIR::PaintTextWithAttributes(t, _) if t.as_str() == " "),
+            )
+            .expect("a cursor block");
+        // The prompt is 2 columns and the text 4: the block is at column 6.
+        assert!(
+            matches!(
+                list[block - 2],
+                RenderOpIR::Common(RenderOpCommon::MoveCursorPositionRelTo(_, pos))
+                    if pos.col_index.as_usize() == 6
+            ),
+            "{:?}",
+            list[block - 2]
+        );
     }
 
     #[test]
@@ -1430,6 +1563,38 @@ mod selection_tests {
         assert!(input.press(at(5, 3), Instant::now()));
         assert_eq!(input.cursor, 4, "the first row shown is the third one");
         assert!(!input.press(at(7, 3), Instant::now()));
+    }
+
+    /// A wide char that does not fit leaves its row short: a click in the columns it leaves
+    /// stays on that row, and so does a vertical move onto it.
+    #[test]
+    fn a_column_a_wide_char_leaves_empty_stays_on_its_row() {
+        // 5 columns: "abcde" fills the first row, "日本" leaves one of the second one short.
+        let mut input = painted("abcde日本語z", "", 5, 4);
+        let now = Instant::now();
+        // The input is painted from column 3: column 4 of the second row.
+        assert!(input.press(at(6, 7), now));
+        assert_eq!(input.cursor, 6, "本, the last char of the row");
+        input.cursor = 4;
+        let down = InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::SpecialKey(SpecialKey::Down),
+        });
+        assert!(input.handle_key(&down));
+        assert_eq!(input.cursor, 6, "the second row, not the third");
+    }
+
+    /// A press on a wide char, in either of its two columns, puts the cursor on it.
+    #[test]
+    fn a_press_on_wide_text_lands_on_the_grapheme_under_it() {
+        let mut input = painted("日本語", "", 4, 3);
+        let now = Instant::now();
+        // The input is painted from column 3.
+        assert!(input.press(at(5, 5), now));
+        assert_eq!(input.cursor, 1, "the first column of 本");
+        assert!(input.press(at(5, 6), now));
+        assert_eq!(input.cursor, 1, "its second column");
+        assert!(input.press(at(6, 4), now));
+        assert_eq!(input.cursor, 2, "語 on the second row");
     }
 
     #[test]

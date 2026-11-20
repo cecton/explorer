@@ -665,6 +665,7 @@ impl FilePreviewComponent {
         data: &parking_lot::RwLockReadGuard<'_, crate::loader::FileData>,
     ) -> (usize, usize, usize) {
         use crate::tui::pane_manager::Window;
+        use unicode_segmentation::UnicodeSegmentation;
         let window = Window::FilePreview(key);
         let scroll = state.pane_manager.window_scroll(&window);
 
@@ -682,21 +683,25 @@ impl FilePreviewComponent {
         let mut rendered = 0usize;
         for line_idx in scroll..total_lines {
             let line = data.line(line_idx);
-            let char_len = line.chars().count();
-            let row_count_for_line = if char_len == 0 {
-                1
-            } else {
-                char_len.div_ceil(content_width)
-            };
-            if rel_y < rendered + row_count_for_line {
-                let sub_row = rel_y - rendered;
-                let seg_start_char = sub_row * content_width;
-                let char_idx = (seg_start_char + rel_x).min(char_len);
-                let cursor_byte =
-                    data.line_starts[line_idx] + data.char_to_byte(line_idx, char_idx);
+            let segments = line_segments(line, content_width);
+            if rel_y < rendered + segments.len() {
+                let (start, end) = segments[rel_y - rendered];
+                // The grapheme whose columns hold `rel_x`; past the row, its end.
+                let mut used = 0;
+                let mut byte = end;
+                for (offset, grapheme) in line[start..end].grapheme_indices(true) {
+                    let width = crate::tui::widgets::text_layout::display_width(grapheme);
+                    if rel_x < used + width {
+                        byte = start + offset;
+                        break;
+                    }
+                    used += width;
+                }
+                let char_idx = line[..byte].chars().count();
+                let cursor_byte = data.line_starts[line_idx] + byte;
                 return (line_idx, char_idx, cursor_byte);
             }
-            rendered += row_count_for_line;
+            rendered += segments.len();
             if rendered >= self.content_row_count {
                 break;
             }
@@ -1360,22 +1365,30 @@ fn ceil_to_char(line: &str, offset: usize) -> usize {
 }
 
 /// Where the sub-row starting at the byte offset `start` of `line` ends: `width` cells on,
-/// by bytes on an ASCII line and by whole chars otherwise, clamped to the line. The caller
+/// by bytes on an ASCII line and by whole graphemes of that many display columns
+/// otherwise, clamped to the line. The caller
 /// passes the answer to `line.is_ascii()`, which is linear in the line and so must not be
 /// asked once per sub-row of a long one.
 fn segment_end(line: &str, start: usize, width: usize, line_is_ascii: bool) -> usize {
     if line_is_ascii {
         (start + width).min(line.len())
     } else {
-        advance_chars(line, start, width)
+        crate::tui::widgets::text_layout::fit_end(line, start, width)
     }
 }
 
-/// The byte offset `chars` characters past `from`, clamped to the end of `line`.
-fn advance_chars(line: &str, from: usize, chars: usize) -> usize {
-    match line[from..].char_indices().nth(chars) {
-        Some((offset, _)) => from + offset,
-        None => line.len(),
+/// The byte ranges a line is painted in, one per screen row, at `width` display columns.
+fn line_segments(line: &str, width: usize) -> Vec<(usize, usize)> {
+    let line_is_ascii = line.is_ascii();
+    let mut segments = Vec::new();
+    let mut start = 0;
+    loop {
+        let end = segment_end(line, start, width, line_is_ascii);
+        segments.push((start, end));
+        if end >= line.len() {
+            return segments;
+        }
+        start = end;
     }
 }
 
@@ -1422,22 +1435,6 @@ mod segment_tests {
     use super::*;
     use crate::tui::theme::Color;
 
-    /// How a line is cut into painted rows at `width` cells: the byte ranges of its segments.
-    fn segments(line: &str, width: usize) -> Vec<(usize, usize)> {
-        let mut segments = Vec::new();
-        let line_is_ascii = line.is_ascii();
-        let mut start = 0usize;
-        loop {
-            let end = segment_end(line, start, width, line_is_ascii);
-            segments.push((start, end));
-            if start >= line.len() || end >= line.len() {
-                break;
-            }
-            start = end;
-        }
-        segments
-    }
-
     const LINES: [&str; 7] = [
         "plain ascii line",
         "héllo wörld ünicode",
@@ -1452,7 +1449,7 @@ mod segment_tests {
     fn segments_partition_the_line_and_never_split_a_char() {
         for line in LINES {
             for width in [1, 2, 3, 5, 7, 80] {
-                let segments = segments(line, width);
+                let segments = line_segments(line, width);
                 assert_eq!(
                     segments.first().map(|s| s.0),
                     Some(0),
@@ -1482,17 +1479,43 @@ mod segment_tests {
         }
     }
 
+    /// A row never holds more display columns than the pane gives it, wide chars or not.
+    #[test]
+    fn segments_fit_the_columns_they_are_painted_in() {
+        use crate::tui::widgets::text_layout::display_width;
+        for line in LINES {
+            for width in [2, 3, 5, 7, 80] {
+                for &(start, end) in &line_segments(line, width) {
+                    assert!(
+                        display_width(&line[start..end]) <= width,
+                        "{line:?} at {width}: {start}..{end}"
+                    );
+                }
+            }
+        }
+        // 5 wide chars are 10 columns: 3 rows at 4 columns, never 2 chars + 1 column.
+        assert_eq!(
+            line_segments("日本語のテ", 4),
+            vec![(0, 6), (6, 12), (12, 15)]
+        );
+    }
+
+    #[test]
+    fn a_char_wider_than_the_pane_is_painted_alone() {
+        assert_eq!(line_segments("日本", 1), vec![(0, 3), (3, 6)]);
+    }
+
     #[test]
     fn a_width_past_the_line_paints_it_in_one_segment() {
         for line in LINES {
-            assert_eq!(segments(line, 200), vec![(0, line.len())], "{line:?}");
+            assert_eq!(line_segments(line, 200), vec![(0, line.len())], "{line:?}");
         }
     }
 
     #[test]
     fn a_segment_of_a_multibyte_line_holds_whole_chars() {
         let line = "héllo wörld";
-        for &(start, end) in &segments(line, 3) {
+        for &(start, end) in &line_segments(line, 3) {
             let text = &line[start..end];
             assert!(
                 !text.is_empty() || line.is_empty(),
@@ -1760,6 +1783,41 @@ mod tests {
         assert_eq!(at(prefix_width + 5), Some((9, 9)), "{rel}: the 9");
         assert_eq!(at(prefix_width - 1), None, "{rel}: the bracket");
         assert_eq!(at(prefix_width + 3), None, "{rel}: the comma");
+    }
+
+    /// A click on a wrapped line of wide chars lands on the char whose columns it hits: the
+    /// rows are cut where the painter cuts them, at display columns.
+    #[test]
+    fn a_click_on_wide_text_lands_on_the_char_under_it() {
+        use crate::tui::pane_manager::Window;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wide.txt");
+        std::fs::write(&path, "日本語のテキスト\nab\n").unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let file = crate::loader::LoadedFile::load(path).unwrap();
+        let mut state = crate::tui::state::AppState::for_test_with_files(vec![file], root);
+        let key = crate::loader::FileKey(0);
+        state.pane_manager.push_window(Window::FilePreview(key));
+        let mut component = FilePreviewComponent::new(crate::tui::pane_component::pane_id(0));
+        // A one-digit gutter and a gap, then 6 columns: 3 wide chars a row.
+        let content_start = 1 + GUTTER_GAP.len();
+        component.content_col_count = content_start + 6;
+        component.content_row_count = 10;
+        let snapshot = state.files.load();
+        let data = snapshot[0].data.read();
+        let at = |row, col| {
+            let (line, char_idx, byte) =
+                component.screen_pos_to_line_char(&state, row, col + content_start, key, &data);
+            (line, char_idx, byte)
+        };
+        // Row 0 holds 日本語, row 1 のテキ, row 2 スト; each char is 3 bytes, 2 columns.
+        assert_eq!(at(0, 0), (0, 0, 0));
+        assert_eq!(at(0, 3), (0, 1, 3));
+        assert_eq!(at(1, 2), (0, 4, 12));
+        assert_eq!(at(1, 3), (0, 4, 12), "the second column of a wide char");
+        assert_eq!(at(2, 0), (0, 6, 18));
+        // The next line starts on the row after the last one of the wrapped line.
+        assert_eq!(at(3, 1), (1, 1, 26));
     }
 
     #[test]

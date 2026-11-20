@@ -33,6 +33,22 @@ pub(crate) fn truncate(text: &str, width: usize) -> String {
     out
 }
 
+/// The byte offset where the run of whole graphemes of `text` starting at byte `start` ends
+/// once it fills `width` display columns. A grapheme wider than `width` is taken alone, so
+/// a row always moves forward.
+pub(crate) fn fit_end(text: &str, start: usize, width: usize) -> usize {
+    use unicode_segmentation::UnicodeSegmentation;
+    let mut used = 0;
+    for (offset, grapheme) in text[start..].grapheme_indices(true) {
+        let w = display_width(grapheme);
+        if used + w > width && offset > 0 {
+            return start + offset;
+        }
+        used += w;
+    }
+    text.len()
+}
+
 /// Word-wraps `text` to `width` display columns. Explicit newlines are kept, and a word
 /// longer than a whole line is split on grapheme boundaries. Each line comes with the
 /// byte offset in `text` where it starts; it is a slice of `text` from there.

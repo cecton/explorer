@@ -70,14 +70,6 @@ impl FileData {
         offset
     }
 
-    pub(crate) fn char_to_byte(&self, line_idx: usize, char_idx: usize) -> usize {
-        let s = self.line(line_idx);
-        s.char_indices()
-            .nth(char_idx)
-            .map(|(b, _)| b)
-            .unwrap_or(s.len())
-    }
-
     /// The [`crate::util::text::word_bounds`] of the file's content under `cursor_byte`.
     pub fn word_bounds(&self, cursor_byte: usize) -> (usize, usize) {
         crate::util::text::word_bounds(&self.content, cursor_byte)
@@ -290,25 +282,6 @@ mod tests {
             content: content.to_string(),
             line_starts: compute_line_starts(content),
         }
-    }
-
-    #[test]
-    fn char_to_byte_ascii() {
-        let data = fd("hello");
-        assert_eq!(data.char_to_byte(0, 0), 0);
-        assert_eq!(data.char_to_byte(0, 1), 1);
-        assert_eq!(data.char_to_byte(0, 4), 4);
-        assert_eq!(data.char_to_byte(0, 5), 5);
-        assert_eq!(data.char_to_byte(0, 100), 5);
-    }
-
-    #[test]
-    fn char_to_byte_multibyte() {
-        let data = fd("héllo");
-        assert_eq!(data.char_to_byte(0, 0), 0); // 'h'
-        assert_eq!(data.char_to_byte(0, 1), 1); // 'é' starts at byte 1
-        assert_eq!(data.char_to_byte(0, 2), 3); // 'l' starts at byte 3
-        assert_eq!(data.char_to_byte(0, 5), 6); // past end
     }
 
     #[test]
