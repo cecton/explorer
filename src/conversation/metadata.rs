@@ -111,7 +111,7 @@ impl Metadata {
         meta
     }
 
-    pub fn to_text(&self) -> String {
+    fn to_text(&self) -> String {
         use crate::conversation::NodeStatus;
         use crate::conversation::NodeType;
         let mut out = String::new();

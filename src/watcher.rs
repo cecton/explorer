@@ -46,6 +46,8 @@ fn created_files(path: &camino::Utf8Path) -> Vec<camino::Utf8PathBuf> {
         .collect()
 }
 
+/// The interrupt the RRT engine reaches a worker with, for the workers (this one and the
+/// language server's) that never have to be woken early, since they poll their own sources.
 #[derive(Debug)]
 pub struct NoOpInterrupt;
 

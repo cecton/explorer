@@ -77,7 +77,7 @@ impl r3bl_tui::RRTWorker for LspWorker {
     type Config = crate::lsp::LspConfig;
     type Input = crate::lsp::LspInput;
     type Output = ();
-    type Interrupt = crate::lsp::LspInterrupt;
+    type Interrupt = crate::watcher::NoOpInterrupt;
 
     fn create_and_register_os_sources(
         config: Self::Config,
@@ -111,7 +111,7 @@ impl r3bl_tui::RRTWorker for LspWorker {
                 held_requests: VecDeque::new(),
                 worker_start: now,
             },
-            crate::lsp::LspInterrupt,
+            crate::watcher::NoOpInterrupt,
         ))
     }
 

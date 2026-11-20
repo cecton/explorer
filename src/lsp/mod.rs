@@ -24,15 +24,6 @@ pub enum LspInput {
     Restart(crate::config::CargoFeatureSelection),
 }
 
-/// The interrupt the RRT engine reaches the worker with; the worker never has to be woken
-/// early, since it polls the server's stdout and its own channel.
-#[derive(Debug)]
-pub struct LspInterrupt;
-
-impl r3bl_tui::RRTSoftwareInterrupt for LspInterrupt {
-    fn trigger_software_interrupt(&self) {}
-}
-
 pub static LSP_RRT: r3bl_tui::RRT<crate::lsp::worker::LspWorker> = r3bl_tui::RRT::new();
 
 #[derive(Clone)]

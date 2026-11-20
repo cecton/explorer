@@ -47,7 +47,7 @@ pub struct LogHistory {
 
 pub const MAX_LOG_ENTRIES: usize = 10_000;
 
-pub const COMMIT_TYPES: &[&str] = &[
+const COMMIT_TYPES: &[&str] = &[
     "feat", "fix", "docs", "style", "refactor", "perf", "test", "build", "ci", "chore", "revert",
 ];
 
@@ -283,7 +283,7 @@ pub fn status_short(root: &camino::Utf8Path) -> Result<String, String> {
 
 /// Full ids of the commits reachable from `after` and not from `before`, oldest first.
 /// Covers amended and rebased history; with no `before`, everything up to `after`.
-pub fn commits_between(
+fn commits_between(
     root: &camino::Utf8Path,
     before: Option<&str>,
     after: &str,

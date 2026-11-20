@@ -19,12 +19,12 @@ pub fn format_markdown(text: &str) -> Result<String, String> {
 }
 
 /// Whether a repository-relative path is a markdown file the formatter owns.
-pub fn is_formatted(relative: &camino::Utf8Path) -> bool {
+fn is_formatted(relative: &camino::Utf8Path) -> bool {
     relative.as_str().ends_with(".md") && !EXCLUDED.iter().any(|dir| relative.starts_with(dir))
 }
 
 /// Replaces each directory with the files git lists under it; other paths are kept.
-pub fn expand_directories(
+fn expand_directories(
     root: &camino::Utf8Path,
     relatives: Vec<camino::Utf8PathBuf>,
 ) -> Result<Vec<camino::Utf8PathBuf>, String> {
@@ -65,7 +65,7 @@ pub fn format_paths(
 }
 
 /// Formats the files in place and returns the paths rewritten; a read error writes nothing.
-pub fn format_files(
+fn format_files(
     root: &camino::Utf8Path,
     relatives: &[camino::Utf8PathBuf],
 ) -> Result<Vec<camino::Utf8PathBuf>, String> {

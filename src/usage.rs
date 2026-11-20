@@ -3,7 +3,9 @@ use std::collections::HashMap;
 const WEEKDAYS: [&str; 7] = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"];
 
 /// The stretch of time one limit of a subscription covers.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
 #[serde(rename_all = "kebab-case")]
 pub enum Span {
     FiveHours,
@@ -392,11 +394,7 @@ fn parse_cline(body: &str) -> Result<Usage, String> {
     if windows.is_empty() {
         return Err("no known usage window in answer".to_string());
     }
-    windows.sort_by_key(|window| match window.span {
-        Span::FiveHours => 0,
-        Span::Week => 1,
-        Span::Month => 2,
-    });
+    windows.sort_by_key(|window| window.span);
     Ok(Usage { windows, key: None })
 }
 
