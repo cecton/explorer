@@ -272,15 +272,7 @@ fn scroll_from_y(
 }
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneComponent {
-    fn reset(&mut self) {
-        self.git_log.reset();
-        self.commit_diff.reset();
-        self.report.reset();
-        self.conversation_tree.reset();
-        self.discussion.reset();
-        self.preview.reset();
-        self.terminal.reset();
-    }
+    fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
         self.id

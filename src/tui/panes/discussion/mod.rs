@@ -494,9 +494,7 @@ impl DiscussionComponent {
 }
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for DiscussionComponent {
-    fn reset(&mut self) {
-        self.drag = None;
-    }
+    fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
         self.id

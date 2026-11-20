@@ -306,9 +306,7 @@ impl TerminalPaneComponent {
 }
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for TerminalPaneComponent {
-    fn reset(&mut self) {
-        self.text_drag_active = false;
-    }
+    fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
         self.id

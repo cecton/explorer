@@ -738,14 +738,7 @@ impl FilePreviewComponent {
 }
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePreviewComponent {
-    fn reset(&mut self) {
-        self.preview_drag_active = false;
-        self.text_drag_active = false;
-        self.clicks.clear();
-        self.drag_snapshot.clear();
-        self.drag_start_line = None;
-        self.drag_modifier = None;
-    }
+    fn reset(&mut self) {}
 
     fn get_id(&self) -> FlexBoxId {
         self.id
