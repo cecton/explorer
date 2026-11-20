@@ -329,6 +329,7 @@ pub(crate) fn render(
                 r.push_blank();
             }
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::BlockQuote(_)) => {
+                r.flush_pending_text();
                 r.start_style(InlineStyle {
                     fg: r.fg("markup.quote"),
                     ..r.plain
@@ -467,7 +468,10 @@ pub(crate) fn render(
                     r.push_content(&text, r.style, verbatim(&text));
                 }
             }
-            pulldown_cmark::Event::Html(text) | pulldown_cmark::Event::InlineHtml(text) => {
+            pulldown_cmark::Event::InlineHtml(text) => {
+                r.push_content(&text, r.style, verbatim(&text));
+            }
+            pulldown_cmark::Event::Html(text) => {
                 let style = InlineStyle {
                     fg: r.fg("comment"),
                     ..r.plain
@@ -544,7 +548,17 @@ impl Renderer<'_> {
         self.style = self.stack.pop().unwrap_or(self.plain);
     }
 
+    /// Ends the text of a tight list item before a block opens inside it. Unlike
+    /// `flush_content` it leaves an item's bare marker alone, so `- > quoted`
+    /// keeps the marker on the quote's line.
+    fn flush_pending_text(&mut self) {
+        if !self.content.is_empty() {
+            self.flush_content();
+        }
+    }
+
     fn start_heading(&mut self, level: pulldown_cmark::HeadingLevel) {
+        self.flush_pending_text();
         let scope = match level {
             pulldown_cmark::HeadingLevel::H1 => "markup.heading.1",
             pulldown_cmark::HeadingLevel::H2 => "markup.heading.2",
@@ -1073,6 +1087,24 @@ mod tests {
 | `wrap` cells | 12 | Rows grow **taller**; nothing is lost |
 | truncate | 3 | Loses text, stays one row |
 ";
+
+    #[test]
+    fn inline_html_stays_where_it_was_typed() {
+        assert_eq!(
+            texts("returns Vec<String> here", 40),
+            ["returns Vec<String> here"]
+        );
+    }
+
+    #[test]
+    fn a_quote_or_heading_in_a_tight_item_starts_its_own_line() {
+        let quote = texts("- note:\n  > quoted", 40);
+        assert_eq!(quote[0], "• note:");
+        assert!(quote[1].contains("quoted"), "{quote:?}");
+        let heading = texts("- note:\n  # Title", 40);
+        assert_eq!(heading[0], "• note:");
+        assert!(heading[1].contains("Title"), "{heading:?}");
+    }
 
     #[test]
     fn table_columns_line_up_under_a_ruled_bold_header() {
