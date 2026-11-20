@@ -109,7 +109,7 @@ Source is organized in layers. A module imports only from its own layer or a low
 - `src/tui/symbols.rs` — symbol highlight groups' bookkeeping, in `FileKey`s alone: `answered` (a language server's answer folded into the groups), `find`, `dedup`, `files_changed`
 - `src/tui/theme.rs` — `HelixTheme`, loaded from the bundled TOML files via `include!("../../themes/themes.rs")`; `Color` (`Rgb`, `Ansi` for the terminal's palette, `Default` for its own color: Helix's 16 color names reach the screen as the terminal's palette, and an unset background or text as the terminal paints it) and `Ui`, every role a pane paints, resolved once at load with one fallback chain each. Panes read `theme.ui` fields, never a UI key by string; theme colors are painted with `ApplyColors(Some(fg.on(bg)))`, never `SetBgColor`, which cannot ask for the terminal's default; color arithmetic runs only on `Color::rgb`
 - `src/tui/panes/` — one window kind each: `preview.rs` (file preview with syntect highlighting and LSP tokens), `git_log_pane.rs` (log with live filter and branch picker), `commit_diff_pane.rs`, `report_pane.rs` (markdown in memory, nothing saved), `terminal/` (`mod.rs` PTY emulation and selection, `spawn.rs` start, reader task and `Throttle`); a pane never imports `app/`; what panes share lives in `focus` and `state`
-- `src/tui/modal/` — the pickers, painted over the panes: `mod.rs` (`Modal`, the open one in `AppState::modal`; `ModalBox`, its centred box and frame; `render`, the one place a modal is painted, at `ZOrder::High`; `Modal::open`/`close`, which release the keyboard and give it back; `dispatch`, which every event goes through while a modal is open), `list.rs` (`paint_rows`, `navigate`), `window_picker.rs`, `theme_picker.rs`, `model_picker.rs`. A modal is not a window: no pane slot, no session entry, no place in the focus cycle — never give one a `Window` variant or route an event to a pane while one is open
+- `src/tui/modal/` — the pickers, painted over the panes: `mod.rs` (`Modal`, the open one in `AppState::modal`; `ModalBox`, its centred box and frame; `render`, the one place a modal is painted, at `ZOrder::High`; `Modal::open`/`close`, which release the keyboard and give it back; `dispatch`, which every event goes through while a modal is open), `window_picker.rs`, `theme_picker.rs`, `model_picker.rs`. A modal is not a window: no pane slot, no session entry, no place in the focus cycle — never give one a `Window` variant or route an event to a pane while one is open
 - `src/tui/panes/discussion/` — a conversation window (`Window::Discussion(id)`; with `DiscussionState.agent` a read-only view of a sub-agent run): `mod.rs` (component, lifecycle, title bar), `launch.rs` (start a turn), `queue.rs`, `document.rs` (the laid-out document and its `DocCache`), `selection.rs` (marks and `locate`), `status.rs`; `drop_queue_entry` must be called wherever a Discussion window is removed
 - `src/tui/panes/conversation_tree/` — the Conversation Tree window: `mod.rs`, `layout.rs` (`rows`, the one place rows and filter matches are built), `filter.rs` (`FilterCache`, keyed by query and tree `revision`), `input.rs`, `render.rs`, `test_support.rs` (the trees the tests build)
 - `src/tui/widgets/` — reusable pieces with no window of their own. A widget takes values and names only other widgets, `crate::tui::theme` and `crate::util`, never `state`, `pane_manager` or a pane; `cargo xtask check-imports` enforces it. `contrast.rs` (`DragModifier`, `drag_modifier_from_mouse`, `ensure_readable_fg`: the foreground swap that keeps text readable over a marker or highlight colour, a no-op when either colour is the terminal's), `fuzzy.rs` (the one fuzzy-matching loop; a haystack is the text's chars, never `Utf32Str::new`), `fuzzy_picker.rs` (`FuzzyPicker`, which paints rows and keeps nothing but its query, `PickerRow`, `PickerColors`, and the `FuzzyPickerState` a picker's query, results, selection and scroll offset live in), `input_line.rs` (`InputLine`, text and cursor, soft-wrapped), `markdown.rs` (markdown to themed `MdLine`s; each `Span` carries its source byte offset; `span_style`, `row_pieces` and `paint_row` paint one row of spans with the marked ranges, which the report pane and the Discussion both do), `text_layout.rs` (`wrap`, `truncate`, `display_width`), `title_row.rs`
@@ -119,10 +119,7 @@ Source is organized in layers. A module imports only from its own layer or a low
 ## Build & Run Commands
 
 ```bash
-# Build (dev) -- always use release even for development
-cargo build --release
-
-# Build (release)
+# Build -- always use release, even for development
 cargo build --release
 
 # Run
@@ -169,8 +166,6 @@ a shell tool call does not keep exported variables for the next one.
 
 ### Tests
 
-Tests live in `src/tui/pane_manager.rs` (unit tests for focus, resize, stacking, and layout). When adding tests:
-
 ```bash
 # Run all tests
 cargo test
@@ -189,48 +184,6 @@ cargo test <module>::<test_name>
 1. Run `cargo fmt` — no exceptions. Commits must have formatted code.
 2. Run `cargo build` (or `cargo check`) to confirm there are no compile errors.
 3. Run `cargo clippy --no-deps --all-targets` and address any warnings before merging. Without `--all-targets` the test modules are never linted, so a dead import there goes unnoticed.
-
----
-
-## Dependencies
-
-| Crate                      | Version | Purpose                                                                                    |
-| -------------------------- | ------- | ------------------------------------------------------------------------------------------ |
-| `arc-swap`                 | 1.x     | Lock-free atomic swap for the shared file list (`Arc<ArcSwap<Vec<Arc<LoadedFile>>>>`)      |
-| `camino`                   | 1.x     | UTF-8–typed path types (`Utf8PathBuf`, etc.)                                               |
-| `directories`              | 5.x     | XDG Base Directory resolution for config and session storage                               |
-| `dprint-core`              | 0.71.x  | Newline configuration of the markdown formatter                                            |
-| `dprint-plugin-markdown`   | 0.28.x  | In-process markdown formatting (`src/markdown_format.rs`)                                  |
-| `futures-util`             | 0.3.x   | Reading `genai`'s chat stream                                                              |
-| `genai`                    | 0.6.x   | LLM wire client for OpenAI-compatible endpoints (only in `src/agent/llm.rs`)               |
-| `gix`                      | 0.87.x  | Git data (log walk, tree diff, blob unified diff); pure Rust                               |
-| `hex`                      | 0.4.x   | Hex encoding for session filename hashes                                                   |
-| `jwalk`                    | 0.8.x   | Parallel directory traversal (uses rayon)                                                  |
-| `kdl`                      | 6.x     | KDL config file parsing                                                                    |
-| `libc`                     | 0.2.x   | PTY/OS-level syscalls used by terminal emulation                                           |
-| `lsp-types`                | 0.97.x  | Typed LSP protocol structs (with `proposed` feature)                                       |
-| `miette`                   | 7.x     | Error reporting                                                                            |
-| `notify`                   | 8.x     | Filesystem event watching (used in `watcher.rs`)                                           |
-| `nucleo`                   | 0.5.x   | Fuzzy matching for paths and file content                                                  |
-| `parking_lot`              | 0.12.x  | Poison-free `Mutex`/`RwLock` primitives (used for shared panes, file data)                 |
-| `pico-args`                | 0.5.x   | Lightweight CLI argument parsing (no proc macros)                                          |
-| `r3bl_tui`                 | 0.7.x   | TUI framework with Linux-native `direct_to_ansi` backend, PTY/terminal-multiplexer support |
-| `reqwest`                  | 0.13.x  | Model list fetch from OpenAI-compatible endpoints                                          |
-| `serde`                    | 1.x     | Derive macros for serialization (`derive` feature)                                         |
-| `serde_json`               | 1.x     | JSON-RPC message serialization for LSP protocol                                            |
-| `sha2`                     | 0.10.x  | Stable repo-root hashing for session filenames                                             |
-| `toml`                     | 0.8.x   | Theme file parsing (`themes/*.toml`)                                                       |
-| `tokio`                    | 1.x     | Async runtime required by `r3bl_tui`                                                       |
-| `tracing`                  | 0.1.x   | Structured logging macros (`debug!`, `info!`, etc.)                                        |
-| `tracing-core`             | 0.1.x   | `LevelFilter` type used to configure `r3bl_tui` logger                                     |
-| `unicode-general-category` | 1.x     | General category lookup for the scan rules                                                 |
-| `unicode-segmentation`     | 1.x     | Word boundary detection in `input_line`                                                    |
-| `url`                      | 2.x     | URL parsing in `word_bounds` for cursor-based URL selection                                |
-
-Planned feature areas and their likely dependencies:
-
-- **Git tooling** (remaining: status, blame — intended to replace `tig`; log and diff have shipped)
-- **AI tooling** integration: the conversation-tree agent chat has shipped; what remains is an architecture-walking tool and an in-repo export of the tree
 
 ---
 
