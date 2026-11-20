@@ -7,7 +7,6 @@ mod modal;
 mod pane_component;
 mod pane_manager;
 mod panes;
-mod panes_renderer;
 mod selection;
 pub(crate) mod session;
 pub(crate) mod state;

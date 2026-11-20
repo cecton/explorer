@@ -11,7 +11,6 @@ pub(super) fn render(
     has_focus: &mut HasFocus,
 ) -> CommonResult {
     use crate::tui::modal::Modal;
-    use crate::tui::panes_renderer::PanesRenderer;
     crate::tui::app::sync_has_focus(&global_data.state, has_focus);
 
     let mut best_generation = 0u64;
@@ -59,23 +58,7 @@ pub(super) fn render(
         }
         crate::tui::app::sync_has_focus(&global_data.state, has_focus);
 
-        // Build surface and render components. They push ops into global_data.pipeline.
-        {
-            let mut it = surface!(stylesheet: create_stylesheet(&global_data.state.theme)?);
-            it.surface_start(SurfaceProps {
-                pos: vp_col(0) + vp_row(0),
-                size: surface_size,
-            })?;
-
-            PanesRenderer.render_in_surface(
-                &mut it,
-                global_data,
-                component_registry_map,
-                has_focus,
-            )?;
-
-            it.surface_end()?;
-        }
+        render_panes(global_data, component_registry_map, has_focus, surface_size)?;
 
         // Take the pipeline (components have already pushed into it) and add
         // background fill and status bar on top.
@@ -131,23 +114,121 @@ pub(super) fn render(
     });
 }
 
-fn create_stylesheet(theme: &crate::tui::theme::HelixTheme) -> CommonResult<TuiStylesheet> {
-    let bg = theme.ui.background.tui();
-    throws_with_return!({
-        let mut container = new_style!(id: {crate::tui::pane_component::container_id()});
-        container.color_bg = bg;
-        let mut styles = tui_stylesheet! { container };
-        for col_idx in 0..crate::tui::pane_manager::MAX_PANES {
-            let mut style = new_style!(id: {FlexBoxId::new(100 + col_idx as u8)} padding: {0});
-            style.color_bg = bg;
-            styles.add_style(style)?;
+/// Paints every visible pane in the box `relayout` gave it, the one focus-follows-mouse and
+/// the mouse hit tests read; each pane pushes its ops into `global_data.pipeline`.
+fn render_panes(
+    global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
+    component_registry_map: &mut ComponentRegistryMap<
+        crate::tui::state::AppState,
+        crate::signal::AppSignal,
+    >,
+    has_focus: &mut HasFocus,
+    surface_size: VPSize,
+) -> CommonResult<()> {
+    let surface_bounds = VPBoundingBox::new(vp_col(0) + vp_row(0), surface_size);
+    let boxes: Vec<(usize, FlexBox)> = global_data
+        .state
+        .pane_manager
+        .visible()
+        .iter()
+        .map(|slot| (slot.slot, slot.box_))
+        .collect();
+    for (slot, box_) in boxes {
+        let pane_id = crate::tui::pane_component::pane_id(slot);
+        if let Some(component) =
+            ComponentRegistry::try_to_get_component_by_id(component_registry_map, pane_id)
+        {
+            component.render(global_data, box_, surface_bounds, has_focus)?;
         }
-        for slot in 0..crate::tui::pane_manager::MAX_PANES {
-            let mut style =
-                new_style!(id: {crate::tui::pane_component::pane_id(slot)} padding: {0});
-            style.color_bg = bg;
-            styles.add_style(style)?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::tui::pane_manager::Window;
+
+    /// On 300 columns, three columns of panes are 100 wide: each paints where `relayout`
+    /// put it, not in the percentage boxes r3bl truncated to 0, 99 and 198.
+    #[test]
+    fn panes_paint_in_the_boxes_relayout_computed() {
+        use crate::loader::FileKey;
+        use crate::tui::state::AppState;
+        let dir = tempfile::tempdir().unwrap();
+        let files: Vec<_> = ["x", "y", "z"]
+            .iter()
+            .map(|name| {
+                let path = dir.path().join(format!("{name}.txt"));
+                std::fs::write(&path, format!("{name}\n")).unwrap();
+                crate::loader::LoadedFile::load(path).unwrap()
+            })
+            .collect();
+        let mut state =
+            AppState::for_test_with_files(files, camino::Utf8PathBuf::from("/tmp/nowhere"));
+        for key in 0..3 {
+            state
+                .pane_manager
+                .push_window(Window::FilePreview(FileKey(key)));
         }
-        styles
-    })
+        let size = vp_width(300) + vp_height(24);
+        state.pane_manager.relayout(size);
+        // The newest window opens at the left: read the names off the layout.
+        let names: Vec<char> = state
+            .pane_manager
+            .visible()
+            .iter()
+            .map(|slot| match slot.window {
+                Window::FilePreview(FileKey(key)) => ['x', 'y', 'z'][key],
+                other => panic!("unexpected window {other:?}"),
+            })
+            .collect();
+        let origins: Vec<u16> = state
+            .pane_manager
+            .visible()
+            .iter()
+            .map(|slot| {
+                slot.box_
+                    .style_adjusted_bounds
+                    .origin_pos
+                    .col_index
+                    .as_u16()
+            })
+            .collect();
+        assert_eq!(origins, [0, 100, 200], "the layout under test");
+
+        let mut global_data = crate::tui::test_support::global_data(state);
+        let mut registry = ComponentRegistryMap::default();
+        for slot in 0..3 {
+            let id = crate::tui::pane_component::pane_id(slot);
+            ComponentRegistry::put(
+                &mut registry,
+                id,
+                crate::tui::pane_component::PaneComponent::new_boxed(slot, id),
+            );
+        }
+        render_panes(
+            &mut global_data,
+            &mut registry,
+            &mut HasFocus::default(),
+            size,
+        )
+        .unwrap();
+
+        let mut ofs_buf = OfsBuf::new(Flat2DArray::new_empty(size, PixelChar::Spacer));
+        global_data.pipeline.compose_render_ops_into_ofs_buf(
+            size,
+            &mut ofs_buf,
+            &mut std::default::Default::default(),
+        );
+        // The text of the first line starts 3 cells past the box, on the row under the title.
+        let row = ofs_buf.get_row(vp_row(1)).expect("a painted row");
+        for (origin, name) in origins.iter().zip(names) {
+            let cell = row[*origin as usize + 3];
+            assert!(
+                matches!(cell, PixelChar::PlainText { display_char, .. } if display_char == name),
+                "pane {name} starts at column {origin}: {cell:?}"
+            );
+        }
+    }
 }

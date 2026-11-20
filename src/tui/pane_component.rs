@@ -669,15 +669,8 @@ fn render_scrollbar(
     }
 }
 
-/// The id of the container box that holds every pane slot.
-const CONTAINER_ID: u8 = 1;
-
 /// The id of the first pane slot; each slot takes the next value.
 const FIRST_PANE_ID: u8 = 2;
-
-pub(crate) fn container_id() -> FlexBoxId {
-    FlexBoxId::new(CONTAINER_ID)
-}
 
 pub(crate) fn pane_id(slot: usize) -> FlexBoxId {
     FlexBoxId::new(FIRST_PANE_ID + slot.min(crate::tui::pane_manager::MAX_PANES - 1) as u8)
@@ -700,22 +693,10 @@ mod tests {
     }
 
     #[test]
-    fn the_slot_ids_leave_room_for_the_container_and_the_columns() {
-        // Column styles start at 100, so the pane slots have to stay under it.
-        assert!(u8::from(container_id()) < u8::from(pane_id(0)));
-        assert!(u8::from(pane_id(crate::tui::pane_manager::MAX_PANES)) < 100);
-    }
-
-    #[test]
     fn a_slot_past_the_last_pane_stays_on_the_last_pane() {
         let last = crate::tui::pane_manager::MAX_PANES - 1;
         assert_eq!(pane_id(last + 1), pane_id(last));
         assert_eq!(pane_slot(pane_id(last + 1)), Some(last));
-    }
-
-    #[test]
-    fn the_container_is_no_pane_slot() {
-        assert_eq!(pane_slot(container_id()), None);
     }
 
     /// A preview of two lines in slot 0 of an 80x24 screen, rendered once for its geometry.

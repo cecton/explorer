@@ -102,7 +102,6 @@ Source is organized in layers. A module imports only from its own layer or a low
 - `src/tui/pane_manager.rs` — `PaneManager` and `Window`: focus, resize, stacking and the frame's one layout (`relayout`, run once per event and once per frame; nothing else recomputes it)
 - `src/tui/selection.rs` — `TextSelection`, the one text selection of `AppState`, and the `SelPoint`s and `DocPart`s that address it in a file preview, a terminal or a Discussion
 - `src/tui/pane_component.rs` — the component of a pane slot: a stack of windows with tab headers, routing mouse and commands to the active window
-- `src/tui/panes_renderer.rs` — paints the visible panes of the frame
 - `src/tui/keymap.rs` — configurable shortcuts: `Action`, `Keymap`, key-spec parsing, status-bar hints
 - `src/tui/command_line.rs` — the global command line (`<leader>:`) and `COMMANDS`, the one table of what it runs and what the palette lists
 - `src/tui/after_agents.rs` — the `after-agents` command: a one-shot shell command after the queue empties, cancelled by any input; killed with its process group when dropped
