@@ -27,6 +27,8 @@ pub struct AppMain {
     watcher_guard: Option<SubscriberGuard<crate::watcher::WatcherWorker>>,
     /// Local minute (since the epoch) the status-bar clock was last painted at.
     last_clock_minute: i64,
+    /// The modal lists' painters, kept so a frame builds no matcher.
+    modal_painters: crate::tui::modal::list::ModalPainters,
 }
 
 impl AppMain {
@@ -35,6 +37,7 @@ impl AppMain {
         root: camino::Utf8PathBuf,
         exit_tx: Arc<OnceLock<crate::signal::MainTx>>,
     ) -> BoxedSafeApp<crate::tui::state::AppState, crate::signal::AppSignal> {
+        use crate::tui::modal::list::ModalPainters;
         let (picker_results_tx, picker_results_rx) = tokio::sync::mpsc::channel(32);
         let (terminal_event_tx, terminal_event_rx) = tokio::sync::mpsc::unbounded_channel();
         Box::new(Self {
@@ -51,6 +54,7 @@ impl AppMain {
             lsp_health_skip: 0,
             watcher_guard: None,
             last_clock_minute: crate::tui::app::tick::clock_minute(),
+            modal_painters: ModalPainters::new(),
         })
     }
 

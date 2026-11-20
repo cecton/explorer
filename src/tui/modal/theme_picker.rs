@@ -86,21 +86,21 @@ pub fn run_theme_name_match(text: &str) -> Vec<String> {
 /// Paints the theme picker's list.
 pub fn render(
     state: &mut crate::tui::state::AppState,
+    painter: &mut crate::tui::widgets::fuzzy_picker::FuzzyPicker,
     list: &crate::tui::modal::ModalBox,
 ) -> RenderOpIRVec {
-    use crate::tui::widgets::fuzzy::Kind;
-    use crate::tui::widgets::fuzzy_picker::PickerRow;
-    let rows: Vec<PickerRow> = state
-        .theme_picker
-        .results
+    use crate::tui::widgets::fuzzy_picker::{PickerColors, PickerRow};
+    let view = crate::tui::modal::list::visible(&mut state.theme_picker, list);
+    let rows: Vec<PickerRow> = state.theme_picker.results[view.range]
         .iter()
         .map(PickerRow::plain)
         .collect();
     crate::tui::modal::list::paint_rows(
-        &state.theme.clone(),
-        Kind::Plain,
+        PickerColors::in_overlay(&state.theme),
+        painter,
+        state.theme_picker.query.text(),
         &rows,
-        &mut state.theme_picker,
+        Some(view.selected),
         list,
     )
 }

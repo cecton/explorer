@@ -153,13 +153,12 @@ pub fn run_model_match(text: &str, state: &crate::tui::state::AppState) -> Vec<u
 /// Paints the model picker's list.
 pub fn render(
     state: &mut crate::tui::state::AppState,
+    painter: &mut crate::tui::widgets::fuzzy_picker::FuzzyPicker,
     list: &crate::tui::modal::ModalBox,
 ) -> RenderOpIRVec {
-    use crate::tui::widgets::fuzzy::Kind;
-    use crate::tui::widgets::fuzzy_picker::PickerRow;
-    let mut rows: Vec<PickerRow> = state
-        .model_picker
-        .results
+    use crate::tui::widgets::fuzzy_picker::{PickerColors, PickerRow};
+    let view = crate::tui::modal::list::visible(&mut state.model_picker, list);
+    let mut rows: Vec<PickerRow> = state.model_picker.results[view.range]
         .iter()
         .map(|index| {
             PickerRow::plain(
@@ -174,7 +173,7 @@ pub fn render(
         .collect();
     // A picker with nothing to offer says why: an endpoint whose list failed, or none at
     // all, is the reason there is no model to choose.
-    if rows.is_empty() {
+    if state.model_picker.results.is_empty() {
         let errors = state.models.errors();
         let text = if !errors.is_empty() {
             errors.join("  ")
@@ -185,11 +184,18 @@ pub fn render(
         };
         rows.push(PickerRow::accented(text, state.theme.ui.error));
     }
+    // The explanation is no result, so it never wears the selection bar.
+    let selected = if state.model_picker.results.is_empty() {
+        None
+    } else {
+        Some(view.selected)
+    };
     crate::tui::modal::list::paint_rows(
-        &state.theme.clone(),
-        Kind::Plain,
+        PickerColors::in_overlay(&state.theme),
+        painter,
+        state.model_picker.query.text(),
         &rows,
-        &mut state.model_picker,
+        selected,
         list,
     )
 }

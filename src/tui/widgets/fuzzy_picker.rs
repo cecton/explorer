@@ -151,14 +151,14 @@ impl FuzzyPicker {
     }
 
     /// Paints `rows` from `scroll` down, `height` of them, at `origin`, each `width` cells
-    /// wide, with row `selected` wearing the selection colors.
+    /// wide, with row `selected`, if any, wearing the selection colors.
     #[allow(clippy::too_many_arguments)]
     pub fn render_results(
         &mut self,
         colors: PickerColors,
         query: &str,
         rows: &[PickerRow],
-        selected: usize,
+        selected: Option<usize>,
         scroll: usize,
         origin: VPPos,
         height: usize,
@@ -174,7 +174,7 @@ impl FuzzyPicker {
             render_ops +=
                 RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(offset as u16));
 
-            let is_selected = index < count && index == selected;
+            let is_selected = index < count && selected == Some(index);
             let row_bg = if is_selected {
                 colors.selected
             } else {
@@ -198,6 +198,9 @@ impl FuzzyPicker {
                 if count == 0 && offset == 0 {
                     let msg = crate::tui::widgets::text_layout::truncate("No results", width);
                     let pad = width.saturating_sub(msg.len()) / 2;
+                    // The blank fill above moved the cursor to the row's end.
+                    render_ops +=
+                        RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
                     render_ops += RenderOpIR::PaintTextWithAttributes(
                         format!("{:pad$}{msg}", "", pad = pad).into(),
                         Some(colors.text.on(colors.surface)),

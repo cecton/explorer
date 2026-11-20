@@ -238,7 +238,12 @@ impl ModalBox {
 
 /// Paints the open modal over the frame: its box, its query line and its list, `None` when
 /// no modal is open. This is the one place modals are painted.
-pub fn render(state: &mut crate::tui::state::AppState, surface: VPSize) -> Option<RenderOpIRVec> {
+pub fn render(
+    state: &mut crate::tui::state::AppState,
+    painters: &mut crate::tui::modal::list::ModalPainters,
+    surface: VPSize,
+) -> Option<RenderOpIRVec> {
+    use crate::tui::widgets::fuzzy::Kind;
     use crate::tui::widgets::title_row::BarColors;
     let modal = state.modal.clone()?;
     let results = match modal {
@@ -246,7 +251,8 @@ pub fn render(state: &mut crate::tui::state::AppState, surface: VPSize) -> Optio
         Modal::ThemePicker => state.theme_picker.results.len(),
         Modal::ModelPicker(_) => state.model_picker.results.len(),
     };
-    let box_ = ModalBox::for_modal(surface, results);
+    // An empty list keeps one row, where "No results" or the reason for it is painted.
+    let box_ = ModalBox::for_modal(surface, results.max(1));
     let list = box_.list_box();
     state.modal_page_size = list.rows;
     state.modal_box = Some(list);
@@ -274,9 +280,15 @@ pub fn render(state: &mut crate::tui::state::AppState, surface: VPSize) -> Optio
     ops.list.extend(query_ops.list);
 
     let rows = match &modal {
-        Modal::WindowPicker => crate::tui::modal::window_picker::render(state, &list),
-        Modal::ThemePicker => crate::tui::modal::theme_picker::render(state, &list),
-        Modal::ModelPicker(_) => crate::tui::modal::model_picker::render(state, &list),
+        Modal::WindowPicker => {
+            crate::tui::modal::window_picker::render(state, painters.of(Kind::Paths), &list)
+        }
+        Modal::ThemePicker => {
+            crate::tui::modal::theme_picker::render(state, painters.of(Kind::Plain), &list)
+        }
+        Modal::ModelPicker(_) => {
+            crate::tui::modal::model_picker::render(state, painters.of(Kind::Plain), &list)
+        }
     };
     ops.list.extend(rows.list);
     Some(ops)
@@ -481,7 +493,7 @@ mod tests {
             PickerColors::in_overlay(&crate::tui::theme::HelixTheme::default()),
             "",
             &rows,
-            0,
+            Some(0),
             0,
             list.origin,
             list.rows,
@@ -545,6 +557,7 @@ mod tests {
     /// the page size the keys will page by kept for the events that follow.
     #[test]
     fn the_frame_paints_the_open_modal_over_the_panes() {
+        use crate::tui::modal::list::ModalPainters;
         use crate::tui::modal::theme_picker;
         let mut state = state();
         crate::tui::focus::focus_window(&mut state, Window::ConversationTree);
@@ -552,7 +565,7 @@ mod tests {
 
         let screen = size(60, 30);
         assert_eq!(state.modal, Some(Modal::ThemePicker));
-        let ops = render(&mut state, screen).expect("the modal paints");
+        let ops = render(&mut state, &mut ModalPainters::new(), screen).expect("the modal paints");
         let modal = ModalBox::for_modal(screen, state.theme_picker.results.len());
         assert_eq!(state.modal_box, Some(modal.list_box()));
         assert_eq!(state.modal_page_size, modal.list_box().rows);
@@ -589,6 +602,66 @@ mod tests {
             scrolled_to,
             "the first row painted is the one the list scrolled to"
         );
+    }
+
+    /// The first row of the list, read back as text.
+    fn list_row_text(state: &AppState, screen: VPSize, ops: RenderOpIRVec) -> String {
+        let list = state.modal_box.expect("the list was painted");
+        let mut pipeline = render_pipeline!();
+        pipeline.push(ZOrder::High, ops);
+        let top = list.origin.row_index.as_u16();
+        let left = list.origin.col_index.as_u16();
+        (left..left + list.width as u16)
+            .map(|col| char_at(screen, pipeline.clone(), top, col).unwrap_or(' '))
+            .collect()
+    }
+
+    #[test]
+    fn a_modal_with_no_result_says_so() {
+        use crate::tui::modal::list::ModalPainters;
+        use crate::tui::modal::theme_picker;
+        let mut state = state();
+        theme_picker::open(&mut state);
+        state.theme_picker.results.clear();
+        state.theme_picker.selected = None;
+        let screen = size(60, 30);
+        let ops = render(&mut state, &mut ModalPainters::new(), screen).expect("paints");
+        assert!(
+            list_row_text(&state, screen, ops).contains("No results"),
+            "the list keeps one row for the message"
+        );
+    }
+
+    #[test]
+    fn the_model_picker_with_nothing_to_offer_says_why() {
+        use crate::tui::modal::list::ModalPainters;
+        let mut state = state();
+        Modal::open(
+            &mut state,
+            Modal::ModelPicker(ModelPickerPurpose::Window(1)),
+        );
+        state.model_picker.results.clear();
+        let screen = size(100, 30);
+        let ops = render(&mut state, &mut ModalPainters::new(), screen).expect("paints");
+        assert!(
+            list_row_text(&state, screen, ops).contains("No endpoint"),
+            "the explanation is painted, not a list of zero rows"
+        );
+    }
+
+    #[test]
+    fn a_frame_maps_only_the_rows_the_list_shows() {
+        use crate::tui::widgets::fuzzy_picker::FuzzyPickerState;
+        let mut picker = FuzzyPickerState {
+            results: (0..20_000).collect(),
+            selected: Some(12_345),
+            ..Default::default()
+        };
+        let list = ModalBox::for_modal(size(80, 24), picker.results.len()).list_box();
+        let view = crate::tui::modal::list::visible(&mut picker, &list);
+        assert_eq!(view.range.len(), list.rows);
+        assert!(view.range.contains(&12_345));
+        assert_eq!(view.range.start + view.selected, 12_345);
     }
 
     /// What the gate in `app/input.rs` hands a modal: a key the picker does not know is still

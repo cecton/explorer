@@ -638,7 +638,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                         colors,
                         &query,
                         &rows,
-                        selected,
+                        Some(selected),
                         scroll,
                         vp_col(origin.col_index.as_u16()) + vp_row(origin.row_index.as_u16()),
                         total_rows,

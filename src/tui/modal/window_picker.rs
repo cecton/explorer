@@ -250,22 +250,22 @@ fn run_file_name_match(
 /// Paints the window picker's list.
 pub fn render(
     state: &mut crate::tui::state::AppState,
+    painter: &mut crate::tui::widgets::fuzzy_picker::FuzzyPicker,
     list: &crate::tui::modal::ModalBox,
 ) -> RenderOpIRVec {
-    use crate::tui::widgets::fuzzy::Kind;
-    use crate::tui::widgets::fuzzy_picker::PickerRow;
+    use crate::tui::widgets::fuzzy_picker::{PickerColors, PickerRow};
     let accents = row_accents(&state.theme);
-    let rows: Vec<PickerRow> = state
-        .window_picker
-        .results
+    let view = crate::tui::modal::list::visible(&mut state.window_picker, list);
+    let rows: Vec<PickerRow> = state.window_picker.results[view.range]
         .iter()
         .map(|window| row_text(state, window, &accents))
         .collect();
     crate::tui::modal::list::paint_rows(
-        &state.theme.clone(),
-        Kind::Paths,
+        PickerColors::in_overlay(&state.theme),
+        painter,
+        state.window_picker.query.text(),
         &rows,
-        &mut state.window_picker,
+        Some(view.selected),
         list,
     )
 }
