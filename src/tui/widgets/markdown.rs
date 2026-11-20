@@ -58,8 +58,8 @@ impl Span {
     }
 }
 
-/// One rendered row. `bg` set marks a code block line, painted with that background
-/// instead of the pane background.
+/// One rendered row. `bg` set paints a code block line with that background instead of
+/// the pane background; a theme with no code background leaves it `None`.
 #[derive(Clone)]
 pub struct MdLine {
     pub spans: Vec<Span>,
@@ -141,6 +141,7 @@ struct Renderer<'a> {
     quote_fg: crate::tui::theme::Color,
     items: Vec<ItemCtx>,
     lists: Vec<Option<u64>>,
+    in_code: bool,
     code_bg: Option<crate::tui::theme::Color>,
     table: Option<TableCtx>,
 }
@@ -342,9 +343,11 @@ pub(crate) fn render(
             }
             pulldown_cmark::Event::Start(pulldown_cmark::Tag::CodeBlock(_)) => {
                 r.flush_content();
+                r.in_code = true;
                 r.code_bg = r.theme.ui.ruler;
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::CodeBlock) => {
+                r.in_code = false;
                 r.code_bg = None;
                 r.push_blank();
             }
@@ -429,7 +432,7 @@ pub(crate) fn render(
                 r.start_style(r.style)
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Image) => r.end_style(),
-            pulldown_cmark::Event::Text(text) if r.code_bg.is_some() => {
+            pulldown_cmark::Event::Text(text) if r.in_code => {
                 r.push_code_lines(&text, verbatim(&text))
             }
             pulldown_cmark::Event::Text(text) => r.push_content(&text, r.style, verbatim(&text)),
@@ -518,6 +521,7 @@ impl Renderer<'_> {
             quote_fg: text_fg,
             items: Vec::new(),
             lists: Vec::new(),
+            in_code: false,
             code_bg: None,
             table: None,
         }
@@ -601,9 +605,7 @@ impl Renderer<'_> {
     }
 
     fn push_code_lines(&mut self, text: &str, src: Option<usize>) {
-        let Some(bg) = self.code_bg else {
-            return;
-        };
+        let bg = self.code_bg;
         let style = InlineStyle {
             fg: self.fg("markup.raw"),
             ..self.plain
@@ -615,7 +617,7 @@ impl Renderer<'_> {
                         src: src.map(|start| start + at + piece_at),
                         ..Span::of(piece, style)
                     }],
-                    bg: Some(bg),
+                    bg,
                 });
             }
         }
@@ -1245,6 +1247,19 @@ mod tests {
         assert!(lines.iter().all(|l| l.bg == ruler));
         // Each wrapped piece carries the byte offset of its own slice of the source.
         assert_eq!(lines[1].spans[0].src, Some(12));
+    }
+
+    #[test]
+    fn a_code_block_stays_apart_from_the_next_paragraph_on_a_theme_without_a_ruler() {
+        let src = "```\nlet x = 1;\nlet y = 2;\n```\n\nafter";
+        let mut bare = theme();
+        bare.ui.ruler = None;
+        let with = render(src, &theme(), 40);
+        let without = render(src, &bare, 40);
+        let shown = |lines: &[MdLine]| lines.iter().map(text).collect::<Vec<_>>();
+        assert_eq!(shown(&without), ["let x = 1;", "let y = 2;", "", "after"]);
+        assert_eq!(shown(&without), shown(&with));
+        assert!(without.iter().all(|l| l.bg.is_none()));
     }
 
     #[test]
