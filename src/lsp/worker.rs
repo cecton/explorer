@@ -57,22 +57,11 @@ pub struct LspWorker {
 }
 
 impl Drop for LspWorker {
-    /// Hands what the next worker has to answer to `REQUEST_BUFFER`: the queries in flight
-    /// died with the server, and the held ones were never sent.
+    /// Hands the held requests, which were never sent, to `REQUEST_BUFFER`; a query in flight
+    /// is not, since one that took the server down would take every next one down too.
     fn drop(&mut self) {
-        use crate::lsp::LspInput;
         self.kill_server();
-        let in_flight =
-            self.take_ref_queries()
-                .into_iter()
-                .map(|query| LspInput::HoverThenReferences {
-                    file_idx: query.file_idx,
-                    line: query.line,
-                    character: query.character,
-                    word: query.word,
-                    group_id: query.group_id,
-                });
-        for input in in_flight.chain(self.held_requests.drain(..)) {
+        for input in self.held_requests.drain(..) {
             crate::lsp::buffer_request(input);
         }
     }
@@ -1091,10 +1080,10 @@ mod tests {
         assert_eq!(kept, [1, 2], "the failed request is not retried");
     }
 
-    /// A crash restart drops the worker: what it held or had in flight reaches the next
-    /// worker through the request buffer.
+    /// A crash restart drops the worker: what it held reaches the next worker through the
+    /// request buffer, a query in flight does not.
     #[test]
-    fn a_dropped_worker_hands_its_queries_to_the_request_buffer() {
+    fn a_dropped_worker_hands_its_held_requests_but_not_its_queries_in_flight() {
         use crate::lsp::LspInput;
         let mut worker = idle_worker();
         worker.ref_queries.insert(1, in_flight(7001));
@@ -1113,7 +1102,7 @@ mod tests {
             .filter_map(hover_of)
             .collect();
         assert!(
-            buffered.contains(&7001),
+            !buffered.contains(&7001),
             "the query in flight: {buffered:?}"
         );
         assert!(buffered.contains(&7002), "the held request: {buffered:?}");
