@@ -705,7 +705,9 @@ impl FilePreviewComponent {
             let segments = line_segments(line, content_width);
             if rel_y < rendered + segments.len() {
                 let (start, end) = segments[rel_y - rendered];
-                // The grapheme whose columns hold `rel_x`; past the row, its end.
+                // The grapheme whose columns hold `rel_x`. Past the row: the end of the line on
+                // its last row, else the row's last grapheme (`end` is the next row's first).
+                let is_last_row = rel_y - rendered + 1 == segments.len();
                 let mut used = 0;
                 let mut byte = end;
                 for (offset, grapheme) in line[start..end].grapheme_indices(true) {
@@ -713,6 +715,9 @@ impl FilePreviewComponent {
                     if rel_x < used + width {
                         byte = start + offset;
                         break;
+                    }
+                    if !is_last_row {
+                        byte = start + offset;
                     }
                     used += width;
                 }
@@ -1837,6 +1842,35 @@ mod tests {
         assert_eq!(at(2, 0), (0, 6, 18));
         // The next line starts on the row after the last one of the wrapped line.
         assert_eq!(at(3, 1), (1, 1, 26));
+    }
+
+    /// A wide char that does not fit leaves the last column of a row unfilled: a click there
+    /// stays on that row's last char, it does not land on the next row's first.
+    #[test]
+    fn a_click_past_the_end_of_a_wrapped_row_stays_on_the_row() {
+        use crate::tui::pane_manager::Window;
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("gap.txt");
+        std::fs::write(&path, "abcdあい\n").unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(dir.path().to_path_buf()).unwrap();
+        let file = crate::loader::LoadedFile::load(path).unwrap();
+        let mut state = crate::tui::state::AppState::for_test_with_files(vec![file], root);
+        let key = crate::loader::FileKey(0);
+        state.pane_manager.push_window(Window::FilePreview(key));
+        let mut component = FilePreviewComponent::new(crate::tui::pane_component::pane_id(0));
+        let content_start = 1 + GUTTER_GAP.len();
+        component.content_col_count = content_start + 5;
+        component.content_row_count = 10;
+        let snapshot = state.files.load();
+        let data = snapshot[0].data.read();
+        let at = |row, col| {
+            component.screen_pos_to_line_char(&state, row, col + content_start, key, &data)
+        };
+        // Row 0 holds `abcd` and a gap in column 4; row 1 holds あい.
+        assert_eq!(at(0, 3), (0, 3, 3));
+        assert_eq!(at(0, 4), (0, 3, 3), "the gap");
+        assert_eq!(at(0, 9), (0, 3, 3), "far past the row");
+        assert_eq!(at(1, 0), (0, 4, 4));
     }
 
     #[test]
