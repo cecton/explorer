@@ -165,21 +165,28 @@ impl r3bl_tui::RRTWorker for LspWorker {
 }
 
 impl LspWorker {
+    /// A request that fails to send is dropped, so the restart it causes removes one request.
+    fn accept_buffered(
+        &mut self,
+        buffered: Vec<crate::lsp::LspInput>,
+    ) -> Result<(), Vec<crate::lsp::LspInput>> {
+        let mut buffered = buffered.into_iter();
+        while let Some(input) = buffered.next() {
+            if self.accept(input).is_err() {
+                return Err(buffered.collect());
+            }
+        }
+        Ok(())
+    }
+
     /// Takes every request waiting for the worker: the buffered ones first, then the
     /// channel's.
     fn drain_requests(&mut self) -> Option<r3bl_tui::Continuation> {
-        let mut buffered = crate::lsp::take_buffered_requests().into_iter();
-        for input in buffered.by_ref() {
-            let retry = input.clone();
-            if self.accept(input).is_err() {
-                // The failed one and the rest wait for the next worker rather than being lost
-                // with this one.
-                crate::lsp::buffer_request(retry);
-                for rest in buffered {
-                    crate::lsp::buffer_request(rest);
-                }
-                return Some(r3bl_tui::Continuation::Restart);
+        if let Err(rest) = self.accept_buffered(crate::lsp::take_buffered_requests()) {
+            for input in rest {
+                crate::lsp::buffer_request(input);
             }
+            return Some(r3bl_tui::Continuation::Restart);
         }
         loop {
             match self.input_receiver.try_recv() {
@@ -1053,6 +1060,35 @@ mod tests {
             })
             .collect();
         assert_eq!(groups, [Some(3), None], "each group keeps its own query");
+    }
+
+    #[test]
+    fn a_buffered_request_that_fails_to_send_is_dropped_and_the_rest_kept() {
+        use crate::lsp::LspInput;
+        let hover = |file_idx| LspInput::HoverThenReferences {
+            file_idx,
+            line: 0,
+            character: 0,
+            word: None,
+            group_id: None,
+        };
+        let mut worker = idle_worker();
+        worker.files = Arc::new(arc_swap::ArcSwap::from_pointee(
+            (0..3)
+                .map(|i| {
+                    crate::loader::LoadedFile::stub(camino::Utf8PathBuf::from(format!(
+                        "/repo/src/f{i}.rs"
+                    )))
+                })
+                .collect(),
+        ));
+        // The server is gone: every write to it fails.
+        worker.kill_server();
+        let rest = worker
+            .accept_buffered(vec![hover(0), hover(1), hover(2)])
+            .expect_err("the first send fails");
+        let kept: Vec<_> = rest.iter().filter_map(hover_of).collect();
+        assert_eq!(kept, [1, 2], "the failed request is not retried");
     }
 
     /// A crash restart drops the worker: what it held or had in flight reaches the next
