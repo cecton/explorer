@@ -16,6 +16,36 @@ enum RawKind {
     Removed,
 }
 
+/// A rename removes the old path and creates the new one: read as a change, the old one stays listed.
+fn raw_kind(kind: &notify::EventKind, index: usize) -> Option<RawKind> {
+    use notify::event::{ModifyKind, RenameMode};
+    match kind {
+        notify::EventKind::Create(_) => Some(RawKind::Created),
+        notify::EventKind::Modify(ModifyKind::Name(RenameMode::From)) => Some(RawKind::Removed),
+        notify::EventKind::Modify(ModifyKind::Name(RenameMode::To)) => Some(RawKind::Created),
+        // The old path first, then the new one.
+        notify::EventKind::Modify(ModifyKind::Name(RenameMode::Both)) => Some(if index == 0 {
+            RawKind::Removed
+        } else {
+            RawKind::Created
+        }),
+        notify::EventKind::Modify(_) => Some(RawKind::Modified),
+        notify::EventKind::Remove(_) => Some(RawKind::Removed),
+        _ => None,
+    }
+}
+
+/// The files a created path stands for: a directory moved in reports no event for its files.
+fn created_files(path: &camino::Utf8Path) -> Vec<camino::Utf8PathBuf> {
+    if !path.is_dir() {
+        return vec![path.to_path_buf()];
+    }
+    crate::loader::walk_repo_files(path)
+        .into_iter()
+        .filter_map(|file| camino::Utf8PathBuf::from_path_buf(file).ok())
+        .collect()
+}
+
 #[derive(Debug)]
 pub struct NoOpInterrupt;
 
@@ -120,13 +150,13 @@ impl r3bl_tui::RRTWorker for WatcherWorker {
                     self.pending_git = true;
                     return r3bl_tui::Continuation::Continue;
                 }
-                let kind = match event.kind {
-                    notify::EventKind::Create(_) => RawKind::Created,
-                    notify::EventKind::Modify(_) => RawKind::Modified,
-                    notify::EventKind::Remove(_) => RawKind::Removed,
-                    _ => return r3bl_tui::Continuation::Continue,
-                };
-                for path in event.paths {
+                if raw_kind(&event.kind, 0).is_none() {
+                    return r3bl_tui::Continuation::Continue;
+                }
+                for (index, path) in event.paths.into_iter().enumerate() {
+                    let Some(kind) = raw_kind(&event.kind, index) else {
+                        continue;
+                    };
                     let Ok(utf8) = camino::Utf8PathBuf::from_path_buf(path) else {
                         continue;
                     };
@@ -142,16 +172,28 @@ impl r3bl_tui::RRTWorker for WatcherWorker {
                     if crate::loader::is_ignored(rel) {
                         continue;
                     }
-                    let entry = self.pending.entry(utf8).or_insert(kind);
-                    // Created+Removed or Removed+Created within one debounce window
-                    // means an atomic replace (e.g. editor save strategy); treat as Modified.
-                    match (*entry, kind) {
-                        (RawKind::Created, RawKind::Removed) => *entry = RawKind::Modified,
-                        (RawKind::Removed, RawKind::Created) => *entry = RawKind::Modified,
-                        (_, RawKind::Removed) => *entry = RawKind::Removed,
-                        (RawKind::Created, RawKind::Modified) => {}
-                        (RawKind::Modified, RawKind::Created) => {}
-                        _ => *entry = kind,
+                    let paths = if kind == RawKind::Created {
+                        created_files(&utf8)
+                    } else {
+                        vec![utf8]
+                    };
+                    for path in paths {
+                        if path
+                            .strip_prefix(&self.root)
+                            .is_ok_and(crate::loader::is_ignored)
+                        {
+                            continue;
+                        }
+                        let entry = self.pending.entry(path).or_insert(kind);
+                        // Created and removed in one window is an atomic replace: Modified.
+                        match (*entry, kind) {
+                            (RawKind::Created, RawKind::Removed) => *entry = RawKind::Modified,
+                            (RawKind::Removed, RawKind::Created) => *entry = RawKind::Modified,
+                            (_, RawKind::Removed) => *entry = RawKind::Removed,
+                            (RawKind::Created, RawKind::Modified) => {}
+                            (RawKind::Modified, RawKind::Created) => {}
+                            _ => *entry = kind,
+                        }
                     }
                 }
                 r3bl_tui::Continuation::Continue
@@ -301,6 +343,60 @@ fn is_git_history_trigger(components: camino::Utf8Components<'_>) -> bool {
 mod tests {
     use super::*;
     use camino::Utf8Path;
+    use notify::EventKind;
+    use notify::event::{CreateKind, ModifyKind, RemoveKind, RenameMode};
+
+    #[test]
+    fn a_rename_event_removes_the_old_path_and_creates_the_new_one() {
+        let name = |mode| EventKind::Modify(ModifyKind::Name(mode));
+        assert_eq!(raw_kind(&name(RenameMode::From), 0), Some(RawKind::Removed));
+        assert_eq!(raw_kind(&name(RenameMode::To), 0), Some(RawKind::Created));
+        let both = name(RenameMode::Both);
+        assert_eq!(raw_kind(&both, 0), Some(RawKind::Removed));
+        assert_eq!(raw_kind(&both, 1), Some(RawKind::Created));
+        // Which side a bare rename event is cannot be told: the path gets read.
+        assert_eq!(raw_kind(&name(RenameMode::Any), 0), Some(RawKind::Modified));
+    }
+
+    #[test]
+    fn other_events_keep_their_kinds() {
+        assert_eq!(
+            raw_kind(&EventKind::Create(CreateKind::File), 0),
+            Some(RawKind::Created)
+        );
+        assert_eq!(
+            raw_kind(&EventKind::Remove(RemoveKind::File), 0),
+            Some(RawKind::Removed)
+        );
+        assert_eq!(
+            raw_kind(&EventKind::Modify(ModifyKind::Any), 0),
+            Some(RawKind::Modified)
+        );
+        assert_eq!(
+            raw_kind(&EventKind::Access(notify::event::AccessKind::Any), 0),
+            None
+        );
+    }
+
+    #[test]
+    fn a_created_directory_stands_for_the_files_under_it() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        std::fs::create_dir_all(root.join("moved/sub")).unwrap();
+        std::fs::write(root.join("moved/a.rs"), "a").unwrap();
+        std::fs::write(root.join("moved/sub/b.rs"), "b").unwrap();
+        let mut files = created_files(&root.join("moved"));
+        files.sort();
+        assert_eq!(
+            files,
+            [root.join("moved/a.rs"), root.join("moved/sub/b.rs")]
+        );
+        // A file, or a path that is gone, stands for itself.
+        let file = root.join("moved/a.rs");
+        assert_eq!(created_files(&file), std::slice::from_ref(&file));
+        let gone = root.join("gone.rs");
+        assert_eq!(created_files(&gone), std::slice::from_ref(&gone));
+    }
 
     #[test]
     fn events_under_ignored_dirs_are_dropped_at_any_depth() {
