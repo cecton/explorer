@@ -105,7 +105,7 @@ pub(crate) fn take_buffered_requests() -> Vec<LspInput> {
     std::mem::take(&mut *REQUEST_BUFFER.lock())
 }
 
-fn buffer_request(input: LspInput) {
+pub(crate) fn buffer_request(input: LspInput) {
     let mut buf = REQUEST_BUFFER.lock();
     if buf.len() >= MAX_BUFFERED_REQUESTS {
         tracing::warn!(

@@ -57,8 +57,24 @@ pub struct LspWorker {
 }
 
 impl Drop for LspWorker {
+    /// Hands what the next worker has to answer to `REQUEST_BUFFER`: the queries in flight
+    /// died with the server, and the held ones were never sent.
     fn drop(&mut self) {
+        use crate::lsp::LspInput;
         self.kill_server();
+        let in_flight =
+            self.take_ref_queries()
+                .into_iter()
+                .map(|query| LspInput::HoverThenReferences {
+                    file_idx: query.file_idx,
+                    line: query.line,
+                    character: query.character,
+                    word: query.word,
+                    group_id: query.group_id,
+                });
+        for input in in_flight.chain(self.held_requests.drain(..)) {
+            crate::lsp::buffer_request(input);
+        }
     }
 }
 
@@ -152,8 +168,16 @@ impl LspWorker {
     /// Takes every request waiting for the worker: the buffered ones first, then the
     /// channel's.
     fn drain_requests(&mut self) -> Option<r3bl_tui::Continuation> {
-        for input in crate::lsp::take_buffered_requests() {
+        let mut buffered = crate::lsp::take_buffered_requests().into_iter();
+        for input in buffered.by_ref() {
+            let retry = input.clone();
             if self.accept(input).is_err() {
+                // The failed one and the rest wait for the next worker rather than being lost
+                // with this one.
+                crate::lsp::buffer_request(retry);
+                for rest in buffered {
+                    crate::lsp::buffer_request(rest);
+                }
                 return Some(r3bl_tui::Continuation::Restart);
             }
         }
@@ -277,7 +301,7 @@ impl LspWorker {
         self.supports_range = server.supports_range;
         self.legend = server.legend;
         self.req_state = crate::lsp::tokens::TokenRequestState::new();
-        self.ref_queries.clear();
+        self.hold_pending_queries();
         self.warmup_retries.clear();
         self.warmup_queue = warmup_queue(&self.files);
         self.last_warmup_progress = Instant::now();
@@ -291,6 +315,27 @@ impl LspWorker {
             crate::signal::try_send(&self.app_tx, AppSignal::Redraw);
         }
         Ok(())
+    }
+
+    /// The queries in flight, oldest first, taken out of the worker.
+    fn take_ref_queries(&mut self) -> Vec<crate::lsp::symbols::PendingRefQuery> {
+        let mut pending: Vec<_> = self.ref_queries.drain().collect();
+        pending.sort_by_key(|(id, _)| *id);
+        pending.into_iter().map(|(_, query)| query).collect()
+    }
+
+    /// Holds again every query in flight, each from its hover: the answers died with the
+    /// server they were asked of, and the held requests go out once the new one is ready.
+    fn hold_pending_queries(&mut self) {
+        for query in self.take_ref_queries() {
+            self.hold_hover(
+                query.file_idx,
+                query.line,
+                query.character,
+                query.word,
+                query.group_id,
+            );
+        }
     }
 
     fn kill_server(&mut self) {
@@ -421,8 +466,8 @@ impl LspWorker {
         self.held_requests.retain(|h| {
             !matches!(
                 h,
-                LspInput::HoverThenReferences { file_idx: f, line: l, character: c, .. }
-                if *f == file_idx && *l == line && *c == character
+                LspInput::HoverThenReferences { file_idx: f, line: l, character: c, group_id: g, .. }
+                if *f == file_idx && *l == line && *c == character && *g == group_id
             )
         });
         self.held_requests.push_back(LspInput::HoverThenReferences {
@@ -922,6 +967,121 @@ fn legend_and_range(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A worker over `cat` instead of rust-analyzer: it never answers, which is all the
+    /// bookkeeping tests need.
+    fn idle_worker() -> LspWorker {
+        let mut child = Command::new("cat")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("cat");
+        let stdin = child.stdin.take().unwrap();
+        let reader = BufReader::new(child.stdout.take().unwrap());
+        let (_input_tx, input_receiver) = tokio::sync::broadcast::channel(1);
+        let (app_tx, _app_rx) = tokio::sync::mpsc::channel(1);
+        let now = Instant::now();
+        LspWorker {
+            root: camino::Utf8PathBuf::from("/tmp/nowhere"),
+            child,
+            stdin,
+            reader,
+            input_receiver,
+            app_tx,
+            files: Arc::new(arc_swap::ArcSwap::from_pointee(Vec::new())),
+            req_state: crate::lsp::tokens::TokenRequestState::new(),
+            warmup_queue: VecDeque::new(),
+            last_warmup_progress: now,
+            warmup_retries: HashMap::new(),
+            supports_range: false,
+            legend: Vec::new(),
+            dispatch_count: 0,
+            ref_queries: HashMap::new(),
+            server_ready: true,
+            held_requests: VecDeque::new(),
+            worker_start: now,
+        }
+    }
+
+    fn in_flight(file_idx: usize) -> crate::lsp::symbols::PendingRefQuery {
+        use crate::lsp::symbols::RefQueryPhase;
+        crate::lsp::symbols::PendingRefQuery {
+            file_idx,
+            line: 3,
+            character: 4,
+            word: Some("word".to_string()),
+            phase: RefQueryPhase::Hover,
+            qualified_name: None,
+            group_id: Some(file_idx),
+        }
+    }
+
+    fn hover_of(input: &crate::lsp::LspInput) -> Option<usize> {
+        use crate::lsp::LspInput;
+        match input {
+            LspInput::HoverThenReferences { file_idx, .. } => Some(*file_idx),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn a_restart_holds_the_queries_in_flight_again() {
+        let mut worker = idle_worker();
+        worker.ref_queries.insert(9, in_flight(2));
+        worker.ref_queries.insert(4, in_flight(1));
+        worker.hold_pending_queries();
+        assert!(worker.ref_queries.is_empty());
+        let held: Vec<_> = worker.held_requests.iter().filter_map(hover_of).collect();
+        assert_eq!(held, [1, 2], "oldest first");
+    }
+
+    #[test]
+    fn a_restart_holds_two_groups_at_one_position_apart() {
+        use crate::lsp::LspInput;
+        let mut worker = idle_worker();
+        let mut other_group = in_flight(3);
+        other_group.group_id = None;
+        worker.ref_queries.insert(1, in_flight(3));
+        worker.ref_queries.insert(2, other_group);
+        worker.hold_pending_queries();
+        let groups: Vec<_> = worker
+            .held_requests
+            .iter()
+            .filter_map(|input| match input {
+                LspInput::HoverThenReferences { group_id, .. } => Some(*group_id),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(groups, [Some(3), None], "each group keeps its own query");
+    }
+
+    /// A crash restart drops the worker: what it held or had in flight reaches the next
+    /// worker through the request buffer.
+    #[test]
+    fn a_dropped_worker_hands_its_queries_to_the_request_buffer() {
+        use crate::lsp::LspInput;
+        let mut worker = idle_worker();
+        worker.ref_queries.insert(1, in_flight(7001));
+        worker
+            .held_requests
+            .push_back(LspInput::HoverThenReferences {
+                file_idx: 7002,
+                line: 0,
+                character: 0,
+                word: None,
+                group_id: None,
+            });
+        drop(worker);
+        let buffered: Vec<_> = crate::lsp::take_buffered_requests()
+            .iter()
+            .filter_map(hover_of)
+            .collect();
+        assert!(
+            buffered.contains(&7001),
+            "the query in flight: {buffered:?}"
+        );
+        assert!(buffered.contains(&7002), "the held request: {buffered:?}");
+    }
 
     #[test]
     fn a_reference_uri_percent_encoded_names_its_loaded_file() {
