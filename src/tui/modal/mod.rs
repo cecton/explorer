@@ -48,6 +48,9 @@ impl Modal {
     /// released, a selection in a pane is dropped and a leader chord in progress is
     /// abandoned, so nothing behind the modal keeps acting as if it were in front.
     pub fn open(state: &mut crate::tui::state::AppState, modal: Modal) {
+        if modal != Modal::ThemePicker {
+            Self::revert_previewed_theme(state);
+        }
         if state.modal.is_none() {
             state.modal_origin = state.pane_manager.focused_window;
         }
@@ -58,9 +61,18 @@ impl Modal {
         state.leader_active = false;
     }
 
+    /// Puts the confirmed theme back when the theme picker is left without Enter, so a
+    /// previewed theme is never kept (nor saved to the session) by accident.
+    fn revert_previewed_theme(state: &mut crate::tui::state::AppState) {
+        if state.modal == Some(Modal::ThemePicker) {
+            state.theme = state.saved_theme.clone();
+        }
+    }
+
     /// Closes the modal and gives the keyboard back to the window it opened over, if that
     /// window is still in the stack. A terminal gets it back ungrabbed, as after `Tab`.
     pub fn close(state: &mut crate::tui::state::AppState) {
+        Self::revert_previewed_theme(state);
         state.modal = None;
         state.modal_box = None;
         state.window_picker.reset();
@@ -649,6 +661,33 @@ mod tests {
         assert!(state.input_drag.is_none());
         assert!(!state.leader_active);
         assert_eq!(state.modal_origin, Some(Window::ConversationTree));
+    }
+
+    fn previewing_another_theme(state: &mut AppState) -> String {
+        use crate::tui::theme::HelixTheme;
+        let confirmed = state.theme.name().to_string();
+        crate::tui::modal::theme_picker::open(state);
+        let other = HelixTheme::theme_names()
+            .find(|name| *name != confirmed)
+            .expect("a second bundled theme");
+        state.theme = HelixTheme::from_name(other).expect("bundled theme");
+        confirmed
+    }
+
+    #[test]
+    fn opening_another_modal_over_the_theme_picker_reverts_the_preview() {
+        let mut state = state();
+        let confirmed = previewing_another_theme(&mut state);
+        Modal::open(&mut state, Modal::WindowPicker);
+        assert_eq!(state.theme.name(), confirmed);
+    }
+
+    #[test]
+    fn closing_the_theme_picker_any_way_reverts_the_preview() {
+        let mut state = state();
+        let confirmed = previewing_another_theme(&mut state);
+        Modal::close(&mut state);
+        assert_eq!(state.theme.name(), confirmed);
     }
 
     #[test]

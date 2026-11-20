@@ -162,7 +162,7 @@ impl Session {
             highlight_ranges,
             symbol_highlights,
             cargo_features: state.cargo_features.clone(),
-            theme: Some(state.theme.name().to_string()),
+            theme: Some(state.saved_theme.name().to_string()),
             conversation_expanded,
             conversation_query: state.tree_view.query.text().to_string(),
             discussion_highlights,
@@ -626,6 +626,22 @@ mod tests {
         let restored: Session = serde_json::from_value(value.clone()).unwrap();
         let value2 = serde_json::to_value(&restored).unwrap();
         assert_eq!(value, value2);
+    }
+
+    #[test]
+    fn a_previewed_theme_is_not_saved_until_it_is_confirmed() {
+        use crate::tui::theme::HelixTheme;
+        let (_dir, root) = temp_root();
+        let mut state = empty_state(root);
+        let confirmed = state.saved_theme.name().to_string();
+        let other = HelixTheme::theme_names()
+            .find(|name| *name != confirmed)
+            .expect("a second bundled theme");
+        state.theme = HelixTheme::from_name(other).expect("bundled theme");
+        assert_eq!(
+            Session::from_state(&state).theme.as_deref(),
+            Some(confirmed.as_str())
+        );
     }
 
     #[test]
