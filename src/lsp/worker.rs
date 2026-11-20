@@ -702,15 +702,10 @@ impl LspWorker {
                     .and_then(|v| serde_json::from_value(v).ok())
                     .unwrap_or_default();
                 let snapshot = self.files.load();
-                let origin_path = &snapshot[pending.file_idx].path;
                 let mut origin_locations: Vec<SymbolRefLocation> = Vec::new();
                 let mut reference_locations: Vec<SymbolRefLocation> = Vec::new();
                 for loc in locations {
-                    let Some(path) = loc.uri.as_str().strip_prefix("file://") else {
-                        continue;
-                    };
-                    let path = camino::Utf8PathBuf::from(path);
-                    let Some(file_key) = crate::loader::file_key_for_path(&snapshot, &path) else {
+                    let Some(file_key) = reference_file_key(&snapshot, &loc.uri) else {
                         continue;
                     };
                     let file = &snapshot[file_key.0];
@@ -733,7 +728,7 @@ impl LspWorker {
                         start_byte,
                         end_byte,
                     };
-                    if path == *origin_path {
+                    if file_key.0 == pending.file_idx {
                         origin_locations.push(location);
                     } else {
                         reference_locations.push(location);
@@ -764,6 +759,16 @@ impl LspWorker {
             }
         }
     }
+}
+
+/// The loaded file a reference location's URI names, or `None` for a URI that is not a
+/// `file://` URI or names no loaded file.
+fn reference_file_key(
+    files: &[Arc<crate::loader::LoadedFile>],
+    uri: &lsp_types::Uri,
+) -> Option<crate::loader::FileKey> {
+    let path = crate::lsp::rpc::uri_path(uri)?;
+    crate::loader::file_key_for_path(files, &path)
 }
 
 /// The indices of the files warmup colors, in the order the walk found them.
@@ -912,4 +917,35 @@ fn legend_and_range(
         .map(|t| TokenKind::from_name(t.as_str()))
         .collect();
     (types, range.unwrap_or(false))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_reference_uri_percent_encoded_names_its_loaded_file() {
+        let files = vec![
+            crate::loader::LoadedFile::stub(camino::Utf8PathBuf::from(
+                "/repo/my code/src/caf\u{e9}.rs",
+            )),
+            crate::loader::LoadedFile::stub(camino::Utf8PathBuf::from("/repo/src/main.rs")),
+        ];
+        let uri: lsp_types::Uri = "file:///repo/my%20code/src/caf%C3%A9.rs".parse().unwrap();
+        assert_eq!(
+            reference_file_key(&files, &uri),
+            Some(crate::loader::FileKey(0))
+        );
+    }
+
+    #[test]
+    fn a_reference_uri_naming_no_loaded_file_or_another_scheme_is_skipped() {
+        let files = vec![crate::loader::LoadedFile::stub(camino::Utf8PathBuf::from(
+            "/repo/src/main.rs",
+        ))];
+        let missing: lsp_types::Uri = "file:///repo/src/lib.rs".parse().unwrap();
+        let other: lsp_types::Uri = "https://example.com/src/main.rs".parse().unwrap();
+        assert_eq!(reference_file_key(&files, &missing), None);
+        assert_eq!(reference_file_key(&files, &other), None);
+    }
 }

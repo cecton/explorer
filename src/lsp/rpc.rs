@@ -32,11 +32,25 @@ pub(super) struct RpcResponse {
     pub(super) params: Option<serde_json::Value>,
 }
 
-/// The `file://` URI rust-analyzer names `path` by.
+/// The `file://` URI rust-analyzer names `path` by, with every byte that is not
+/// valid in a URI percent-encoded.
 pub(super) fn file_uri(path: &camino::Utf8Path) -> lsp_types::Uri {
-    format!("file://{path}")
-        .parse()
-        .expect("a path makes a valid file URI")
+    let url = url::Url::from_file_path(path.as_std_path())
+        .expect("rust-analyzer is only given absolute paths");
+    // `url` leaves these four alone in a path, but `lsp_types::Uri` refuses them.
+    let encoded = url
+        .as_str()
+        .replace('[', "%5B")
+        .replace(']', "%5D")
+        .replace('^', "%5E")
+        .replace('|', "%7C");
+    encoded.parse().expect("an encoded file URL is a valid URI")
+}
+
+/// The path a `file://` URI names, or `None` for any other kind of URI.
+pub(super) fn uri_path(uri: &lsp_types::Uri) -> Option<camino::Utf8PathBuf> {
+    let path = url::Url::parse(uri.as_str()).ok()?.to_file_path().ok()?;
+    camino::Utf8PathBuf::from_path_buf(path).ok()
 }
 
 pub(super) fn send_msg<T: serde::Serialize>(
@@ -137,5 +151,49 @@ pub(super) fn poll_readable(fd: &impl AsFd, timeout: std::time::Duration) -> boo
             Err(Errno::INTR) => continue,
             Err(_) => return false,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const PATHS: [&str; 6] = [
+        "/repo/my code/src/caf\u{e9}.rs",
+        "/a/b[1]/c.rs",
+        "/a/100%/c.rs",
+        "/a/x#y.rs",
+        "/a/what?.rs",
+        "/a/x^y|z.rs",
+    ];
+
+    #[test]
+    fn file_uri_round_trips_awkward_paths() {
+        for path in PATHS {
+            let path = camino::Utf8Path::new(path);
+            let uri = file_uri(path);
+            assert_eq!(uri_path(&uri).as_deref(), Some(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn file_uri_of_a_plain_path_is_unchanged() {
+        let uri = file_uri(camino::Utf8Path::new("/repo/src/main.rs"));
+        assert_eq!(uri.as_str(), "file:///repo/src/main.rs");
+    }
+
+    #[test]
+    fn uri_path_reads_a_percent_encoded_uri() {
+        let uri: lsp_types::Uri = "file:///repo/my%20code/caf%C3%A9.rs".parse().unwrap();
+        assert_eq!(
+            uri_path(&uri).as_deref(),
+            Some(camino::Utf8Path::new("/repo/my code/caf\u{e9}.rs"))
+        );
+    }
+
+    #[test]
+    fn uri_path_refuses_other_schemes() {
+        let uri: lsp_types::Uri = "https://example.com/a.rs".parse().unwrap();
+        assert_eq!(uri_path(&uri), None);
     }
 }
