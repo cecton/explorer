@@ -319,6 +319,13 @@ impl ConversationTree {
         prompt: &str,
         input: Option<&str>,
     ) -> std::io::Result<NodeId> {
+        // A tree that has not loaded has no directory: a root node would land in the
+        // process's working directory, then be replaced by the loaded tree.
+        if parent.is_none() && self.dir.as_str().is_empty() {
+            return Err(std::io::Error::other(
+                "the conversation tree has not loaded yet",
+            ));
+        }
         self.touch();
         let stamp = crate::util::time::utc_stamp(now_secs);
         let mut id = NodeId::new(&stamp.replace(':', "-"));
@@ -639,6 +646,21 @@ mod tests {
         assert!(dir.join(child.as_str()).join("prompt.md").exists());
         assert_eq!(tree.lineage(&child), [first.clone(), child.clone()]);
         assert_eq!(tree.roots(), [first, twin]);
+    }
+
+    /// A root prompt sent before the tree loaded must not write a node in the working
+    /// directory.
+    #[test]
+    fn create_node_refuses_a_tree_that_has_not_loaded() {
+        use crate::conversation::metadata::Metadata;
+        let mut tree = ConversationTree::default();
+        let result = tree.create_node(None, 86_401, Metadata::default(), "p", None);
+        assert!(result.is_err());
+        assert!(
+            !std::path::Path::new("1970-01-02T00-00-01Z").exists(),
+            "nothing is written in the working directory"
+        );
+        assert!(tree.roots().is_empty());
     }
 
     #[test]
