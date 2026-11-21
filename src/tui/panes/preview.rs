@@ -2142,3 +2142,385 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod mouse_tests {
+    use super::*;
+    use crate::loader::FileKey;
+    use crate::tui::selection::SelPoint;
+
+    type Data = GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>;
+
+    /// The columns before the text of a file of fewer than ten lines: one digit and the gap.
+    const TEXT_COL: usize = 1 + GUTTER_GAP.len();
+
+    /// A preview of `content` laid out as a 60x10 pane at the terminal's top left.
+    fn rig(content: &str) -> (tempfile::TempDir, FilePreviewComponent, Data) {
+        use crate::loader::LoadedFile;
+        use crate::tui::pane_manager::Window;
+        use crate::tui::state::AppState;
+        use crate::tui::test_support::global_data;
+        use crate::util::test_support::temp_root;
+        let (dir, root) = temp_root();
+        let path = root.join("f.txt");
+        std::fs::write(&path, content).unwrap();
+        let file = LoadedFile::load(path.into_std_path_buf()).unwrap();
+        let mut state = AppState::for_test_with_files(vec![file], root);
+        state
+            .pane_manager
+            .push_window(Window::FilePreview(FileKey(0)));
+        let mut component = FilePreviewComponent::new(crate::tui::pane_component::pane_id(0));
+        component.content_col_count = 60;
+        component.content_row_count = 10;
+        (dir, component, global_data(state))
+    }
+
+    fn mouse(
+        kind: MouseInputKind,
+        row: usize,
+        col: usize,
+        modifiers: Option<(bool, bool)>,
+    ) -> MouseInput {
+        let state = |on| {
+            if on {
+                KeyState::Pressed
+            } else {
+                KeyState::NotPressed
+            }
+        };
+        MouseInput {
+            pos: vp_col(col) + vp_row(row),
+            kind,
+            maybe_modifier_keys: modifiers.map(|(shift, ctrl)| ModifierKeysMask {
+                shift_key_state: state(shift),
+                ctrl_key_state: state(ctrl),
+                alt_key_state: KeyState::NotPressed,
+            }),
+        }
+    }
+
+    fn down(component: &mut FilePreviewComponent, data: &mut Data, row: usize, col: usize) -> bool {
+        let event = mouse(
+            MouseInputKind::MouseDown(Button::Left),
+            row,
+            TEXT_COL + col,
+            None,
+        );
+        component.handle_mouse(data, event, FileKey(0))
+    }
+
+    /// A click that counts as quick however long the test took: its window cannot close.
+    fn quick_down(
+        component: &mut FilePreviewComponent,
+        data: &mut Data,
+        row: usize,
+        col: usize,
+    ) -> bool {
+        if let Some((at, _)) = component.clicks.last.as_mut() {
+            *at = Instant::now() + Duration::from_secs(60);
+        }
+        down(component, data, row, col)
+    }
+
+    fn selection(
+        data: &Data,
+    ) -> Option<(
+        crate::tui::selection::SelPoint,
+        crate::tui::selection::SelPoint,
+    )> {
+        data.state
+            .text_selection
+            .as_ref()
+            .map(|sel| (sel.start, sel.end))
+    }
+
+    fn at(line_idx: usize, byte_offset: usize) -> crate::tui::selection::SelPoint {
+        SelPoint::Preview {
+            line_idx,
+            byte_offset,
+        }
+    }
+
+    /// A symbol highlight whose origin is the bytes `start..end` of the file.
+    fn symbol_at(start: usize, end: usize) -> crate::tui::state::SymbolHighlightGroup {
+        use crate::tui::state::SymbolHighlightGroup;
+        SymbolHighlightGroup {
+            qualified_name: "beta".to_string(),
+            origin_file: FileKey(0),
+            origin_line: 0,
+            origin_char: 0,
+            origin_word: None,
+            origin_byte_start: Some(start),
+            origin_byte_end: Some(end),
+            color: RgbValue {
+                red: 1,
+                green: 2,
+                blue: 3,
+            },
+            locations: Vec::new(),
+            needs_rebuild: false,
+        }
+    }
+
+    #[test]
+    fn a_click_selects_the_word_under_it() {
+        let (_dir, mut component, mut data) = rig("alpha beta\ngamma\n");
+        assert!(down(&mut component, &mut data, 0, 7));
+        assert_eq!(selection(&data), Some((at(0, 6), at(0, 6))));
+        let sel = data.state.text_selection.as_ref().unwrap();
+        assert_eq!(sel.click_anchor, Some(at(0, 7)));
+        assert_eq!(sel.click_word, Some((at(0, 6), at(0, 10))));
+        assert!(component.text_drag_active);
+        assert!(data.state.mouse_drag_active);
+    }
+
+    #[test]
+    fn a_click_outside_the_content_is_not_taken() {
+        let (_dir, mut component, mut data) = rig("alpha beta\n");
+        let below = mouse(MouseInputKind::MouseDown(Button::Left), 10, TEXT_COL, None);
+        assert!(!component.handle_mouse(&mut data, below, FileKey(0)));
+        let right = mouse(MouseInputKind::MouseDown(Button::Left), 0, 60, None);
+        assert!(!component.handle_mouse(&mut data, right, FileKey(0)));
+        assert_eq!(selection(&data), None);
+        assert!(!component.text_drag_active);
+    }
+
+    #[test]
+    fn a_drag_inside_the_clicked_word_selects_whole_words() {
+        let (_dir, mut component, mut data) = rig("alpha beta\ngamma\n");
+        down(&mut component, &mut data, 0, 7);
+        let drag = |col| {
+            mouse(
+                MouseInputKind::MouseDrag(Button::Left),
+                0,
+                TEXT_COL + col,
+                None,
+            )
+        };
+        assert!(component.handle_mouse(&mut data, drag(8), FileKey(0)));
+        assert_eq!(selection(&data), Some((at(0, 6), at(0, 10))));
+        // Back to the first word: it joins the clicked one.
+        assert!(component.handle_mouse(&mut data, drag(1), FileKey(0)));
+        assert_eq!(selection(&data), Some((at(0, 0), at(0, 10))));
+    }
+
+    #[test]
+    fn a_drag_onto_another_line_ends_the_selection_there() {
+        let (_dir, mut component, mut data) = rig("alpha beta\ngamma\n");
+        down(&mut component, &mut data, 0, 7);
+        let drag = mouse(
+            MouseInputKind::MouseDrag(Button::Left),
+            1,
+            TEXT_COL + 2,
+            None,
+        );
+        assert!(component.handle_mouse(&mut data, drag, FileKey(0)));
+        assert_eq!(selection(&data), Some((at(0, 6), at(1, 13))));
+    }
+
+    #[test]
+    fn a_drag_with_no_click_before_it_is_not_taken() {
+        let (_dir, mut component, mut data) = rig("alpha beta\n");
+        let drag = mouse(MouseInputKind::MouseDrag(Button::Left), 0, TEXT_COL, None);
+        assert!(!component.handle_mouse(&mut data, drag, FileKey(0)));
+        assert_eq!(selection(&data), None);
+    }
+
+    #[test]
+    fn cancelling_the_drag_drops_the_selection() {
+        let (_dir, mut component, mut data) = rig("alpha beta\n");
+        down(&mut component, &mut data, 0, 7);
+        component.cancel_drag(&mut data.state);
+        assert_eq!(selection(&data), None);
+        assert!(!component.text_drag_active);
+        assert!(!data.state.mouse_drag_active);
+    }
+
+    #[test]
+    fn a_double_click_on_a_highlighted_symbol_removes_it() {
+        let (_dir, mut component, mut data) = rig("alpha beta\n");
+        data.state.symbol_highlights.push(symbol_at(6, 10));
+        assert!(down(&mut component, &mut data, 0, 7));
+        assert_eq!(
+            data.state.symbol_highlights.len(),
+            1,
+            "one click only selects"
+        );
+        assert!(quick_down(&mut component, &mut data, 0, 7));
+        assert!(data.state.symbol_highlights.is_empty());
+    }
+
+    #[test]
+    fn a_triple_click_selects_the_whole_line() {
+        let (_dir, mut component, mut data) = rig("alpha beta\ngamma\n");
+        // The second click removes this highlight, so no symbol request reaches the LSP.
+        data.state.symbol_highlights.push(symbol_at(6, 10));
+        assert!(down(&mut component, &mut data, 0, 7));
+        assert!(quick_down(&mut component, &mut data, 0, 7));
+        assert!(quick_down(&mut component, &mut data, 0, 7));
+        assert_eq!(selection(&data), Some((at(0, 0), at(0, 10))));
+        let sel = data.state.text_selection.as_ref().unwrap();
+        assert_eq!((sel.click_anchor, sel.click_word), (None, None));
+        assert!(component.text_drag_active);
+    }
+
+    #[test]
+    fn a_shift_drag_marks_the_lines_it_crosses() {
+        let (_dir, mut component, mut data) = rig("a\nb\nc\nd\ne\nf\n");
+        let key = FileKey(0);
+        let shift = Some((true, false));
+        let press = mouse(MouseInputKind::MouseDown(Button::Left), 1, TEXT_COL, shift);
+        assert!(component.handle_mouse(&mut data, press, key));
+        assert!(component.preview_drag_active);
+        assert!(data.state.mouse_drag_active);
+        assert_eq!(selection(&data), None, "a marking drag selects no text");
+        let drag = mouse(MouseInputKind::MouseDrag(Button::Left), 3, TEXT_COL, shift);
+        assert!(component.handle_mouse(&mut data, drag, key));
+        assert_eq!(data.state.highlights(key), &[(2, 4)]);
+        let release = mouse(MouseInputKind::MouseUp(Button::Left), 3, TEXT_COL, shift);
+        assert!(component.handle_mouse(&mut data, release, key));
+        assert!(!component.preview_drag_active);
+        assert!(!data.state.mouse_drag_active);
+        assert_eq!(data.state.highlights(key), &[(2, 4)], "the marks stay");
+    }
+
+    #[test]
+    fn a_ctrl_drag_unmarks_the_lines_it_crosses() {
+        let (_dir, mut component, mut data) = rig("a\nb\nc\nd\ne\nf\n");
+        let key = FileKey(0);
+        data.state.preview_mut(key).highlights = vec![(1, 5)];
+        let ctrl = Some((false, true));
+        let press = mouse(MouseInputKind::MouseDown(Button::Left), 1, TEXT_COL, ctrl);
+        assert!(component.handle_mouse(&mut data, press, key));
+        let drag = mouse(MouseInputKind::MouseDrag(Button::Left), 2, TEXT_COL, ctrl);
+        assert!(component.handle_mouse(&mut data, drag, key));
+        assert_eq!(data.state.highlights(key), &[(1, 1), (4, 5)]);
+    }
+
+    #[test]
+    fn a_release_with_no_drag_is_not_taken() {
+        let (_dir, mut component, mut data) = rig("alpha\n");
+        let release = mouse(MouseInputKind::MouseUp(Button::Left), 0, TEXT_COL, None);
+        assert!(!component.handle_mouse(&mut data, release, FileKey(0)));
+    }
+
+    /// What `render` paints: each run of text with its background.
+    fn painted(
+        component: &mut FilePreviewComponent,
+        data: &mut Data,
+    ) -> Vec<(String, Option<TuiColor>)> {
+        use crate::tui::test_support::frame_box;
+        let frame = frame_box(60, 10);
+        component
+            .render(
+                data,
+                frame,
+                frame.style_adjusted_bounds,
+                &mut HasFocus::default(),
+            )
+            .unwrap();
+        data.pipeline
+            .get(&ZOrder::Normal)
+            .list
+            .iter()
+            .filter_map(|op| match op {
+                RenderOpIR::PaintTextWithAttributes(text, style) => Some((
+                    text.trim_end_matches('\n').to_string(),
+                    style.as_ref().and_then(|style| style.color_bg),
+                )),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn select(
+        data: &mut Data,
+        start: crate::tui::selection::SelPoint,
+        end: crate::tui::selection::SelPoint,
+    ) {
+        use crate::tui::pane_manager::Window;
+        use crate::tui::selection::TextSelection;
+        data.state.text_selection = Some(TextSelection {
+            window: Window::FilePreview(FileKey(0)),
+            start,
+            end,
+            click_anchor: None,
+            click_word: None,
+        });
+    }
+
+    #[test]
+    fn a_selection_inside_a_line_paints_just_its_text_selected() {
+        let (_dir, mut component, mut data) = rig("alpha beta\ngamma\n");
+        select(&mut data, at(0, 6), at(0, 10));
+        let selected = data.state.theme.ui.selection.tui();
+        let painted = painted(&mut component, &mut data);
+        assert!(
+            painted.contains(&("beta".to_string(), selected)),
+            "{painted:?}"
+        );
+        assert!(
+            !painted
+                .iter()
+                .any(|(text, bg)| *bg == selected && text.contains("alpha")),
+            "{painted:?}"
+        );
+        assert!(
+            painted
+                .iter()
+                .any(|(text, bg)| text == "gamma" && *bg != selected),
+            "{painted:?}"
+        );
+    }
+
+    #[test]
+    fn a_selection_across_lines_paints_each_whole_line_selected() {
+        let (_dir, mut component, mut data) = rig("alpha beta\ngamma\ndelta\n");
+        select(&mut data, at(1, 11), at(0, 6));
+        let selected = data.state.theme.ui.selection.tui();
+        let painted = painted(&mut component, &mut data);
+        for text in ["alpha beta", "gamma"] {
+            assert!(
+                painted.contains(&(text.to_string(), selected)),
+                "{text}: {painted:?}"
+            );
+        }
+        assert!(
+            painted
+                .iter()
+                .any(|(text, bg)| text == "delta" && *bg != selected),
+            "{painted:?}"
+        );
+    }
+
+    #[test]
+    fn a_selection_of_another_window_paints_nothing_selected() {
+        use crate::tui::pane_manager::Window;
+        let (_dir, mut component, mut data) = rig("alpha beta\n");
+        select(&mut data, at(0, 0), at(0, 5));
+        data.state.text_selection.as_mut().unwrap().window = Window::FilePreview(FileKey(9));
+        let selected = data.state.theme.ui.selection.tui();
+        let painted = painted(&mut component, &mut data);
+        assert!(painted.iter().all(|(_, bg)| *bg != selected), "{painted:?}");
+    }
+
+    #[test]
+    fn a_symbol_highlight_of_this_file_paints_its_bytes_in_its_color() {
+        use crate::signal::SymbolRefLocation;
+        use crate::tui::theme::Color;
+        let (_dir, mut component, mut data) = rig("alpha beta\n");
+        let mut group = symbol_at(6, 10);
+        group.locations.push(SymbolRefLocation {
+            file_key: FileKey(0),
+            start_byte: 6,
+            end_byte: 10,
+        });
+        let color = Color::Rgb(group.color).tui();
+        data.state.symbol_highlights.push(group);
+        let painted = painted(&mut component, &mut data);
+        assert!(
+            painted.contains(&("beta".to_string(), color)),
+            "{painted:?}"
+        );
+    }
+}
