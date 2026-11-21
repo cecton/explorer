@@ -279,33 +279,19 @@ impl PaneManager {
         let cols = ((surface_cols + TARGET_PANE_WIDTH / 2) / TARGET_PANE_WIDTH).max(1) as usize;
         let base_col_width = surface_cols / cols as u16;
         let remainder = surface_cols % cols as u16;
+        // The first `remainder` columns are one cell wider.
+        let col_origin = |col: usize| {
+            let col = col as u16;
+            col * base_col_width + col.min(remainder)
+        };
 
         let mut slots: Vec<PaneSlot> = Vec::with_capacity(self.window_stack.len().min(MAX_PANES));
-        let mut current_col: usize = 0;
-        let mut used_rows_in_col: u16 = 0;
-        let mut origin_col: u16 = 0;
-        let mut col_last_slot: Vec<usize> = vec![0; cols];
-        let mut col_used_rows: Vec<u16> = vec![0; cols];
+        let mut col: usize = 0;
+        let mut used_rows: u16 = 0;
 
         for window in self.window_stack.iter() {
-            if current_col >= cols || slots.len() >= MAX_PANES {
+            if slots.len() >= MAX_PANES {
                 break;
-            }
-
-            let mut remaining_rows = surface_rows.saturating_sub(used_rows_in_col);
-            if remaining_rows == 0 {
-                current_col += 1;
-                if current_col >= cols {
-                    break;
-                }
-                used_rows_in_col = 0;
-                origin_col += base_col_width
-                    + if current_col - 1 < remainder as usize {
-                        1
-                    } else {
-                        0
-                    };
-                remaining_rows = surface_rows;
             }
 
             let pane_size = self
@@ -315,79 +301,39 @@ impl PaneManager {
                 .unwrap_or_default();
             let requested_rows = ((surface_rows as f32 * pane_size.height_factor()) as u16).max(1);
 
-            let actual_rows = if requested_rows > remaining_rows {
-                let remaining_pct = remaining_rows * 100 / surface_rows;
-                if remaining_pct >= 25 {
-                    // Meaningful space — shrink the pane to fit in this column.
-                    remaining_rows
-                } else {
-                    // Small leftover (< 25%) — absorb into the last placed
-                    // pane, then wrap (or drop if this is the last column).
-                    if let Some(last) = slots.last_mut() {
-                        last.box_.style_adjusted_bounds.bounds_size.row_height += remaining_rows;
-                    }
-                    col_used_rows[current_col] += remaining_rows;
-                    used_rows_in_col += remaining_rows;
-                    if current_col == cols - 1 {
-                        continue;
-                    }
-                    current_col += 1;
-                    if current_col >= cols {
-                        break;
-                    }
-                    used_rows_in_col = 0;
-                    origin_col += base_col_width
-                        + if current_col - 1 < remainder as usize {
-                            1
-                        } else {
-                            0
-                        };
-                    requested_rows
+            let remaining_rows = surface_rows - used_rows;
+            // The last pane placed absorbs the leftover, then the column wraps.
+            if remaining_rows == 0
+                || (requested_rows > remaining_rows && remaining_rows * 100 / surface_rows < 25)
+            {
+                if let Some(last) = slots.last_mut() {
+                    last.box_.style_adjusted_bounds.bounds_size.row_height += remaining_rows;
                 }
-            } else {
-                requested_rows
-            };
+                used_rows = surface_rows;
+                col += 1;
+                if col >= cols {
+                    break;
+                }
+                used_rows = 0;
+            }
 
-            let pane_width = base_col_width
-                + if current_col < remainder as usize {
-                    1
-                } else {
-                    0
-                };
-
-            let origin = vp_col(origin_col) + vp_row(used_rows_in_col);
-            let size = vp_width(pane_width) + vp_height(actual_rows);
-            let box_ = FlexBox {
-                style_adjusted_bounds: VPBoundingBox::new(origin, size),
-                ..FlexBox::default()
-            };
-
+            let actual_rows = requested_rows.min(surface_rows - used_rows);
+            let origin = vp_col(col_origin(col)) + vp_row(used_rows);
+            let size = vp_width(col_origin(col + 1) - col_origin(col)) + vp_height(actual_rows);
             slots.push(PaneSlot {
                 slot: slots.len(),
                 window: *window,
-                box_,
+                box_: FlexBox {
+                    style_adjusted_bounds: VPBoundingBox::new(origin, size),
+                    ..FlexBox::default()
+                },
             });
-
-            col_last_slot[current_col] = slots.len() - 1;
-            col_used_rows[current_col] += actual_rows;
-            used_rows_in_col += actual_rows;
+            used_rows += actual_rows;
         }
 
-        // Stretch the last pane in each column to absorb any rounding leftovers.
-        for col in 0..cols {
-            let used = col_used_rows[col];
-            if used == 0 {
-                continue;
-            }
-            let remaining = surface_rows.saturating_sub(used);
-            if remaining > 0 {
-                let last_idx = col_last_slot[col];
-                slots[last_idx]
-                    .box_
-                    .style_adjusted_bounds
-                    .bounds_size
-                    .row_height += remaining;
-            }
+        // The column in progress is stretched here; each earlier one was stretched when it wrapped.
+        if let Some(last) = slots.last_mut() {
+            last.box_.style_adjusted_bounds.bounds_size.row_height += surface_rows - used_rows;
         }
 
         slots
