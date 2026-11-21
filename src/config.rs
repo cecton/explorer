@@ -127,15 +127,31 @@ pub(crate) fn parse_auth(content: &str) -> Result<HashMap<String, String>, Strin
     Ok(tokens)
 }
 
-fn string_arg(node: &kdl::KdlNode) -> Option<&str> {
+fn positional_arg(node: &kdl::KdlNode) -> Option<&kdl::KdlValue> {
     node.entries()
         .iter()
         .find(|e| e.name().is_none())
-        .and_then(|e| e.value().as_string())
+        .map(|e| e.value())
+}
+
+fn string_arg(node: &kdl::KdlNode) -> Option<&str> {
+    positional_arg(node)?.as_string()
+}
+
+fn int_arg(node: &kdl::KdlNode) -> Option<i128> {
+    positional_arg(node)?.as_integer()
+}
+
+/// The `endpoint/model/effort` argument of `summary-model` and `subagent-model`.
+fn model_arg(node: &kdl::KdlNode) -> Result<crate::model_spec::ModelSpec, String> {
+    let key = node.name().value();
+    let value =
+        string_arg(node).ok_or_else(|| format!("agent.{key} must have a string argument"))?;
+    crate::model_spec::ModelSpec::parse(value)
+        .ok_or_else(|| format!("{key} '{value}' is not of the form endpoint/model/effort"))
 }
 
 fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
-    use crate::model_spec::ModelSpec;
     let mut settings = AgentSettings::default();
     let Some(children) = node.children() else {
         return Ok(settings);
@@ -203,39 +219,17 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                     kind: receiver,
                 });
             }
-            "summary-model" => {
-                let value =
-                    string_arg(child).ok_or("agent.summary-model must have a string argument")?;
-                let spec = ModelSpec::parse(value).ok_or_else(|| {
-                    format!("summary-model '{value}' is not of the form endpoint/model/effort")
-                })?;
-                settings.summary_model = Some(spec);
-            }
-            "subagent-model" => {
-                let value =
-                    string_arg(child).ok_or("agent.subagent-model must have a string argument")?;
-                let spec = ModelSpec::parse(value).ok_or_else(|| {
-                    format!("subagent-model '{value}' is not of the form endpoint/model/effort")
-                })?;
-                settings.subagent_model = Some(spec);
-            }
+            "summary-model" => settings.summary_model = Some(model_arg(child)?),
+            "subagent-model" => settings.subagent_model = Some(model_arg(child)?),
             "review-rounds" => {
-                let rounds = child
-                    .entries()
-                    .iter()
-                    .find(|e| e.name().is_none())
-                    .and_then(|e| e.value().as_integer())
+                let rounds = int_arg(child)
                     .and_then(|n| u32::try_from(n).ok())
                     .filter(|n| *n >= 1)
                     .ok_or("agent.review-rounds must have an integer argument of at least 1")?;
                 settings.review_rounds = Some(rounds);
             }
             "repeat-limit" => {
-                let limit = child
-                    .entries()
-                    .iter()
-                    .find(|e| e.name().is_none())
-                    .and_then(|e| e.value().as_integer())
+                let limit = int_arg(child)
                     .and_then(|n| u32::try_from(n).ok())
                     .filter(|n| *n != 1)
                     .ok_or(
@@ -296,11 +290,7 @@ pub(crate) fn parse(content: &str) -> Result<Config, String> {
                 };
                 for child in children.nodes() {
                     if child.name().value() == "grace-seconds" {
-                        after_agents.grace_seconds = child
-                            .entries()
-                            .iter()
-                            .find(|e| e.name().is_none())
-                            .and_then(|e| e.value().as_integer())
+                        after_agents.grace_seconds = int_arg(child)
                             .and_then(|seconds| u64::try_from(seconds).ok())
                             .ok_or(
                                 "after-agents.grace-seconds must have a non-negative integer argument",
@@ -326,14 +316,9 @@ pub(crate) fn parse(content: &str) -> Result<Config, String> {
                 };
                 for bind in children.nodes() {
                     let slug = bind.name().value().to_string();
-                    let arg = bind
-                        .entries()
-                        .iter()
-                        .find(|e| e.name().is_none())
-                        .and_then(|e| e.value().as_string())
-                        .ok_or_else(|| {
-                            format!("keybinding '{slug}' must have a string key argument")
-                        })?;
+                    let arg = string_arg(bind).ok_or_else(|| {
+                        format!("keybinding '{slug}' must have a string key argument")
+                    })?;
                     keybindings.push((slug, arg.to_string()));
                 }
             }
