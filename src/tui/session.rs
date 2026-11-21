@@ -172,6 +172,7 @@ impl Session {
         }
     }
 
+    // Only on a fresh AppState: previews and symbol_highlights are not cleared first.
     pub fn apply(self, state: &mut crate::tui::state::AppState) {
         use crate::conversation::NodeId;
         use crate::loader::LoadedFile;
@@ -322,10 +323,6 @@ impl Session {
         }
 
         let snapshot = state.files.load();
-        let keys: Vec<_> = state.previews.keys().copied().collect();
-        for key in keys {
-            state.set_highlights(key, Vec::new());
-        }
         for (rel, ranges) in self.highlight_ranges {
             let abs = state.root.join(&rel);
             if let Some(key) = crate::loader::file_key_for_path(&snapshot, &abs) {
@@ -336,7 +333,6 @@ impl Session {
         // Locations are never restored (they'd be stale); only origin identity is
         // kept. `needs_rebuild` triggers re-resolution against a running LSP worker,
         // same as the modified-origin-file rebuild path.
-        state.symbol_highlights.clear();
         for entry in self.symbol_highlights {
             let abs = state.root.join(&entry.origin_path);
             if let Some(origin_file) = crate::loader::file_key_for_path(&snapshot, &abs) {
@@ -440,23 +436,6 @@ fn pane_record_from_window(
     })
 }
 
-#[derive(Debug)]
-pub enum SessionError {
-    Io(std::io::Error),
-    Serialize(serde_json::Error),
-}
-
-impl std::fmt::Display for SessionError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            SessionError::Io(e) => write!(f, "io error: {e}"),
-            SessionError::Serialize(e) => write!(f, "serialize error: {e}"),
-        }
-    }
-}
-
-impl std::error::Error for SessionError {}
-
 /// The MCP servers a session saves, without reading the rest of it: the tools of a
 /// repository are what a client outside Explorer asks for, and nothing else in the
 /// session concerns it.
@@ -507,19 +486,15 @@ pub fn load_session(repo_root: &camino::Utf8Path) -> Option<Session> {
     Some(session)
 }
 
-pub fn save_session(
-    repo_root: &camino::Utf8Path,
-    state: &crate::tui::state::AppState,
-) -> Result<(), SessionError> {
-    let path = session_file_path(repo_root).ok_or_else(|| {
-        SessionError::Io(std::io::Error::other("could not determine session path"))
-    })?;
+pub fn save_session(state: &crate::tui::state::AppState) -> std::io::Result<()> {
+    let path = session_file_path(&state.root)
+        .ok_or_else(|| std::io::Error::other("could not determine session path"))?;
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(SessionError::Io)?;
+        std::fs::create_dir_all(parent)?;
     }
-    let session = Session::from_state(state);
-    let content = serde_json::to_string_pretty(&session).map_err(SessionError::Serialize)?;
-    crate::util::fs::write_atomic(&path, &content).map_err(SessionError::Io)
+    let content =
+        serde_json::to_string_pretty(&Session::from_state(state)).map_err(std::io::Error::other)?;
+    crate::util::fs::write_atomic(&path, &content)
 }
 
 pub fn session_dir() -> Option<camino::Utf8PathBuf> {
@@ -1160,7 +1135,7 @@ mod tests {
             .pane_manager
             .push_window(Window::FilePreview(FileKey(0)));
 
-        save_session(&root, &state).unwrap();
+        save_session(&state).unwrap();
 
         let path = session_file_path(&root).unwrap();
         assert!(path.exists(), "session file should exist at {path}");

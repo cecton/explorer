@@ -279,7 +279,7 @@ pub async fn run(
     }
     tokio::time::sleep(std::time::Duration::from_millis(250)).await;
 
-    if let Err(e) = crate::tui::session::save_session(&global_data.state.root, &global_data.state) {
+    if let Err(e) = crate::tui::session::save_session(&global_data.state) {
         tracing::warn!("Failed to save session on exit: {e}");
     }
 

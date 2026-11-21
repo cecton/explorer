@@ -232,7 +232,7 @@ pub(super) fn handle(
                 }
             }
             AppSignal::Housekeeping => {
-                crate::tui::app::tick::maybe_save_session(state, &app.root);
+                crate::tui::app::tick::maybe_save_session(state);
                 state.spawn_dirty_check(global_data.main_thread_channel_sender.clone());
                 app.log_lsp_health();
                 propagation = EventPropagation::Consumed;

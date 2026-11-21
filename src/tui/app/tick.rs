@@ -29,11 +29,11 @@ pub(super) fn clock_minute() -> i64 {
 
 // save_session is intentionally a synchronous fast JSON write on the main thread.
 // The 5s `Housekeeping` period is the debounce.
-pub(super) fn maybe_save_session(state: &mut crate::tui::state::AppState, root: &camino::Utf8Path) {
+pub(super) fn maybe_save_session(state: &mut crate::tui::state::AppState) {
     if !state.session_dirty {
         return;
     }
-    match crate::tui::session::save_session(root, state) {
+    match crate::tui::session::save_session(state) {
         Ok(()) => {
             state.session_dirty = false;
         }
