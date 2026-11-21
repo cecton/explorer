@@ -1019,27 +1019,35 @@ fn is_word_end(s: &str) -> bool {
     !s.starts_with(|c: char| c.is_alphanumeric() || c == '_')
 }
 
-/// Finds the nearest ancestor directory of `file_path` that contains a `Cargo.toml`.
-fn find_crate_root(file_path: &camino::Utf8Path) -> Option<camino::Utf8PathBuf> {
+/// Finds the nearest ancestor directory of `file_path` that contains `marker`.
+fn find_ancestor_with(file_path: &camino::Utf8Path, marker: &str) -> Option<camino::Utf8PathBuf> {
     let mut dir = file_path.parent()?;
     loop {
-        if dir.join("Cargo.toml").exists() {
+        if dir.join(marker).exists() {
             return Some(dir.to_path_buf());
         }
         dir = dir.parent()?;
     }
 }
 
-/// Finds the nearest ancestor directory of `file_path` that contains a `.git` directory.
-fn find_repo_root(file_path: &camino::Utf8Path) -> Option<camino::Utf8PathBuf> {
-    let mut dir = file_path.parent()?;
-    loop {
-        if dir.join(".git").exists() {
-            return Some(dir.to_path_buf());
-        }
-        dir = dir.parent()?;
-    }
+/// What a file placeholder expands to.
+#[derive(Clone, Copy)]
+enum Placeholder {
+    /// The nearest ancestor directory holding this marker.
+    Ancestor(&'static str),
+    /// The directory of the file, relative to the root.
+    Dir,
 }
+
+/// The placeholder names; a name matches only at a word end, so `%crate` is never read as `%c`.
+const PLACEHOLDERS: [(&str, Placeholder); 6] = [
+    ("crate", Placeholder::Ancestor("Cargo.toml")),
+    ("repo", Placeholder::Ancestor(crate::loader::GIT_DIR)),
+    ("dir", Placeholder::Dir),
+    ("c", Placeholder::Ancestor("Cargo.toml")),
+    ("r", Placeholder::Ancestor(crate::loader::GIT_DIR)),
+    ("d", Placeholder::Dir),
+];
 
 /// Expands `%%`, `%`, `%c`/`%crate`, `%r`/`%repo` and `%project` placeholders in `cmd`.
 ///
@@ -1078,40 +1086,27 @@ fn expand_placeholders(
             continue;
         }
         let file_path = file.ok_or_else(|| "% needs a file preview in focus".to_string())?;
-        if s.starts_with("crate") && is_word_end(&s[5..]) {
-            let root = find_crate_root(file_path)
-                .ok_or_else(|| "no Cargo.toml found (needed by %crate)".to_string())?;
-            result.push_str(&sh_quote(root.as_str()));
-            s = &s[5..];
-        } else if s.starts_with("repo") && is_word_end(&s[4..]) {
-            let root = find_repo_root(file_path)
-                .ok_or_else(|| "no .git found (needed by %repo)".to_string())?;
-            result.push_str(&sh_quote(root.as_str()));
-            s = &s[4..];
-        } else if s.starts_with('c') && is_word_end(&s[1..]) {
-            let root = find_crate_root(file_path)
-                .ok_or_else(|| "no Cargo.toml found (needed by %c)".to_string())?;
-            result.push_str(&sh_quote(root.as_str()));
-            s = &s[1..];
-        } else if s.starts_with("dir") && is_word_end(&s[3..]) {
-            let parent = file_path.parent().unwrap_or(file_path);
-            let rel = parent.strip_prefix(root).unwrap_or(parent);
-            result.push_str(&sh_quote(rel.as_str()));
-            s = &s[3..];
-        } else if s.starts_with('r') && is_word_end(&s[1..]) {
-            let root = find_repo_root(file_path)
-                .ok_or_else(|| "no .git found (needed by %r)".to_string())?;
-            result.push_str(&sh_quote(root.as_str()));
-            s = &s[1..];
-        } else if s.starts_with('d') && is_word_end(&s[1..]) {
-            let parent = file_path.parent().unwrap_or(file_path);
-            let rel = parent.strip_prefix(root).unwrap_or(parent);
-            result.push_str(&sh_quote(rel.as_str()));
-            s = &s[1..];
-        } else {
+        let matched = PLACEHOLDERS
+            .iter()
+            .find(|(name, _)| s.starts_with(name) && is_word_end(&s[name.len()..]));
+        let Some(&(name, kind)) = matched else {
             let rel = file_path.strip_prefix(root).unwrap_or(file_path);
             result.push_str(&sh_quote(rel.as_str()));
+            continue;
+        };
+        match kind {
+            Placeholder::Ancestor(marker) => {
+                let found = find_ancestor_with(file_path, marker)
+                    .ok_or_else(|| format!("no {marker} found (needed by %{name})"))?;
+                result.push_str(&sh_quote(found.as_str()));
+            }
+            Placeholder::Dir => {
+                let parent = file_path.parent().unwrap_or(file_path);
+                let rel = parent.strip_prefix(root).unwrap_or(parent);
+                result.push_str(&sh_quote(rel.as_str()));
+            }
         }
+        s = &s[name.len()..];
     }
     Ok(result)
 }
