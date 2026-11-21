@@ -254,7 +254,6 @@ pub fn render(
     // An empty list keeps one row, where "No results" or the reason for it is painted.
     let box_ = ModalBox::for_modal(surface, results.max(1));
     let list = box_.list_box();
-    state.modal_page_size = list.rows;
     state.modal_box = Some(list);
     let mut ops = box_.render_frame(
         state.theme.ui.overlay,
@@ -563,7 +562,6 @@ mod tests {
         let ops = render(&mut state, &mut ModalPainters::new(), screen).expect("the modal paints");
         let modal = ModalBox::for_modal(screen, state.theme_picker.results.len());
         assert_eq!(state.modal_box, Some(modal.list_box()));
-        assert_eq!(state.modal_page_size, modal.list_box().rows);
 
         let pane_style = crate::tui::theme::Color::from_u8(255, 255, 255)
             .on(crate::tui::theme::Color::from_u8(0, 0, 0));

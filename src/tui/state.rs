@@ -407,11 +407,7 @@ pub struct AppState {
     /// The window that had the keyboard before the modal opened, and gets it back when the
     /// modal closes.
     pub modal_origin: Option<crate::tui::pane_manager::Window>,
-    /// Rows the open modal's list shows at once, as the last frame painted it: the page a
-    /// PageUp/PageDown moves by.
-    pub modal_page_size: usize,
-    /// The box the open modal's list was painted in, as the last frame put it: a wheel over
-    /// it moves the list, a wheel anywhere else moves nothing.
+    /// The box the open modal's list was painted in: a wheel moves it, its rows are the page.
     pub modal_box: Option<crate::tui::modal::ModalBox>,
     pub window_picker:
         crate::tui::widgets::fuzzy_picker::FuzzyPickerState<crate::tui::pane_manager::Window>,

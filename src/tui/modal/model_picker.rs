@@ -101,8 +101,7 @@ pub fn handle(
         state.model_picker.scroll_offset = 0;
         return;
     }
-    let page_size = state.modal_page_size;
-    crate::tui::modal::list::navigate(state, input_event, page_size);
+    crate::tui::modal::list::navigate(state, input_event);
 }
 
 /// Gets the model list of `endpoint` in the background: fetched from an OpenAI-compatible

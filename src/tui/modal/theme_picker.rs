@@ -49,8 +49,7 @@ pub fn handle(state: &mut crate::tui::state::AppState, input_event: &InputEvent)
         preview_selected_theme(state);
         return;
     }
-    let page_size = state.modal_page_size;
-    if crate::tui::modal::list::navigate(state, input_event, page_size) {
+    if crate::tui::modal::list::navigate(state, input_event) {
         preview_selected_theme(state);
     }
 }

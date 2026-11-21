@@ -82,8 +82,7 @@ pub fn handle(
         );
         return;
     }
-    let page_size = state.modal_page_size;
-    crate::tui::modal::list::navigate(state, input_event, page_size);
+    crate::tui::modal::list::navigate(state, input_event);
 }
 
 /// Opens the window the picker highlights, then closes the picker.
