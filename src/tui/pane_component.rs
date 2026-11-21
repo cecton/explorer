@@ -241,11 +241,11 @@ fn scroll_metrics(
     ))
 }
 
-fn thumb_size(scrollbar_height: usize, page_size: usize, scroll_max: usize) -> usize {
+pub(super) fn thumb_size(scrollbar_height: usize, page_size: usize, scroll_max: usize) -> usize {
     std::cmp::max(1, (scrollbar_height * page_size) / scroll_max.max(1))
 }
 
-fn thumb_position(
+pub(super) fn thumb_position(
     scroll: usize,
     scrollbar_height: usize,
     thumb_height: usize,

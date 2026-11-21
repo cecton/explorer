@@ -527,7 +527,7 @@ fn run_highlight(run: &mut CommandRun<'_>) -> Result<(), String> {
         }
         return Ok(());
     }
-    let max = run.state.pane_manager.window_scroll_max(&window);
+    let max = crate::tui::panes::preview::line_count(run.state, key);
     let ranges = parse_line_ranges(run.argument, max)
         .ok_or_else(|| "highlight: expected lines like 12, 3-7 or 1-3,8".to_string())?;
     let page_size = run.state.pane_manager.window_page_size(&window);

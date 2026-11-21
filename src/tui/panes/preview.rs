@@ -420,9 +420,8 @@ impl FilePreviewComponent {
                     let state = &mut global_data.state;
                     let window = Window::FilePreview(key);
                     let scroll = state.pane_manager.window_scroll(&window);
-                    let scroll_max = state.pane_manager.window_scroll_max(&window);
                     let rel_y = row.saturating_sub(origin_row);
-                    let line = (scroll + rel_y + 1).clamp(1, scroll_max.max(1));
+                    let line = (scroll + rel_y + 1).clamp(1, line_count(state, key).max(1));
 
                     self.preview_drag_active = true;
                     self.start_drag(state, key, line, modifier);
@@ -593,9 +592,8 @@ impl FilePreviewComponent {
                 let state = &mut global_data.state;
                 let window = Window::FilePreview(key);
                 let scroll = state.pane_manager.window_scroll(&window);
-                let scroll_max = state.pane_manager.window_scroll_max(&window);
                 let rel_y = row.saturating_sub(origin_row);
-                let line = (scroll + rel_y + 1).clamp(1, scroll_max.max(1));
+                let line = (scroll + rel_y + 1).clamp(1, line_count(state, key).max(1));
 
                 let before = state.highlights(key).to_vec();
                 self.update_drag(state, key, line);
@@ -957,7 +955,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
             global_data
                 .state
                 .pane_manager
-                .set_window_scroll_max(&window, total_lines);
+                .set_window_scroll_max(&window, scroll_extent(total_lines, visible_rows));
             global_data.state.pane_manager.clamp_scroll(&window);
 
             let state = &global_data.state;
@@ -1216,6 +1214,26 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
             global_data.pipeline.push(ZOrder::Normal, render_ops);
         });
     }
+}
+
+/// The preview scrolls by file line and stops with the last line at the top of the
+/// pane, so its content is the file followed by `page_size - 1` blank rows. A file that
+/// fits the page does not scroll at all.
+fn scroll_extent(total_lines: usize, page_size: usize) -> usize {
+    if total_lines <= page_size {
+        total_lines
+    } else {
+        total_lines + page_size - 1
+    }
+}
+
+/// The number of lines of the file `key`. The preview's scroll extent is not one: it
+/// counts the blank rows after the file (see `scroll_extent`).
+pub(crate) fn line_count(
+    state: &crate::tui::state::AppState,
+    key: crate::loader::FileKey,
+) -> usize {
+    state.files.load()[key.0].data.read().line_starts.len()
 }
 
 /// Merge `lo..=hi` with `snapshot`, combining overlapping or adjacent ranges.
@@ -1986,6 +2004,46 @@ mod tests {
         assert_eq!(
             clicks.register(other, start + Duration::from_millis(710)),
             1
+        );
+    }
+
+    /// A preview of `lines` lines on a page of `page_size` rows, scrolled with `End`.
+    fn scroll_to_end(lines: usize, page_size: usize) -> (usize, usize) {
+        use crate::tui::pane_manager::{PaneManager, Window};
+        let window = Window::FilePreview(crate::loader::FileKey(0));
+        let mut manager = PaneManager::new();
+        manager.push_window(window);
+        manager.set_window_page_size(&window, page_size);
+        manager.set_window_scroll_max(&window, scroll_extent(lines, page_size));
+        let end = InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::SpecialKey(SpecialKey::End),
+        });
+        manager.scroll_for_input(&window, &end);
+        (
+            manager.window_scroll(&window),
+            manager.window_scroll_max(&window),
+        )
+    }
+
+    #[test]
+    fn end_brings_the_last_line_to_the_top_of_the_pane() {
+        assert_eq!(scroll_to_end(40, 11).0, 39);
+    }
+
+    #[test]
+    fn a_file_that_fits_the_page_does_not_scroll() {
+        assert_eq!(scroll_to_end(5, 11).0, 0);
+    }
+
+    #[test]
+    fn the_thumb_reaches_the_bottom_of_the_track_at_the_last_line() {
+        use crate::tui::pane_component::{thumb_position, thumb_size};
+        let (scroll, scroll_max) = scroll_to_end(40, 11);
+        let track = 11;
+        let thumb = thumb_size(track, 11, scroll_max);
+        assert_eq!(
+            thumb_position(scroll, track, thumb, scroll_max, 11) + thumb,
+            track
         );
     }
 }
