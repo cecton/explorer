@@ -52,59 +52,56 @@ pub(crate) fn fit_end(text: &str, start: usize, width: usize) -> usize {
 /// Word-wraps `text` to `width` display columns. Explicit newlines are kept, and a word
 /// longer than a whole line is split on grapheme boundaries. Each line comes with the
 /// byte offset in `text` where it starts; it is a slice of `text` from there.
-pub(crate) fn wrap(text: &str, width: usize) -> Vec<(usize, String)> {
+pub(crate) fn wrap(text: &str, width: usize) -> Vec<(usize, &str)> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let mut base = 0;
     use unicode_segmentation::UnicodeSegmentation;
     for paragraph in text.split('\n') {
-        let mut line = String::new();
         let mut start = base;
+        let mut end = base;
         let mut used = 0;
         for (index, word) in paragraph.split_word_bound_indices() {
             let offset = base + index;
             let word_width = display_width(word);
             if used + word_width <= width {
-                if line.is_empty() {
+                if end == start {
                     start = offset;
                 }
-                line.push_str(word);
+                end = offset + word.len();
                 used += word_width;
                 continue;
             }
             if word.trim().is_empty() {
-                lines.push((start, std::mem::take(&mut line)));
+                lines.push((start, &text[start..end]));
                 start = offset + word.len();
+                end = start;
                 used = 0;
                 continue;
             }
             if used > 0 {
-                push_trimmed(&mut lines, start, std::mem::take(&mut line));
+                lines.push((start, text[start..end].trim_end()));
+                end = start;
                 used = 0;
             }
             for (at, grapheme) in word.grapheme_indices(true) {
                 let w = display_width(grapheme);
                 if used + w > width && used > 0 {
-                    lines.push((start, std::mem::take(&mut line)));
+                    lines.push((start, &text[start..end]));
+                    end = start;
                     used = 0;
                 }
-                if line.is_empty() {
+                if end == start {
                     start = offset + at;
                 }
-                line.push_str(grapheme);
+                end = offset + at + grapheme.len();
                 used += w;
             }
         }
-        push_trimmed(&mut lines, start, line);
+        lines.push((start, text[start..end].trim_end()));
         base += paragraph.len() + 1;
     }
     lines
-}
-
-fn push_trimmed(lines: &mut Vec<(usize, String)>, start: usize, mut line: String) {
-    let trimmed = line.trim_end().len();
-    line.truncate(trimmed);
-    lines.push((start, line));
 }
 
 #[cfg(test)]
@@ -116,7 +113,7 @@ mod tests {
         GCStringOwned::from(text).display_width().as_usize()
     }
 
-    fn texts(text: &str, width: usize) -> Vec<String> {
+    fn texts(text: &str, width: usize) -> Vec<&str> {
         wrap(text, width)
             .into_iter()
             .map(|(_, line)| line)
@@ -177,7 +174,7 @@ mod tests {
     #[test]
     fn wrap_never_exceeds_the_width() {
         for line in texts("a mix of short and extraordinarily long words, wrapped", 7) {
-            assert!(display_width(&line) <= 7, "{line:?}");
+            assert!(display_width(line) <= 7, "{line:?}");
         }
     }
 

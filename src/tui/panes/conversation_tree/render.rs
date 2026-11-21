@@ -283,7 +283,7 @@ fn build_lines(
                 row: row_idx,
                 kind,
                 offset,
-                text,
+                text: text.to_string(),
             });
         }
         if let Some(summary) = layout::shown_summary(node) {
@@ -292,7 +292,7 @@ fn build_lines(
                     row: row_idx,
                     kind: LineKind::Summary,
                     offset,
-                    text,
+                    text: text.to_string(),
                 });
             }
         }
