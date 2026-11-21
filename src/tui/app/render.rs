@@ -11,7 +11,6 @@ pub(super) fn render(
     has_focus: &mut HasFocus,
 ) -> CommonResult {
     use crate::tui::modal::Modal;
-    crate::tui::app::sync_has_focus(&global_data.state, has_focus);
 
     let mut best_generation = 0u64;
     let mut best_results = None;

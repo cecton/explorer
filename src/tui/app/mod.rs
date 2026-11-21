@@ -163,16 +163,10 @@ impl App for AppMain {
     }
 }
 
-/// Returns the `FlexBoxId` for the pane slot that corresponds to the focused window.
-pub(super) fn focused_pane_id(state: &crate::tui::state::AppState) -> FlexBoxId {
-    let Some(slot) = state.pane_manager.focused_slot() else {
-        return crate::tui::pane_component::pane_id(0);
-    };
-    crate::tui::pane_component::pane_id(slot)
-}
-
+/// Points the focus at the pane slot of the focused window.
 fn sync_has_focus(state: &crate::tui::state::AppState, has_focus: &mut HasFocus) {
-    has_focus.set_id(focused_pane_id(state));
+    let slot = state.pane_manager.focused_slot().unwrap_or(0);
+    has_focus.set_id(crate::tui::pane_component::pane_id(slot));
 }
 
 fn surface_size(window_size: VPSize) -> VPSize {

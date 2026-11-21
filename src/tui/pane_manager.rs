@@ -267,7 +267,7 @@ impl PaneManager {
     /// Within each column, panes are stacked top-to-bottom using their requested
     /// `PaneSize`. The last pane in each column is stretched to fill any remaining
     /// vertical space in that column.
-    pub fn layout(&self, surface_size: VPSize) -> Vec<PaneSlot> {
+    fn layout(&self, surface_size: VPSize) -> Vec<PaneSlot> {
         const TARGET_PANE_WIDTH: u16 = 100;
 
         let surface_cols = surface_size.col_width.as_u16();

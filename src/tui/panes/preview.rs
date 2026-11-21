@@ -52,6 +52,32 @@ pub struct FilePreviewComponent {
     clicks: ClickTracker,
 }
 
+/// Search-match highlight background (teal) and the brighter variant for the current `n`/`N` match.
+/// Both are distinct from `ui.selection` and every `SYMBOL_PALETTE` color.
+const SEARCH_MATCH: RgbValue = RgbValue {
+    red: 0,
+    green: 140,
+    blue: 150,
+};
+const SEARCH_CURRENT: RgbValue = RgbValue {
+    red: 40,
+    green: 205,
+    blue: 220,
+};
+/// Manually-set foreground for search-match text (bypasses `ensure_readable_fg`). Inverted between
+/// the two states so the current match is unmistakable: near-white text on the teal matches,
+/// near-black text on the brighter-teal current match.
+const SEARCH_MATCH_FG: RgbValue = RgbValue {
+    red: 235,
+    green: 235,
+    blue: 235,
+};
+const SEARCH_CURRENT_FG: RgbValue = RgbValue {
+    red: 20,
+    green: 20,
+    blue: 20,
+};
+
 /// How long an error or notice of the file preview's title bar stays up.
 const ERROR_SHOWN_FOR: Duration = Duration::from_secs(3);
 
@@ -1074,15 +1100,9 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                             }
                             let is_current = search.current == Some((line_idx, m.start()));
                             let (bg, fg) = if is_current {
-                                (
-                                    crate::tui::state::SEARCH_CURRENT,
-                                    crate::tui::state::SEARCH_CURRENT_FG,
-                                )
+                                (SEARCH_CURRENT, SEARCH_CURRENT_FG)
                             } else {
-                                (
-                                    crate::tui::state::SEARCH_MATCH,
-                                    crate::tui::state::SEARCH_MATCH_FG,
-                                )
+                                (SEARCH_MATCH, SEARCH_MATCH_FG)
                             };
                             overlays.push((
                                 m.start(),

@@ -791,32 +791,6 @@ pub struct PreviewSearch {
     pub current: Option<(usize, usize)>,
 }
 
-/// Search-match highlight background (teal) and the brighter variant for the current `n`/`N` match.
-/// Both are distinct from `ui.selection` and every `SYMBOL_PALETTE` color.
-pub const SEARCH_MATCH: RgbValue = RgbValue {
-    red: 0,
-    green: 140,
-    blue: 150,
-};
-pub const SEARCH_CURRENT: RgbValue = RgbValue {
-    red: 40,
-    green: 205,
-    blue: 220,
-};
-/// Manually-set foreground for search-match text (bypasses `ensure_readable_fg`). Inverted between
-/// the two states so the current match is unmistakable: near-white text on the teal matches,
-/// near-black text on the brighter-teal current match.
-pub const SEARCH_MATCH_FG: RgbValue = RgbValue {
-    red: 235,
-    green: 235,
-    blue: 235,
-};
-pub const SEARCH_CURRENT_FG: RgbValue = RgbValue {
-    red: 20,
-    green: 20,
-    blue: 20,
-};
-
 pub const SYMBOL_PALETTE: [RgbValue; 8] = [
     RgbValue {
         red: 255,
