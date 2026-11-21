@@ -182,7 +182,7 @@ pub(crate) fn test_call(name: &str, arguments: serde_json::Value) -> ToolCall {
 mod tests {
     use super::*;
 
-    /// The endpoint `name` reaches `url` with `token`, once its token is resolved.
+    /// The endpoint `name` reaches `url` on `provider` with `token`, which may be empty.
     fn live(
         name: &str,
         url: &str,
