@@ -208,24 +208,17 @@ impl DiscussionComponent {
             .map(|(id, _)| *id);
         let id = existing.unwrap_or_else(|| {
             let id = state.next_id();
-            let model = {
-                let tree = state.conversations.read();
-                match agent {
-                    Some(index) => tree
-                        .agent(&node, index)
-                        .and_then(|agent| agent.meta.model_spec()),
-                    None => tree.node(&node).and_then(|node| node.meta.model_spec()),
-                }
+            let mut discussion = DiscussionState {
+                node: Some(node),
+                agent,
+                ..Default::default()
             };
-            state.discussions.insert(
-                id,
-                DiscussionState {
-                    node: Some(node),
-                    agent,
-                    model,
-                    ..Default::default()
-                },
-            );
+            discussion.model = crate::tui::panes::discussion::launch::shown_meta(
+                &state.conversations.read(),
+                &discussion,
+            )
+            .and_then(|meta| meta.model_spec());
+            state.discussions.insert(id, discussion);
             Self::load_content(state, main_tx, id);
             id
         });
@@ -922,13 +915,11 @@ pub(crate) fn content_loaded(
     discussion.show_content(prompt.to_string(), reply.to_string(), work_log.to_vec());
     discussion.loaded = true;
     if discussion.model.is_none() {
-        let tree = state.conversations.read();
-        discussion.model = match discussion.agent {
-            Some(index) => tree
-                .agent(node, index)
-                .and_then(|agent| agent.meta.model_spec()),
-            None => tree.node(node).and_then(|node| node.meta.model_spec()),
-        };
+        discussion.model = crate::tui::panes::discussion::launch::shown_meta(
+            &state.conversations.read(),
+            discussion,
+        )
+        .and_then(|meta| meta.model_spec());
     }
 }
 
