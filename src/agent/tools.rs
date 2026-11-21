@@ -640,6 +640,7 @@ fn shell_background(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::agent::test_call;
 
     fn repo() -> (tempfile::TempDir, camino::Utf8PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
@@ -662,15 +663,6 @@ mod tests {
             node: NodeId::new("current"),
             background: Arc::default(),
             mcp: McpTools::default(),
-        }
-    }
-
-    fn call(name: &str, arguments: serde_json::Value) -> crate::agent::ToolCall {
-        use crate::agent::ToolCall;
-        ToolCall {
-            id: "c1".into(),
-            name: name.into(),
-            arguments,
         }
     }
 
@@ -697,7 +689,7 @@ mod tests {
         std::fs::write(root.join("many.txt"), many).unwrap();
         let out = run(
             &context(&root),
-            &call("read", serde_json::json!({"path": "many.txt"})),
+            &test_call("read", serde_json::json!({"path": "many.txt"})),
         )
         .await;
         assert!(out.len() <= READ_MAX_BYTES + 100, "{}", out.len());
@@ -720,7 +712,7 @@ mod tests {
         std::fs::write(root.join("min.json"), format!("{{\"k\":\"{payload}\"}}")).unwrap();
         let out = run(
             &context(&root),
-            &call("read", serde_json::json!({"path": "min.json"})),
+            &test_call("read", serde_json::json!({"path": "min.json"})),
         )
         .await;
         assert!(out.len() < 3000, "{}", out.len());
@@ -738,7 +730,7 @@ mod tests {
         let (_tmp, root) = repo();
         let out = run(
             &context(&root),
-            &call(
+            &test_call(
                 "read",
                 serde_json::json!({"path": "src/main.rs", "offset": 500}),
             ),
@@ -752,7 +744,7 @@ mod tests {
         let (_tmp, root) = repo();
         let out = run(
             &context(&root),
-            &call(
+            &test_call(
                 "read",
                 serde_json::json!({"path": "src/main.rs", "limit": 0}),
             ),
@@ -769,7 +761,7 @@ mod tests {
         let (_tmp, root) = repo();
         let out = run(
             &context(&root),
-            &call("read", serde_json::json!({"path": "src/main.rs"})),
+            &test_call("read", serde_json::json!({"path": "src/main.rs"})),
         )
         .await;
         assert_eq!(out, "1\tfn main() {\n2\t    run();\n3\t}\n");
@@ -780,13 +772,13 @@ mod tests {
         let (_tmp, root) = repo();
         let all = run(
             &context(&root),
-            &call("read", serde_json::json!({"path": "src/main.rs"})),
+            &test_call("read", serde_json::json!({"path": "src/main.rs"})),
         )
         .await;
         assert_eq!(all, "1\tfn main() {\n2\t    run();\n3\t}\n");
         let part = run(
             &context(&root),
-            &call(
+            &test_call(
                 "read",
                 serde_json::json!({"path": "src/main.rs", "offset": 2, "limit": 1}),
             ),
@@ -798,7 +790,7 @@ mod tests {
         );
         let outside = run(
             &context(&root),
-            &call("read", serde_json::json!({"path": "../x"})),
+            &test_call("read", serde_json::json!({"path": "../x"})),
         )
         .await;
         assert!(outside.starts_with("error: "), "{outside}");
@@ -809,14 +801,14 @@ mod tests {
         let (_tmp, root) = repo();
         let listed = run(
             &context(&root),
-            &call("glob", serde_json::json!({"pattern": "**/*.rs"})),
+            &test_call("glob", serde_json::json!({"pattern": "**/*.rs"})),
         )
         .await;
         assert_eq!(listed, "src/main.rs\nsrc/tui/app.rs\n");
 
         let found = run(
             &context(&root),
-            &call("grep", serde_json::json!({"pattern": "run"})),
+            &test_call("grep", serde_json::json!({"pattern": "run"})),
         )
         .await;
         assert_eq!(
@@ -825,7 +817,7 @@ mod tests {
         );
         let scoped = run(
             &context(&root),
-            &call(
+            &test_call(
                 "grep",
                 serde_json::json!({"pattern": "run", "path": "src", "glob": "**/app.rs"}),
             ),
@@ -834,7 +826,7 @@ mod tests {
         assert_eq!(scoped, "src/tui/app.rs:1: pub fn run() {}\n");
         let none = run(
             &context(&root),
-            &call("grep", serde_json::json!({"pattern": "zzz"})),
+            &test_call("grep", serde_json::json!({"pattern": "zzz"})),
         )
         .await;
         assert_eq!(none, "no matches\n");
@@ -845,13 +837,13 @@ mod tests {
         let (_tmp, root) = repo();
         let ok = run(
             &context(&root),
-            &call("shell", serde_json::json!({"command": "echo hi; pwd"})),
+            &test_call("shell", serde_json::json!({"command": "echo hi; pwd"})),
         )
         .await;
         assert_eq!(ok, format!("hi\n{root}\n"));
         let failed = run(
             &context(&root),
-            &call(
+            &test_call(
                 "shell",
                 serde_json::json!({"command": "echo oops >&2; exit 3"}),
             ),
@@ -860,7 +852,7 @@ mod tests {
         assert_eq!(failed, "oops\nexit code: 3\n");
         let slow = run(
             &context(&root),
-            &call(
+            &test_call(
                 "shell",
                 serde_json::json!({"command": "sleep 5", "timeout": 1}),
             ),
@@ -887,7 +879,7 @@ mod tests {
         let start = std::time::Instant::now();
         let started = run(
             &context,
-            &call(
+            &test_call(
                 "shell",
                 serde_json::json!({"command": "echo up; exec sleep 30", "background": true}),
             ),
@@ -915,7 +907,7 @@ mod tests {
         }
         assert_eq!(std::fs::read_to_string(&log).unwrap(), "up\n");
         assert!(alive());
-        let second = call(
+        let second = test_call(
             "shell",
             serde_json::json!({"command": "true", "background": true}),
         );
@@ -934,32 +926,35 @@ mod tests {
 
     #[test]
     fn describe_shows_the_main_argument() {
-        let shell = call(
+        let shell = test_call(
             "shell",
             serde_json::json!({"command": "cargo check\necho done"}),
         );
         assert_eq!(describe(&shell), "shell cargo check");
         assert_eq!(
-            describe(&call("glob", serde_json::json!({"pattern": "*.rs"}))),
+            describe(&test_call("glob", serde_json::json!({"pattern": "*.rs"}))),
             "glob *.rs"
         );
-        assert_eq!(describe(&call("odd", serde_json::json!({}))), "odd");
+        assert_eq!(describe(&test_call("odd", serde_json::json!({}))), "odd");
         assert_eq!(
-            describe(&call("mcp__egui__click", serde_json::json!({"id": 4}))),
+            describe(&test_call("mcp__egui__click", serde_json::json!({"id": 4}))),
             r#"mcp__egui__click {"id":4}"#
         );
-        let grep = call(
+        let grep = test_call(
             "grep",
             serde_json::json!({"pattern": "struct Recorder", "path": "src"}),
         );
         assert_eq!(describe(&grep), "grep struct Recorder in src");
-        let grep = call(
+        let grep = test_call(
             "grep",
             serde_json::json!({"pattern": "struct Recorder", "glob": "*.rs"}),
         );
         assert_eq!(describe(&grep), "grep struct Recorder");
         assert_eq!(
-            describe(&call("read", serde_json::json!({"path": "src/main.rs"}))),
+            describe(&test_call(
+                "read",
+                serde_json::json!({"path": "src/main.rs"})
+            )),
             "read src/main.rs"
         );
     }
@@ -985,7 +980,7 @@ mod tests {
             ]
         );
 
-        let write_call = call(
+        let write_call = test_call(
             "write",
             serde_json::json!({"path": "docs/new.md", "content": "one\ntwo\n"}),
         );
@@ -994,7 +989,7 @@ mod tests {
             std::fs::read_to_string(root.join("docs/new.md")).unwrap(),
             "one\ntwo\n"
         );
-        let outside = call(
+        let outside = test_call(
             "write",
             serde_json::json!({"path": "../evil", "content": "x"}),
         );
@@ -1005,7 +1000,7 @@ mod tests {
     async fn format_markdown_formats_the_given_files_and_refuses_outside_paths() {
         let (_tmp, root) = repo();
         std::fs::write(root.join("t.md"), "|a|b|\n|-|-|\n|1|2|\n").unwrap();
-        let format_call = call(
+        let format_call = test_call(
             "format_markdown",
             serde_json::json!({"paths": ["t.md", "src/main.rs"]}),
         );
@@ -1018,7 +1013,7 @@ mod tests {
             run(&context(&root), &format_call).await,
             "nothing to format"
         );
-        let outside = call("format_markdown", serde_json::json!({"paths": ["../x.md"]}));
+        let outside = test_call("format_markdown", serde_json::json!({"paths": ["../x.md"]}));
         assert!(run(&context(&root), &outside).await.starts_with("error: "));
     }
 
@@ -1027,7 +1022,7 @@ mod tests {
         let (_tmp, root) = repo();
         std::fs::write(root.join("a.txt"), "alpha beta alpha\n").unwrap();
         let edit_call = |old: &str, new: &str| {
-            call(
+            test_call(
                 "edit",
                 serde_json::json!({"path": "a.txt", "old_string": old, "new_string": new}),
             )
@@ -1070,7 +1065,7 @@ mod tests {
             background: Arc::default(),
             mcp: McpTools::default(),
         };
-        let ask = |arguments| call("conversation", arguments);
+        let ask = |arguments| test_call("conversation", arguments);
 
         let roots = run(&context, &ask(serde_json::json!({"action": "toc"}))).await;
         assert!(

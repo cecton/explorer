@@ -168,26 +168,19 @@ pub struct ToolCall {
     pub arguments: serde_json::Value,
 }
 
+/// A call of the tool `name`, for the tests of the agent modules.
+#[cfg(test)]
+pub(crate) fn test_call(name: &str, arguments: serde_json::Value) -> ToolCall {
+    ToolCall {
+        id: "c".into(),
+        name: name.into(),
+        arguments,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// The endpoint `name` reaches `url` on `provider`, as `config.kdl` declares it.
-    fn declared(
-        name: &str,
-        url: &str,
-        provider: crate::endpoint::Provider,
-    ) -> crate::endpoint::Endpoint {
-        use crate::endpoint::EndpointKind;
-        crate::endpoint::Endpoint {
-            name: name.to_string(),
-            kind: EndpointKind::Http {
-                url: url.to_string(),
-                token: String::new(),
-                provider,
-            },
-        }
-    }
 
     /// The endpoint `name` reaches `url` with `token`, once its token is resolved.
     fn live(
@@ -238,8 +231,13 @@ mod tests {
         assert_eq!(
             settings.endpoints,
             [
-                declared("go", "https://opencode.ai/zen/go/v1", Provider::OpenCodeGo),
-                declared("mirror", "https://mirror/v1", Provider::OpenCodeGo),
+                live(
+                    "go",
+                    "https://opencode.ai/zen/go/v1",
+                    "",
+                    Provider::OpenCodeGo
+                ),
+                live("mirror", "https://mirror/v1", "", Provider::OpenCodeGo),
             ]
         );
         let tokens = crate::config::parse_auth("go \"sk-go\"").expect("valid auth");
@@ -361,8 +359,8 @@ mod tests {
         use crate::endpoint::Provider;
         let settings = AgentSettings {
             endpoints: vec![
-                declared("kimi", "https://k", Provider::OpenAi),
-                declared("router", "https://r", Provider::OpenAi),
+                live("kimi", "https://k", "", Provider::OpenAi),
+                live("router", "https://r", "", Provider::OpenAi),
                 crate::endpoint::Endpoint {
                     name: "claude".to_string(),
                     kind: EndpointKind::ClaudeCode {

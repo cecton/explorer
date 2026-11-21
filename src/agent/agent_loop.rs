@@ -354,6 +354,7 @@ mod tests {
         time_nudge,
     };
     use crate::agent::ToolCall;
+    use crate::agent::test_call;
     use std::time::Duration;
 
     #[test]
@@ -361,14 +362,6 @@ mod tests {
         assert!(has_excessive_chinese("\u{4f60}\u{597d}\u{4e16}a"));
         assert!(!has_excessive_chinese("\u{4f60}\u{597d}ab"));
         assert!(!has_excessive_chinese(""));
-    }
-
-    fn call(name: &str, arguments: serde_json::Value) -> ToolCall {
-        ToolCall {
-            id: "c".into(),
-            name: name.into(),
-            arguments,
-        }
     }
 
     /// Feeds the detector `times` copies of one call and result; what the last asked.
@@ -386,7 +379,7 @@ mod tests {
     #[test]
     fn the_same_call_with_new_results_is_progress() {
         let mut detector = StallDetector::new(5);
-        let build = call("shell", serde_json::json!({"command": "cargo build"}));
+        let build = test_call("shell", serde_json::json!({"command": "cargo build"}));
         for attempt in 0..20 {
             let result = format!("error E0382 at line {attempt}");
             assert_eq!(detector.record(signature(&build, &result)), None);
@@ -396,7 +389,7 @@ mod tests {
     #[test]
     fn a_stuck_call_is_nudged_then_fails_when_it_repeats_after_the_nudge() {
         let mut detector = StallDetector::new(5);
-        let shot = call("screenshot", serde_json::json!({"save_path": null}));
+        let shot = test_call("screenshot", serde_json::json!({"save_path": null}));
         let seen = repeat(&mut detector, &shot, "saved_to: null", 5);
         assert_eq!(seen[..4], [None, None, None, None]);
         assert_eq!(seen[4], Some(Stall::Nudge));
@@ -410,11 +403,11 @@ mod tests {
     #[test]
     fn another_stuck_call_after_a_nudge_gets_its_own_nudge() {
         let mut detector = StallDetector::new(5);
-        let first = call(
+        let first = test_call(
             "screenshot",
             serde_json::json!({"pixels_per_point": 1, "save_path": null}),
         );
-        let second = call("screenshot", serde_json::json!({"save_path": null}));
+        let second = test_call("screenshot", serde_json::json!({"save_path": null}));
         assert_eq!(repeat(&mut detector, &first, "r", 5)[4], Some(Stall::Nudge));
         assert_eq!(
             repeat(&mut detector, &second, "r", 5)[4],
@@ -426,8 +419,8 @@ mod tests {
     #[test]
     fn a_cycle_between_two_stuck_calls_counts() {
         let mut detector = StallDetector::new(5);
-        let a = call("read", serde_json::json!({"path": "a"}));
-        let b = call("read", serde_json::json!({"path": "b"}));
+        let a = test_call("read", serde_json::json!({"path": "a"}));
+        let b = test_call("read", serde_json::json!({"path": "b"}));
         let mut seen = Vec::new();
         for _ in 0..5 {
             seen.push(detector.record(signature(&a, "same a")));
@@ -440,7 +433,7 @@ mod tests {
     #[test]
     fn a_limit_of_zero_never_steps_in() {
         let mut detector = StallDetector::new(0);
-        let shot = call("screenshot", serde_json::json!({}));
+        let shot = test_call("screenshot", serde_json::json!({}));
         assert!(
             repeat(&mut detector, &shot, "r", 50)
                 .iter()
@@ -450,7 +443,7 @@ mod tests {
 
     #[test]
     fn a_stall_note_quotes_the_arguments_as_sent() {
-        let shot = call("screenshot", serde_json::json!({"save_path": null}));
+        let shot = test_call("screenshot", serde_json::json!({"save_path": null}));
         let text = stall_text(&shot, 5);
         assert!(text.contains("`screenshot {\"save_path\":null}`"));
         assert!(text.contains("same result 5 times"));
