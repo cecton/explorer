@@ -87,6 +87,14 @@ impl AgentConfig {
         self.endpoints.iter().find(|endpoint| endpoint.name == name)
     }
 
+    /// The endpoint and backend `spec` designates, if its endpoint is usable.
+    pub fn target(
+        &self,
+        spec: &crate::model_spec::ModelSpec,
+    ) -> Option<(crate::endpoint::Endpoint, Backend)> {
+        Some((self.endpoint(&spec.endpoint)?.clone(), self.backend(spec)?))
+    }
+
     /// The backend `spec` designates, if its endpoint is usable.
     pub fn backend(&self, spec: &crate::model_spec::ModelSpec) -> Option<Backend> {
         use crate::endpoint::EndpointKind;

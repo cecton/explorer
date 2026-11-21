@@ -378,8 +378,7 @@ pub(crate) fn start_turn(
             (Mode::Feedback, NodeType::Compact, Some(instructions))
         }
     };
-    let endpoint = state.agent.endpoint(&spec.endpoint).cloned();
-    let (Some(endpoint), Some(backend)) = (endpoint, state.agent.backend(&spec)) else {
+    let Some((endpoint, backend)) = state.agent.target(&spec) else {
         return Err(Refusal::Rejected(format!(
             "endpoint '{}' is not configured or has no token",
             spec.endpoint

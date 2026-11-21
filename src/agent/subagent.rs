@@ -276,8 +276,7 @@ fn prepare(
         }
         _ => None,
     };
-    let endpoint = config.endpoint(&spec.endpoint).cloned();
-    let (Some(endpoint), Some(backend)) = (endpoint, config.backend(&spec)) else {
+    let Some((endpoint, backend)) = config.target(&spec) else {
         return Err(format!(
             "endpoint '{}' is not configured or has no token",
             spec.endpoint
@@ -484,11 +483,7 @@ async fn prepare_retry(
 ) -> Result<Launch, String> {
     use crate::conversation::NodeStatus;
     use crate::conversation::metadata::Metadata;
-    let (endpoint, backend) = (
-        config.endpoint(&spec.endpoint).cloned(),
-        config.backend(spec),
-    );
-    let (Some(endpoint), Some(backend)) = (endpoint, backend) else {
+    let Some((endpoint, backend)) = config.target(spec) else {
         return Err(format!(
             "the fallback endpoint '{}' is not configured or has no token",
             spec.endpoint
