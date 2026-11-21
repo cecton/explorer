@@ -14,16 +14,11 @@ pub struct PaneComponent {
     discussion: crate::tui::panes::discussion::DiscussionComponent,
     preview: crate::tui::panes::preview::FilePreviewComponent,
     terminal: crate::tui::panes::terminal::TerminalPaneComponent,
-    /// Origin row of the content area (below title bar), used for scrollbar mouse events.
-    content_origin_row: u16,
-    /// Total columns in the content area (full width including scrollbar column).
-    content_col_count: u16,
-    /// Total rows in the content area.
-    content_row_count: u16,
+    /// The content area (below the title bar), including the scrollbar column; the
+    /// scrollbar's mouse events are read against it.
+    content_box: FlexBox,
     /// Rows the scrollbar spans from the top of the content area.
     scrollbar_row_count: u16,
-    /// Origin column of the content area, used for absolute scrollbar column calculation.
-    content_origin_col: u16,
     /// Whether the user is currently dragging the scrollbar thumb.
     scrollbar_dragging: bool,
     /// (scroll, rel_y) at thumb grab time (None if drag started on track).
@@ -52,14 +47,21 @@ impl PaneComponent {
             discussion: DiscussionComponent::new(id),
             preview: FilePreviewComponent::new(id),
             terminal: TerminalPaneComponent::new(id, slot),
-            content_origin_row: 0,
-            content_col_count: 0,
-            content_row_count: 0,
+            content_box: FlexBox::default(),
             scrollbar_row_count: 0,
-            content_origin_col: 0,
             scrollbar_dragging: false,
             scrollbar_grab_state: None,
         })
+    }
+
+    /// The content area's origin row, origin column and column count.
+    fn content_geometry(&self) -> (usize, usize, usize) {
+        let bounds = self.content_box.style_adjusted_bounds;
+        (
+            bounds.origin_pos.row_index.as_usize(),
+            bounds.origin_pos.col_index.as_usize(),
+            bounds.bounds_size.col_width.as_usize(),
+        )
     }
 
     fn active_window(
@@ -77,7 +79,8 @@ impl PaneComponent {
     ) -> EventPropagation {
         use crate::tui::pane_manager::Window;
         let row = mouse.pos.row_index.as_usize();
-        let rel_y = row.saturating_sub(self.content_origin_row as usize);
+        let (origin_row, _, _) = self.content_geometry();
+        let rel_y = row.saturating_sub(origin_row);
 
         let state = &mut global_data.state;
         let Some((scroll, scroll_max, page_size)) = scroll_metrics(state, window) else {
@@ -325,9 +328,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
         {
             let col = mouse.pos.col_index.as_usize();
             let row = mouse.pos.row_index.as_usize();
-            let origin_col = self.content_origin_col as usize;
-            let origin_row = self.content_origin_row as usize;
-            let col_count = self.content_col_count as usize;
+            let (origin_row, origin_col, col_count) = self.content_geometry();
             let scrollbar_col = origin_col + col_count.saturating_sub(1);
             let bottom_row = origin_row + self.scrollbar_row_count as usize;
 
@@ -349,9 +350,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
             && let Some(window) = active_window
             && let Window::FilePreview(key) = window
         {
-            let title_bar_row = self.content_origin_row.saturating_sub(1) as usize;
-            let origin_col = self.content_origin_col as usize;
-            let pane_width = self.content_col_count as usize;
+            let (origin_row, origin_col, pane_width) = self.content_geometry();
+            let title_bar_row = origin_row.saturating_sub(1);
             let col = mouse.pos.col_index.as_usize();
             let row = mouse.pos.row_index.as_usize();
 
@@ -465,77 +465,26 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                 _ => true,
             };
 
-            let (content_box, inner_bounds) = if title_height > 0 {
-                let origin =
-                    current_box.style_adjusted_bounds.origin_pos + vp_height(title_height as u16);
-                let bounds = current_box.style_adjusted_bounds.bounds_size.col_width
-                    + (current_box.style_adjusted_bounds.bounds_size.row_height
-                        - vp_height(title_height as u16));
-                let scrollbar_col = if has_scrollbar {
-                    bounds.col_width - vp_width(1)
-                } else {
-                    bounds.col_width
-                };
-                let inner_bounds = scrollbar_col + bounds.row_height;
-                let boxed = FlexBox {
-                    style_adjusted_bounds: VPBoundingBox::new(origin, bounds),
-                    ..current_box
-                };
-                (
-                    boxed,
-                    FlexBox {
-                        style_adjusted_bounds: VPBoundingBox::new(origin, inner_bounds),
-                        ..current_box
-                    },
-                )
+            let bounds = current_box.style_adjusted_bounds;
+            let origin = bounds.origin_pos + vp_height(title_height as u16);
+            let size = bounds.bounds_size.col_width
+                + (bounds.bounds_size.row_height - vp_height(title_height as u16));
+            let content_box = FlexBox {
+                style_adjusted_bounds: VPBoundingBox::new(origin, size),
+                ..current_box
+            };
+            let scrollbar_col = if has_scrollbar {
+                size.col_width - vp_width(1)
             } else {
-                let bounds = current_box.style_adjusted_bounds.bounds_size;
-                let scrollbar_col = if has_scrollbar {
-                    bounds.col_width - vp_width(1)
-                } else {
-                    bounds.col_width
-                };
-                let inner_bounds = scrollbar_col + bounds.row_height;
-                let boxed = FlexBox {
-                    style_adjusted_bounds: VPBoundingBox::new(
-                        current_box.style_adjusted_bounds.origin_pos,
-                        bounds,
-                    ),
-                    ..current_box
-                };
-                (
-                    boxed,
-                    FlexBox {
-                        style_adjusted_bounds: VPBoundingBox::new(
-                            current_box.style_adjusted_bounds.origin_pos,
-                            inner_bounds,
-                        ),
-                        ..current_box
-                    },
-                )
+                size.col_width
+            };
+            let inner_bounds = FlexBox {
+                style_adjusted_bounds: VPBoundingBox::new(origin, scrollbar_col + size.row_height),
+                ..current_box
             };
 
             // Store content area geometry for scrollbar mouse event handling.
-            self.content_origin_row = content_box
-                .style_adjusted_bounds
-                .origin_pos
-                .row_index
-                .as_u16();
-            self.content_origin_col = content_box
-                .style_adjusted_bounds
-                .origin_pos
-                .col_index
-                .as_u16();
-            self.content_col_count = content_box
-                .style_adjusted_bounds
-                .bounds_size
-                .col_width
-                .as_u16();
-            self.content_row_count = content_box
-                .style_adjusted_bounds
-                .bounds_size
-                .row_height
-                .as_u16();
+            self.content_box = content_box;
 
             // Push title ops first (display behind content).
             if title_height > 0 {
@@ -580,7 +529,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
             // The Discussion keeps its input out of the scrollbar's column.
             let scrollbar_rows = match active_window {
                 Some(Window::Discussion(_)) => self.discussion.scrollbar_rows(),
-                _ => self.content_row_count as usize,
+                _ => size.row_height.as_usize(),
             };
             // No scrollbar is painted where the window has no scroll metrics (a terminal on
             // its alternate screen): that column belongs to the window.
