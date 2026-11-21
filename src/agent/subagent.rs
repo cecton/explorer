@@ -788,7 +788,6 @@ async fn run_own_loop(
     use crate::agent::Message;
     use crate::agent::Mode;
     use crate::agent::agent_loop::Limits;
-    use crate::agent::tools::ToolContext;
     let (system, mut messages) = {
         let lead = system.to_string();
         let root = context.root.clone();
@@ -816,16 +815,9 @@ async fn run_own_loop(
     };
     recorder.message(&message);
     messages.push(message);
-    let tool_context = ToolContext {
-        root: context.root.clone(),
-        tree: Arc::clone(&context.tree),
-        node: context.node.clone(),
-        background: Arc::clone(&context.background),
-        mcp: context.mcp.clone(),
-    };
     // A sub-agent never starts another.
     crate::agent::agent_loop::run(
-        &tool_context,
+        context,
         None,
         target,
         &launch.session,
