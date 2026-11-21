@@ -355,7 +355,7 @@ mod tests {
 
     /// The document of `discussion` at `width`, and how many texts this laid out again.
     fn layout(discussion: &mut DiscussionState, width: usize) -> (usize, usize) {
-        let theme = crate::tui::theme::HelixTheme::default();
+        let theme = crate::tui::theme::HelixTheme::bundled_default();
         let rows = doc_lines(discussion, true, &theme, width).len();
         (rows, discussion.doc_cache.rebuilds)
     }

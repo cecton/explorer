@@ -983,7 +983,7 @@ mod tests {
     #[test]
     fn marker_bg_lays_the_warning_color_over_the_pane_background() {
         use crate::tui::theme::HelixTheme;
-        let theme = HelixTheme::default();
+        let theme = HelixTheme::bundled_default();
         let marker = marker_bg(&theme);
         assert_ne!(marker, theme.ui.background);
         assert_ne!(marker, theme.ui.selection);

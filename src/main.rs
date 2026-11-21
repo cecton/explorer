@@ -154,7 +154,7 @@ async fn main() {
         t
     } else {
         eprintln!("unknown theme '{theme_name}', using default");
-        tui::theme::HelixTheme::default()
+        tui::theme::HelixTheme::bundled_default()
     };
 
     let mut keymap = tui::keymap::Keymap::default();

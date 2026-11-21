@@ -1101,7 +1101,7 @@ mod tests {
 
     fn theme() -> crate::tui::theme::HelixTheme {
         use crate::tui::theme::HelixTheme;
-        HelixTheme::default()
+        HelixTheme::bundled_default()
     }
 
     fn render_md(src: &str, width: usize) -> Vec<MdLine> {

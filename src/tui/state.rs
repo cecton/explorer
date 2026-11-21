@@ -745,7 +745,7 @@ impl AppState {
         Self::new(
             Arc::new(arc_swap::ArcSwap::from_pointee(files)),
             root,
-            crate::tui::theme::HelixTheme::default(),
+            crate::tui::theme::HelixTheme::bundled_default(),
             crate::tui::keymap::Keymap::default(),
         )
     }

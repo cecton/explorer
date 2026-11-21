@@ -364,7 +364,7 @@ mod tests {
     #[test]
     fn row_accents_are_distinct_and_theme_sourced() {
         use crate::tui::theme::HelixTheme;
-        let theme = HelixTheme::default();
+        let theme = HelixTheme::bundled_default();
         let accents = row_accents(&theme);
         // Never identical to the file-row (ui.text) color, nor to each other.
         for accent in [accents.terminal, accents.agent, accents.git] {

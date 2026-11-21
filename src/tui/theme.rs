@@ -142,7 +142,7 @@ pub struct HelixTheme {
 impl Default for HelixTheme {
     /// A theme that styles nothing, with its `ui` resolved like any other, as the default
     /// `AppState` (derived `Default`) needs: a derived default would leave every role at
-    /// the terminal's default. The inherent `HelixTheme::default()` is catppuccin_mocha.
+    /// the terminal's default.
     fn default() -> Self {
         Self::build("", "")
     }
@@ -180,7 +180,7 @@ impl HelixTheme {
         Some(theme)
     }
 
-    pub fn default() -> Self {
+    pub fn bundled_default() -> Self {
         let default_name = "catppuccin_mocha";
         Self::from_name(default_name).expect("default theme not found")
     }

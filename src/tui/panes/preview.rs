@@ -1668,7 +1668,7 @@ mod paint_tests {
     #[test]
     fn a_multibyte_segment_paints_whole_chars_and_their_text() {
         let file = data("héllo wörld ünicode");
-        let theme = crate::tui::theme::HelixTheme::default();
+        let theme = crate::tui::theme::HelixTheme::bundled_default();
         let mut ops = RenderOpIRVec::new();
         // the segments the render loop cuts at width 5, painted one after the other
         let line = file.line(0);
@@ -1695,7 +1695,7 @@ mod paint_tests {
     #[test]
     fn a_search_match_paints_its_text_in_one_run() {
         let file = data("fn main() { target(); }");
-        let theme = crate::tui::theme::HelixTheme::default();
+        let theme = crate::tui::theme::HelixTheme::bundled_default();
         let mut ops = RenderOpIRVec::new();
         let before = "fn main() { ".len();
         paint_line_segment(
@@ -1726,7 +1726,7 @@ mod paint_tests {
     #[test]
     fn an_empty_segment_paints_nothing() {
         let file = data("some text");
-        let theme = crate::tui::theme::HelixTheme::default();
+        let theme = crate::tui::theme::HelixTheme::bundled_default();
         let mut ops = RenderOpIRVec::new();
         paint_line_segment(
             &mut ops,
@@ -1749,7 +1749,7 @@ mod paint_tests {
     fn an_offset_inside_a_character_paints_rather_than_panicking() {
         use crate::highlight::TokenKind;
         let file = data("— dash");
-        let theme = crate::tui::theme::HelixTheme::default();
+        let theme = crate::tui::theme::HelixTheme::bundled_default();
 
         let mut ops = RenderOpIRVec::new();
         paint_line_segment(

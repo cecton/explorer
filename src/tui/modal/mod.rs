@@ -490,7 +490,7 @@ mod tests {
         use crate::tui::widgets::fuzzy::Kind;
         let mut painter = crate::tui::widgets::fuzzy_picker::FuzzyPicker::new(Kind::Plain);
         let ops = painter.render_results(
-            PickerColors::in_overlay(&crate::tui::theme::HelixTheme::default()),
+            PickerColors::in_overlay(&crate::tui::theme::HelixTheme::bundled_default()),
             "",
             &rows,
             Some(0),
