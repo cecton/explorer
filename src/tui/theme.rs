@@ -337,85 +337,52 @@ impl HelixTheme {
 
 fn collect_chain(name: &str, toml_str: &str) -> Vec<RawTheme> {
     let mut chain = Vec::new();
-    let mut current_name: Option<&str> = Some(name);
-    let mut current_toml: Option<&str> = Some(toml_str);
+    let mut current = Some((name, toml_str));
     let mut visited = std::collections::HashSet::new();
 
-    while let Some(n) = current_name {
-        if !visited.insert(n) {
+    while let Some((name, toml_str)) = current {
+        if !visited.insert(name) {
             break;
         }
-        let Some(t) = current_toml else { break };
-        let raw = parse_theme(t);
-        let inherits = raw.inherits.clone();
+        let raw = parse_theme(toml_str);
+        current = raw
+            .inherits
+            .as_deref()
+            .and_then(|parent| THEMES.iter().find(|(n, _)| *n == parent))
+            .map(|(n, t)| (*n, *t));
         chain.push(raw);
-        match inherits.as_deref() {
-            Some(parent) => {
-                let found = THEMES.iter().find(|(n, _)| *n == parent);
-                match found {
-                    Some((pn, pt)) => {
-                        current_name = Some(pn);
-                        current_toml = Some(pt);
-                    }
-                    None => break,
-                }
-            }
-            None => break,
-        }
     }
 
     chain
 }
 
 fn parse_theme(toml_str: &str) -> RawTheme {
-    let root: serde_json::Value = match toml::from_str(toml_str) {
-        Ok(v) => v,
-        Err(_) => {
-            return RawTheme {
-                palette: HashMap::new(),
-                styles: Vec::new(),
-                inherits: None,
-            };
-        }
+    let empty = || RawTheme {
+        palette: HashMap::new(),
+        styles: Vec::new(),
+        inherits: None,
     };
-    let table = match root.as_object() {
-        Some(t) => t,
-        None => {
-            return RawTheme {
-                palette: HashMap::new(),
-                styles: Vec::new(),
-                inherits: None,
-            };
-        }
+    let Ok(serde_json::Value::Object(table)) = toml::from_str(toml_str) else {
+        return empty();
     };
 
-    let mut palette: HashMap<String, RgbValue> = HashMap::new();
-    if let Some(palette_table) = table.get("palette").and_then(|v| v.as_object()) {
-        for (name, val) in palette_table {
-            if let Some(color) = val.as_str().and_then(parse_hex_color) {
-                palette.insert(name.to_string(), color);
-            }
-        }
-    }
-
-    let inherits = table
-        .get("inherits")
-        .and_then(|v| v.as_str())
-        .map(|s| s.to_string());
-
-    let mut styles: Vec<(String, serde_json::Value)> = Vec::new();
+    let mut raw = empty();
     for (key, val) in table {
-        if key == "palette" || key == "inherits" {
-            continue;
+        match key.as_str() {
+            "palette" => {
+                if let Some(palette_table) = val.as_object() {
+                    for (name, val) in palette_table {
+                        if let Some(color) = val.as_str().and_then(parse_hex_color) {
+                            raw.palette.insert(name.to_string(), color);
+                        }
+                    }
+                }
+            }
+            "inherits" => raw.inherits = val.as_str().map(str::to_string),
+            _ => raw.styles.push((key, val)),
         }
-        styles.push((key.clone(), val.clone()));
     }
-
-    RawTheme {
-        palette,
-        styles,
-        inherits,
-    }
+    raw
 }
 
 /// A style of the theme: a bare string is a foreground. A style whose `modifiers` hold

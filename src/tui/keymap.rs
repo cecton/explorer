@@ -1,16 +1,10 @@
 //! Configurable top-level keyboard shortcuts (the leader + global keymap).
 //!
-//! Explorer's dispatch used to match each shortcut as a literal `KeyPress` pattern inline.
-//! This module adds one level of indirection: an [`Action`] names *what* a binding does,
-//! and a [`Keymap`] maps a [`KeyPress`] to an [`Action`] per context (leader vs global).
-//! The dispatch in [`crate::tui`] resolves the key to an action, so the triggering key can
-//! be overridden from `config.kdl` (see [`Keymap::apply_overrides`]).
-//!
-//! Config slugs accepted in the `keybindings` block: `leader`, `quit`, `focus-next`,
-//! `focus-prev`, `open-window-picker`, `open-terminal`, `open-theme-picker`,
-//! `open-git-log`, `open-conversations`, `toggle-favorite`, `open-model-picker`,
-//! `close-pane`, `resize-grow`, `resize-shrink`, `move-pane-forward`, `move-pane-backward`,
-//! `send-to-back`, `open-command-line`.
+//! An [`Action`] names *what* a binding does, and a [`Keymap`] maps a [`KeyPress`] to an
+//! [`Action`] per context (leader vs global). The dispatch in [`crate::tui`] resolves the
+//! key to an action, so the triggering key can be overridden from `config.kdl` (see
+//! [`Keymap::apply_overrides`]); the slugs the `keybindings` block accepts are `leader` and
+//! those of `Action::from_slug`.
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
 
@@ -138,7 +132,7 @@ impl Keymap {
     }
 
     /// The key bound to `action` outside leader mode (for status-bar hints).
-    pub fn global_key_for(&self, action: Action) -> Option<KeyPress> {
+    fn global_key_for(&self, action: Action) -> Option<KeyPress> {
         self.global
             .iter()
             .find(|(_, a)| *a == action)
