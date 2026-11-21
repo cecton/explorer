@@ -5,12 +5,17 @@ const TITLE_MAX_CHARS: usize = 100;
 pub(crate) const REPLY_MAX_CHARS: usize = 8000;
 const COMMITS_MAX: usize = 20;
 
+/// The last `REPLY_MAX_CHARS` characters of a reply: the end is where the verdict is.
+pub(crate) fn reply_tail(reply: &str) -> &str {
+    match reply.char_indices().rev().nth(REPLY_MAX_CHARS - 1) {
+        Some((start, _)) => &reply[start..],
+        None => reply,
+    }
+}
+
 /// What the summary model reads: the prompt, the end of the reply and the commits made.
 fn title_input(prompt: &str, reply: &str, commits: &[String]) -> String {
-    let reply = match reply.char_indices().nth(REPLY_MAX_CHARS) {
-        Some((end, _)) => &reply[..end],
-        None => reply,
-    };
+    let reply = reply_tail(reply);
     let mut input = format!(
         "<prompt>\n{}\n</prompt>\n\n<reply>\n{}\n</reply>\n",
         prompt.trim(),
@@ -139,11 +144,21 @@ mod tests {
 
     #[test]
     fn title_input_truncates_reply_and_lists_commits() {
-        let reply = "é".repeat(REPLY_MAX_CHARS + 10);
+        let reply = format!("{}{}", "a".repeat(10), "é".repeat(REPLY_MAX_CHARS));
         let input = title_input("do it", &reply, &["abc1234 feat: x".to_string()]);
         assert!(input.starts_with("<prompt>\ndo it\n</prompt>\n\n<reply>\n"));
         assert_eq!(input.matches('é').count(), REPLY_MAX_CHARS);
+        assert!(!input.contains("aaa"));
         assert!(input.contains("\n<commits>\nabc1234 feat: x\n</commits>\n"));
         assert!(input.ends_with("recorded above.\n"));
+    }
+
+    #[test]
+    fn reply_tail_keeps_short_replies_and_the_last_chars_of_long_ones() {
+        assert_eq!(reply_tail("short"), "short");
+        let exact = "é".repeat(REPLY_MAX_CHARS);
+        assert_eq!(reply_tail(&exact), exact);
+        let longer = format!("a{exact}");
+        assert_eq!(reply_tail(&longer), exact);
     }
 }

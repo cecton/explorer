@@ -755,14 +755,7 @@ fn title_backend(subagents: &Subagents, outcome: &Outcome) -> Option<crate::agen
 /// What the summary model reads for one run: the task and the end of its answer. The
 /// task says what was asked; the end of the answer is where the run's verdict is.
 fn run_title_input(task: &str, reply: &str) -> String {
-    let reply = match reply
-        .char_indices()
-        .rev()
-        .nth(crate::agent::turn::title::REPLY_MAX_CHARS - 1)
-    {
-        Some((start, _)) => &reply[start..],
-        None => reply,
-    };
+    let reply = crate::agent::turn::title::reply_tail(reply);
     format!(
         "<task>\n{}\n</task>\n\n<reply>\n{}\n</reply>\n\n\
          Write the title of the run recorded above.\n",
