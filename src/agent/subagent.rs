@@ -186,12 +186,6 @@ struct Launch {
     fallback: Option<crate::model_spec::ModelSpec>,
 }
 
-fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
-    args.get(key)
-        .and_then(serde_json::Value::as_str)
-        .ok_or_else(|| format!("missing string argument `{key}`"))
-}
-
 fn find_role<'a>(config: &'a crate::agent::AgentConfig, name: &str) -> Result<&'a Role, String> {
     config
         .roles
@@ -231,8 +225,8 @@ fn prepare(
     use crate::conversation::metadata::Metadata;
     use crate::endpoint::EndpointKind;
     let config = &subagents.config;
-    let description = str_arg(args, "description")?;
-    let prompt = str_arg(args, "prompt")?;
+    let description = crate::agent::tools::str_arg(args, "description")?;
+    let prompt = crate::agent::tools::str_arg(args, "prompt")?;
     let resumed = match args.get("agent_id").and_then(serde_json::Value::as_str) {
         Some(id) => Some(tree.read().resumable_agent(node, id)?),
         None => None,

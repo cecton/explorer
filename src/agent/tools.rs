@@ -279,7 +279,7 @@ async fn blocking(
         .map_err(|e| e.to_string())?
 }
 
-fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
+pub(super) fn str_arg<'a>(args: &'a serde_json::Value, key: &str) -> Result<&'a str, String> {
     args.get(key)
         .and_then(serde_json::Value::as_str)
         .ok_or_else(|| format!("missing string argument `{key}`"))
