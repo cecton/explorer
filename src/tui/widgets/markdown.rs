@@ -5,11 +5,7 @@ use r3bl_tui::*;
 #[derive(Clone)]
 pub struct Span {
     pub text: String,
-    pub fg: crate::tui::theme::Color,
-    pub bold: bool,
-    pub italic: bool,
-    pub underline: bool,
-    pub strikethrough: bool,
+    pub style: InlineStyle,
     /// Byte offset in the source where `text` is found as is; `None` for what the
     /// renderer adds (markers, padding, borders) or rewrites (entities).
     pub src: Option<usize>,
@@ -17,25 +13,22 @@ pub struct Span {
 
 impl Span {
     pub(crate) fn plain(text: impl Into<String>, fg: crate::tui::theme::Color) -> Self {
-        Self {
-            text: text.into(),
-            fg,
-            bold: false,
-            italic: false,
-            underline: false,
-            strikethrough: false,
-            src: None,
-        }
+        Self::of(
+            text,
+            InlineStyle {
+                fg,
+                bold: false,
+                italic: false,
+                underline: false,
+                strikethrough: false,
+            },
+        )
     }
 
     fn of(text: impl Into<String>, style: InlineStyle) -> Self {
         Self {
             text: text.into(),
-            fg: style.fg,
-            bold: style.bold,
-            italic: style.italic,
-            underline: style.underline,
-            strikethrough: style.strikethrough,
+            style,
             src: None,
         }
     }
@@ -47,14 +40,6 @@ impl Span {
             (None, None) => true,
             _ => false,
         }
-    }
-
-    fn same_style(&self, style: InlineStyle) -> bool {
-        self.fg == style.fg
-            && self.bold == style.bold
-            && self.italic == style.italic
-            && self.underline == style.underline
-            && self.strikethrough == style.strikethrough
     }
 }
 
@@ -72,30 +57,18 @@ impl MdLine {
     }
 }
 
-#[derive(Clone, Copy)]
-struct InlineStyle {
-    fg: crate::tui::theme::Color,
-    bold: bool,
-    italic: bool,
-    underline: bool,
-    strikethrough: bool,
-}
-
-impl InlineStyle {
-    fn of(span: &Span) -> Self {
-        Self {
-            fg: span.fg,
-            bold: span.bold,
-            italic: span.italic,
-            underline: span.underline,
-            strikethrough: span.strikethrough,
-        }
-    }
+#[derive(Clone, Copy, PartialEq)]
+pub struct InlineStyle {
+    pub fg: crate::tui::theme::Color,
+    pub bold: bool,
+    pub italic: bool,
+    pub underline: bool,
+    pub strikethrough: bool,
 }
 
 fn push_run(line: &mut Vec<Span>, text: &str, style: InlineStyle, src: Option<usize>) {
     match line.last_mut() {
-        Some(last) if last.same_style(style) && last.continued_by(src) => last.text.push_str(text),
+        Some(last) if last.style == style && last.continued_by(src) => last.text.push_str(text),
         _ => line.push(Span {
             src,
             ..Span::of(text, style)
@@ -115,7 +88,7 @@ fn lines_with_offsets(text: &str) -> impl Iterator<Item = (usize, &str)> {
 }
 
 struct ItemCtx {
-    marker: Vec<Span>,
+    marker: Span,
     marker_width: usize,
     flushed: bool,
     /// Quote depth when the item started: the quotes opened since are drawn right of it.
@@ -150,18 +123,18 @@ struct Renderer<'a> {
 
 /// Paint style for one markdown span: its fg over `bg`, with the span's attributes.
 pub(crate) fn span_style(span: &Span, bg: crate::tui::theme::Color) -> TuiStyle {
-    let mut style = span.fg.on(bg);
+    let mut style = span.style.fg.on(bg);
     use r3bl_tui::tui_style_attrib;
-    if span.bold {
+    if span.style.bold {
         style.attribs.bold = Some(tui_style_attrib::Bold);
     }
-    if span.italic {
+    if span.style.italic {
         style.attribs.italic = Some(tui_style_attrib::Italic);
     }
-    if span.underline {
+    if span.style.underline {
         style.attribs.underline = Some(tui_style_attrib::Underline);
     }
-    if span.strikethrough {
+    if span.style.strikethrough {
         style.attribs.strikethrough = Some(tui_style_attrib::Strikethrough);
     }
     style
@@ -288,9 +261,11 @@ pub(crate) fn paint_row(
         if piece.marked {
             style.color_bg = marks.bg.tui();
             if !marks.keep_fg {
-                style.color_fg =
-                    crate::tui::widgets::contrast::ensure_readable_fg(piece.span.fg, marks.bg)
-                        .tui();
+                style.color_fg = crate::tui::widgets::contrast::ensure_readable_fg(
+                    piece.span.style.fg,
+                    marks.bg,
+                )
+                .tui();
             }
         }
         *ops +=
@@ -433,11 +408,6 @@ pub(crate) fn render(
                 r.start_style(style);
             }
             pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Link) => r.end_style(),
-            // The alt text of an image renders inline as plain text.
-            pulldown_cmark::Event::Start(pulldown_cmark::Tag::Image { .. }) => {
-                r.start_style(r.style)
-            }
-            pulldown_cmark::Event::End(pulldown_cmark::TagEnd::Image) => r.end_style(),
             pulldown_cmark::Event::Text(text) if r.in_code => {
                 r.push_code_lines(&text, verbatim(&text))
             }
@@ -487,13 +457,6 @@ pub(crate) fn render(
                 for (at, line) in lines_with_offsets(&text) {
                     r.push_html_line(line, style, src.map(|start| start + at));
                 }
-            }
-            pulldown_cmark::Event::FootnoteReference(name) => {
-                let style = InlineStyle {
-                    fg: r.fg("comment"),
-                    ..r.plain
-                };
-                r.push_content(&format!("[{name}]"), style, None);
             }
             _ => {}
         }
@@ -590,7 +553,7 @@ impl Renderer<'_> {
         };
         let marker_width = crate::tui::widgets::text_layout::display_width(&marker_text);
         self.items.push(ItemCtx {
-            marker: vec![Span::of(marker_text, style)],
+            marker: Span::of(marker_text, style),
             marker_width,
             flushed: false,
             quotes: self.quote_depth,
@@ -612,7 +575,7 @@ impl Renderer<'_> {
         let Some(item) = self.items.last_mut() else {
             return;
         };
-        item.marker[0] = Span::of(glyph, style);
+        item.marker = Span::of(glyph, style);
         item.marker_width = crate::tui::widgets::text_layout::display_width(glyph);
     }
 
@@ -686,7 +649,7 @@ impl Renderer<'_> {
             if item.flushed {
                 first.push(Span::of(" ".repeat(item.marker_width), self.plain));
             } else {
-                first.extend(item.marker.iter().cloned());
+                first.push(item.marker.clone());
             }
             cont.push(Span::of(" ".repeat(item.marker_width), self.plain));
         }
@@ -942,14 +905,14 @@ fn wrap_spans(
                 && let Some(last) = line.last()
             {
                 // The space stands for the source byte between two words one byte apart.
-                let style = InlineStyle::of(last);
+                let style = last.style;
                 let end = last.src.map(|start| start + last.text.len());
                 let adjoining = end.is_some_and(|end| word[0].src == Some(end + 1));
-                let src = end.filter(|_| adjoining && last.same_style(InlineStyle::of(&word[0])));
+                let src = end.filter(|_| adjoining && last.style == word[0].style);
                 push_run(&mut line, " ", style, src);
             }
             for run in word {
-                push_run(&mut line, &run.text, InlineStyle::of(run), run.src);
+                push_run(&mut line, &run.text, run.style, run.src);
             }
             used += sep + word_width;
         } else if word_width > eff {
@@ -965,14 +928,14 @@ fn wrap_spans(
                         used = 0;
                     }
                     let src = run.src.map(|start| start + at);
-                    push_run(&mut line, grapheme, InlineStyle::of(run), src);
+                    push_run(&mut line, grapheme, run.style, src);
                     used += w;
                 }
             }
         } else {
             lines.push(std::mem::take(&mut line));
             for run in word {
-                push_run(&mut line, &run.text, InlineStyle::of(run), run.src);
+                push_run(&mut line, &run.text, run.style, run.src);
             }
             used = word_width;
         }
@@ -1009,7 +972,7 @@ fn split_words(content: &[Span]) -> Vec<Vec<Span>> {
                 }
             } else {
                 let src = span.src.map(|start| start + at);
-                push_run(&mut word, grapheme, InlineStyle::of(span), src);
+                push_run(&mut word, grapheme, span.style, src);
             }
         }
     }
@@ -1201,9 +1164,12 @@ mod tests {
             texts,
             ["a     │ b", "──────┼────", "one   │ two", "three │ 4"]
         );
-        assert!(lines[0].spans[0].bold);
-        assert!(!lines[2].spans[0].bold);
-        assert_eq!(lines[1].spans[0].fg, theme().color_for_scope("comment"));
+        assert!(lines[0].spans[0].style.bold);
+        assert!(!lines[2].spans[0].style.bold);
+        assert_eq!(
+            lines[1].spans[0].style.fg,
+            theme().color_for_scope("comment")
+        );
     }
 
     #[test]
@@ -1310,8 +1276,8 @@ mod tests {
         let lines = render_md("# Title", 40);
         let span = &lines[0].spans[0];
         assert_eq!(span.text, "Title");
-        assert!(span.bold);
-        assert_eq!(span.fg, theme().color_for_scope("markup.heading.1"));
+        assert!(span.style.bold);
+        assert_eq!(span.style.fg, theme().color_for_scope("markup.heading.1"));
     }
 
     #[test]
@@ -1319,16 +1285,19 @@ mod tests {
         let lines = render_md("# Title\n\nbody text", 40);
         let plain_fg = theme().ui.text;
         let heading = &lines[0].spans[0];
-        assert_eq!(heading.fg, theme().color_for_scope("markup.heading.1"));
+        assert_eq!(
+            heading.style.fg,
+            theme().color_for_scope("markup.heading.1")
+        );
         let body = &lines[2];
         assert_eq!(text(body), "body text");
         for span in &body.spans {
             assert_eq!(
-                span.fg, plain_fg,
+                span.style.fg, plain_fg,
                 "span {:?} kept the heading color",
                 span.text
             );
-            assert!(!span.bold);
+            assert!(!span.style.bold);
         }
     }
 
@@ -1338,9 +1307,9 @@ mod tests {
         let italic = lines[0]
             .spans
             .iter()
-            .find(|s| s.italic)
+            .find(|s| s.style.italic)
             .expect("italic span");
-        assert!(italic.bold);
+        assert!(italic.style.bold);
         assert_eq!(italic.text, "both");
     }
 
@@ -1352,7 +1321,7 @@ mod tests {
             .iter()
             .find(|s| s.text == "ls -la")
             .expect("code span");
-        assert_eq!(code.fg, theme().color_for_scope("markup.raw"));
+        assert_eq!(code.style.fg, theme().color_for_scope("markup.raw"));
     }
 
     #[test]
@@ -1426,11 +1395,11 @@ mod tests {
         assert_eq!(text(&lines[0]), "☑ done");
         assert_eq!(text(&lines[1]), "☐ todo");
         assert_eq!(
-            lines[0].spans[0].fg,
+            lines[0].spans[0].style.fg,
             theme().color_for_scope("markup.list.checked")
         );
         assert_eq!(
-            lines[1].spans[0].fg,
+            lines[1].spans[0].style.fg,
             theme().color_for_scope("markup.list.unchecked")
         );
     }
@@ -1440,7 +1409,7 @@ mod tests {
         let lines = render_md("> quoted", 20);
         assert_eq!(text(&lines[0]), "> quoted");
         assert_eq!(
-            lines[0].spans[0].fg,
+            lines[0].spans[0].style.fg,
             theme().color_for_scope("markup.quote")
         );
     }
@@ -1450,7 +1419,7 @@ mod tests {
         let lines = render_md("[txt](https://example.com)", 40);
         let span = &lines[0].spans[0];
         assert_eq!(span.text, "txt");
-        assert!(span.underline);
+        assert!(span.style.underline);
         assert!(!text(&lines[0]).contains("example.com"));
     }
 
@@ -1540,12 +1509,12 @@ mod tests {
     fn wrap_spans_keeps_style_across_a_break() {
         let bold = Span::plain("two", Color::from_u8(255, 0, 0));
         let mut bold_style = bold.clone();
-        bold_style.bold = true;
+        bold_style.style.bold = true;
         let plain = Span::plain(" words", Color::from_u8(0, 255, 0));
         let lines = wrap_spans(&[bold_style, plain], 5, Vec::new(), Vec::new());
         assert_eq!(lines.len(), 2);
-        assert!(lines[0][0].bold);
-        assert!(!lines[1][0].bold);
+        assert!(lines[0][0].style.bold);
+        assert!(!lines[1][0].style.bold);
         assert_eq!(lines[1][0].text, "words");
     }
 

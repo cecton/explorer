@@ -440,7 +440,7 @@ mod tests {
             let doc = &discussion.doc_cache.doc;
             (0..doc.len())
                 .filter_map(|row| doc.line(row))
-                .flat_map(|line| line.spans.iter().map(|span| span.fg))
+                .flat_map(|line| line.spans.iter().map(|span| span.style.fg))
                 .collect::<Vec<_>>()
         };
 
