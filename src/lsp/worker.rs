@@ -207,17 +207,9 @@ impl LspWorker {
             // at once for fast colors, even before quiescent.
             LspInput::TokenRequest(file_idx) => self.send_tokens(file_idx),
             // A qualified name is resolved across files, which genuinely needs the index.
-            LspInput::HoverThenReferences {
-                file_idx,
-                line,
-                character,
-                word,
-                group_id,
-            } if !self.server_ready => {
-                tracing::debug!(
-                    "LSP: holding hover until ready: file_idx={file_idx} line={line} char={character}",
-                );
-                self.hold_hover(file_idx, line, character, word, group_id);
+            input @ LspInput::HoverThenReferences { .. } if !self.server_ready => {
+                tracing::debug!("LSP: holding hover until ready: {input:?}");
+                self.hold(input);
                 Ok(())
             }
             LspInput::HoverThenReferences {
@@ -324,13 +316,7 @@ impl LspWorker {
     /// server they were asked of, and the held requests go out once the new one is ready.
     fn hold_pending_queries(&mut self) {
         for query in self.take_ref_queries() {
-            self.hold_hover(
-                query.file_idx,
-                query.line,
-                query.character,
-                query.word,
-                query.group_id,
-            );
+            self.hold(query.into_input());
         }
     }
 
@@ -450,29 +436,18 @@ impl LspWorker {
 
     /// Queues a hover received before the server was ready, collapsing repeated requests
     /// for the same position so a burst replays only once.
-    fn hold_hover(
-        &mut self,
-        file_idx: usize,
-        line: u32,
-        character: u32,
-        word: Option<String>,
-        group_id: Option<usize>,
-    ) {
+    fn hold(&mut self, input: crate::lsp::LspInput) {
         use crate::lsp::LspInput;
-        self.held_requests.retain(|h| {
+        self.held_requests.retain(|held| {
             !matches!(
-                h,
-                LspInput::HoverThenReferences { file_idx: f, line: l, character: c, group_id: g, .. }
-                if *f == file_idx && *l == line && *c == character && *g == group_id
+                (held, &input),
+                (
+                    LspInput::HoverThenReferences { file_idx: f, line: l, character: c, group_id: g, .. },
+                    LspInput::HoverThenReferences { file_idx, line, character, group_id, .. },
+                ) if f == file_idx && l == line && c == character && g == group_id
             )
         });
-        self.held_requests.push_back(LspInput::HoverThenReferences {
-            file_idx,
-            line,
-            character,
-            word,
-            group_id,
-        });
+        self.held_requests.push_back(input);
     }
 
     fn send_hover_request(
@@ -511,7 +486,6 @@ impl LspWorker {
                 character,
                 word,
                 phase: RefQueryPhase::Hover,
-                qualified_name: None,
                 group_id,
             },
         );
@@ -657,13 +631,7 @@ impl LspWorker {
                             pending.line,
                             pending.character,
                         );
-                        self.hold_hover(
-                            pending.file_idx,
-                            pending.line,
-                            pending.character,
-                            pending.word,
-                            pending.group_id,
-                        );
+                        self.hold(pending.into_input());
                         return Some(r3bl_tui::Continuation::Continue);
                     }
                     // blocking_send: this runs on the RRT thread, and a dropped result would
@@ -724,8 +692,7 @@ impl LspWorker {
                         line: pending.line,
                         character: pending.character,
                         word: pending.word.clone(),
-                        phase: RefQueryPhase::References,
-                        qualified_name: Some(name),
+                        phase: RefQueryPhase::References(name),
                         group_id: pending.group_id,
                     },
                 );
@@ -735,10 +702,7 @@ impl LspWorker {
                 );
                 Some(r3bl_tui::Continuation::Continue)
             }
-            RefQueryPhase::References => {
-                let Some(name) = pending.qualified_name else {
-                    return Some(r3bl_tui::Continuation::Continue);
-                };
+            RefQueryPhase::References(name) => {
                 let locations: Vec<lsp_types::Location> = result
                     .and_then(|v| serde_json::from_value(v).ok())
                     .unwrap_or_default();
@@ -1007,7 +971,6 @@ mod tests {
             character: 4,
             word: Some("word".to_string()),
             phase: RefQueryPhase::Hover,
-            qualified_name: None,
             group_id: Some(file_idx),
         }
     }

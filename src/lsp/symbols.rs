@@ -4,7 +4,8 @@
 #[derive(Clone, Debug)]
 pub(super) enum RefQueryPhase {
     Hover,
-    References,
+    /// Asked for the places this qualified name appears.
+    References(String),
 }
 
 pub(super) struct PendingRefQuery {
@@ -13,8 +14,21 @@ pub(super) struct PendingRefQuery {
     pub(super) character: u32,
     pub(super) word: Option<String>,
     pub(super) phase: RefQueryPhase,
-    pub(super) qualified_name: Option<String>,
     pub(super) group_id: Option<usize>,
+}
+
+impl PendingRefQuery {
+    /// The request that asks this query again from its hover.
+    pub(super) fn into_input(self) -> crate::lsp::LspInput {
+        use crate::lsp::LspInput;
+        LspInput::HoverThenReferences {
+            file_idx: self.file_idx,
+            line: self.line,
+            character: self.character,
+            word: self.word,
+            group_id: self.group_id,
+        }
+    }
 }
 
 /// The qualified name a hover answer states, or `None` when it states none.
