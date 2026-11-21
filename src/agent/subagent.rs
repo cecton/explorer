@@ -87,33 +87,7 @@ pub fn load_roles() -> Vec<Role> {
 /// The roles of the `.md` files in `dir`, by name. A file that cannot make a role is
 /// logged and skipped; a missing directory yields none.
 fn read_roles(dir: &std::path::Path) -> Vec<Role> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<Role> = entries
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            if path.extension()? != "md" {
-                return None;
-            }
-            let name = path.file_stem()?.to_str()?;
-            if !crate::agent::commands::is_command_name(name) {
-                tracing::warn!(
-                    "ignoring {}: a role name is made of lowercase letters, digits and dashes",
-                    path.display()
-                );
-                return None;
-            }
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| tracing::warn!("cannot read {}: {e}", path.display()))
-                .ok()?;
-            Role::parse(name, &text)
-                .map_err(|reason| tracing::warn!("ignoring {}: {reason}", path.display()))
-                .ok()
-        })
-        .collect();
-    found.sort_by(|a, b| a.name.cmp(&b.name));
-    found
+    crate::agent::commands::read_markdown(dir, "a role", Role::parse, |role| &role.name)
 }
 
 /// What a turn lends to the sub-agents it calls.

@@ -208,10 +208,30 @@ pub fn load() -> Vec<Command> {
 /// The commands of the `.md` files in `dir`, by name. A file that cannot make a
 /// command is logged and skipped; a missing directory yields none.
 fn read(dir: &std::path::Path) -> Vec<Command> {
+    read_markdown(
+        dir,
+        "a command",
+        |name, text| {
+            if is_built_in(name) {
+                return Err(format!("'{name}' is built in"));
+            }
+            Command::parse(name, text).ok_or_else(|| "it has no prompt".to_string())
+        },
+        |command| &command.name,
+    )
+}
+
+/// The items `parse` makes from the `.md` files in `dir`, sorted by `name_of`.
+pub(crate) fn read_markdown<T>(
+    dir: &std::path::Path,
+    kind: &str,
+    parse: impl Fn(&str, &str) -> Result<T, String>,
+    name_of: impl Fn(&T) -> &str,
+) -> Vec<T> {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return Vec::new();
     };
-    let mut found: Vec<Command> = entries
+    let mut found: Vec<T> = entries
         .filter_map(|entry| {
             let path = entry.ok()?.path();
             if path.extension()? != "md" {
@@ -220,26 +240,20 @@ fn read(dir: &std::path::Path) -> Vec<Command> {
             let name = path.file_stem()?.to_str()?;
             if !is_command_name(name) {
                 tracing::warn!(
-                    "ignoring {}: a command name is made of lowercase letters, digits and dashes",
+                    "ignoring {}: {kind} name is made of lowercase letters, digits and dashes",
                     path.display()
                 );
-                return None;
-            }
-            if is_built_in(name) {
-                tracing::warn!("ignoring {}: '{name}' is built in", path.display());
                 return None;
             }
             let text = std::fs::read_to_string(&path)
                 .map_err(|e| tracing::warn!("cannot read {}: {e}", path.display()))
                 .ok()?;
-            let command = Command::parse(name, &text);
-            if command.is_none() {
-                tracing::warn!("ignoring {}: it has no prompt", path.display());
-            }
-            command
+            parse(name, &text)
+                .map_err(|reason| tracing::warn!("ignoring {}: {reason}", path.display()))
+                .ok()
         })
         .collect();
-    found.sort_by(|a, b| a.name.cmp(&b.name));
+    found.sort_by(|a, b| name_of(a).cmp(name_of(b)));
     found
 }
 
