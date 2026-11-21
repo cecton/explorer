@@ -1043,6 +1043,31 @@ mod tests {
         assert_eq!(kept, [1, 2], "the failed request is not retried");
     }
 
+    #[test]
+    fn holding_a_position_twice_keeps_one_request_and_other_positions_stay() {
+        use crate::lsp::LspInput;
+        let hover = |file_idx, line| LspInput::HoverThenReferences {
+            file_idx,
+            line,
+            character: 0,
+            word: None,
+            group_id: Some(1),
+        };
+        let mut worker = idle_worker();
+        worker.hold(hover(0, 1));
+        worker.hold(hover(0, 2));
+        worker.hold(hover(0, 1));
+        let lines: Vec<_> = worker
+            .held_requests
+            .iter()
+            .map(|input| match input {
+                LspInput::HoverThenReferences { line, .. } => *line,
+                _ => unreachable!("only hovers are held here"),
+            })
+            .collect();
+        assert_eq!(lines, [2, 1], "the repeat replaces the first, at the back");
+    }
+
     /// A crash restart drops the worker: what it held reaches the next worker through the
     /// request buffer, a query in flight does not.
     #[test]

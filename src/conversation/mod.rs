@@ -691,6 +691,27 @@ mod tests {
     }
 
     #[test]
+    fn a_node_shows_the_same_title_after_a_reload_as_when_it_was_created() {
+        use crate::conversation::metadata::Metadata;
+        let (_tmp, root) = temp_root();
+        let mut tree = ConversationTree::load(&root);
+        let id = tree
+            .create_node(
+                None,
+                0,
+                Metadata::default(),
+                "\n  first line  \nsecond",
+                None,
+            )
+            .unwrap();
+        let created = tree.node(&id).unwrap().display_title().to_string();
+        assert_eq!(created, "first line");
+
+        let reloaded = ConversationTree::load(&root);
+        assert_eq!(reloaded.node(&id).unwrap().display_title(), created);
+    }
+
+    #[test]
     fn every_change_moves_the_revision_and_a_reloaded_tree_never_reuses_one() {
         use crate::conversation::metadata::Metadata;
         let (_tmp, root) = temp_root();
