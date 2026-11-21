@@ -185,16 +185,6 @@ fn interrupted_of(node: &crate::conversation::Node) -> Option<String> {
     }
 }
 
-/// What a resume of `node` sends: how its turn ended, the mode it ran in, and whether
-/// its uncommitted work was discarded.
-fn resume_of(node: &crate::conversation::Node) -> (Option<String>, crate::agent::Mode, bool) {
-    (
-        interrupted_of(node),
-        node_mode(node),
-        node.meta.scratch_reset,
-    )
-}
-
 /// Whether a plain message on the node window `id` shows resumes it, the way
 /// `/continue` does: its turn stopped without finishing, so the reasoning on disk is
 /// what the message builds on. A compact node is left out — it has no work to resume,
@@ -287,7 +277,11 @@ pub(crate) fn compose_launch(
                         "a compact turn has no work to resume; send the message again".to_string(),
                     )));
                 }
-                resume_of(resumed)
+                (
+                    interrupted_of(resumed),
+                    node_mode(resumed),
+                    resumed.meta.scratch_reset,
+                )
             };
             (
                 crate::agent::context::continue_request(
@@ -384,16 +378,14 @@ pub(crate) fn start_turn(
             spec.endpoint
         )));
     };
-    let parent_status = parent
-        .as_ref()
-        .and_then(|parent| state.conversations.read().node(parent)?.meta.status);
-    let parent_has_children = parent.as_ref().is_some_and(|parent| {
-        state
-            .conversations
-            .read()
-            .node(parent)
-            .is_some_and(|node| !node.children.is_empty())
-    });
+    let (parent_status, parent_has_children) = {
+        let tree = state.conversations.read();
+        let parent = parent.as_ref().and_then(|parent| tree.node(parent));
+        (
+            parent.and_then(|node| node.meta.status),
+            parent.is_some_and(|node| !node.children.is_empty()),
+        )
+    };
     if parent_status == Some(NodeStatus::Running) {
         return Err(Refusal::Busy("this node is still running"));
     }
@@ -455,7 +447,6 @@ pub(crate) fn start_turn(
     state.tree_view.selected = Some(RowTarget::Node(node.clone()));
     // The new node has no title yet: no filter would list it.
     state.tree_view.query.clear();
-    state.mark_session_dirty();
 
     let summary_backend = state
         .agent

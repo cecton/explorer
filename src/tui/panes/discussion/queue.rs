@@ -138,11 +138,7 @@ impl crate::tui::panes::discussion::DiscussionComponent {
                 main_tx.clone(),
                 id,
             ) {
-                None => {
-                    state.queued_turns.remove(0);
-                    continue;
-                }
-                Some(Ok(())) => {
+                None | Some(Ok(())) => {
                     state.queued_turns.remove(0);
                     continue;
                 }
