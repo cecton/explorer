@@ -91,14 +91,14 @@ const BUILT_INS: [(&str, &str, Option<&str>); 3] = [
 
 /// Whether `name` can follow the slash of a command: lowercase letters, digits and
 /// dashes.
-pub fn is_command_name(name: &str) -> bool {
+fn is_command_name(name: &str) -> bool {
     !name.is_empty()
         && name
             .chars()
             .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
 }
 
-pub fn is_built_in(name: &str) -> bool {
+fn is_built_in(name: &str) -> bool {
     BUILT_INS.iter().any(|(built_in, ..)| *built_in == name)
 }
 
@@ -222,7 +222,7 @@ fn read(dir: &std::path::Path) -> Vec<Command> {
 }
 
 /// The items `parse` makes from the `.md` files in `dir`, sorted by `name_of`.
-pub(crate) fn read_markdown<T>(
+pub(super) fn read_markdown<T>(
     dir: &std::path::Path,
     kind: &str,
     parse: impl Fn(&str, &str) -> Result<T, String>,
