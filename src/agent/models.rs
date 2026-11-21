@@ -11,12 +11,7 @@ struct ModelEntry {
 #[derive(serde::Deserialize)]
 struct Recommended {
     #[serde(rename = "clinePass", default)]
-    cline_pass: Vec<RecommendedModel>,
-}
-
-#[derive(serde::Deserialize)]
-struct RecommendedModel {
-    id: String,
+    cline_pass: Vec<ModelEntry>,
 }
 
 /// The model ids an endpoint offers, sorted: the `data[].id` of `GET <url>/models`, or
