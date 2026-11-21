@@ -833,36 +833,29 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
 /// The entries of `entries` whose summary holds the query, best match first. Only the
 /// indices: the chars a painted row highlights are matched again, for that row alone.
 pub(crate) fn run_log_match(text: &str, entries: &[crate::git::LogEntry]) -> Vec<usize> {
-    use crate::tui::widgets::fuzzy::{Kind, Query};
-    let mut query = Query::new(Kind::Plain);
-    query.set(text);
-    if query.is_empty() {
-        return (0..entries.len()).collect();
-    }
-    let mut scored: Vec<(usize, u32)> = entries
-        .iter()
-        .enumerate()
-        .filter_map(|(i, entry)| query.rank(&entry.summary).map(|score| (i, score)))
-        .collect();
-    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
-    scored.into_iter().map(|(i, _)| i).collect()
+    use crate::tui::widgets::fuzzy::Kind;
+    crate::tui::widgets::fuzzy::ranked(
+        Kind::Plain,
+        text,
+        entries
+            .iter()
+            .enumerate()
+            .map(|(i, entry)| (i, &entry.summary)),
+    )
+    .unwrap_or_else(|| (0..entries.len()).collect())
 }
 
 /// The refs of `refs` whose name holds the query, best match first.
 pub(crate) fn run_ref_match(text: &str, refs: &[crate::git::GitRef]) -> Vec<usize> {
-    use crate::tui::widgets::fuzzy::{Kind, Query};
-    let mut query = Query::new(Kind::Plain);
-    query.set(text);
-    if query.is_empty() {
-        return (0..refs.len()).collect();
-    }
-    let mut scored: Vec<(usize, u32)> = refs
-        .iter()
-        .enumerate()
-        .filter_map(|(i, git_ref)| query.rank(&git_ref.name).map(|score| (i, score)))
-        .collect();
-    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
-    scored.into_iter().map(|(i, _)| i).collect()
+    use crate::tui::widgets::fuzzy::Kind;
+    crate::tui::widgets::fuzzy::ranked(
+        Kind::Plain,
+        text,
+        refs.iter()
+            .enumerate()
+            .map(|(i, git_ref)| (i, &git_ref.name)),
+    )
+    .unwrap_or_else(|| (0..refs.len()).collect())
 }
 
 /// The entries painted from `scroll` down for `rows` rows, filtered or not: a filtered

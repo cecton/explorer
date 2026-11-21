@@ -70,17 +70,12 @@ fn preview_selected_theme(state: &mut crate::tui::state::AppState) {
 pub fn run_theme_name_match(text: &str) -> Vec<String> {
     use crate::tui::theme::HelixTheme;
     use crate::tui::widgets::fuzzy::Kind;
-    use crate::tui::widgets::fuzzy::Query;
-    let mut query = Query::new(Kind::Plain);
-    query.set(text);
-    if query.is_empty() {
-        return HelixTheme::theme_names().map(str::to_string).collect();
-    }
-    let mut scored: Vec<(String, u32)> = HelixTheme::theme_names()
-        .filter_map(|name| query.rank(name).map(|score| (name.to_string(), score)))
-        .collect();
-    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
-    scored.into_iter().map(|(name, _)| name).collect()
+    crate::tui::widgets::fuzzy::ranked(
+        Kind::Plain,
+        text,
+        HelixTheme::theme_names().map(|name| (name.to_string(), name)),
+    )
+    .unwrap_or_else(|| HelixTheme::theme_names().map(str::to_string).collect())
 }
 
 /// Paints the theme picker's list.

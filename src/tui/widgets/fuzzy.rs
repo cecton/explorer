@@ -192,9 +192,45 @@ pub(crate) fn matched(indices: &[u32], index: usize) -> bool {
     indices.binary_search(&(index as u32)).is_ok()
 }
 
+/// The keys of the `items` matching `text`, best first, ties in given order; `None` if empty.
+pub(crate) fn ranked<K, S: AsRef<str>>(
+    kind: Kind,
+    text: &str,
+    items: impl IntoIterator<Item = (K, S)>,
+) -> Option<Vec<K>> {
+    let mut query = Query::new(kind);
+    query.set(text);
+    if query.is_empty() {
+        return None;
+    }
+    let mut scored: Vec<(K, u32)> = items
+        .into_iter()
+        .filter_map(|(key, item)| query.rank(item.as_ref()).map(|score| (key, score)))
+        .collect();
+    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
+    Some(scored.into_iter().map(|(key, _)| key).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ranked_is_none_for_an_empty_query() {
+        assert_eq!(ranked(Kind::Plain, "  ", [(0, "a")]), None);
+    }
+
+    #[test]
+    fn ranked_drops_misses_and_puts_the_best_match_first() {
+        let items = [(0, "xyz"), (1, "xxfoo"), (2, "foo")];
+        assert_eq!(ranked(Kind::Plain, "foo", items), Some(vec![2, 1]));
+    }
+
+    #[test]
+    fn ranked_keeps_the_given_order_of_equal_scores() {
+        let items = [(0, "foo"), (1, "foo"), (2, "foo")];
+        assert_eq!(ranked(Kind::Plain, "foo", items), Some(vec![0, 1, 2]));
+    }
 
     #[test]
     fn indices_count_chars_not_graphemes_nor_bytes() {

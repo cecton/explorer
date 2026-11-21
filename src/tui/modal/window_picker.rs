@@ -221,30 +221,16 @@ fn run_file_name_match(
     use crate::loader::FileKey;
     use crate::tui::pane_manager::Window;
     use crate::tui::widgets::fuzzy::Kind;
-    use crate::tui::widgets::fuzzy::Query;
-    let mut query = Query::new(Kind::Paths);
-    query.set(text);
-
-    if query.is_empty() {
-        return open_windows_results(files, window_stack);
-    }
-
-    let mut scored: Vec<(FileKey, u32)> = files
+    let items = files
         .iter()
         .enumerate()
         .filter(|(_, file)| !file.removed.load(Ordering::Relaxed))
-        .filter_map(|(index, file)| {
+        .map(|(index, file)| {
             let rel = file.path.strip_prefix(root).unwrap_or(&file.path);
-            query
-                .rank(rel.as_str())
-                .map(|score| (FileKey(index), score))
-        })
-        .collect();
-    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
-    scored
-        .into_iter()
-        .map(|(key, _)| Window::FilePreview(key))
-        .collect()
+            (Window::FilePreview(FileKey(index)), rel.as_str())
+        });
+    crate::tui::widgets::fuzzy::ranked(Kind::Paths, text, items)
+        .unwrap_or_else(|| open_windows_results(files, window_stack))
 }
 
 /// Paints the window picker's list.

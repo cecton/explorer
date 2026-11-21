@@ -134,20 +134,16 @@ pub fn fetch_models(endpoint: &crate::endpoint::Endpoint, main_tx: crate::signal
 /// The specs matching `text`, best match first; an empty query lists them all.
 pub fn run_model_match(text: &str, state: &crate::tui::state::AppState) -> Vec<usize> {
     use crate::tui::widgets::fuzzy::Kind;
-    use crate::tui::widgets::fuzzy::Query;
-    let mut query = Query::new(Kind::Plain);
-    query.set(text);
     let specs = &state.models.specs;
-    if query.is_empty() {
-        return (0..specs.len()).collect();
-    }
-    let mut scored: Vec<(usize, u32)> = specs
-        .iter()
-        .enumerate()
-        .filter_map(|(index, spec)| query.rank(&spec.to_string()).map(|score| (index, score)))
-        .collect();
-    scored.sort_by_key(|&(_, score)| std::cmp::Reverse(score));
-    scored.into_iter().map(|(index, _)| index).collect()
+    crate::tui::widgets::fuzzy::ranked(
+        Kind::Plain,
+        text,
+        specs
+            .iter()
+            .enumerate()
+            .map(|(index, spec)| (index, spec.to_string())),
+    )
+    .unwrap_or_else(|| (0..specs.len()).collect())
 }
 
 /// Paints the model picker's list.
