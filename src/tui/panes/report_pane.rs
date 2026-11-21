@@ -197,17 +197,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
             let pane_bg = state.theme.ui.background;
             let text_fg = state.theme.ui.text;
 
-            let blank = text_fg.on(pane_bg);
-            let mut ops = RenderOpIRVec::new();
-            for row_offset in 0..rows {
-                ops += RenderOpCommon::MoveCursorPositionRelTo(
-                    origin,
-                    vp_col(0) + vp_row(row_offset as u16),
-                );
-                ops += RenderOpCommon::ApplyColors(Some(blank));
-                ops += RenderOpIR::PaintTextWithAttributes(" ".repeat(width).into(), Some(blank));
-            }
-
             state.pane_manager.set_window_page_size(&window, rows);
             state
                 .pane_manager
@@ -215,15 +204,19 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
             state.pane_manager.clamp_scroll(&window);
             let scroll = state.pane_manager.window_scroll(&window);
 
-            for (row_offset, line) in lines.iter().skip(scroll).take(rows).enumerate() {
-                let bg = line.bg.unwrap_or(pane_bg);
+            let mut ops = RenderOpIRVec::new();
+            for row_offset in 0..rows {
+                let line = lines.get(scroll + row_offset);
                 crate::tui::widgets::markdown::paint_row(
                     &mut ops,
                     origin,
                     row_offset,
-                    &line.spans,
-                    &crate::tui::widgets::markdown::RowColors { fg: text_fg, bg },
-                    &crate::tui::widgets::markdown::Marks::none(bg),
+                    line.map_or(&[][..], |line| &line.spans),
+                    &crate::tui::widgets::markdown::RowColors {
+                        fg: text_fg,
+                        bg: line.and_then(|line| line.bg).unwrap_or(pane_bg),
+                    },
+                    &crate::tui::widgets::markdown::Marks::none(pane_bg),
                     width,
                 );
             }
