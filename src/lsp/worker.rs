@@ -1071,8 +1071,11 @@ mod tests {
                 })
                 .collect(),
         ));
-        // The server is gone: every write to it fails.
         worker.kill_server();
+        // Read-only: every write fails with EBADF, not the EPIPE a fork in another test can postpone.
+        worker.stdin = std::process::ChildStdin::from(std::os::fd::OwnedFd::from(
+            std::fs::File::open("/dev/null").expect("/dev/null"),
+        ));
         let rest = worker
             .accept_buffered(vec![hover(0), hover(1), hover(2)])
             .expect_err("the first send fails");
