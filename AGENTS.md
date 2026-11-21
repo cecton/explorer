@@ -291,7 +291,8 @@ A name is imported as close as possible to where it is used, never listed at the
 - Write no comments by default.
 - Add a comment only when the _why_ is non-obvious: a hidden constraint, a subtle invariant, a workaround for a specific external bug.
 - Never describe _what_ the code does — well-named identifiers already do that.
-- No multi-line comment blocks. One short line maximum.
+- No multi-line comment blocks. One short line maximum. A file's `//!` module doc is not a block in this sense: it is where the _why_ of the file belongs.
+- Doc comments written before this rule stay as they are until a commit touches that function; then it shortens them.
 
 ### Pattern Matching
 
