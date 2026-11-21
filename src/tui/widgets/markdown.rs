@@ -118,6 +118,8 @@ struct ItemCtx {
     marker: Vec<Span>,
     marker_width: usize,
     flushed: bool,
+    /// Quote depth when the item started: the quotes opened since are drawn right of it.
+    quotes: usize,
 }
 
 /// Longest word a table column refuses to split when columns shrink to fit.
@@ -591,6 +593,7 @@ impl Renderer<'_> {
             marker: vec![Span::of(marker_text, style)],
             marker_width,
             flushed: false,
+            quotes: self.quote_depth,
         });
     }
 
@@ -670,11 +673,16 @@ impl Renderer<'_> {
         };
         let mut first = Vec::new();
         let mut cont = Vec::new();
-        for _ in 0..self.quote_depth {
-            first.push(Span::of("> ", quote_style));
-            cont.push(Span::of("> ", quote_style));
-        }
+        let mut drawn = 0;
+        let mut quotes_up_to = |depth: usize, first: &mut Vec<Span>, cont: &mut Vec<Span>| {
+            for _ in drawn..depth {
+                first.push(Span::of("> ", quote_style));
+                cont.push(Span::of("> ", quote_style));
+            }
+            drawn = drawn.max(depth);
+        };
         for item in &self.items {
+            quotes_up_to(item.quotes, &mut first, &mut cont);
             if item.flushed {
                 first.push(Span::of(" ".repeat(item.marker_width), self.plain));
             } else {
@@ -682,6 +690,7 @@ impl Renderer<'_> {
             }
             cont.push(Span::of(" ".repeat(item.marker_width), self.plain));
         }
+        quotes_up_to(self.quote_depth, &mut first, &mut cont);
         (first, cont)
     }
 
@@ -1165,6 +1174,13 @@ mod tests {
             long.len() > 1 && long.iter().all(|l| l.starts_with("> ")),
             "{long:?}"
         );
+    }
+
+    #[test]
+    fn a_quote_in_an_item_is_drawn_right_of_the_item_marker() {
+        assert_eq!(texts("- > text", 40), vec!["• > text"]);
+        assert_eq!(texts("- a\n  > b\n  > c", 40), vec!["• a", "  > b c"]);
+        assert_eq!(texts("> - a\n>   > b", 40), vec!["> • a", ">   > b"]);
     }
 
     #[test]
