@@ -95,6 +95,8 @@ pub struct WindowState {
     pub scroll: usize,
     /// Number of rows visible in the pane at once.
     pub page_size: usize,
+    /// Number of columns of the pane at its last paint.
+    pub page_width: usize,
     /// Total content height in rows.
     pub scroll_max: usize,
     /// Relative vertical size of the pane.
@@ -409,6 +411,14 @@ impl PaneManager {
             .unwrap_or(0)
     }
 
+    /// Number of columns of `window` at its last paint.
+    pub fn window_page_width(&self, window: &Window) -> usize {
+        self.window_states
+            .get(window)
+            .map(|s| s.page_width)
+            .unwrap_or(0)
+    }
+
     /// Total content height for `window`.
     pub fn window_scroll_max(&self, window: &Window) -> usize {
         self.window_states
@@ -425,6 +435,11 @@ impl PaneManager {
     /// Sets the rendered page size for `window`.
     pub fn set_window_page_size(&mut self, window: &Window, page_size: usize) {
         self.window_states.entry(*window).or_default().page_size = page_size;
+    }
+
+    /// Sets the number of columns of `window` at its last paint.
+    pub fn set_window_page_width(&mut self, window: &Window, page_width: usize) {
+        self.window_states.entry(*window).or_default().page_width = page_width;
     }
 
     /// Sets the total content height for `window`.
@@ -523,40 +538,6 @@ impl PaneManager {
     }
 }
 
-/// The scroll offset that brings a block of `block_height` lines starting at
-/// `start_1_indexed` into view, centered when it fits the page and a fifth from the top
-/// when it does not.
-pub(crate) fn block_scroll(start_1_indexed: usize, block_height: usize, page_size: usize) -> usize {
-    if block_height <= page_size {
-        start_1_indexed
-            .saturating_sub(1)
-            .saturating_sub((page_size - block_height) / 2)
-    } else {
-        start_1_indexed
-            .saturating_sub(1)
-            .saturating_sub(page_size * 20 / 100)
-    }
-}
-
-/// The scroll offset that brings the first of `ranges` (1-indexed, inclusive line
-/// ranges) into view: the block itself when it fits the page, its first range otherwise.
-pub(crate) fn ranges_scroll_target(ranges: &[(usize, usize)], page_size: usize) -> usize {
-    if ranges.is_empty() || page_size == 0 {
-        return 0;
-    }
-    let (first, rest) = (ranges[0], &ranges[1..]);
-    if rest.is_empty() {
-        return block_scroll(first.0, first.1 - first.0 + 1, page_size);
-    }
-    let min_start = ranges.iter().map(|&(s, _)| s).min().unwrap_or(first.0);
-    let max_end = ranges.iter().map(|&(_, e)| e).max().unwrap_or(first.1);
-    if max_end - min_start < page_size {
-        block_scroll(min_start, max_end - min_start + 1, page_size)
-    } else {
-        block_scroll(first.0, first.1 - first.0 + 1, page_size)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -636,35 +617,6 @@ mod tests {
         ));
         assert!(!manager.scroll_for_input(&window, &combo(ModifierKeysMask::new().with_alt())));
         assert_eq!(manager.window_scroll(&window), 0);
-    }
-
-    #[test]
-    fn a_block_that_fits_the_page_is_centered() {
-        assert_eq!(super::block_scroll(1, 1, 20), 0);
-        // 10 lines at line 30, a 20-line page: 5 lines of context above.
-        assert_eq!(super::block_scroll(30, 10, 20), 24);
-        // The block is the whole page: it starts at the top.
-        assert_eq!(super::block_scroll(30, 20, 20), 29);
-    }
-
-    #[test]
-    fn a_block_taller_than_the_page_starts_a_fifth_down() {
-        // 100 lines at line 30, a 20-line page: 4 lines above, the rest below.
-        assert_eq!(super::block_scroll(30, 100, 20), 25);
-        // The first line cannot scroll above 0.
-        assert_eq!(super::block_scroll(1, 100, 20), 0);
-    }
-
-    #[test]
-    fn ranges_scroll_to_the_first_of_them() {
-        assert_eq!(super::ranges_scroll_target(&[], 20), 0);
-        assert_eq!(super::ranges_scroll_target(&[(5, 5)], 0), 0);
-        // One range: the range itself.
-        assert_eq!(super::ranges_scroll_target(&[(30, 39)], 20), 24);
-        // Several close together, together within the page: the block they span.
-        assert_eq!(super::ranges_scroll_target(&[(30, 32), (40, 41)], 20), 25);
-        // Several far apart: the first, since the page cannot show them all.
-        assert_eq!(super::ranges_scroll_target(&[(30, 32), (300, 301)], 20), 21);
     }
 
     #[test]

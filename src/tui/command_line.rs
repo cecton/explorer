@@ -517,7 +517,7 @@ fn run_alias(run: &mut CommandRun<'_>) -> Result<(), String> {
 /// Marks lines of the file preview the line opened from, and scrolls to them.
 fn run_highlight(run: &mut CommandRun<'_>) -> Result<(), String> {
     use crate::tui::pane_manager::Window;
-    let Some(window @ Window::FilePreview(key)) = run.origin else {
+    let Some(Window::FilePreview(key)) = run.origin else {
         return Err("highlight needs a file preview in focus".to_string());
     };
     if run.argument.is_empty() {
@@ -530,11 +530,8 @@ fn run_highlight(run: &mut CommandRun<'_>) -> Result<(), String> {
     let max = crate::tui::panes::preview::line_count(run.state, key);
     let ranges = parse_line_ranges(run.argument, max)
         .ok_or_else(|| "highlight: expected lines like 12, 3-7 or 1-3,8".to_string())?;
-    let page_size = run.state.pane_manager.window_page_size(&window);
-    let target = crate::tui::pane_manager::ranges_scroll_target(&ranges, page_size);
+    crate::tui::panes::preview::scroll_to_ranges(run.state, key, &ranges);
     run.state.set_highlights(key, ranges);
-    run.state.pane_manager.set_window_scroll(&window, target);
-    run.state.pane_manager.clamp_scroll(&window);
     run.state.mark_session_dirty();
     Ok(())
 }

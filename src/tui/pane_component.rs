@@ -366,8 +366,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for PaneCo
                     pane_width,
                 )
             {
-                self.preview
-                    .scroll_to_range(&mut global_data.state, key, lo, hi);
+                crate::tui::panes::preview::scroll_to_ranges(
+                    &mut global_data.state,
+                    key,
+                    &[(lo, hi)],
+                );
                 global_data.state.mark_session_dirty();
                 return Ok(EventPropagation::ConsumedRender);
             }

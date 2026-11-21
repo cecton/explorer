@@ -198,35 +198,6 @@ impl FilePreviewComponent {
         None
     }
 
-    pub fn scroll_to_range(
-        &self,
-        state: &mut crate::tui::state::AppState,
-        key: crate::loader::FileKey,
-        lo: usize,
-        hi: usize,
-    ) {
-        use crate::tui::pane_manager::Window;
-        let window = Window::FilePreview(key);
-        let page_size = state.pane_manager.window_page_size(&window);
-        let target = {
-            let files = state.files.load();
-            let data = files[key.0].data.read();
-            let line_num_width = data.line_starts.len().max(1).to_string().len();
-            let width = self
-                .content_col_count
-                .saturating_sub(line_num_width + GUTTER_GAP.len())
-                .max(1);
-            wrapped_block_scroll(
-                |i| line_segments(data.line(i), width).len(),
-                lo,
-                hi,
-                page_size,
-            )
-        };
-        state.pane_manager.set_window_scroll(&window, target);
-        state.pane_manager.clamp_scroll(&window);
-    }
-
     /// Commits the in-progress search input for `key`. An empty pattern clears the active search;
     /// an invalid regex shows a transient error and leaves any prior search intact; a valid pattern
     /// becomes the active search and jumps to the first match in the search direction.
@@ -255,7 +226,7 @@ impl FilePreviewComponent {
                     direction,
                     current: None,
                 });
-                self.goto_match(state, key, direction);
+                Self::goto_match(state, key, direction);
             }
             Err(e) => {
                 state.preview_mut(key).error = Some((format!("bad regex: {e}"), Instant::now()));
@@ -266,7 +237,6 @@ impl FilePreviewComponent {
     /// Moves the active search for `key` to the next match in `direction`, wrapping around, and
     /// scrolls it into view. Match positions are collected on demand (only on a keypress).
     fn goto_match(
-        &mut self,
         state: &mut crate::tui::state::AppState,
         key: crate::loader::FileKey,
         direction: crate::tui::state::SearchDirection,
@@ -335,7 +305,7 @@ impl FilePreviewComponent {
         if let Some(search) = state.previews.get_mut(&key).and_then(|p| p.search.as_mut()) {
             search.current = Some((line_idx, start));
         }
-        self.scroll_to_range(state, key, line_idx + 1, line_idx + 1);
+        scroll_to_ranges(state, key, &[(line_idx + 1, line_idx + 1)]);
         state.mark_session_dirty();
     }
 
@@ -699,13 +669,7 @@ impl FilePreviewComponent {
         let scroll = state.pane_manager.window_scroll(&window);
 
         let total_lines = data.line_starts.len();
-        let line_num_width = total_lines.max(1).to_string().len();
-        let content_start_col = line_num_width + GUTTER_GAP.len();
-
-        let content_width = self
-            .content_col_count
-            .saturating_sub(content_start_col)
-            .max(1);
+        let (content_start_col, content_width) = text_columns(self.content_col_count, total_lines);
         let rel_y = row.saturating_sub(self.content_origin_row);
         let rel_x = col.saturating_sub(self.content_origin_col + content_start_col);
 
@@ -878,7 +842,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                         SearchDirection::Backward => SearchDirection::Forward,
                     }
                 };
-                self.goto_match(&mut global_data.state, key, direction);
+                Self::goto_match(&mut global_data.state, key, direction);
                 Self::repaint_when_error_expires(global_data, key);
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -959,6 +923,10 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                 .state
                 .pane_manager
                 .set_window_page_size(&window, visible_rows);
+            global_data
+                .state
+                .pane_manager
+                .set_window_page_width(&window, bounds.col_width.as_usize());
 
             let total_lines = {
                 let snapshot = global_data.state.files.load();
@@ -988,9 +956,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
             let bg_style = ui.text.on(pane_bg);
             let hl_rgb = ui.selection;
             let hl_bg_style = ui.text.on(hl_rgb);
-            let line_num_width = (total_lines.max(1)).to_string().len();
-            let content_start_col = line_num_width + GUTTER_GAP.len();
-            let content_width = pane_width.saturating_sub(content_start_col).max(1);
+            let (content_start_col, content_width) = text_columns(pane_width, total_lines);
+            let line_num_width = content_start_col - GUTTER_GAP.len();
             let line_num_style = ui.line_number.on(pane_bg);
             let hl_line_num_style = ui.selection_fg.on(ui.line_number_bg);
 
@@ -1238,6 +1205,56 @@ fn scroll_extent(total_lines: usize, page_size: usize) -> usize {
         total_lines
     } else {
         total_lines + page_size - 1
+    }
+}
+
+/// The gutter and text columns the painter wraps at, so mouse hits and jumps agree with it.
+fn text_columns(pane_width: usize, total_lines: usize) -> (usize, usize) {
+    let digits = total_lines.max(1).ilog10() as usize + 1;
+    let gutter = digits + GUTTER_GAP.len();
+    (gutter, pane_width.saturating_sub(gutter).max(1))
+}
+
+/// Scrolls the preview of `key` to show `ranges`, measured in rows at the painted width.
+pub(crate) fn scroll_to_ranges(
+    state: &mut crate::tui::state::AppState,
+    key: crate::loader::FileKey,
+    ranges: &[(usize, usize)],
+) {
+    use crate::tui::pane_manager::Window;
+    let window = Window::FilePreview(key);
+    let page_size = state.pane_manager.window_page_size(&window);
+    let page_width = state.pane_manager.window_page_width(&window);
+    let target = {
+        let files = state.files.load();
+        let data = files[key.0].data.read();
+        let (_, width) = text_columns(page_width, data.line_starts.len());
+        wrapped_ranges_scroll(
+            |i| line_segments(data.line(i), width).len(),
+            ranges,
+            page_size,
+        )
+    };
+    state.pane_manager.set_window_scroll(&window, target);
+    state.pane_manager.clamp_scroll(&window);
+}
+
+/// The first line to show for `ranges`: their whole span if its rows fit the page, else the first.
+fn wrapped_ranges_scroll(
+    rows: impl Fn(usize) -> usize,
+    ranges: &[(usize, usize)],
+    page_size: usize,
+) -> usize {
+    let Some(&(first_lo, first_hi)) = ranges.first() else {
+        return 0;
+    };
+    let lo = ranges.iter().map(|&(s, _)| s).min().unwrap_or(first_lo);
+    let hi = ranges.iter().map(|&(_, e)| e).max().unwrap_or(first_hi);
+    let span: usize = (lo.saturating_sub(1)..hi).map(&rows).sum();
+    if span <= page_size {
+        wrapped_block_scroll(rows, lo, hi, page_size)
+    } else {
+        wrapped_block_scroll(rows, first_lo, first_hi, page_size)
     }
 }
 
@@ -1824,6 +1841,38 @@ mod tests {
         assert_eq!(wrapped_block_scroll(|_| 3, 50, 50, 21), 46);
         assert_eq!(wrapped_block_scroll(|_| 1, 50, 50, 21), 39);
         assert_eq!(wrapped_block_scroll(|_| 1, 2, 2, 21), 0);
+        // The block is the whole page: it starts at the top.
+        assert_eq!(wrapped_block_scroll(|_| 1, 30, 49, 20), 29);
+        // A block taller than the page starts a fifth down.
+        assert_eq!(wrapped_block_scroll(|_| 1, 30, 129, 20), 25);
+        // The first line cannot scroll above 0.
+        assert_eq!(wrapped_block_scroll(|_| 1, 1, 100, 20), 0);
+    }
+
+    /// Several ranges are shown together when their rows fit the page, else the first.
+    #[test]
+    fn wrapped_ranges_scroll_picks_the_block_by_rows() {
+        assert_eq!(wrapped_ranges_scroll(|_| 1, &[], 20), 0);
+        assert_eq!(wrapped_ranges_scroll(|_| 1, &[(30, 39)], 20), 24);
+        assert_eq!(wrapped_ranges_scroll(|_| 1, &[(30, 32), (40, 41)], 20), 25);
+        assert_eq!(
+            wrapped_ranges_scroll(|_| 1, &[(30, 32), (300, 301)], 20),
+            21
+        );
+        // 2-row lines: 30-41 span 24 rows, more than the page, so the first range is centred.
+        assert_eq!(wrapped_ranges_scroll(|_| 2, &[(30, 32), (40, 41)], 20), 26);
+    }
+
+    /// The gutter is as wide as the largest line number, plus the gap.
+    #[test]
+    fn text_columns_fit_the_largest_line_number() {
+        let gap = GUTTER_GAP.len();
+        assert_eq!(text_columns(80, 0), (1 + gap, 80 - 1 - gap));
+        assert_eq!(text_columns(80, 9).0, 1 + gap);
+        assert_eq!(text_columns(80, 10).0, 2 + gap);
+        assert_eq!(text_columns(80, 999).0, 3 + gap);
+        assert_eq!(text_columns(80, 1000).0, 4 + gap);
+        assert_eq!(text_columns(2, 1000).1, 1);
     }
 
     /// A preview of `rel` under a temp root, highlighted on lines 3-5 and 9.
