@@ -321,16 +321,15 @@ impl Recorder {
     /// The current answer calls tools: its text is not part of the reply, and moves
     /// to the work log.
     pub fn answer_calls_tools(&mut self) {
-        {
-            let mut live = self.live.lock();
-            live.thinking.truncate(self.thinking_start);
-            live.touch();
-        }
         let text = {
             let mut live = self.live.lock();
+            let thinking = live.thinking.len();
+            live.thinking.truncate(self.thinking_start);
             let start = self.answer_start.min(live.reply.len());
             let text = live.reply.split_off(start);
-            live.touch();
+            if live.thinking.len() != thinking || !text.is_empty() {
+                live.touch();
+            }
             text
         };
         let text = text.trim();
@@ -338,8 +337,8 @@ impl Recorder {
             self.log(text.to_string());
             self.flush_reply();
         }
-        {
-            let mut live = self.live.lock();
+        let mut live = self.live.lock();
+        if live.log_start != live.work_log.len() {
             live.log_start = live.work_log.len();
             live.touch();
         }
@@ -591,6 +590,28 @@ mod tests {
         recorder.chunk(false, "ok");
         assert_eq!(live.lock().thinking, "hm");
         assert_eq!(live.lock().reply, "ok");
+    }
+
+    #[test]
+    fn an_answer_with_nothing_to_move_leaves_the_revision_alone() {
+        let (_tmp, node_dir) = temp_dir();
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
+        let live = Arc::default();
+        let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
+
+        recorder.begin_answer();
+        let before = live.lock().revision;
+        recorder.answer_calls_tools();
+        assert_eq!(live.lock().revision, before);
+        recorder.text("looking");
+        let before = live.lock().revision;
+        recorder.answer_calls_tools();
+        assert_ne!(live.lock().revision, before);
+        recorder.begin_answer();
+        recorder.reasoning("should I look?");
+        let before = live.lock().revision;
+        recorder.answer_calls_tools();
+        assert_ne!(live.lock().revision, before);
     }
 
     #[test]
