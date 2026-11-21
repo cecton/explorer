@@ -109,7 +109,7 @@ impl PaneComponent {
                         self.scrollbar_dragging = true;
                         self.scrollbar_grab_state = None;
                         let target = scroll_from_y(rel_y, scrollbar_height, scroll_max, page_size);
-                        return self.apply_scroll(state, window, target);
+                        scroll_to(state, window, target);
                     }
                 }
                 EventPropagation::ConsumedRender
@@ -127,7 +127,7 @@ impl PaneComponent {
                     } else {
                         scroll_from_y(rel_y, scrollbar_height, scroll_max, page_size)
                     };
-                    return self.apply_scroll(state, window, target);
+                    scroll_to(state, window, target);
                 }
                 EventPropagation::ConsumedRender
             }
@@ -138,50 +138,15 @@ impl PaneComponent {
             }
             MouseInputKind::ScrollUp => {
                 let target = scroll.saturating_sub(crate::tui::pane_manager::WHEEL_STEP);
-                self.apply_scroll(state, window, target)
+                scroll_to(state, window, target);
+                EventPropagation::ConsumedRender
             }
             MouseInputKind::ScrollDown => {
                 let target = scroll.saturating_add(crate::tui::pane_manager::WHEEL_STEP);
-                self.apply_scroll(state, window, target)
+                scroll_to(state, window, target);
+                EventPropagation::ConsumedRender
             }
             _ => EventPropagation::ConsumedRender,
-        }
-    }
-
-    fn apply_scroll(
-        &mut self,
-        state: &mut crate::tui::state::AppState,
-        window: &crate::tui::pane_manager::Window,
-        target: usize,
-    ) -> EventPropagation {
-        use crate::tui::pane_manager::Window;
-        match window {
-            Window::FilePreview(_) => {
-                state.pane_manager.set_window_scroll(window, target);
-                state.pane_manager.clamp_scroll(window);
-                state.mark_session_dirty();
-                EventPropagation::ConsumedRender
-            }
-            Window::GitLog(_)
-            | Window::CommitDiff(_)
-            | Window::Report(_)
-            | Window::ConversationTree
-            | Window::Discussion(_) => {
-                state.pane_manager.set_window_scroll(window, target);
-                state.pane_manager.clamp_scroll(window);
-                EventPropagation::ConsumedRender
-            }
-            Window::Terminal(id) => {
-                let Some(pane) = state.terminal_panes.get(id) else {
-                    return EventPropagation::ConsumedRender;
-                };
-                let mut pane = pane.lock();
-                let scrollback_len = pane.ofs_buf.get_history_len();
-                let clamped = target.min(scrollback_len);
-                pane.scroll_offset = scrollback_len.saturating_sub(clamped);
-                state.terminal_grabbed = false;
-                EventPropagation::ConsumedRender
-            }
         }
     }
 }
@@ -214,6 +179,40 @@ impl PaneComponent {
                 .discussion
                 .render_title_row(ops, pane_box, focused, state),
             Window::Report(_) => self.report.render_title_row(ops, pane_box, focused, state),
+        }
+    }
+}
+
+/// Scrolls `window` to `target` as its kind clamps it: a terminal's scrollback is its own
+/// buffer, a file preview's position is saved with the session.
+fn scroll_to(
+    state: &mut crate::tui::state::AppState,
+    window: &crate::tui::pane_manager::Window,
+    target: usize,
+) {
+    use crate::tui::pane_manager::Window;
+    match window {
+        Window::FilePreview(_)
+        | Window::GitLog(_)
+        | Window::CommitDiff(_)
+        | Window::Report(_)
+        | Window::ConversationTree
+        | Window::Discussion(_) => {
+            state.pane_manager.set_window_scroll(window, target);
+            state.pane_manager.clamp_scroll(window);
+            if matches!(window, Window::FilePreview(_)) {
+                state.mark_session_dirty();
+            }
+        }
+        Window::Terminal(id) => {
+            let Some(pane) = state.terminal_panes.get(id) else {
+                return;
+            };
+            let mut pane = pane.lock();
+            let scrollback_len = pane.ofs_buf.get_history_len();
+            let clamped = target.min(scrollback_len);
+            pane.scroll_offset = scrollback_len.saturating_sub(clamped);
+            state.terminal_grabbed = false;
         }
     }
 }
