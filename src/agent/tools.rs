@@ -198,14 +198,24 @@ fn base_specs() -> Vec<crate::agent::llm::ToolSpec> {
 pub fn describe(call: &crate::agent::ToolCall) -> String {
     let arg = |key: &str| call.arguments.get(key).and_then(serde_json::Value::as_str);
     let detail = match (arg("pattern"), arg("command"), arg("path")) {
-        (Some(pattern), _, Some(path)) => format!("{pattern} in {path}"),
-        (Some(pattern), _, None) => pattern.to_string(),
-        (None, Some(command), _) => command.to_string(),
-        (None, None, Some(path)) => path.to_string(),
-        (None, None, None) => arguments_detail(&call.arguments),
+        (Some(pattern), _, Some(path)) => Some(format!("{pattern} in {path}")),
+        (Some(pattern), _, None) => Some(pattern.to_string()),
+        (None, Some(command), _) => Some(command.to_string()),
+        (None, None, Some(path)) => Some(path.to_string()),
+        (None, None, None) => None,
     };
+    describe_with(&call.name, detail, &call.arguments)
+}
+
+/// The line a call is shown as: its name and the first line of `detail` or of its arguments.
+pub(super) fn describe_with(
+    name: &str,
+    detail: Option<String>,
+    arguments: &serde_json::Value,
+) -> String {
+    let detail = detail.unwrap_or_else(|| arguments_detail(arguments));
     let detail = detail.lines().next().unwrap_or("");
-    format!("{} {detail}", call.name).trim_end().to_string()
+    format!("{name} {detail}").trim_end().to_string()
 }
 
 /// The arguments of a call as compact JSON, cut short; empty when there are none.

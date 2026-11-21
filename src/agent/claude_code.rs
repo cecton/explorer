@@ -138,12 +138,8 @@ fn tool_activity(name: &str, input: &serde_json::Value) -> String {
     let detail = ["command", "file_path", "pattern", "description"]
         .iter()
         .find_map(|key| input.get(key).and_then(serde_json::Value::as_str))
-        .map_or_else(
-            || crate::agent::tools::arguments_detail(input),
-            str::to_string,
-        );
-    let detail = detail.lines().next().unwrap_or("");
-    format!("{name} {detail}").trim_end().to_string()
+        .map(str::to_string);
+    crate::agent::tools::describe_with(name, detail, input)
 }
 
 /// The sizes of one request's context: its total, and how much of it the provider
@@ -721,6 +717,24 @@ mod tests {
         // server of its own: a claude-code turn reads the conversation tree through them.
         assert!(fresh.contains("--mcp-config"));
         assert!(fresh.contains("explorer"));
+    }
+
+    #[test]
+    fn a_tool_is_shown_with_its_first_detail_line() {
+        let shown = |name: &str, input: serde_json::Value| tool_activity(name, &input);
+        assert_eq!(
+            shown("Bash", serde_json::json!({"command": "cargo check\necho"})),
+            "Bash cargo check"
+        );
+        assert_eq!(
+            shown("Read", serde_json::json!({"file_path": "src/main.rs"})),
+            "Read src/main.rs"
+        );
+        assert_eq!(shown("Idle", serde_json::json!({})), "Idle");
+        assert_eq!(
+            shown("Odd", serde_json::json!({"id": 4})),
+            r#"Odd {"id":4}"#
+        );
     }
 
     #[test]
