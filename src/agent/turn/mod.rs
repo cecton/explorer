@@ -384,14 +384,7 @@ async fn run_own_loop(
                 request.agent.review_rounds,
                 &request.root,
             );
-            let mut messages: Vec<Message> = request
-                .ancestor_dirs
-                .iter()
-                .flat_map(|dir| crate::agent::context::ancestor_messages(dir))
-                .collect();
-            if request.mode == Mode::Commit {
-                crate::agent::context::strip_workspace_note(&mut messages);
-            }
+            let mut messages = crate::agent::context::replay(&request.ancestor_dirs, request.mode);
             messages.push(Message::User {
                 content: message_to_send(&request),
                 injected: false,

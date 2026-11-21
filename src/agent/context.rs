@@ -148,10 +148,24 @@ fn repair_tail(messages: &mut Vec<crate::agent::Message>) {
     messages.extend(missing);
 }
 
+/// The messages the ancestors `dirs` contribute, oldest first. A commit turn never reads the
+/// feedback turns before it as instructions to itself, so their workspace note is removed.
+pub fn replay(
+    dirs: &[camino::Utf8PathBuf],
+    mode: crate::agent::Mode,
+) -> Vec<crate::agent::Message> {
+    use crate::agent::Mode;
+    let mut messages: Vec<_> = dirs.iter().flat_map(|dir| ancestor_messages(dir)).collect();
+    if mode == Mode::Commit {
+        strip_workspace_note(&mut messages);
+    }
+    messages
+}
+
 /// What an ancestor contributes to the context: its exact transcript, or, when it has
 /// none, its prompt and reply as plain text. A transcript cut inside a round is
 /// repaired, so replaying it is a valid sequence.
-pub fn ancestor_messages(dir: &camino::Utf8Path) -> Vec<crate::agent::Message> {
+fn ancestor_messages(dir: &camino::Utf8Path) -> Vec<crate::agent::Message> {
     use crate::agent::Message;
     if let Some(mut messages) = read_transcript(dir) {
         repair_tail(&mut messages);
@@ -208,7 +222,7 @@ keep a change in the git history — you can only present a change to the user.]
 
 /// Removes the feedback note from replayed user messages, so a commit turn never reads
 /// the feedback turns before it as instructions to itself.
-pub fn strip_workspace_note(messages: &mut [crate::agent::Message]) {
+fn strip_workspace_note(messages: &mut [crate::agent::Message]) {
     use crate::agent::Message;
     let note = format!("{WORKSPACE_NOTE}\n\n");
     for message in messages {
@@ -601,6 +615,48 @@ mod tests {
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
 
         assert_eq!(claude_system_prompt(None, 3), "");
+    }
+
+    #[test]
+    fn replay_strips_the_workspace_note_only_in_commit_mode() {
+        use crate::agent::{Message, Mode};
+        let (_tmp, root) = temp_dir();
+        let first = root.join("a");
+        let second = root.join("b");
+        for dir in [&first, &second] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let feedback = with_notes(&[Some(WORKSPACE_NOTE.to_string())], "first");
+        std::fs::write(first.join(crate::conversation::files::PROMPT), &feedback).unwrap();
+        std::fs::write(second.join(crate::conversation::files::PROMPT), "second").unwrap();
+        let dirs = [first, second];
+
+        assert_eq!(
+            replay(&dirs, Mode::Feedback),
+            [
+                Message::User {
+                    content: feedback,
+                    injected: false,
+                },
+                Message::User {
+                    content: "second".into(),
+                    injected: false,
+                },
+            ]
+        );
+        assert_eq!(
+            replay(&dirs, Mode::Commit),
+            [
+                Message::User {
+                    content: "first".into(),
+                    injected: false,
+                },
+                Message::User {
+                    content: "second".into(),
+                    injected: false,
+                },
+            ]
+        );
     }
 
     #[test]

@@ -786,7 +786,6 @@ async fn run_own_loop(
     recorder: &mut crate::agent::turn::live::Recorder,
 ) -> Result<(), String> {
     use crate::agent::Message;
-    use crate::agent::Mode;
     use crate::agent::agent_loop::Limits;
     let (system, mut messages) = {
         let lead = system.to_string();
@@ -794,13 +793,7 @@ async fn run_own_loop(
         let chain = launch.chain.clone();
         let mode = launch.mode;
         tokio::task::spawn_blocking(move || {
-            let mut messages: Vec<Message> = chain
-                .iter()
-                .flat_map(|dir| crate::agent::context::ancestor_messages(dir))
-                .collect();
-            if mode == Mode::Commit {
-                crate::agent::context::strip_workspace_note(&mut messages);
-            }
+            let messages = crate::agent::context::replay(&chain, mode);
             (
                 crate::agent::context::subagent_system_prompt(&lead, &root),
                 messages,
