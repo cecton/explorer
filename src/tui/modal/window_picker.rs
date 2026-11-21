@@ -26,7 +26,7 @@ pub fn open(state: &mut crate::tui::state::AppState) {
     Modal::open(state, Modal::WindowPicker);
 }
 
-/// Hands `input_event` to the window picker while it is the modal in front.
+/// Hands `input_event` to the window picker, the modal in front.
 pub fn handle(
     state: &mut crate::tui::state::AppState,
     input_event: &InputEvent,
@@ -34,9 +34,6 @@ pub fn handle(
     main_tx: crate::signal::MainTx,
 ) {
     use crate::tui::modal::Modal;
-    if !matches!(state.modal, Some(Modal::WindowPicker)) {
-        return;
-    }
     match input_event {
         InputEvent::Keyboard(KeyPress::Plain {
             key: Key::SpecialKey(SpecialKey::Esc),
@@ -82,7 +79,10 @@ pub fn handle(
         );
         return;
     }
-    crate::tui::modal::list::navigate(state, input_event);
+    if !crate::tui::modal::list::wheel_outside(state, input_event) {
+        let page = crate::tui::modal::list::page_size(state);
+        state.window_picker.navigate(input_event, page);
+    }
 }
 
 /// Opens the window the picker highlights, then closes the picker.

@@ -77,21 +77,13 @@ pub(crate) fn paint_rows(
     )
 }
 
-/// Moves the open modal's selection and answers whether the event moved it. The wheel only
-/// counts over the modal's list: the panes behind it are out of reach, so a scroll that lands
-/// on one of them moves nothing.
-pub(crate) fn navigate(state: &mut crate::tui::state::AppState, input_event: &InputEvent) -> bool {
-    use crate::tui::modal::Modal;
-    if let InputEvent::Mouse(mouse) = input_event
-        && !state.modal_box.is_some_and(|list| list.contains(mouse.pos))
-    {
-        return false;
-    }
-    let page_size = state.modal_box.map_or(0, |list| list.rows);
-    match state.modal {
-        Some(Modal::WindowPicker) => state.window_picker.navigate(input_event, page_size),
-        Some(Modal::ThemePicker) => state.theme_picker.navigate(input_event, page_size),
-        Some(Modal::ModelPicker(_)) => state.model_picker.navigate(input_event, page_size),
-        None => false,
-    }
+/// A wheel outside the modal's list moves nothing: the panes behind it are out of reach.
+pub(crate) fn wheel_outside(state: &crate::tui::state::AppState, input_event: &InputEvent) -> bool {
+    matches!(input_event, InputEvent::Mouse(mouse)
+        if !state.modal_box.is_some_and(|list| list.contains(mouse.pos)))
+}
+
+/// The rows the open modal's list shows at once: the page a PageUp/PageDown moves by.
+pub(crate) fn page_size(state: &crate::tui::state::AppState) -> usize {
+    state.modal_box.map_or(0, |list| list.rows)
 }

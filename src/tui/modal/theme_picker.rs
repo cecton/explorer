@@ -17,12 +17,9 @@ pub fn open(state: &mut crate::tui::state::AppState) {
     Modal::open(state, Modal::ThemePicker);
 }
 
-/// Hands `input_event` to the theme picker while it is the modal in front.
+/// Hands `input_event` to the theme picker, the modal in front.
 pub fn handle(state: &mut crate::tui::state::AppState, input_event: &InputEvent) {
     use crate::tui::modal::Modal;
-    if !matches!(state.modal, Some(Modal::ThemePicker)) {
-        return;
-    }
     match input_event {
         InputEvent::Keyboard(KeyPress::Plain {
             key: Key::SpecialKey(SpecialKey::Esc),
@@ -49,8 +46,11 @@ pub fn handle(state: &mut crate::tui::state::AppState, input_event: &InputEvent)
         preview_selected_theme(state);
         return;
     }
-    if crate::tui::modal::list::navigate(state, input_event) {
-        preview_selected_theme(state);
+    if !crate::tui::modal::list::wheel_outside(state, input_event) {
+        let page = crate::tui::modal::list::page_size(state);
+        if state.theme_picker.navigate(input_event, page) {
+            preview_selected_theme(state);
+        }
     }
 }
 

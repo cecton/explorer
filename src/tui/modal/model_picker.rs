@@ -46,18 +46,16 @@ pub fn open(
     Modal::open(state, Modal::ModelPicker(purpose));
 }
 
-/// Hands `input_event` to the model picker while it is the modal in front.
+/// Hands `input_event` to the model picker, the modal in front.
 pub fn handle(
     state: &mut crate::tui::state::AppState,
     input_event: &InputEvent,
+    purpose: crate::tui::state::ModelPickerPurpose,
     main_tx: crate::signal::MainTx,
 ) {
     use crate::tui::modal::Modal;
     use crate::tui::panes::discussion::DiscussionComponent;
     use crate::tui::state::ModelPickerPurpose;
-    let Some(Modal::ModelPicker(purpose)) = state.modal.clone() else {
-        return;
-    };
     match input_event {
         InputEvent::Keyboard(KeyPress::Plain {
             key: Key::SpecialKey(SpecialKey::Esc),
@@ -101,7 +99,10 @@ pub fn handle(
         state.model_picker.scroll_offset = 0;
         return;
     }
-    crate::tui::modal::list::navigate(state, input_event);
+    if !crate::tui::modal::list::wheel_outside(state, input_event) {
+        let page = crate::tui::modal::list::page_size(state);
+        state.model_picker.navigate(input_event, page);
+    }
 }
 
 /// Gets the model list of `endpoint` in the background: fetched from an OpenAI-compatible

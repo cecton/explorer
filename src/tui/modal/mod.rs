@@ -107,7 +107,9 @@ pub fn dispatch(
             window_picker::handle(state, &input_event, window_picker_senders, main_tx)
         }
         Some(Modal::ThemePicker) => theme_picker::handle(state, &input_event),
-        Some(Modal::ModelPicker(_)) => model_picker::handle(state, &input_event, main_tx),
+        Some(Modal::ModelPicker(purpose)) => {
+            model_picker::handle(state, &input_event, purpose, main_tx)
+        }
         None => {}
     }
 }
