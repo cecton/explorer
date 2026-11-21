@@ -654,79 +654,24 @@ impl AppState {
         keymap: crate::tui::keymap::Keymap,
     ) -> Self {
         use crate::agent::mcp::McpHost;
-        use crate::lsp::CargoFeatureSelection;
         use crate::tui::pane_manager::PaneManager;
-        use crate::tui::theme::HelixTheme;
-        use crate::tui::widgets::fuzzy_picker::FuzzyPickerState;
         let saved_theme = theme.clone();
         let pane_manager = PaneManager::new();
         let repo = gix::ThreadSafeRepository::open(root.as_std_path()).ok();
         let mcp = Arc::new(McpHost::new(root.clone()));
 
-        let mut state = Self {
+        Self {
             files,
             root,
             repo,
             pane_manager,
-            previews: HashMap::new(),
-            leader_active: false,
-            modal: None,
-            modal_origin: None,
-            modal_page_size: 0,
-            modal_box: None,
-            window_picker: FuzzyPickerState::default(),
-            theme_picker: FuzzyPickerState::default(),
             theme,
             saved_theme,
-            terminal_panes: HashMap::new(),
-            pending_terminals: HashMap::new(),
-            git_logs: HashMap::new(),
-            git_refs: None,
-            commit_diffs: HashMap::new(),
-            terminal_to_preview: HashMap::new(),
-            conversations: Arc::default(),
-            tree_view: TreeViewState::default(),
-            discussions: HashMap::new(),
-            discussion_highlights: HashMap::new(),
-            agent: Arc::default(),
-            models: ModelCatalog::default(),
-            usage: HashMap::new(),
-            mcp_servers: Vec::new(),
-            reports: HashMap::new(),
-            next_window_id: 0,
             mcp,
-            last_picked_model: None,
-            model_picker: FuzzyPickerState::default(),
-            running_turns: HashMap::new(),
-            spinner_tick: 0,
-            queued_turns: Vec::new(),
-            after_agents: None,
-            config_aliases: Vec::new(),
-            project_aliases: Vec::new(),
-            trusted: false,
             after_agents_grace: Duration::from_secs(crate::config::DEFAULT_GRACE_SECONDS),
-            next_after_agents_run: 0,
-            mouse_drag_active: false,
-            input_drag: None,
-            terminal_grabbed: false,
-            text_selection: None,
-            session_dirty: false,
-            is_dirty: false,
-            symbol_highlights: Vec::new(),
-            next_palette_index: 0,
-            command_line: None,
             keymap,
-            cargo_features: CargoFeatureSelection::default(),
-        };
-
-        let all_themes: Vec<String> = HelixTheme::theme_names().map(str::to_string).collect();
-        state.theme_picker.selected = all_themes
-            .iter()
-            .find(|name| name.as_str() == state.theme.name())
-            .cloned();
-        state.theme_picker.results = all_themes;
-
-        state
+            ..Self::default()
+        }
     }
 }
 
