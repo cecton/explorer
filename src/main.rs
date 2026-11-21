@@ -135,8 +135,6 @@ async fn main() {
         std::process::exit(fmt_md(&root, paths));
     }
 
-    let files = Arc::new(arc_swap::ArcSwap::from_pointee(loader::load_repo(&root)));
-
     let config = match config::Config::load() {
         Ok(c) => c,
         Err(e) => {
@@ -164,6 +162,8 @@ async fn main() {
         eprintln!("invalid keybindings in config: {e}");
         std::process::exit(1);
     }
+
+    let files = Arc::new(arc_swap::ArcSwap::from_pointee(loader::load_repo(&root)));
 
     let mut initial_state =
         tui::state::AppState::new(Arc::clone(&files), root.clone(), theme.clone(), keymap);
