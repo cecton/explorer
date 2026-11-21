@@ -69,14 +69,12 @@ pub(crate) fn read_summary(dir: &camino::Utf8Path) -> Option<String> {
     read_trimmed(dir, SUMMARY)
 }
 
-/// A node's [`INPUT`] when it says something, trimmed.
-pub(crate) fn read_input_file(dir: &camino::Utf8Path) -> Option<String> {
-    read_trimmed(dir, INPUT)
-}
-
-/// A node's [`PROMPT`] when it says something, trimmed.
-pub(crate) fn read_prompt_file(dir: &camino::Utf8Path) -> Option<String> {
-    read_trimmed(dir, PROMPT)
+/// The first non-blank line of `text`, trimmed: what stands for a node without a title.
+pub(crate) fn first_line(text: &str) -> Option<String> {
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
 }
 
 /// Writes a node's [`TITLE`].
@@ -164,6 +162,16 @@ mod tests {
         assert_eq!(read_work_log(&dir), ["Reading.", "- read a.txt"]);
         write_node(&root.join("a2"), &[]);
         assert!(read_work_log(&root.join("a2")).is_empty());
+    }
+
+    #[test]
+    fn the_first_line_is_the_first_non_blank_one_trimmed() {
+        assert_eq!(
+            first_line("\n  \n  hello there  \nnext"),
+            Some("hello there".into())
+        );
+        assert_eq!(first_line(" \n\t"), None);
+        assert_eq!(first_line(""), None);
     }
 
     #[test]

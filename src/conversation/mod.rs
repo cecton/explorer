@@ -119,10 +119,7 @@ impl Node {
         let title = files::read_title(dir);
         let prompt_first_line = match title {
             Some(_) => None,
-            None => files::read_input_file(dir)
-                .or_else(|| files::read_prompt_file(dir))
-                .and_then(|text| text.lines().next().map(str::to_string))
-                .filter(|line| !line.is_empty()),
+            None => files::first_line(&files::read_input(dir)),
         };
         let created_display = id
             .created_secs()
@@ -328,10 +325,11 @@ impl ConversationTree {
         }
         self.touch();
         let stamp = crate::util::time::utc_stamp(now_secs);
-        let mut id = NodeId::new(&stamp.replace(':', "-"));
+        let stamp_id = stamp.replace(':', "-");
+        let mut id = NodeId::new(&stamp_id);
         let mut suffix = 2;
         while self.nodes.contains_key(&id) {
-            id = NodeId::new(&format!("{}-{suffix}", stamp.replace(':', "-")));
+            id = NodeId::new(&format!("{stamp_id}-{suffix}"));
             suffix += 1;
         }
         let dir = match parent {
@@ -354,12 +352,7 @@ impl ConversationTree {
             title: None,
             summary: None,
             agents: Vec::new(),
-            prompt_first_line: input
-                .unwrap_or(prompt)
-                .lines()
-                .map(str::trim)
-                .find(|line| !line.is_empty())
-                .map(str::to_string),
+            prompt_first_line: files::first_line(input.unwrap_or(prompt)),
             created_display: crate::util::time::format_log_time(
                 now_secs,
                 crate::util::time::local_offset_secs(now_secs),
