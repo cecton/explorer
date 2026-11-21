@@ -29,8 +29,6 @@ pub struct GitLogWindowState {
     pub filtered: Option<Vec<usize>>,
     /// Where the history walk starts.
     pub source: LogSource,
-    pub branch_picking: bool,
-    pub branch_picker: crate::tui::widgets::fuzzy_picker::FuzzyPickerState<usize>,
 }
 
 /// View state of the Conversation Tree window.
@@ -453,6 +451,10 @@ pub struct AppState {
     pub last_picked_model: Option<crate::model_spec::ModelSpec>,
     /// Model Picker entries are indexes into `models.specs`.
     pub model_picker: crate::tui::widgets::fuzzy_picker::FuzzyPickerState<usize>,
+    /// Branch Picker rows: HEAD, or an index into `git_refs`.
+    pub branch_picker: crate::tui::widgets::fuzzy_picker::FuzzyPickerState<
+        crate::tui::modal::branch_picker::BranchRow,
+    >,
     /// Turns in progress, by node.
     pub running_turns: HashMap<crate::conversation::NodeId, crate::agent::turn::TurnHandle>,
     /// Animation step shared by every spinner on screen; advanced by `TurnTick`.
@@ -577,9 +579,7 @@ impl AppState {
                 .map(|shown| &mut shown.draft),
             Window::GitLog(id) => {
                 let win = self.git_logs.get_mut(id)?;
-                if win.branch_picking {
-                    Some(&mut win.branch_picker.query)
-                } else if win.search_active {
+                if win.search_active {
                     Some(&mut win.query)
                 } else {
                     None

@@ -1,6 +1,7 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
 
+pub(crate) mod branch_picker;
 pub(crate) mod list;
 pub(crate) mod model_picker;
 pub(crate) mod theme_picker;
@@ -20,6 +21,8 @@ pub enum Modal {
     ThemePicker,
     /// The model picker, choosing for what [`crate::tui::state::ModelPickerPurpose`] names.
     ModelPicker(crate::tui::state::ModelPickerPurpose),
+    /// The branch picker of the git log window with this id: HEAD, then every branch and tag.
+    BranchPicker(usize),
 }
 
 impl Modal {
@@ -29,6 +32,7 @@ impl Modal {
             Modal::WindowPicker => "Windows",
             Modal::ThemePicker => "Themes",
             Modal::ModelPicker(_) => "Model",
+            Modal::BranchPicker(_) => "Branches",
         }
     }
 
@@ -39,6 +43,7 @@ impl Modal {
             Modal::WindowPicker => "Esc:Close  Enter:Open  Ctrl+X:Close window",
             Modal::ThemePicker => "Esc:Cancel  Enter:Save",
             Modal::ModelPicker(_) => "Esc:Cancel  Enter:Choose",
+            Modal::BranchPicker(_) => "Esc:Cancel  Enter:Show",
         }
     }
 
@@ -78,6 +83,7 @@ impl Modal {
         state.window_picker.reset();
         state.theme_picker.reset();
         state.model_picker.reset();
+        state.branch_picker.reset();
         let Some(origin) = state.modal_origin.take() else {
             return;
         };
@@ -99,6 +105,7 @@ pub fn dispatch(
     window_picker_senders: crate::tui::modal::window_picker::Senders<'_>,
     main_tx: crate::signal::MainTx,
 ) {
+    use crate::tui::modal::branch_picker;
     use crate::tui::modal::model_picker;
     use crate::tui::modal::theme_picker;
     use crate::tui::modal::window_picker;
@@ -109,6 +116,9 @@ pub fn dispatch(
         Some(Modal::ThemePicker) => theme_picker::handle(state, &input_event),
         Some(Modal::ModelPicker(purpose)) => {
             model_picker::handle(state, &input_event, purpose, main_tx)
+        }
+        Some(Modal::BranchPicker(window_id)) => {
+            branch_picker::handle(state, &input_event, window_id, main_tx)
         }
         None => {}
     }
@@ -252,6 +262,7 @@ pub fn render(
         Modal::WindowPicker => state.window_picker.results.len(),
         Modal::ThemePicker => state.theme_picker.results.len(),
         Modal::ModelPicker(_) => state.model_picker.results.len(),
+        Modal::BranchPicker(_) => state.branch_picker.results.len(),
     };
     // An empty list keeps one row, where "No results" or the reason for it is painted.
     let box_ = ModalBox::for_modal(surface, results.max(1));
@@ -267,6 +278,7 @@ pub fn render(
         Modal::WindowPicker => (&mut state.window_picker.query, ""),
         Modal::ThemePicker => (&mut state.theme_picker.query, ""),
         Modal::ModelPicker(_) => (&mut state.model_picker.query, "Model: "),
+        Modal::BranchPicker(_) => (&mut state.branch_picker.query, "Branch: "),
     };
     crate::tui::widgets::title_row::render_input_title(
         &mut ops,
@@ -287,6 +299,9 @@ pub fn render(
         }
         Modal::ModelPicker(_) => {
             crate::tui::modal::model_picker::render(state, painters.of(Kind::Plain), &list)
+        }
+        Modal::BranchPicker(_) => {
+            crate::tui::modal::branch_picker::render(state, painters.of(Kind::Plain), &list)
         }
     };
     ops.list.extend(rows.list);

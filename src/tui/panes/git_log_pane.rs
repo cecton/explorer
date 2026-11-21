@@ -6,7 +6,6 @@ pub struct GitLogPaneComponent {
     id: FlexBoxId,
     content_origin_row: usize,
     content_row_count: usize,
-    branch_fuzzy: crate::tui::widgets::fuzzy_picker::FuzzyPicker,
     /// The `/` filter's query, kept so a frame reuses its matcher instead of making one.
     log_query: crate::tui::widgets::fuzzy::Query,
 }
@@ -14,12 +13,10 @@ pub struct GitLogPaneComponent {
 impl GitLogPaneComponent {
     pub fn new(id: FlexBoxId) -> Self {
         use crate::tui::widgets::fuzzy::Kind;
-        use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
         Self {
             id,
             content_origin_row: 0,
             content_row_count: 0,
-            branch_fuzzy: FuzzyPicker::new(Kind::Plain),
             log_query: crate::tui::widgets::fuzzy::Query::new(Kind::Plain),
         }
     }
@@ -152,34 +149,6 @@ impl GitLogPaneComponent {
         }
     }
 
-    fn refresh_branch_results(
-        git_refs: &Option<Arc<Vec<crate::git::GitRef>>>,
-        win: &mut crate::tui::state::GitLogWindowState,
-    ) {
-        let Some(refs) = git_refs.as_ref() else {
-            return;
-        };
-        win.branch_picker.results = run_ref_match(win.branch_picker.query.text(), refs);
-        win.branch_picker.selected = win.branch_picker.results.first().copied();
-    }
-
-    pub(crate) fn refresh_branch_results_for_window(
-        state: &mut crate::tui::state::AppState,
-        id: usize,
-    ) {
-        use crate::tui::state::AppState;
-        if !state.git_logs.get(&id).is_some_and(|w| w.branch_picking) {
-            return;
-        }
-        let AppState {
-            git_logs, git_refs, ..
-        } = state;
-        let Some(win) = git_logs.get_mut(&id) else {
-            return;
-        };
-        Self::refresh_branch_results(git_refs, win);
-    }
-
     fn move_selection(
         win: &mut crate::tui::state::GitLogWindowState,
         target: usize,
@@ -235,19 +204,12 @@ impl GitLogPaneComponent {
         let Some(win) = state.git_logs.get_mut(&window_id) else {
             return 0;
         };
-        let input_mode = if win.branch_picking {
-            Some((&mut win.branch_picker.query, "Show branch:"))
-        } else if win.search_active {
-            Some((&mut win.query, "/"))
-        } else {
-            None
-        };
-        if let Some((input_line, prompt)) = input_mode {
+        if win.search_active {
             crate::tui::widgets::title_row::render_input_title(
                 ops,
                 pane_box,
-                input_line,
-                prompt,
+                &mut win.query,
+                "/",
                 focused,
                 crate::tui::widgets::title_row::BarColors::in_pane(focused, theme),
                 1,
@@ -262,169 +224,6 @@ impl GitLogPaneComponent {
                 focused,
             );
             1
-        }
-    }
-
-    /// Opens the branch list and loads the refs when they are not there yet.
-    fn start_branch_picking(
-        win: &mut crate::tui::state::GitLogWindowState,
-        git_refs: &Option<Arc<Vec<crate::git::GitRef>>>,
-        repo: &Option<gix::ThreadSafeRepository>,
-        main_tx: &crate::signal::MainTx,
-    ) {
-        use crate::signal::AppSignal;
-        win.branch_picking = true;
-        win.branch_picker.query.clear();
-        win.branch_picker.results.clear();
-        win.branch_picker.selected = None;
-        if git_refs.is_some() {
-            Self::refresh_branch_results(git_refs, win);
-        } else if let Some(repo) = repo.clone() {
-            let picker_tx = main_tx.clone();
-            tokio::task::spawn_blocking(move || {
-                let result = crate::git::load_refs(&repo).map(Arc::new);
-                crate::signal::send(&picker_tx, AppSignal::GitRefsLoaded(result));
-            });
-        } else {
-            crate::signal::send(
-                main_tx,
-                AppSignal::GitRefsLoaded(Err("open repository: not a git repository".to_string())),
-            );
-        }
-    }
-
-    /// Handles an event while the branch list is open.
-    fn handle_branch_picker_event(
-        &self,
-        win: &mut crate::tui::state::GitLogWindowState,
-        git_refs: &Option<Arc<Vec<crate::git::GitRef>>>,
-        repo: &Option<gix::ThreadSafeRepository>,
-        main_tx: crate::signal::MainTx,
-        window_id: usize,
-        input_event: &InputEvent,
-    ) -> EventPropagation {
-        use crate::tui::state::LogSource;
-        use crate::tui::widgets::fuzzy_picker::FuzzyPickerState;
-        match input_event {
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Esc),
-            }) => {
-                win.branch_picking = false;
-                win.branch_picker = FuzzyPickerState::default();
-                win.source = LogSource::Head;
-                Self::reload_log(repo.clone(), main_tx, window_id, &LogSource::Head);
-                return EventPropagation::ConsumedRender;
-            }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Enter),
-            }) => {
-                let picked = win
-                    .branch_picker
-                    .selected
-                    .or_else(|| win.branch_picker.results.first().copied())
-                    .and_then(|k| git_refs.as_ref().and_then(|refs| refs.get(k)))
-                    .map(|git_ref| git_ref.name.clone());
-                if let Some(name) = picked {
-                    win.branch_picking = false;
-                    win.branch_picker = FuzzyPickerState::default();
-                    win.source = LogSource::Branch(name.clone());
-                    win.query.clear();
-                    win.filtered = None;
-                    win.selected = 0;
-                    Self::reload_log(repo.clone(), main_tx, window_id, &win.source);
-                }
-                return EventPropagation::ConsumedRender;
-            }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key:
-                    Key::SpecialKey(SpecialKey::Up)
-                    | Key::SpecialKey(SpecialKey::Down)
-                    | Key::SpecialKey(SpecialKey::PageUp)
-                    | Key::SpecialKey(SpecialKey::PageDown),
-            })
-            | InputEvent::Mouse(MouseInput {
-                kind: MouseInputKind::ScrollUp | MouseInputKind::ScrollDown,
-                ..
-            }) => {
-                win.branch_picker
-                    .navigate(input_event, self.content_row_count.max(1));
-                return EventPropagation::ConsumedRender;
-            }
-            InputEvent::Mouse(MouseInput {
-                kind: MouseInputKind::MouseDown(Button::Left),
-                pos,
-                ..
-            }) => {
-                let rel = pos
-                    .row_index
-                    .as_usize()
-                    .saturating_sub(self.content_origin_row);
-                let idx = win.branch_picker.scroll_offset + rel;
-                if let Some(k) = win.branch_picker.results.get(idx) {
-                    win.branch_picker.selected = Some(*k);
-                }
-                return EventPropagation::ConsumedRender;
-            }
-            _ => {}
-        }
-        if win.branch_picker.query.handle_key(input_event) {
-            Self::refresh_branch_results(git_refs, win);
-            return EventPropagation::ConsumedRender;
-        }
-        EventPropagation::Propagate
-    }
-
-    /// Paints the branch list over the log's rows.
-    fn render_branch_picker(
-        &mut self,
-        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
-        window_id: usize,
-        origin: VPPos,
-        total_rows: usize,
-        pane_width: usize,
-    ) {
-        use crate::git::RefKind;
-        use crate::tui::widgets::fuzzy_picker::{PickerColors, PickerRow};
-        let state = &mut global_data.state;
-        // Builds only the rows in view, once the scroll offset follows the selection.
-        let (branch_rgb, tag_rgb) = ref_colors(&state.theme);
-        let shown = state
-            .git_logs
-            .get_mut(&window_id)
-            .map(|win| crate::tui::modal::list::visible(&mut win.branch_picker, total_rows));
-        let picked = shown.and_then(|view| {
-            let win = state.git_logs.get(&window_id)?;
-            let rows: Vec<PickerRow> = win.branch_picker.results[view.range]
-                .iter()
-                .map(
-                    |idx| match state.git_refs.as_ref().and_then(|refs| refs.get(*idx)) {
-                        Some(git_ref) => match git_ref.kind {
-                            RefKind::Tag => PickerRow::accented(git_ref.name.clone(), tag_rgb),
-                            _ => PickerRow::accented(git_ref.name.clone(), branch_rgb),
-                        },
-                        None => PickerRow::plain(""),
-                    },
-                )
-                .collect();
-            Some((
-                rows,
-                view.selected,
-                win.branch_picker.query.text().to_string(),
-            ))
-        });
-        let colors = PickerColors::in_pane(&state.theme);
-        if let Some((rows, selected, query)) = picked {
-            let picker_ops = self.branch_fuzzy.render_results(
-                colors,
-                &query,
-                &rows,
-                Some(selected),
-                0,
-                vp_col(origin.col_index.as_u16()) + vp_row(origin.row_index.as_u16()),
-                total_rows,
-                pane_width,
-            );
-            global_data.pipeline.push(ZOrder::Normal, picker_ops);
         }
     }
 }
@@ -451,9 +250,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
         };
         let AppState {
             git_logs,
-            git_refs,
             pane_manager,
-            repo,
             ..
         } = state;
         let Some(win) = git_logs.get_mut(&window_id) else {
@@ -464,7 +261,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
             key: Key::Character('/'),
         }) = input_event
             && !win.search_active
-            && !win.branch_picking
         {
             win.search_active = true;
             if win.query.text().is_empty() {
@@ -479,21 +275,9 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
             key: Key::Character('b'),
         }) = input_event
             && !win.search_active
-            && !win.branch_picking
         {
-            Self::start_branch_picking(win, git_refs, repo, &main_tx);
+            crate::tui::modal::branch_picker::open(state, main_tx, window_id);
             return Ok(EventPropagation::ConsumedRender);
-        }
-
-        if win.branch_picking {
-            return Ok(self.handle_branch_picker_event(
-                win,
-                git_refs,
-                repo,
-                main_tx,
-                window_id,
-                &input_event,
-            ));
         }
 
         let mut open_commit = None;
@@ -631,17 +415,15 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
             let state = &mut global_data.state;
             state.pane_manager.set_window_page_size(&window, total_rows);
 
-            let (entries, selected, error, filtering, branch_picking) =
-                match state.git_logs.get(&window_id) {
-                    Some(win) => (
-                        win.entries.clone(),
-                        win.selected,
-                        win.error.clone(),
-                        win.filtered.is_some(),
-                        win.branch_picking,
-                    ),
-                    None => (None, 0, None, false, false),
-                };
+            let (entries, selected, error, filtering) = match state.git_logs.get(&window_id) {
+                Some(win) => (
+                    win.entries.clone(),
+                    win.selected,
+                    win.error.clone(),
+                    win.filtered.is_some(),
+                ),
+                None => (None, 0, None, false),
+            };
             let visible = state.git_logs.get(&window_id).map(visible_len).unwrap_or(0);
             state.pane_manager.set_window_scroll_max(&window, visible);
             state.pane_manager.clamp_scroll(&window);
@@ -680,9 +462,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
 
             let mut render_ops = RenderOpIRVec::new();
 
-            if branch_picking {
-                self.render_branch_picker(global_data, window_id, origin, total_rows, pane_width);
-            } else if visible == 0 {
+            if visible == 0 {
                 let message = if let Some(err) = error {
                     (format!("error: {err}"), error_fg)
                 } else if entries.is_none() {
@@ -915,19 +695,6 @@ pub(crate) fn run_log_match(text: &str, entries: &[crate::git::LogEntry]) -> Vec
     .unwrap_or_else(|| (0..entries.len()).collect())
 }
 
-/// The refs of `refs` whose name holds the query, best match first.
-pub(crate) fn run_ref_match(text: &str, refs: &[crate::git::GitRef]) -> Vec<usize> {
-    use crate::tui::widgets::fuzzy::Kind;
-    crate::tui::widgets::fuzzy::ranked(
-        Kind::Plain,
-        text,
-        refs.iter()
-            .enumerate()
-            .map(|(i, git_ref)| (i, &git_ref.name)),
-    )
-    .unwrap_or_else(|| (0..refs.len()).collect())
-}
-
 /// The entries painted from `scroll` down for `rows` rows, filtered or not: a filtered
 /// window paints its matches, an unfiltered one the log itself.
 pub(crate) fn painted_entries(
@@ -1034,22 +801,17 @@ pub(crate) fn history_changed(state: &crate::tui::state::AppState, main_tx: crat
     }
 }
 
-/// Keeps refs read without error, and refreshes the branch pickers that are open.
+/// Keeps refs read without error, and refreshes the branch picker when it is open.
 pub(crate) fn refs_loaded(
     state: &mut crate::tui::state::AppState,
     result: &Result<Arc<Vec<crate::git::GitRef>>, String>,
 ) {
+    use crate::tui::modal::Modal;
     if let Ok(refs) = result {
         state.git_refs = Some(Arc::clone(refs));
     }
-    let picking: Vec<usize> = state
-        .git_logs
-        .iter()
-        .filter(|(_, win)| win.branch_picking)
-        .map(|(id, _)| *id)
-        .collect();
-    for id in picking {
-        GitLogPaneComponent::refresh_branch_results_for_window(state, id);
+    if matches!(state.modal, Some(Modal::BranchPicker(_))) {
+        crate::tui::modal::branch_picker::refresh(state);
     }
 }
 
@@ -1081,7 +843,7 @@ fn visible_entry(win: &crate::tui::state::GitLogWindowState) -> Option<([u8; 20]
 
 /// The colors of a branch and a tag name: the `namespace` and `special` scopes, the tag
 /// taking a fixed orange where the theme gives both one color.
-fn ref_colors(
+pub(crate) fn ref_colors(
     theme: &crate::tui::theme::HelixTheme,
 ) -> (crate::tui::theme::Color, crate::tui::theme::Color) {
     use crate::tui::theme::Color;
@@ -1156,33 +918,6 @@ fn layout_refs(
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// With 20,000 refs a frame builds the rows of the visible ones only, and the selection
-    /// is relative to the first of them.
-    #[test]
-    fn the_branch_list_shows_only_the_rows_in_view() {
-        use crate::tui::widgets::fuzzy_picker::FuzzyPickerState;
-        let shown = |picker: &mut FuzzyPickerState<usize>| {
-            let view = crate::tui::modal::list::visible(picker, 10);
-            (view.range, view.selected)
-        };
-        let mut picker = FuzzyPickerState::<usize> {
-            results: (0..20_000).collect(),
-            selected: Some(0),
-            ..Default::default()
-        };
-        assert_eq!(shown(&mut picker), (0..10, 0));
-        picker.selected = Some(12);
-        assert_eq!(shown(&mut picker), (3..13, 9), "scrolled to it");
-        picker.selected = Some(19_999);
-        assert_eq!(shown(&mut picker), (19_990..20_000, 9));
-        picker.results.truncate(4);
-        picker.selected = Some(2);
-        picker.scroll_offset = 0;
-        assert_eq!(shown(&mut picker), (0..4, 2), "fewer than the rows");
-        picker.results.clear();
-        assert_eq!(shown(&mut picker), (0..0, 0), "no results");
-    }
 
     fn entry_with_summary(summary: &str) -> crate::git::LogEntry {
         use crate::git::LogEntry;

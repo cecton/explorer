@@ -112,17 +112,6 @@ pub struct PickerColors {
 }
 
 impl PickerColors {
-    /// A picker painted inside a pane: the pane's own background and the theme's selection.
-    pub fn in_pane(theme: &crate::tui::theme::HelixTheme) -> Self {
-        Self {
-            surface: theme.ui.background,
-            text: theme.ui.text,
-            matched: theme.ui.matched,
-            selected: theme.ui.selection,
-            selected_text: theme.ui.text,
-        }
-    }
-
     /// A picker painted as a modal over the panes: the overlay surface and its own bar.
     pub fn in_overlay(theme: &crate::tui::theme::HelixTheme) -> Self {
         Self {
