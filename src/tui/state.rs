@@ -235,8 +235,7 @@ impl DiscussionState {
 /// reports `true`, since only a revision tells the layout cache such a change apart.
 fn append_str(text: &mut String, live: &str) -> bool {
     if live.len() >= text.len() && live.starts_with(text.as_str()) {
-        let added = live[text.len()..].to_string();
-        text.push_str(&added);
+        text.push_str(&live[text.len()..]);
         false
     } else {
         text.clear();
