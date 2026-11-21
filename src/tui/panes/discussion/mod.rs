@@ -949,6 +949,8 @@ mod tests {
     use crate::tui::panes::discussion::status::resume_hint;
     use crate::tui::panes::discussion::status::status_line;
     use crate::tui::panes::discussion::status::status_text;
+    use crate::tui::test_support::frame_box;
+    use crate::tui::test_support::key;
     use crate::tui::theme::Color;
     use camino::Utf8PathBuf;
     use std::sync::Arc;
@@ -962,12 +964,14 @@ mod tests {
     ) {
         use crate::conversation::ConversationTree;
         use crate::conversation::NodeId;
-        let tmp = tempfile::tempdir().unwrap();
-        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        use crate::conversation::test_support::write_node;
+        use crate::util::test_support::temp_root;
+        let (tmp, root) = temp_root();
         let id = NodeId::new("2026-10-05T14-32-07Z");
-        let dir = root.join(id.as_str());
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(crate::conversation::files::METADATA), metadata).unwrap();
+        write_node(
+            &root.join(id.as_str()),
+            &[(crate::conversation::files::METADATA, metadata)],
+        );
         (tmp, ConversationTree::load(&root), id)
     }
 
@@ -2286,10 +2290,6 @@ mod tests {
         );
     }
 
-    fn key(key: Key) -> InputEvent {
-        InputEvent::Keyboard(KeyPress::Plain { key })
-    }
-
     /// Sends `events` to `window` through `component`, as the pane slot showing it would:
     /// the window has to sit in the slot the component is drawn in.
     fn type_into(
@@ -2351,13 +2351,7 @@ mod tests {
         }
         state.pane_manager.push_window(Window::Discussion(0));
         let mut global_data = crate::tui::test_support::global_data(state);
-        let frame = FlexBox {
-            style_adjusted_bounds: VPBoundingBox::new(
-                vp_col(0) + vp_row(0),
-                vp_width(40) + vp_height(12),
-            ),
-            ..FlexBox::default()
-        };
+        let frame = frame_box(40, 12);
         let render = |component: &mut DiscussionComponent,
                       global_data: &mut GlobalData<
             crate::tui::state::AppState,

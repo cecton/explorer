@@ -18,3 +18,19 @@ pub(crate) fn global_data(
     )
     .unwrap()
 }
+
+/// A plain key press.
+pub(crate) fn key(key: Key) -> InputEvent {
+    InputEvent::Keyboard(KeyPress::Plain { key })
+}
+
+/// The box a pane of `cols` columns and `rows` rows is given, at the terminal's top left.
+pub(crate) fn frame_box(cols: u16, rows: u16) -> FlexBox {
+    FlexBox {
+        style_adjusted_bounds: VPBoundingBox::new(
+            vp_col(0) + vp_row(0),
+            vp_width(cols) + vp_height(rows),
+        ),
+        ..FlexBox::default()
+    }
+}

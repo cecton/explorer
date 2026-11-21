@@ -506,11 +506,11 @@ mod tests {
 
     #[test]
     fn scroll_for_input_moves_by_row_page_and_end_and_clamps() {
+        use crate::tui::test_support::key;
         let window = Window::GitLog(1);
         let mut manager = make_manager(&[window]);
         manager.set_window_page_size(&window, 10);
         manager.set_window_scroll_max(&window, 100);
-        let plain = |key| InputEvent::Keyboard(KeyPress::Plain { key });
         let wheel = |kind| {
             InputEvent::Mouse(MouseInput {
                 pos: VPPos::default(),
@@ -518,15 +518,15 @@ mod tests {
                 maybe_modifier_keys: None,
             })
         };
-        assert!(manager.scroll_for_input(&window, &plain(Key::SpecialKey(SpecialKey::Down))));
+        assert!(manager.scroll_for_input(&window, &key(Key::SpecialKey(SpecialKey::Down))));
         assert_eq!(manager.window_scroll(&window), 1);
-        assert!(manager.scroll_for_input(&window, &plain(Key::SpecialKey(SpecialKey::PageDown))));
+        assert!(manager.scroll_for_input(&window, &key(Key::SpecialKey(SpecialKey::PageDown))));
         assert_eq!(manager.window_scroll(&window), 11);
         assert!(manager.scroll_for_input(&window, &wheel(MouseInputKind::ScrollUp)));
         assert_eq!(manager.window_scroll(&window), 11 - WHEEL_STEP);
-        assert!(manager.scroll_for_input(&window, &plain(Key::SpecialKey(SpecialKey::End))));
+        assert!(manager.scroll_for_input(&window, &key(Key::SpecialKey(SpecialKey::End))));
         assert_eq!(manager.window_scroll(&window), 90);
-        assert!(manager.scroll_for_input(&window, &plain(Key::SpecialKey(SpecialKey::Down))));
+        assert!(manager.scroll_for_input(&window, &key(Key::SpecialKey(SpecialKey::Down))));
         assert_eq!(manager.window_scroll(&window), 90);
         let ctrl_a = InputEvent::Keyboard(KeyPress::WithModifiers {
             key: Key::Character('a'),
@@ -534,7 +534,7 @@ mod tests {
         });
         assert!(manager.scroll_for_input(&window, &ctrl_a));
         assert_eq!(manager.window_scroll(&window), 0);
-        assert!(!manager.scroll_for_input(&window, &plain(Key::Character('x'))));
+        assert!(!manager.scroll_for_input(&window, &key(Key::Character('x'))));
         let shift = |key| {
             InputEvent::Keyboard(KeyPress::WithModifiers {
                 key: Key::SpecialKey(key),

@@ -95,7 +95,7 @@ Source is organized in layers. A module imports only from its own layer or a low
 - `src/agent/commands.rs` — slash commands (`/compact`, `/commit`, `/continue` built in, custom ones from `<config_dir>/commands/`)
 - `src/agent/models.rs` — `GET <url>/models`
 - `src/agent/fixtures/` — `claude_stream.jsonl`, a recorded `claude -p` stream that the parser's tests in `claude_code.rs` read
-- `src/tui/mod.rs` — module declarations; `test_support.rs` is the shared `AppState` and `GlobalData` test setup
+- `src/tui/mod.rs` — module declarations; `test_support.rs` is the shared `AppState` and `GlobalData` test setup, with `key` and `frame_box`
 - `src/tui/app/` — the `r3bl_tui` `App` impl: `mod.rs` (`AppMain`, one dispatcher per trait method), `init.rs` (components, background services), `input.rs` (key and mouse routing), `signals.rs`, `render.rs`, `status_bar.rs`, `tick.rs` (timers and housekeeping)
 - `src/tui/state.rs` — `AppState`, the one state every component reads; inputs and selections live here beside what they edit, never in a component (a component belongs to a pane slot and a window changes slot whenever the stack moves)
 - `src/tui/focus.rs` — `focus_window`, `close_window` and terminal focus notification: the shared helpers panes call instead of importing `app/`

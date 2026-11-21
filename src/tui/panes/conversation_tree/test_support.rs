@@ -6,8 +6,8 @@ pub(crate) fn tree_with(
     paths: &[&str],
 ) -> (tempfile::TempDir, crate::conversation::ConversationTree) {
     use crate::conversation::ConversationTree;
-    let tmp = tempfile::tempdir().unwrap();
-    let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+    use crate::util::test_support::temp_root;
+    let (tmp, root) = temp_root();
     for path in paths {
         std::fs::create_dir_all(root.join(path)).unwrap();
     }
@@ -19,15 +19,15 @@ pub(crate) fn described_tree(
     nodes: &[(&str, &str, &str)],
 ) -> (tempfile::TempDir, crate::conversation::ConversationTree) {
     use crate::conversation::ConversationTree;
-    let tmp = tempfile::tempdir().unwrap();
-    let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+    use crate::conversation::test_support::write_node;
+    use crate::util::test_support::temp_root;
+    let (tmp, root) = temp_root();
     for (path, title, summary) in nodes {
-        let dir = root.join(path);
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(crate::conversation::files::TITLE), title).unwrap();
+        let mut files = vec![(crate::conversation::files::TITLE, *title)];
         if !summary.is_empty() {
-            std::fs::write(dir.join(crate::conversation::files::SUMMARY), summary).unwrap();
+            files.push((crate::conversation::files::SUMMARY, *summary));
         }
+        write_node(&root.join(path), &files);
     }
     let tree = ConversationTree::load(&root);
     (tmp, tree)

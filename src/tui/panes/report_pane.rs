@@ -228,6 +228,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::tui::test_support::frame_box;
+    use crate::tui::test_support::key;
 
     #[test]
     fn a_report_gets_its_own_window_and_is_replaced_in_place() {
@@ -285,10 +287,6 @@ mod tests {
         ReportComponent::show(&mut state, "t".to_string(), "m".to_string());
         let session = Session::from_state(&state);
         assert!(session.panes.is_empty(), "{:?}", session.panes.len());
-    }
-
-    fn key(k: Key) -> InputEvent {
-        InputEvent::Keyboard(KeyPress::Plain { key: k })
     }
 
     /// A report is read and gone: closing its window leaves nothing in `AppState`.
@@ -491,16 +489,5 @@ mod tests {
             1,
             "the report keeps its lines in its new slot"
         );
-    }
-
-    /// The box a pane of `cols` columns and `rows` rows is given, at the terminal's top left.
-    fn frame_box(cols: u16, rows: u16) -> FlexBox {
-        FlexBox {
-            style_adjusted_bounds: VPBoundingBox::new(
-                vp_col(0) + vp_row(0),
-                vp_width(cols) + vp_height(rows),
-            ),
-            ..FlexBox::default()
-        }
     }
 }
