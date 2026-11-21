@@ -1945,7 +1945,7 @@ mod tests {
     /// click: the ranges are not painted.
     #[test]
     fn a_title_click_finds_no_range_while_the_title_shows_something_else() {
-        use crate::tui::state::PreviewInput;
+        use crate::tui::state::{PreviewInput, SearchDirection};
         use crate::tui::widgets::input_line::InputLine;
         let (_dir, component, mut state) = highlighted_preview("src/main.rs");
         let key = crate::loader::FileKey(0);
@@ -1961,7 +1961,7 @@ mod tests {
         state.preview_mut(key).error = None;
         state.preview_mut(key).input = Some(PreviewInput::Search(
             InputLine::new(),
-            crate::tui::state::SearchDirection::Forward,
+            SearchDirection::Forward,
         ));
         assert_eq!(component.range_at_title_col(&state, 15, 200), None, "input");
     }
