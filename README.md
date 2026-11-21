@@ -242,7 +242,7 @@ agent {
   `openrouter` endpoint states what its API key has spent and the limit it enforces in
   the status bar, or what is left of the account's credit when the key has no limit. An
   endpoint name is declared once: a second `endpoint` of the same name fails the config at
-  startup, naming it.
+  startup, naming it, and so does a second `agent` block.
 
 Tokens stay out of the configuration, in `~/.local/share/explorer/auth.kdl`, one line
 per endpoint name. A `claude-code` endpoint needs none.

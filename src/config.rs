@@ -260,6 +260,7 @@ pub(crate) fn parse(content: &str) -> Result<Config, String> {
     let mut theme = None;
     let mut keybindings = Vec::new();
     let mut agent = AgentSettings::default();
+    let mut agent_seen = false;
     let mut after_agents = AfterAgentsConfig::default();
     let mut aliases: Vec<Alias> = Vec::new();
 
@@ -301,7 +302,12 @@ pub(crate) fn parse(content: &str) -> Result<Config, String> {
                     }
                 }
             }
-            "agent" => agent = parse_agent(node)?,
+            "agent" => {
+                if std::mem::replace(&mut agent_seen, true) {
+                    return Err("agent is defined twice".to_string());
+                }
+                agent = parse_agent(node)?;
+            }
             "theme" => {
                 if let Some(arg) = node.entries().iter().find(|e| e.name().is_none()) {
                     if let Some(val) = arg.value().as_string() {
@@ -501,6 +507,12 @@ mod config_tests {
         let config =
             "agent {\n endpoint \"a\" {\n url \"u\"\n }\n endpoint \"a\" {\n url \"v\"\n }\n}";
         assert_eq!(parse(config).unwrap_err(), "endpoint 'a' is defined twice");
+    }
+
+    #[test]
+    fn an_agent_block_declared_twice_is_an_error() {
+        let config = "agent {\n endpoint \"a\" {\n url \"u\"\n }\n}\nagent {\n}";
+        assert_eq!(parse(config).unwrap_err(), "agent is defined twice");
     }
 
     #[test]
