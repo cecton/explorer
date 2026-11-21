@@ -53,8 +53,11 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             _ => None,
         };
 
+        if Self::navigate(state, shown, &input_event) {
+            return EventPropagation::ConsumedRender;
+        }
         if state.tree_view.search_active && matches!(input_event, InputEvent::Keyboard(_)) {
-            self.handle_search_key(state, &input_event, &rows, index, page);
+            self.handle_search_key(state, &input_event, &rows, index);
             return EventPropagation::ConsumedRender;
         }
 
@@ -68,29 +71,39 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
         }
     }
 
-    /// The keys of the open filter: the arrows and pages move the selection, Enter
-    /// validates, Esc clears, and every other key edits the query.
+    /// Arrows and pages move the selection, in the tree or its open filter; returns whether it did.
+    fn navigate(
+        state: &mut crate::tui::state::AppState,
+        shown: Shown<'_>,
+        input_event: &InputEvent,
+    ) -> bool {
+        let Shown { rows, index, page } = shown;
+        let InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::SpecialKey(key),
+        }) = input_event
+        else {
+            return false;
+        };
+        let delta = match key {
+            SpecialKey::Up => -1,
+            SpecialKey::Down => 1,
+            SpecialKey::PageUp => -(page as isize),
+            SpecialKey::PageDown => page as isize,
+            _ => return false,
+        };
+        Self::move_selection(state, rows, index, delta);
+        true
+    }
+
+    /// The open filter's keys: Enter validates, Esc clears, every other key edits the query.
     fn handle_search_key(
         &mut self,
         state: &mut crate::tui::state::AppState,
         input_event: &InputEvent,
         rows: &[crate::tui::panes::conversation_tree::layout::TreeRow],
         index: usize,
-        page: usize,
     ) {
         match input_event {
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Up),
-            }) => Self::move_selection(state, rows, index, -1),
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Down),
-            }) => Self::move_selection(state, rows, index, 1),
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::PageUp),
-            }) => Self::move_selection(state, rows, index, -(page as isize)),
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::PageDown),
-            }) => Self::move_selection(state, rows, index, page as isize),
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Enter),
             }) => {
@@ -145,7 +158,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
         use crate::tui::panes::discussion::DiscussionComponent;
         use crate::tui::state::ModelPickerPurpose;
         use crate::tui::state::RowTarget;
-        let Shown { rows, index, page } = shown;
+        let Shown { rows, index, .. } = shown;
         let window = Window::ConversationTree;
         match input_event {
             InputEvent::Keyboard(KeyPress::Plain {
@@ -154,18 +167,6 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 state.tree_view.search_active = true;
                 state.tree_view.before_search = rows.get(index).map(|row| row.target.clone());
             }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Up),
-            }) => Self::move_selection(state, rows, index, -1),
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Down),
-            }) => Self::move_selection(state, rows, index, 1),
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::PageUp),
-            }) => Self::move_selection(state, rows, index, -(page as isize)),
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::PageDown),
-            }) => Self::move_selection(state, rows, index, page as isize),
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Home),
             }) => Self::select(state, rows, 0),
@@ -235,18 +236,11 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Enter),
-            }) => match rows.get(index).map(|row| &row.target) {
-                Some(RowTarget::Queued { window, .. }) => {
-                    DiscussionComponent::show(state, *window);
+            }) => {
+                if let Some(row) = rows.get(index) {
+                    Self::open_row(state, main_tx, &row.target);
                 }
-                Some(RowTarget::Node(id)) => {
-                    DiscussionComponent::open(state, main_tx, id.clone(), None);
-                }
-                Some(RowTarget::Agent { node, index }) => {
-                    DiscussionComponent::open(state, main_tx, node.clone(), Some(*index));
-                }
-                None => {}
-            },
+            }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::Character('s'),
             }) => {
@@ -374,9 +368,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
         pos: VPPos,
         rows: &[crate::tui::panes::conversation_tree::layout::TreeRow],
     ) -> EventPropagation {
-        use crate::tui::panes::discussion::DiscussionComponent;
         use crate::tui::panes::git_log_pane::GitLogPaneComponent;
-        use crate::tui::state::RowTarget;
         let line = pos
             .row_index
             .as_usize()
@@ -395,32 +387,12 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             return EventPropagation::ConsumedRender;
         };
         Self::select(state, rows, row);
-        let Some(id) = target.target.node().cloned() else {
-            let now = Instant::now();
-            let double = self
-                .last_click
-                .is_some_and(|(at, last)| last == row && now.duration_since(at) < DOUBLE_CLICK);
-            self.last_click = (!double).then_some((now, row));
-            if double {
-                match &target.target {
-                    RowTarget::Queued { window, .. } => {
-                        DiscussionComponent::show(state, *window);
-                    }
-                    RowTarget::Agent { node, index } => {
-                        let (node, index) = (node.clone(), *index);
-                        DiscussionComponent::open(state, main_tx, node, Some(index));
-                    }
-                    RowTarget::Node(_) => {}
-                }
-            }
-            return EventPropagation::ConsumedRender;
-        };
-        if on_label {
+        if on_label && let Some(id) = target.target.node() {
             self.last_click = None;
             let hash = state
                 .conversations
                 .read()
-                .node(&id)
+                .node(id)
                 .and_then(|node| node.meta.commits.last().cloned());
             if let Some(hash) = hash {
                 GitLogPaneComponent::open_log_at_commit(state, main_tx, hash);
@@ -433,9 +405,26 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             .is_some_and(|(at, last)| last == row && now.duration_since(at) < DOUBLE_CLICK);
         self.last_click = (!double).then_some((now, row));
         if double {
-            DiscussionComponent::open(state, main_tx, id, None);
+            Self::open_row(state, main_tx, &target.target);
         }
         EventPropagation::ConsumedRender
+    }
+
+    /// Enter and a double click: show a queued window, or open a node or sub-agent run.
+    fn open_row(
+        state: &mut crate::tui::state::AppState,
+        main_tx: crate::signal::MainTx,
+        target: &crate::tui::state::RowTarget,
+    ) {
+        use crate::tui::panes::discussion::DiscussionComponent;
+        use crate::tui::state::RowTarget;
+        match target {
+            RowTarget::Queued { window, .. } => DiscussionComponent::show(state, *window),
+            RowTarget::Node(id) => DiscussionComponent::open(state, main_tx, id.clone(), None),
+            RowTarget::Agent { node, index } => {
+                DiscussionComponent::open(state, main_tx, node.clone(), Some(*index));
+            }
+        }
     }
 
     /// Selects `target` for the unfiltered tree, opening the folds that hide its node.
