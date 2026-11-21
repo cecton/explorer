@@ -146,18 +146,314 @@ fn segments<'a>(text: &'a str, offset: usize, ranges: &[(usize, usize)]) -> Vec<
     pieces
 }
 
+/// The colors a frame of the tree is painted with.
+struct TreeColors {
+    pane_bg: crate::tui::theme::Color,
+    selected_bg: crate::tui::theme::Color,
+    text: crate::tui::theme::Color,
+    dim: crate::tui::theme::Color,
+    gutter: crate::tui::theme::Color,
+    selected_gutter: crate::tui::theme::Color,
+    commit: crate::tui::theme::Color,
+    hash: crate::tui::theme::Color,
+    running: crate::tui::theme::Color,
+    error: crate::tui::theme::Color,
+    /// Favorite nodes and the matched text of a filter.
+    matched: crate::tui::theme::Color,
+}
+
+impl TreeColors {
+    fn of(theme: &crate::tui::theme::HelixTheme) -> Self {
+        Self {
+            pane_bg: theme.ui.background,
+            selected_bg: theme.ui.selection,
+            text: theme.ui.text,
+            dim: theme.ui.dim,
+            gutter: theme.ui.line_number,
+            selected_gutter: theme.ui.line_number_selected,
+            commit: theme.color_for_scope("diff.plus"),
+            hash: theme.color_for_scope("constant"),
+            running: theme.color_for_scope("diff.delta"),
+            error: theme.ui.error,
+            matched: theme.ui.matched,
+        }
+    }
+}
+
+fn paint_at(
+    ops: &mut RenderOpIRVec,
+    origin: VPPos,
+    row_offset: usize,
+    column: usize,
+    text: &str,
+    style: TuiStyle,
+) {
+    *ops += RenderOpCommon::MoveCursorPositionRelTo(
+        origin,
+        vp_col(column as u16) + vp_row(row_offset as u16),
+    );
+    *ops += RenderOpCommon::ApplyColors(Some(style));
+    *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+}
+
+/// A blank pane with `message` on its first row.
+fn paint_message(
+    ops: &mut RenderOpIRVec,
+    origin: VPPos,
+    size: (usize, usize),
+    message: &str,
+    style: TuiStyle,
+) {
+    let (pane_width, total_rows) = size;
+    for row_offset in 0..total_rows {
+        paint_at(ops, origin, row_offset, 0, &" ".repeat(pane_width), style);
+    }
+    paint_at(ops, origin, 0, 0, message, style);
+}
+
+/// The lines of every row, and the span of lines the selected row takes.
+fn build_lines(
+    state: &crate::tui::state::AppState,
+    tree: &crate::conversation::ConversationTree,
+    rows: &[crate::tui::panes::conversation_tree::layout::TreeRow],
+    selected: usize,
+    gutter_width: usize,
+    pane_width: usize,
+) -> (Vec<Line>, (usize, usize)) {
+    use crate::tui::panes::conversation_tree::layout;
+    use crate::tui::state::RowTarget;
+    let mut lines: Vec<Line> = Vec::with_capacity(rows.len() + 8);
+    let mut selected_span = (0, 0);
+    for (row_idx, row) in rows.iter().enumerate() {
+        let Some(id) = row.target.node() else {
+            let prefix_width =
+                gutter_width + crate::tui::widgets::text_layout::display_width(&row_prefix(row));
+            let width = pane_width.saturating_sub(prefix_width).max(1);
+            let text = match &row.target {
+                RowTarget::Agent { node, index } => tree
+                    .agent(node, *index)
+                    .map(|agent| agent.title())
+                    .unwrap_or_default(),
+                RowTarget::Node(_) | RowTarget::Queued { .. } => {
+                    std::borrow::Cow::Owned(queued_text(state, row))
+                }
+            };
+            let start = lines.len();
+            lines.push(Line {
+                row: row_idx,
+                kind: LineKind::Head,
+                offset: 0,
+                text: crate::tui::widgets::text_layout::truncate(&text, width),
+            });
+            if row_idx == selected {
+                selected_span = (start, lines.len());
+            }
+            continue;
+        };
+        let Some(node) = tree.node(id) else {
+            continue;
+        };
+        let prefix_width =
+            gutter_width + crate::tui::widgets::text_layout::display_width(&row_prefix(row));
+        let label_width = commit_label(node).map_or(0, |label| {
+            crate::tui::widgets::text_layout::display_width(&label) + 1
+        });
+        let text_width = pane_width.saturating_sub(prefix_width + label_width).max(1);
+        if row_idx != selected {
+            lines.push(Line {
+                row: row_idx,
+                kind: LineKind::Head,
+                offset: 0,
+                text: crate::tui::widgets::text_layout::truncate(node.display_title(), text_width),
+            });
+            continue;
+        }
+        let start = lines.len();
+        for (i, (offset, text)) in
+            crate::tui::widgets::text_layout::wrap(node.display_title(), text_width)
+                .into_iter()
+                .enumerate()
+        {
+            let kind = if i == 0 {
+                LineKind::Head
+            } else {
+                LineKind::TitleRest
+            };
+            lines.push(Line {
+                row: row_idx,
+                kind,
+                offset,
+                text,
+            });
+        }
+        if let Some(summary) = layout::shown_summary(node) {
+            for (offset, text) in crate::tui::widgets::text_layout::wrap(summary, text_width) {
+                lines.push(Line {
+                    row: row_idx,
+                    kind: LineKind::Summary,
+                    offset,
+                    text,
+                });
+            }
+        }
+        selected_span = (start, lines.len());
+    }
+    (lines, selected_span)
+}
+
+/// What painting the lines of one frame reads.
+struct LinePainter<'a> {
+    tree: &'a crate::conversation::ConversationTree,
+    rows: &'a [crate::tui::panes::conversation_tree::layout::TreeRow],
+    matches: &'a [crate::tui::panes::conversation_tree::filter::FilterMatch],
+    colors: &'a TreeColors,
+    armed_delete: Option<&'a crate::conversation::NodeId>,
+    spinner_tick: u8,
+    origin: VPPos,
+    pane_width: usize,
+    gutter_width: usize,
+    selected: usize,
+}
+
+impl LinePainter<'_> {
+    /// Returns the commit label's click zone as `(column, width)`, if the line shows one.
+    fn paint_line(
+        &self,
+        ops: &mut RenderOpIRVec,
+        row_offset: usize,
+        line: &Line,
+        bg: crate::tui::theme::Color,
+    ) -> Option<(usize, usize)> {
+        use crate::conversation::NodeStatus;
+        use crate::conversation::NodeType;
+        use crate::tui::panes::conversation_tree::layout;
+        use crate::tui::state::RowTarget;
+        use crate::tui::theme::Color;
+        let colors = self.colors;
+        let origin = self.origin;
+        let gutter_width = self.gutter_width;
+        let row_info = &self.rows[line.row];
+        let gutter = if line.row == self.selected {
+            colors.selected_gutter
+        } else {
+            colors.gutter
+        };
+        let paint_plain = |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: Color| {
+            paint_at(ops, origin, row_offset, column, text, fg.on(bg));
+        };
+        let (rail_prefix, fold_text) = row_prefix_parts(row_info);
+        let fold_column =
+            gutter_width + crate::tui::widgets::text_layout::display_width(&rail_prefix);
+        let text_column = fold_column + crate::tui::widgets::text_layout::display_width(fold_text);
+
+        // A queued prompt or a sub-agent run is not a node: nothing to arm, fold or label.
+        let Some(node) = row_info.target.node().and_then(|id| self.tree.node(id)) else {
+            let (glyph, glyph_fg) = match &row_info.target {
+                RowTarget::Queued { position, .. } => (Some(queue_glyph(*position)), colors.dim),
+                RowTarget::Agent { node, index } => {
+                    let meta = self.tree.agent(node, *index).map(|agent| &agent.meta);
+                    let fg = match meta.and_then(|meta| meta.status) {
+                        Some(NodeStatus::Failed) => colors.error,
+                        _ => colors.running,
+                    };
+                    (
+                        meta.and_then(|meta| state_marker(meta, self.spinner_tick)),
+                        fg,
+                    )
+                }
+                RowTarget::Node(_) => return None,
+            };
+            paint_plain(ops, gutter_width, &rail_prefix, gutter);
+            paint_plain(ops, fold_column, fold_text, gutter);
+            if let Some(glyph) = glyph {
+                paint_plain(ops, gutter_width - 2, &glyph.to_string(), glyph_fg);
+            }
+            paint_plain(ops, text_column, &line.text, colors.dim);
+            return None;
+        };
+
+        let armed = self.armed_delete == row_info.target.node();
+        let favorite = node.meta.favorite;
+        let type_fg = match (node.meta.status, node.meta.node_type) {
+            _ if armed => colors.error,
+            (Some(NodeStatus::Failed), _) => colors.error,
+            (Some(NodeStatus::Running), _) => colors.running,
+            _ if favorite => colors.matched,
+            (_, Some(NodeType::Commit)) => colors.commit,
+            (_, Some(NodeType::Compact)) => colors.dim,
+            _ => colors.text,
+        };
+        let styled = |fg: Color| {
+            if favorite { fg.on_bold(bg) } else { fg.on(bg) }
+        };
+        let paint = |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: Color| {
+            paint_at(ops, origin, row_offset, column, text, styled(fg));
+        };
+
+        // While filtering, the rows are the matches, in the same order.
+        let matched: &[(usize, usize)] = match (self.matches.get(line.row), line.kind) {
+            (Some(found), LineKind::Summary) => &found.summary,
+            (Some(found), _) => &found.title,
+            (None, _) => &[],
+        };
+        let paint_text = |ops: &mut RenderOpIRVec, fg: Color| {
+            let mut column = text_column;
+            for (text, is_match) in segments(&line.text, line.offset, matched) {
+                let mut style = styled(if is_match { colors.matched } else { fg });
+                if is_match {
+                    style.attribs.underline = Some(tui_style_attrib::Underline);
+                }
+                paint_at(ops, origin, row_offset, column, text, style);
+                column += crate::tui::widgets::text_layout::display_width(text);
+            }
+        };
+
+        match line.kind {
+            LineKind::Head => {
+                paint_plain(ops, 0, &node.created_display, gutter);
+                paint_plain(ops, gutter_width, &rail_prefix, gutter);
+                if row_info.fold == layout::Fold::Leaf {
+                    paint_plain(ops, fold_column, fold_text, gutter);
+                } else {
+                    paint(ops, fold_column, fold_text, type_fg);
+                }
+                if let Some(marker) = state_marker(&node.meta, self.spinner_tick) {
+                    paint(ops, gutter_width - 2, &marker.to_string(), type_fg);
+                }
+                paint_text(ops, type_fg);
+                let label = commit_label(node)?;
+                let width = crate::tui::widgets::text_layout::display_width(&label);
+                let column = self.pane_width.saturating_sub(width);
+                paint(ops, column, &label, colors.hash);
+                Some((column, width))
+            }
+            LineKind::TitleRest | LineKind::Summary => {
+                let hangs = self
+                    .rows
+                    .get(line.row + 1)
+                    .is_some_and(|next| next.rails.len() > row_info.rails.len());
+                let continuation = row_continuation_prefix(row_info, hangs);
+                paint_plain(ops, gutter_width, &continuation, colors.selected_gutter);
+                let fg = match line.kind {
+                    LineKind::Summary if armed => colors.error,
+                    LineKind::Summary => colors.dim,
+                    _ => type_fg,
+                };
+                paint_text(ops, fg);
+                None
+            }
+        }
+    }
+}
+
 impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
     pub(crate) fn render_pane(
         &mut self,
         global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
         current_box: FlexBox,
     ) -> CommonResult {
-        use crate::conversation::NodeStatus;
-        use crate::conversation::NodeType;
         use crate::tui::pane_manager::Window;
         use crate::tui::panes::conversation_tree::layout;
-        use crate::tui::state::RowTarget;
-        use crate::tui::theme::Color;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -182,20 +478,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             let selected_target = rows.get(selected).map(|row| row.target.clone());
             state.tree_view.selected = selected_target.clone();
 
-            let theme = &state.theme;
-            let pane_bg = theme.ui.background;
-            let selected_bg = theme.ui.selection;
-            let text_fg = theme.ui.text;
-            let dim_fg = theme.ui.dim;
-            let gutter_fg = theme.ui.line_number;
-            let selected_gutter_fg = theme.ui.line_number_selected;
-            let commit_fg = theme.color_for_scope("diff.plus");
-            let hash_fg = theme.color_for_scope("constant");
-            let running_fg = theme.color_for_scope("diff.delta");
-            let error_fg = theme.ui.error;
-            let favorite_fg = theme.ui.matched;
-            let match_fg = favorite_fg;
-
+            let colors = TreeColors::of(&state.theme);
             let mut render_ops = RenderOpIRVec::new();
 
             if rows.is_empty() {
@@ -206,23 +489,14 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 } else {
                     "(no conversations)"
                 };
-                let text_style = text_fg.on(pane_bg);
-                let bg_style = text_style;
-                for row_offset in 0..total_rows {
-                    render_ops += RenderOpCommon::MoveCursorPositionRelTo(
-                        origin,
-                        vp_col(0) + vp_row(row_offset as u16),
-                    );
-                    render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
-                    render_ops += RenderOpIR::PaintTextWithAttributes(
-                        " ".repeat(pane_width).into(),
-                        Some(bg_style),
-                    );
-                }
-                render_ops +=
-                    RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
-                render_ops += RenderOpCommon::ApplyColors(Some(text_style));
-                render_ops += RenderOpIR::PaintTextWithAttributes(message.into(), Some(text_style));
+                let style = colors.text.on(colors.pane_bg);
+                paint_message(
+                    &mut render_ops,
+                    origin,
+                    (pane_width, total_rows),
+                    message,
+                    style,
+                );
                 state.pane_manager.set_window_scroll_max(&window, 0);
                 global_data.pipeline.push(ZOrder::Normal, render_ops);
                 return Ok(());
@@ -237,86 +511,8 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 .unwrap_or(0)
                 + GUTTER_GAP.len();
 
-            let mut lines: Vec<Line> = Vec::with_capacity(rows.len() + 8);
-            let mut selected_span = (0, 0);
-            for (row_idx, row) in rows.iter().enumerate() {
-                let Some(id) = row.target.node() else {
-                    let prefix_width = gutter_width
-                        + crate::tui::widgets::text_layout::display_width(&row_prefix(row));
-                    let width = pane_width.saturating_sub(prefix_width).max(1);
-                    let text = match &row.target {
-                        RowTarget::Agent { node, index } => tree
-                            .agent(node, *index)
-                            .map(|agent| agent.title())
-                            .unwrap_or_default(),
-                        RowTarget::Node(_) | RowTarget::Queued { .. } => {
-                            std::borrow::Cow::Owned(queued_text(state, row))
-                        }
-                    };
-                    let start = lines.len();
-                    lines.push(Line {
-                        row: row_idx,
-                        kind: LineKind::Head,
-                        offset: 0,
-                        text: crate::tui::widgets::text_layout::truncate(&text, width),
-                    });
-                    if row_idx == selected {
-                        selected_span = (start, lines.len());
-                    }
-                    continue;
-                };
-                let Some(node) = tree.node(id) else {
-                    continue;
-                };
-                let prefix_width = gutter_width
-                    + crate::tui::widgets::text_layout::display_width(&row_prefix(row));
-                let label_width = commit_label(node).map_or(0, |label| {
-                    crate::tui::widgets::text_layout::display_width(&label) + 1
-                });
-                let text_width = pane_width.saturating_sub(prefix_width + label_width).max(1);
-                if row_idx != selected {
-                    lines.push(Line {
-                        row: row_idx,
-                        kind: LineKind::Head,
-                        offset: 0,
-                        text: crate::tui::widgets::text_layout::truncate(
-                            node.display_title(),
-                            text_width,
-                        ),
-                    });
-                    continue;
-                }
-                let start = lines.len();
-                for (i, (offset, text)) in
-                    crate::tui::widgets::text_layout::wrap(node.display_title(), text_width)
-                        .into_iter()
-                        .enumerate()
-                {
-                    lines.push(Line {
-                        row: row_idx,
-                        kind: if i == 0 {
-                            LineKind::Head
-                        } else {
-                            LineKind::TitleRest
-                        },
-                        offset,
-                        text,
-                    });
-                }
-                if let Some(summary) = layout::shown_summary(node) {
-                    for (offset, text) in
-                        crate::tui::widgets::text_layout::wrap(summary, text_width)
-                    {
-                        lines.push(Line {
-                            row: row_idx,
-                            kind: LineKind::Summary,
-                            offset,
-                            text,
-                        });
-                    }
-                }
-                selected_span = (start, lines.len());
-            }
+            let (lines, selected_span) =
+                build_lines(state, &tree, &rows, selected, gutter_width, pane_width);
 
             state
                 .pane_manager
@@ -338,180 +534,41 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 state.pane_manager.set_window_scroll(&window, scroll);
             }
 
+            let painter = LinePainter {
+                tree: &tree,
+                rows: &rows,
+                matches: &matches,
+                colors: &colors,
+                armed_delete: state.tree_view.armed_delete.as_ref(),
+                spinner_tick: state.spinner_tick,
+                origin,
+                pane_width,
+                gutter_width,
+                selected,
+            };
             for row_offset in 0..total_rows {
                 let line = lines.get(scroll + row_offset);
                 let is_selected = line.is_some_and(|line| line.row == selected);
-                let bg = if is_selected { selected_bg } else { pane_bg };
-                let bg_style = text_fg.on(bg);
-                render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                let bg = if is_selected {
+                    colors.selected_bg
+                } else {
+                    colors.pane_bg
+                };
+                let blank = " ".repeat(pane_width);
+                paint_at(
+                    &mut render_ops,
                     origin,
-                    vp_col(0) + vp_row(row_offset as u16),
-                );
-                render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
-                render_ops += RenderOpIR::PaintTextWithAttributes(
-                    " ".repeat(pane_width).into(),
-                    Some(bg_style),
+                    row_offset,
+                    0,
+                    &blank,
+                    colors.text.on(bg),
                 );
                 let Some(line) = line else {
                     continue;
                 };
                 self.line_rows.push(line.row);
-                self.label_zones.push(None);
-                let row_info = &rows[line.row];
-                let gutter = if is_selected {
-                    selected_gutter_fg
-                } else {
-                    gutter_fg
-                };
-                let plain = |fg: Color| fg.on(bg);
-                let paint_plain =
-                    |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: Color| {
-                        let style = plain(fg);
-                        *ops += RenderOpCommon::MoveCursorPositionRelTo(
-                            origin,
-                            vp_col(column as u16) + vp_row(row_offset as u16),
-                        );
-                        *ops += RenderOpCommon::ApplyColors(Some(style));
-                        *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                    };
-                let (rail_prefix, fold_text) = row_prefix_parts(row_info);
-                let fold_column =
-                    gutter_width + crate::tui::widgets::text_layout::display_width(&rail_prefix);
-                let text_column =
-                    fold_column + crate::tui::widgets::text_layout::display_width(fold_text);
-
-                // A queued prompt or a sub-agent run is not a node: nothing to arm, fold
-                // or label.
-                let Some(node) = row_info.target.node().and_then(|id| tree.node(id)) else {
-                    let (glyph, glyph_fg) = match &row_info.target {
-                        RowTarget::Queued { position, .. } => {
-                            (Some(queue_glyph(*position)), dim_fg)
-                        }
-                        RowTarget::Agent { node, index } => {
-                            let meta = tree.agent(node, *index).map(|agent| &agent.meta);
-                            let fg = match meta.and_then(|meta| meta.status) {
-                                Some(NodeStatus::Failed) => error_fg,
-                                _ => running_fg,
-                            };
-                            (
-                                meta.and_then(|meta| state_marker(meta, state.spinner_tick)),
-                                fg,
-                            )
-                        }
-                        RowTarget::Node(_) => continue,
-                    };
-                    paint_plain(&mut render_ops, gutter_width, &rail_prefix, gutter);
-                    paint_plain(&mut render_ops, fold_column, fold_text, gutter);
-                    if let Some(glyph) = glyph {
-                        paint_plain(
-                            &mut render_ops,
-                            gutter_width - 2,
-                            &glyph.to_string(),
-                            glyph_fg,
-                        );
-                    }
-                    paint_plain(&mut render_ops, text_column, &line.text, dim_fg);
-                    continue;
-                };
-                let node_id = row_info.target.node().expect("checked above");
-
-                let armed = state.tree_view.armed_delete.as_ref() == Some(node_id);
-                let favorite = node.meta.favorite;
-                let type_fg = match (node.meta.status, node.meta.node_type) {
-                    _ if armed => error_fg,
-                    (Some(NodeStatus::Failed), _) => error_fg,
-                    (Some(NodeStatus::Running), _) => running_fg,
-                    _ if favorite => favorite_fg,
-                    (_, Some(NodeType::Commit)) => commit_fg,
-                    (_, Some(NodeType::Compact)) => dim_fg,
-                    _ => text_fg,
-                };
-                let styled = |fg: Color| {
-                    if favorite { fg.on_bold(bg) } else { fg.on(bg) }
-                };
-                let paint = |ops: &mut RenderOpIRVec, column: usize, text: &str, fg: Color| {
-                    let style = styled(fg);
-                    *ops += RenderOpCommon::MoveCursorPositionRelTo(
-                        origin,
-                        vp_col(column as u16) + vp_row(row_offset as u16),
-                    );
-                    *ops += RenderOpCommon::ApplyColors(Some(style));
-                    *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                };
-
-                // While filtering, the rows are the matches, in the same order.
-                let matched: &[(usize, usize)] = match (matches.get(line.row), line.kind) {
-                    (Some(found), LineKind::Summary) => &found.summary,
-                    (Some(found), _) => &found.title,
-                    (None, _) => &[],
-                };
-                let paint_text = |ops: &mut RenderOpIRVec, fg: Color| {
-                    let mut column = text_column;
-                    for (text, is_match) in segments(&line.text, line.offset, matched) {
-                        let mut style = styled(if is_match { match_fg } else { fg });
-                        if is_match {
-                            style.attribs.underline = Some(tui_style_attrib::Underline);
-                        }
-                        *ops += RenderOpCommon::MoveCursorPositionRelTo(
-                            origin,
-                            vp_col(column as u16) + vp_row(row_offset as u16),
-                        );
-                        *ops += RenderOpCommon::ApplyColors(Some(style));
-                        *ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-                        column += crate::tui::widgets::text_layout::display_width(text);
-                    }
-                };
-
-                let marker = state_marker(&node.meta, state.spinner_tick);
-                match line.kind {
-                    LineKind::Head => {
-                        paint_plain(&mut render_ops, 0, &node.created_display, gutter);
-                        paint_plain(&mut render_ops, gutter_width, &rail_prefix, gutter);
-                        if row_info.fold == layout::Fold::Leaf {
-                            paint_plain(&mut render_ops, fold_column, fold_text, gutter);
-                        } else {
-                            paint(&mut render_ops, fold_column, fold_text, type_fg);
-                        }
-                        if let Some(marker) = marker {
-                            paint(
-                                &mut render_ops,
-                                gutter_width - 2,
-                                &marker.to_string(),
-                                type_fg,
-                            );
-                        }
-                        paint_text(&mut render_ops, type_fg);
-                        if let Some(label) = commit_label(node) {
-                            let column = pane_width.saturating_sub(
-                                crate::tui::widgets::text_layout::display_width(&label),
-                            );
-                            paint(&mut render_ops, column, &label, hash_fg);
-                            let slot = self.label_zones.last_mut().expect("pushed above");
-                            *slot = Some((
-                                column,
-                                crate::tui::widgets::text_layout::display_width(&label),
-                            ));
-                        }
-                    }
-                    LineKind::TitleRest | LineKind::Summary => {
-                        let hangs = rows
-                            .get(line.row + 1)
-                            .is_some_and(|next| next.rails.len() > row_info.rails.len());
-                        let continuation = row_continuation_prefix(row_info, hangs);
-                        paint_plain(
-                            &mut render_ops,
-                            gutter_width,
-                            &continuation,
-                            selected_gutter_fg,
-                        );
-                        let fg = match line.kind {
-                            LineKind::Summary if armed => error_fg,
-                            LineKind::Summary => dim_fg,
-                            _ => type_fg,
-                        };
-                        paint_text(&mut render_ops, fg);
-                    }
-                }
+                self.label_zones
+                    .push(painter.paint_line(&mut render_ops, row_offset, line, bg));
             }
 
             global_data.pipeline.push(ZOrder::Normal, render_ops);
