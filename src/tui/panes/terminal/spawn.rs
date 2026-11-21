@@ -52,11 +52,11 @@ pub(crate) fn open(
             row_height: vp_height(pty_rows),
         };
 
-        let is_command_pane = cmd.as_deref().is_some_and(|s| !s.is_empty());
-        let mut builder = if is_command_pane {
-            PtySessionBuilder::new("/bin/sh").cli_args(["-c", cmd.as_deref().unwrap()])
-        } else {
-            PtySessionBuilder::new(shell_command())
+        let command = cmd.as_deref().filter(|s| !s.is_empty());
+        let is_command_pane = command.is_some();
+        let mut builder = match command {
+            Some(command) => PtySessionBuilder::new("/bin/sh").cli_args(["-c", command]),
+            None => PtySessionBuilder::new(shell_command()),
         };
         if let Some(ref cwd_path) = cwd {
             builder = builder.cwd(cwd_path.as_std_path());
@@ -75,7 +75,7 @@ pub(crate) fn open(
         let ofs_buf = r3bl_tui::OfsBufVT100::new_empty(pty_size);
         let pty_input_tx = Arc::new(session.tx_input_event.clone());
         let child_killer = session.child_process_termination_handle;
-        let initial_title = cmd.as_deref().filter(|s| !s.is_empty()).map(|cmd| {
+        let initial_title = command.map(|cmd| {
             let mut lines = cmd.lines();
             let first = lines.next().unwrap_or_default();
             match lines.next() {
@@ -84,7 +84,7 @@ pub(crate) fn open(
             }
         });
         let pane_cwd = cwd.clone().unwrap_or_else(|| state.root.clone());
-        let pane_command = if is_command_pane { cmd.clone() } else { None };
+        let pane_command = command.map(str::to_string);
         let pane = Arc::new(parking_lot::Mutex::new(TerminalPane {
             ofs_buf,
             title: initial_title,
