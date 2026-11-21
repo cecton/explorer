@@ -182,14 +182,8 @@ pub(crate) fn truncate_middle(text: &str, max_bytes: usize) -> String {
         return text.to_string();
     }
     let half = max_bytes / 2;
-    let mut head_end = half;
-    while !text.is_char_boundary(head_end) {
-        head_end -= 1;
-    }
-    let mut tail_start = text.len() - half;
-    while !text.is_char_boundary(tail_start) {
-        tail_start += 1;
-    }
+    let head_end = text.floor_char_boundary(half);
+    let tail_start = text.ceil_char_boundary(text.len() - half);
     format!(
         "{}\n[... {} bytes omitted ...]\n{}",
         &text[..head_end],
@@ -300,5 +294,14 @@ mod tests {
         let cut = truncate_middle(&text, 20);
         assert!(cut.starts_with("aaaaaaaaaa\n[... 80 bytes omitted ...]\n"));
         assert!(cut.ends_with("bbbbbbbbbb"));
+    }
+
+    #[test]
+    fn truncate_middle_cuts_on_character_boundaries() {
+        // Both cuts (bytes 10 and 30) fall inside a two-byte character.
+        let text = format!("a{}a", "é".repeat(19));
+        let cut = truncate_middle(&text, 20);
+        let expected = format!("aéééé\n[... 22 bytes omitted ...]\néééé{}", "a");
+        assert_eq!(cut, expected);
     }
 }

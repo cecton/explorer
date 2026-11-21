@@ -44,30 +44,14 @@ impl FileData {
         } else {
             (start_byte, end_byte)
         };
-        let start_byte = self.char_boundary_at_or_before(start_byte);
-        let end_byte = self.char_boundary_at_or_after(end_byte);
+        let start_byte = self.content.floor_char_boundary(start_byte);
+        let end_byte = self.content.ceil_char_boundary(end_byte);
         let result = self.content[start_byte..end_byte].to_string();
         if result.is_empty() {
             None
         } else {
             Some(result)
         }
-    }
-
-    fn char_boundary_at_or_before(&self, offset: usize) -> usize {
-        let mut offset = offset.min(self.content.len());
-        while !self.content.is_char_boundary(offset) {
-            offset -= 1;
-        }
-        offset
-    }
-
-    fn char_boundary_at_or_after(&self, offset: usize) -> usize {
-        let mut offset = offset.min(self.content.len());
-        while offset < self.content.len() && !self.content.is_char_boundary(offset) {
-            offset += 1;
-        }
-        offset
     }
 
     /// The [`crate::util::text::word_bounds`] of the file's content under `cursor_byte`.

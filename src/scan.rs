@@ -667,8 +667,8 @@ fn is_subdivision_flag(payload: &str, after_base: bool) -> bool {
 }
 
 fn excerpt_of(line: &str, at: usize, width: usize) -> String {
-    let start = floor_boundary(line, at.saturating_sub(EXCERPT_BEFORE));
-    let end = ceil_boundary(line, (at + width + EXCERPT_AFTER).min(line.len()));
+    let start = line.floor_char_boundary(at.saturating_sub(EXCERPT_BEFORE));
+    let end = line.ceil_char_boundary(at + width + EXCERPT_AFTER);
     let mut out = String::with_capacity(end - start + 8);
     if start > 0 {
         out.push('…');
@@ -710,20 +710,6 @@ fn push_escaped(out: &mut String, ch: char) {
             _ => format!("\\U{{{code:08x}}}"),
         });
     }
-}
-
-fn floor_boundary(text: &str, mut at: usize) -> usize {
-    while at > 0 && !text.is_char_boundary(at) {
-        at -= 1;
-    }
-    at
-}
-
-fn ceil_boundary(text: &str, mut at: usize) -> usize {
-    while at < text.len() && !text.is_char_boundary(at) {
-        at += 1;
-    }
-    at
 }
 
 /// Writes a path with the control bytes of a hostile file name escaped, so that a report

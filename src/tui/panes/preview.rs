@@ -1393,8 +1393,8 @@ fn paint_line_segment(
     // An offset can outlive the content it was computed against: a highlight of a file an
     // external editor just rewrote reaches this frame still holding the old bytes. Clamping to
     // the line's length is not enough, a stale offset can land inside a character.
-    let seg_start_byte = floor_to_char(line_content, seg_start_byte);
-    let seg_end_byte = ceil_to_char(line_content, seg_end_byte);
+    let seg_start_byte = line_content.floor_char_boundary(seg_start_byte);
+    let seg_end_byte = line_content.ceil_char_boundary(seg_end_byte);
     if seg_start_byte >= seg_end_byte {
         return;
     }
@@ -1412,8 +1412,8 @@ fn paint_line_segment(
 
     if let Some(spans) = colored_guard.get(line_idx) {
         for span in spans {
-            let overlap_start = floor_to_char(line_content, span.start.max(seg_start_byte));
-            let overlap_end = ceil_to_char(line_content, span.end.min(seg_end_byte));
+            let overlap_start = line_content.floor_char_boundary(span.start.max(seg_start_byte));
+            let overlap_end = line_content.ceil_char_boundary(span.end.min(seg_end_byte));
             if overlap_start >= overlap_end {
                 continue;
             }
@@ -1432,25 +1432,6 @@ fn paint_line_segment(
     let style = fg_rgb.on(pane_bg);
     *render_ops += RenderOpCommon::ApplyColors(Some(style));
     *render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
-}
-
-/// `offset` moved back to the start of the character it falls inside.
-fn floor_to_char(line: &str, offset: usize) -> usize {
-    let mut offset = offset.min(line.len());
-    while !line.is_char_boundary(offset) {
-        offset -= 1;
-    }
-    offset
-}
-
-/// `offset` moved past the character it falls inside, so a range whose ends both fall within
-/// one character still covers it rather than collapsing to nothing.
-fn ceil_to_char(line: &str, offset: usize) -> usize {
-    let mut offset = offset.min(line.len());
-    while offset < line.len() && !line.is_char_boundary(offset) {
-        offset += 1;
-    }
-    offset
 }
 
 /// Where the sub-row starting at the byte offset `start` of `line` ends: `width` cells on,
