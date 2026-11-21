@@ -208,7 +208,21 @@ impl FilePreviewComponent {
         use crate::tui::pane_manager::Window;
         let window = Window::FilePreview(key);
         let page_size = state.pane_manager.window_page_size(&window);
-        let target = crate::tui::pane_manager::block_scroll(lo, hi - lo + 1, page_size);
+        let target = {
+            let files = state.files.load();
+            let data = files[key.0].data.read();
+            let line_num_width = data.line_starts.len().max(1).to_string().len();
+            let width = self
+                .content_col_count
+                .saturating_sub(line_num_width + GUTTER_GAP.len())
+                .max(1);
+            wrapped_block_scroll(
+                |i| line_segments(data.line(i), width).len(),
+                lo,
+                hi,
+                page_size,
+            )
+        };
         state.pane_manager.set_window_scroll(&window, target);
         state.pane_manager.clamp_scroll(&window);
     }
@@ -1227,6 +1241,31 @@ fn scroll_extent(total_lines: usize, page_size: usize) -> usize {
     }
 }
 
+/// The first line to show so that lines `lo..=hi` (1-indexed) sit centred on a page of
+/// `page_size` screen rows, a fifth from the top when they do not fit; `rows(i)` is how
+/// many rows line `i` (0-indexed) wraps to. The block is placed by rows, not by lines, so
+/// long lines above it cannot push it off the page.
+fn wrapped_block_scroll(
+    rows: impl Fn(usize) -> usize,
+    lo: usize,
+    hi: usize,
+    page_size: usize,
+) -> usize {
+    let first = lo.saturating_sub(1);
+    let block: usize = (first..hi).map(&rows).sum();
+    let mut above = if block <= page_size {
+        (page_size - block) / 2
+    } else {
+        page_size / 5
+    };
+    let mut scroll = first;
+    while scroll > 0 && rows(scroll - 1) <= above {
+        above -= rows(scroll - 1);
+        scroll -= 1;
+    }
+    scroll
+}
+
 /// The number of lines of the file `key`. The preview's scroll extent is not one: it
 /// counts the blank rows after the file (see `scroll_extent`).
 pub(crate) fn line_count(
@@ -1778,6 +1817,14 @@ mod paint_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A match is centred by screen rows: wrapped lines above it take their full height.
+    #[test]
+    fn wrapped_block_scroll_centres_by_rows() {
+        assert_eq!(wrapped_block_scroll(|_| 3, 50, 50, 21), 46);
+        assert_eq!(wrapped_block_scroll(|_| 1, 50, 50, 21), 39);
+        assert_eq!(wrapped_block_scroll(|_| 1, 2, 2, 21), 0);
+    }
 
     /// A preview of `rel` under a temp root, highlighted on lines 3-5 and 9.
     fn highlighted_preview(
