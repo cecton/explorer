@@ -282,9 +282,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
         let Some(window_id) = self.window_id(state) else {
             return Ok(EventPropagation::Propagate);
         };
-        if !state.git_logs.contains_key(&window_id) {
-            return Ok(EventPropagation::Propagate);
-        }
         let AppState {
             git_logs,
             git_refs,
@@ -292,7 +289,9 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
             repo,
             ..
         } = state;
-        let win = git_logs.get_mut(&window_id).expect("checked above");
+        let Some(win) = git_logs.get_mut(&window_id) else {
+            return Ok(EventPropagation::Propagate);
+        };
 
         if let InputEvent::Keyboard(KeyPress::Plain {
             key: Key::Character('/'),
@@ -435,11 +434,19 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Up),
+            })
+            | InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::ScrollUp,
+                ..
             }) if Self::move_selection(win, win.selected.saturating_sub(1), visible_len(win)) => {
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Down),
+            })
+            | InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::ScrollDown,
+                ..
             }) if Self::move_selection(win, win.selected + 1, visible_len(win)) => {
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -478,18 +485,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                 visible_len(win),
             ) =>
             {
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            InputEvent::Mouse(MouseInput {
-                kind: MouseInputKind::ScrollUp,
-                ..
-            }) if Self::move_selection(win, win.selected.saturating_sub(1), visible_len(win)) => {
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            InputEvent::Mouse(MouseInput {
-                kind: MouseInputKind::ScrollDown,
-                ..
-            }) if Self::move_selection(win, win.selected + 1, visible_len(win)) => {
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Mouse(MouseInput {
@@ -769,11 +764,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                         );
                         for (i, git_ref) in shown.iter().enumerate() {
                             if i > 0 {
-                                let sep_style = if is_selected {
-                                    normal_fg.on(selected_bg)
-                                } else {
-                                    normal_fg.on(bg)
-                                };
+                                let sep_style = normal_fg.on(background);
                                 render_ops += RenderOpCommon::ApplyColors(Some(sep_style));
                                 render_ops += RenderOpIR::PaintTextWithAttributes(
                                     " ".into(),
@@ -784,11 +775,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                                 RefKind::Tag => tag_fg,
                                 _ => branch_fg,
                             };
-                            let style = if is_selected {
-                                fg.on(selected_bg)
-                            } else {
-                                fg.on(bg)
-                            };
+                            let style = fg.on(background);
                             render_ops += RenderOpCommon::ApplyColors(Some(style));
                             render_ops += RenderOpIR::PaintTextWithAttributes(
                                 git_ref.name.clone().into(),
@@ -801,22 +788,14 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                                 _ => branch_fg,
                             };
                             if !shown.is_empty() {
-                                let sep_style = if is_selected {
-                                    normal_fg.on(selected_bg)
-                                } else {
-                                    normal_fg.on(bg)
-                                };
+                                let sep_style = normal_fg.on(background);
                                 render_ops += RenderOpCommon::ApplyColors(Some(sep_style));
                                 render_ops += RenderOpIR::PaintTextWithAttributes(
                                     " ".into(),
                                     Some(sep_style),
                                 );
                             }
-                            let style = if is_selected {
-                                fg.on(selected_bg)
-                            } else {
-                                fg.on(bg)
-                            };
+                            let style = fg.on(background);
                             render_ops += RenderOpCommon::ApplyColors(Some(style));
                             render_ops +=
                                 RenderOpIR::PaintTextWithAttributes("...".into(), Some(style));
