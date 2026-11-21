@@ -14,8 +14,7 @@ struct Shown<'a> {
 }
 
 impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
-    /// Routes one event: while the filter's input holds the keys it takes them all, the
-    /// tree's own keys run otherwise, and a click is hit-tested against the last render.
+    /// Routes one event to navigation, the open filter, the tree's keys or a click.
     pub(crate) fn handle_input(
         &mut self,
         state: &mut crate::tui::state::AppState,
