@@ -77,7 +77,7 @@ pub enum AppSignal {
     /// Change which Cargo features rust-analyzer analyzes. rust-analyzer doesn't
     /// hot-reload `cargo.*` settings, so applying this sends `LspInput::Restart` and the
     /// worker replaces its own process, keeping the old one on a failed handshake.
-    SetCargoFeatures(crate::config::CargoFeatureSelection),
+    SetCargoFeatures(crate::lsp::CargoFeatureSelection),
     /// Result of an async `git::load_log` run for git log window `id`.
     GitLogLoaded {
         id: usize,

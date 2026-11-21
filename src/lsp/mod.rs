@@ -21,7 +21,7 @@ pub enum LspInput {
         group_id: Option<usize>,
     },
     /// Restart rust-analyzer on another Cargo feature selection.
-    Restart(crate::config::CargoFeatureSelection),
+    Restart(CargoFeatureSelection),
 }
 
 pub static LSP_RRT: r3bl_tui::RRT<crate::lsp::worker::LspWorker> = r3bl_tui::RRT::new();
@@ -31,7 +31,7 @@ pub struct LspConfig {
     pub root: camino::Utf8PathBuf,
     pub files: std::sync::Arc<arc_swap::ArcSwap<Vec<std::sync::Arc<crate::loader::LoadedFile>>>>,
     pub app_tx: crate::signal::MainTx,
-    pub cargo_features: crate::config::CargoFeatureSelection,
+    pub cargo_features: CargoFeatureSelection,
 }
 
 impl std::fmt::Debug for LspConfig {
@@ -43,13 +43,25 @@ impl std::fmt::Debug for LspConfig {
     }
 }
 
+/// Which Cargo features rust-analyzer should analyze. Set via the `features` /
+/// `all-features` / `default-features` command line commands; changing it requires
+/// restarting the rust-analyzer process since these are initialization-time-only
+/// settings (rust-analyzer doesn't hot-reload `cargo.*` via `didChangeConfiguration`).
+#[derive(Clone, Debug, Default, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum CargoFeatureSelection {
+    #[default]
+    Default,
+    All,
+    Explicit {
+        no_default_features: bool,
+        features: Vec<String>,
+    },
+}
+
 /// The `initializationOptions` that make rust-analyzer analyze `selection`. `Default`
 /// omits the `cargo` key entirely, so rust-analyzer keeps its own default (the default
 /// features only).
-fn cargo_initialization_options(
-    selection: &crate::config::CargoFeatureSelection,
-) -> Option<serde_json::Value> {
-    use crate::config::CargoFeatureSelection;
+fn cargo_initialization_options(selection: &CargoFeatureSelection) -> Option<serde_json::Value> {
     match selection {
         CargoFeatureSelection::Default => None,
         CargoFeatureSelection::All => Some(serde_json::json!({
@@ -167,15 +179,13 @@ pub fn send_symbol_request(
 /// The Cargo features the last selection asked for, `None` before any command did. The
 /// engine rebuilds the worker from the config it was subscribed with, so a new selection
 /// only survives a restart (rust-analyzer crash, read error) if the worker reads it here.
-static CARGO_FEATURES: parking_lot::Mutex<Option<crate::config::CargoFeatureSelection>> =
+static CARGO_FEATURES: parking_lot::Mutex<Option<CargoFeatureSelection>> =
     parking_lot::const_mutex(None);
 
 /// The Cargo features a new rust-analyzer process starts with: the last selection, or
 /// `initial` — the one of the config the worker was subscribed with — when no command has
 /// selected any yet.
-pub(crate) fn cargo_features(
-    initial: &crate::config::CargoFeatureSelection,
-) -> crate::config::CargoFeatureSelection {
+pub(crate) fn cargo_features(initial: &CargoFeatureSelection) -> CargoFeatureSelection {
     CARGO_FEATURES
         .lock()
         .clone()
@@ -184,7 +194,7 @@ pub(crate) fn cargo_features(
 
 /// Restarts rust-analyzer on `selection`. Its `cargo.*` initialization options are only
 /// read once, so nothing short of a fresh process applies a new feature selection.
-pub fn set_cargo_features(selection: crate::config::CargoFeatureSelection) {
+pub fn set_cargo_features(selection: CargoFeatureSelection) {
     *CARGO_FEATURES.lock() = Some(selection.clone());
     send_lsp_input(LspInput::Restart(selection));
 }
@@ -243,7 +253,6 @@ pub(crate) fn byte_to_utf16(s: &str, byte_offset: usize) -> u32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::config::CargoFeatureSelection;
 
     #[test]
     fn byte_to_utf16_ascii() {

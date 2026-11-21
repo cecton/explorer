@@ -268,10 +268,7 @@ impl LspWorker {
     /// Restarts rust-analyzer on `selection`, the new process replacing the old one only
     /// once its handshake succeeded: a selection it cannot start under leaves the colors
     /// it already gave us in place.
-    fn restart_server(
-        &mut self,
-        selection: crate::config::CargoFeatureSelection,
-    ) -> Result<(), ()> {
+    fn restart_server(&mut self, selection: crate::lsp::CargoFeatureSelection) -> Result<(), ()> {
         tracing::info!("LSP: restarting rust-analyzer for {selection:?}");
         let server = match spawn_server(&self.root, &selection) {
             Ok(server) => server,
@@ -802,7 +799,7 @@ struct Server {
 /// Starts rust-analyzer on `root` and completes the handshake.
 fn spawn_server(
     root: &camino::Utf8Path,
-    selection: &crate::config::CargoFeatureSelection,
+    selection: &crate::lsp::CargoFeatureSelection,
 ) -> miette::Result<Server> {
     use lsp_types::notification::Notification;
     use lsp_types::request::Request;

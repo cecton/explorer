@@ -566,17 +566,17 @@ fn parse_line_ranges(text: &str, max: usize) -> Option<Vec<(usize, usize)>> {
 }
 
 fn run_all_features(run: &mut CommandRun<'_>) -> Result<(), String> {
-    use crate::config::CargoFeatureSelection;
+    use crate::lsp::CargoFeatureSelection;
     select_features(run, CargoFeatureSelection::All)
 }
 
 fn run_default_features(run: &mut CommandRun<'_>) -> Result<(), String> {
-    use crate::config::CargoFeatureSelection;
+    use crate::lsp::CargoFeatureSelection;
     select_features(run, CargoFeatureSelection::Default)
 }
 
 fn run_features(run: &mut CommandRun<'_>) -> Result<(), String> {
-    use crate::config::CargoFeatureSelection;
+    use crate::lsp::CargoFeatureSelection;
     let mut tokens = run.argument.split_whitespace().peekable();
     let no_default_features = tokens.next_if_eq(&"no-default").is_some();
     let features: Vec<String> = tokens.map(str::to_string).collect();
@@ -595,7 +595,7 @@ fn run_features(run: &mut CommandRun<'_>) -> Result<(), String> {
 /// Asks for rust-analyzer to restart with `selection`, once the line has closed.
 fn select_features(
     run: &mut CommandRun<'_>,
-    selection: crate::config::CargoFeatureSelection,
+    selection: crate::lsp::CargoFeatureSelection,
 ) -> Result<(), String> {
     use crate::signal::AppSignal;
     if crate::lsp::disabled() {

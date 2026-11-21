@@ -12,7 +12,7 @@ pub struct Session {
     pub symbol_highlights: Vec<SessionSymbolGroup>,
     /// Which Cargo features rust-analyzer analyzes for this project.
     #[serde(default)]
-    pub cargo_features: crate::config::CargoFeatureSelection,
+    pub cargo_features: crate::lsp::CargoFeatureSelection,
     /// Selected UI theme name for this project.
     #[serde(default)]
     pub theme: Option<String>,
@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn session_serialization_round_trip() {
-        use crate::config::CargoFeatureSelection;
+        use crate::lsp::CargoFeatureSelection;
         let session = Session {
             panes: vec![
                 PaneRecord {

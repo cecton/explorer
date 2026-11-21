@@ -491,7 +491,7 @@ pub struct AppState {
     /// Which Cargo features rust-analyzer analyzes; set via `features`/`all-features`/
     /// `default-features` on the global command line, persisted per-project in the
     /// session file.
-    pub cargo_features: crate::config::CargoFeatureSelection,
+    pub cargo_features: crate::lsp::CargoFeatureSelection,
 }
 
 impl AppState {
@@ -654,7 +654,7 @@ impl AppState {
         keymap: crate::tui::keymap::Keymap,
     ) -> Self {
         use crate::agent::mcp::McpHost;
-        use crate::config::CargoFeatureSelection;
+        use crate::lsp::CargoFeatureSelection;
         use crate::tui::pane_manager::PaneManager;
         use crate::tui::theme::HelixTheme;
         use crate::tui::widgets::fuzzy_picker::FuzzyPickerState;
