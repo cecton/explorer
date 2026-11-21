@@ -685,7 +685,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
         use crate::tui::selection::DocPart;
         use crate::tui::selection::SelPoint;
         use crate::tui::selection::TextSelection;
-        use crate::tui::theme::Color;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
             let bounds = current_box.style_adjusted_bounds.bounds_size;
@@ -798,28 +797,20 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             // never both: a selection hides the highlights, as in the file preview. A
             // selection is painted on the regular selection color with its foreground
             // auto-contrasted, a highlight on the marker color with the markdown colors.
-            let marked = |part: DocPart| -> (Vec<(usize, usize)>, Color, bool) {
-                match (selection, highlights) {
-                    (Some((selected, range)), _) if selected == part => {
-                        (vec![range], selection_bg, false)
-                    }
-                    (None, Some(highlights)) => (highlights.part(part).to_vec(), marker, true),
-                    _ => (Vec::new(), pane_bg, true),
-                }
-            };
-            let marks = [
-                marked(DocPart::Prompt),
-                marked(DocPart::WorkLog),
-                marked(DocPart::Reply),
-                marked(DocPart::Thinking),
-            ];
-            let marks_of = |part: Option<DocPart>| -> (&[(usize, usize)], Color, bool) {
-                match part {
-                    Some(DocPart::Prompt) => (&marks[0].0, marks[0].1, marks[0].2),
-                    Some(DocPart::WorkLog) => (&marks[1].0, marks[1].1, marks[1].2),
-                    Some(DocPart::Reply) => (&marks[2].0, marks[2].1, marks[2].2),
-                    Some(DocPart::Thinking) => (&marks[3].0, marks[3].1, marks[3].2),
-                    None => (&[], pane_bg, true),
+            let marks_of = |part: Option<DocPart>| -> crate::tui::widgets::markdown::Marks<'_> {
+                use crate::tui::widgets::markdown::Marks;
+                match (part, selection.as_ref(), highlights) {
+                    (Some(part), Some((selected, range)), _) if *selected == part => Marks {
+                        ranges: std::slice::from_ref(range),
+                        bg: selection_bg,
+                        keep_fg: false,
+                    },
+                    (Some(part), None, Some(highlights)) => Marks {
+                        ranges: highlights.part(part),
+                        bg: marker,
+                        keep_fg: true,
+                    },
+                    _ => Marks::none(pane_bg),
                 }
             };
 
@@ -855,44 +846,25 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
 
             let mut render_ops = RenderOpIRVec::new();
             for row_offset in 0..doc_rows {
-                match doc.line(scroll + row_offset) {
+                let (spans, part, bg) = match doc.line(scroll + row_offset) {
                     Some(line) => {
                         let bg = match line.part {
                             Some(DocPart::Prompt) => prompt_bg,
                             _ => line.bg.unwrap_or(pane_bg),
                         };
-                        let (marked, marked_bg, keep_fg) = marks_of(line.part);
-                        crate::tui::widgets::markdown::paint_row(
-                            &mut render_ops,
-                            origin,
-                            row_offset,
-                            &line.spans,
-                            &crate::tui::widgets::markdown::RowColors { fg: text_fg, bg },
-                            &crate::tui::widgets::markdown::Marks {
-                                ranges: marked,
-                                bg: marked_bg,
-                                keep_fg,
-                            },
-                            doc_width,
-                        );
+                        (&line.spans[..], line.part, bg)
                     }
-                    None => crate::tui::widgets::markdown::paint_row(
-                        &mut render_ops,
-                        origin,
-                        row_offset,
-                        &[],
-                        &crate::tui::widgets::markdown::RowColors {
-                            fg: text_fg,
-                            bg: pane_bg,
-                        },
-                        &crate::tui::widgets::markdown::Marks {
-                            ranges: &[],
-                            bg: pane_bg,
-                            keep_fg: false,
-                        },
-                        doc_width,
-                    ),
-                }
+                    None => (&[][..], None, pane_bg),
+                };
+                crate::tui::widgets::markdown::paint_row(
+                    &mut render_ops,
+                    origin,
+                    row_offset,
+                    spans,
+                    &crate::tui::widgets::markdown::RowColors { fg: text_fg, bg },
+                    &marks_of(part),
+                    doc_width,
+                );
             }
             if status_rows > 0 {
                 let fg = if alert { error_fg } else { status_fg };
@@ -904,11 +876,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                     doc_rows,
                     &span,
                     &crate::tui::widgets::markdown::RowColors { fg, bg: pane_bg },
-                    &crate::tui::widgets::markdown::Marks {
-                        ranges: &[],
-                        bg: pane_bg,
-                        keep_fg: false,
-                    },
+                    &crate::tui::widgets::markdown::Marks::none(pane_bg),
                     doc_width,
                 );
             }
