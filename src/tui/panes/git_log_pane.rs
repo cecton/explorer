@@ -38,9 +38,15 @@ impl GitLogPaneComponent {
         state: &mut crate::tui::state::AppState,
         main_tx: crate::signal::MainTx,
         id: [u8; 20],
+        summary: &str,
     ) {
         use crate::tui::pane_manager::Window;
         Self::load_commit_diff(state, main_tx, id);
+        if let Some(diff) = state.commit_diffs.get_mut(&id)
+            && diff.summary.is_empty()
+        {
+            diff.summary = summary.to_string();
+        }
         crate::tui::focus::focus_window(state, Window::CommitDiff(id));
         state.mark_session_dirty();
     }
@@ -513,7 +519,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                     win.search_active = false;
                     return Ok(EventPropagation::ConsumedRender);
                 }
-                open_commit = visible_entry_id(win);
+                open_commit = visible_entry(win);
             }
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Up),
@@ -594,8 +600,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
             return Ok(EventPropagation::ConsumedRender);
         }
 
-        if let Some(commit_id) = open_commit {
-            Self::open_commit_diff(state, main_tx, commit_id);
+        if let Some((commit_id, summary)) = open_commit {
+            Self::open_commit_diff(state, main_tx, commit_id, &summary);
             return Ok(EventPropagation::ConsumedRender);
         }
 
@@ -1055,7 +1061,7 @@ fn visible_len(win: &crate::tui::state::GitLogWindowState) -> usize {
     win.filtered.as_ref().map_or(total, |matches| matches.len())
 }
 
-fn visible_entry_id(win: &crate::tui::state::GitLogWindowState) -> Option<[u8; 20]> {
+fn visible_entry(win: &crate::tui::state::GitLogWindowState) -> Option<([u8; 20], String)> {
     let history = win.entries.as_ref()?;
     let entry_idx = match win.filtered.as_ref() {
         Some(matches) => *matches.get(win.selected)?,
@@ -1067,7 +1073,10 @@ fn visible_entry_id(win: &crate::tui::state::GitLogWindowState) -> Option<[u8; 2
             }
         }
     };
-    history.entries.get(entry_idx).map(|entry| entry.id)
+    history
+        .entries
+        .get(entry_idx)
+        .map(|entry| (entry.id, entry.summary.clone()))
 }
 
 /// The colors of a branch and a tag name: the `namespace` and `special` scopes, the tag

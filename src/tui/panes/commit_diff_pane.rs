@@ -336,4 +336,19 @@ mod tests {
             format!("commit {short} fix: a bug")
         );
     }
+
+    #[tokio::test]
+    async fn opening_a_diff_from_a_log_entry_shows_its_summary_before_the_load() {
+        use crate::git::short_id;
+        use crate::tui::panes::git_log_pane::GitLogPaneComponent;
+        use crate::tui::state::AppState;
+        let mut state = AppState::default();
+        let (main_tx, _rx) = tokio::sync::mpsc::channel(8);
+        let id = [7u8; 20];
+        GitLogPaneComponent::open_commit_diff(&mut state, main_tx, id, "fix: a bug");
+        assert_eq!(
+            CommitDiffPaneComponent::title(&state, id),
+            format!("commit {} fix: a bug", short_id(&id))
+        );
+    }
 }

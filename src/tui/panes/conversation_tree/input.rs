@@ -557,7 +557,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             })
             .unwrap_or_default();
         for commit in commits.into_iter().rev() {
-            GitLogPaneComponent::open_commit_diff(state, main_tx.clone(), commit);
+            GitLogPaneComponent::open_commit_diff(state, main_tx.clone(), commit, "");
         }
     }
 }
