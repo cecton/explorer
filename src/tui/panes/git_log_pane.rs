@@ -257,6 +257,169 @@ impl GitLogPaneComponent {
             1
         }
     }
+
+    /// Opens the branch list and loads the refs when they are not there yet.
+    fn start_branch_picking(
+        win: &mut crate::tui::state::GitLogWindowState,
+        git_refs: &Option<Arc<Vec<crate::git::GitRef>>>,
+        repo: &Option<gix::ThreadSafeRepository>,
+        main_tx: &crate::signal::MainTx,
+    ) {
+        use crate::signal::AppSignal;
+        win.branch_picking = true;
+        win.branch_picker.query.clear();
+        win.branch_picker.results.clear();
+        win.branch_picker.selected = None;
+        if git_refs.is_some() {
+            Self::refresh_branch_results(git_refs, win);
+        } else if let Some(repo) = repo.clone() {
+            let picker_tx = main_tx.clone();
+            tokio::task::spawn_blocking(move || {
+                let result = crate::git::load_refs(&repo).map(Arc::new);
+                crate::signal::send(&picker_tx, AppSignal::GitRefsLoaded(result));
+            });
+        } else {
+            crate::signal::send(
+                main_tx,
+                AppSignal::GitRefsLoaded(Err("open repository: not a git repository".to_string())),
+            );
+        }
+    }
+
+    /// Handles an event while the branch list is open.
+    fn handle_branch_picker_event(
+        &self,
+        win: &mut crate::tui::state::GitLogWindowState,
+        git_refs: &Option<Arc<Vec<crate::git::GitRef>>>,
+        repo: &Option<gix::ThreadSafeRepository>,
+        main_tx: crate::signal::MainTx,
+        window_id: usize,
+        input_event: &InputEvent,
+    ) -> EventPropagation {
+        use crate::tui::state::LogSource;
+        use crate::tui::widgets::fuzzy_picker::FuzzyPickerState;
+        match input_event {
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Esc),
+            }) => {
+                win.branch_picking = false;
+                win.branch_picker = FuzzyPickerState::default();
+                win.source = LogSource::Head;
+                Self::reload_log(repo.clone(), main_tx, window_id, &LogSource::Head);
+                return EventPropagation::ConsumedRender;
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key: Key::SpecialKey(SpecialKey::Enter),
+            }) => {
+                let picked = win
+                    .branch_picker
+                    .selected
+                    .or_else(|| win.branch_picker.results.first().copied())
+                    .and_then(|k| git_refs.as_ref().and_then(|refs| refs.get(k)))
+                    .map(|git_ref| git_ref.name.clone());
+                if let Some(name) = picked {
+                    win.branch_picking = false;
+                    win.branch_picker = FuzzyPickerState::default();
+                    win.source = LogSource::Branch(name.clone());
+                    win.query.clear();
+                    win.filtered = None;
+                    win.selected = 0;
+                    Self::reload_log(repo.clone(), main_tx, window_id, &win.source);
+                }
+                return EventPropagation::ConsumedRender;
+            }
+            InputEvent::Keyboard(KeyPress::Plain {
+                key:
+                    Key::SpecialKey(SpecialKey::Up)
+                    | Key::SpecialKey(SpecialKey::Down)
+                    | Key::SpecialKey(SpecialKey::PageUp)
+                    | Key::SpecialKey(SpecialKey::PageDown),
+            })
+            | InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::ScrollUp | MouseInputKind::ScrollDown,
+                ..
+            }) => {
+                win.branch_picker
+                    .navigate(input_event, self.content_row_count.max(1));
+                return EventPropagation::ConsumedRender;
+            }
+            InputEvent::Mouse(MouseInput {
+                kind: MouseInputKind::MouseDown(Button::Left),
+                pos,
+                ..
+            }) => {
+                let rel = pos
+                    .row_index
+                    .as_usize()
+                    .saturating_sub(self.content_origin_row);
+                let idx = win.branch_picker.scroll_offset + rel;
+                if let Some(k) = win.branch_picker.results.get(idx) {
+                    win.branch_picker.selected = Some(*k);
+                }
+                return EventPropagation::ConsumedRender;
+            }
+            _ => {}
+        }
+        if win.branch_picker.query.handle_key(input_event) {
+            Self::refresh_branch_results(git_refs, win);
+            return EventPropagation::ConsumedRender;
+        }
+        EventPropagation::Propagate
+    }
+
+    /// Paints the branch list over the log's rows.
+    fn render_branch_picker(
+        &mut self,
+        global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
+        window_id: usize,
+        origin: VPPos,
+        total_rows: usize,
+        pane_width: usize,
+    ) {
+        use crate::git::RefKind;
+        use crate::tui::widgets::fuzzy_picker::{PickerColors, PickerRow};
+        let state = &mut global_data.state;
+        // Builds only the rows in view, once the scroll offset follows the selection.
+        let (branch_rgb, tag_rgb) = ref_colors(&state.theme);
+        let shown = state
+            .git_logs
+            .get_mut(&window_id)
+            .map(|win| crate::tui::modal::list::visible(&mut win.branch_picker, total_rows));
+        let picked = shown.and_then(|view| {
+            let win = state.git_logs.get(&window_id)?;
+            let rows: Vec<PickerRow> = win.branch_picker.results[view.range]
+                .iter()
+                .map(
+                    |idx| match state.git_refs.as_ref().and_then(|refs| refs.get(*idx)) {
+                        Some(git_ref) => match git_ref.kind {
+                            RefKind::Tag => PickerRow::accented(git_ref.name.clone(), tag_rgb),
+                            _ => PickerRow::accented(git_ref.name.clone(), branch_rgb),
+                        },
+                        None => PickerRow::plain(""),
+                    },
+                )
+                .collect();
+            Some((
+                rows,
+                view.selected,
+                win.branch_picker.query.text().to_string(),
+            ))
+        });
+        let colors = PickerColors::in_pane(&state.theme);
+        if let Some((rows, selected, query)) = picked {
+            let picker_ops = self.branch_fuzzy.render_results(
+                colors,
+                &query,
+                &rows,
+                Some(selected),
+                0,
+                vp_col(origin.col_index.as_u16()) + vp_row(origin.row_index.as_u16()),
+                total_rows,
+                pane_width,
+            );
+            global_data.pipeline.push(ZOrder::Normal, picker_ops);
+        }
+    }
 }
 
 impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLogPaneComponent {
@@ -272,11 +435,8 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
         input_event: InputEvent,
         _has_focus: &mut HasFocus,
     ) -> CommonResult<EventPropagation> {
-        use crate::signal::AppSignal;
         use crate::tui::pane_manager::Window;
         use crate::tui::state::AppState;
-        use crate::tui::state::LogSource;
-        use crate::tui::widgets::fuzzy_picker::FuzzyPickerState;
         let main_tx = global_data.main_thread_channel_sender.clone();
         let state = &mut global_data.state;
         let Some(window_id) = self.window_id(state) else {
@@ -314,97 +474,19 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
             && !win.search_active
             && !win.branch_picking
         {
-            win.branch_picking = true;
-            win.branch_picker.query.clear();
-            win.branch_picker.results.clear();
-            win.branch_picker.selected = None;
-            if git_refs.is_some() {
-                Self::refresh_branch_results(git_refs, win);
-            } else if let Some(repo) = repo.clone() {
-                let picker_tx = main_tx.clone();
-                tokio::task::spawn_blocking(move || {
-                    let result = crate::git::load_refs(&repo).map(Arc::new);
-                    crate::signal::send(&picker_tx, AppSignal::GitRefsLoaded(result));
-                });
-            } else {
-                crate::signal::send(
-                    &main_tx,
-                    AppSignal::GitRefsLoaded(Err(
-                        "open repository: not a git repository".to_string()
-                    )),
-                );
-            }
+            Self::start_branch_picking(win, git_refs, repo, &main_tx);
             return Ok(EventPropagation::ConsumedRender);
         }
 
         if win.branch_picking {
-            match &input_event {
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::Esc),
-                }) => {
-                    win.branch_picking = false;
-                    win.branch_picker = FuzzyPickerState::default();
-                    win.source = LogSource::Head;
-                    Self::reload_log(repo.clone(), main_tx, window_id, &LogSource::Head);
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key: Key::SpecialKey(SpecialKey::Enter),
-                }) => {
-                    let picked = win
-                        .branch_picker
-                        .selected
-                        .or_else(|| win.branch_picker.results.first().copied())
-                        .and_then(|k| git_refs.as_ref().and_then(|refs| refs.get(k)))
-                        .map(|git_ref| git_ref.name.clone());
-                    if let Some(name) = picked {
-                        win.branch_picking = false;
-                        win.branch_picker = FuzzyPickerState::default();
-                        win.source = LogSource::Branch(name.clone());
-                        win.query.clear();
-                        win.filtered = None;
-                        win.selected = 0;
-                        Self::reload_log(repo.clone(), main_tx, window_id, &win.source);
-                    }
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                InputEvent::Keyboard(KeyPress::Plain {
-                    key:
-                        Key::SpecialKey(SpecialKey::Up)
-                        | Key::SpecialKey(SpecialKey::Down)
-                        | Key::SpecialKey(SpecialKey::PageUp)
-                        | Key::SpecialKey(SpecialKey::PageDown),
-                })
-                | InputEvent::Mouse(MouseInput {
-                    kind: MouseInputKind::ScrollUp | MouseInputKind::ScrollDown,
-                    ..
-                }) => {
-                    win.branch_picker
-                        .navigate(&input_event, self.content_row_count.max(1));
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                InputEvent::Mouse(MouseInput {
-                    kind: MouseInputKind::MouseDown(Button::Left),
-                    pos,
-                    ..
-                }) => {
-                    let rel = pos
-                        .row_index
-                        .as_usize()
-                        .saturating_sub(self.content_origin_row);
-                    let idx = win.branch_picker.scroll_offset + rel;
-                    if let Some(k) = win.branch_picker.results.get(idx) {
-                        win.branch_picker.selected = Some(*k);
-                    }
-                    return Ok(EventPropagation::ConsumedRender);
-                }
-                _ => {}
-            }
-            if win.branch_picker.query.handle_key(&input_event) {
-                Self::refresh_branch_results(git_refs, win);
-                return Ok(EventPropagation::ConsumedRender);
-            }
-            return Ok(EventPropagation::Propagate);
+            return Ok(self.handle_branch_picker_event(
+                win,
+                git_refs,
+                repo,
+                main_tx,
+                window_id,
+                &input_event,
+            ));
         }
 
         let mut open_commit = None;
@@ -526,7 +608,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
         _surface_bounds: VPBoundingBox,
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
-        use crate::git::RefKind;
         use crate::tui::pane_manager::Window;
         throws!({
             let Some(window_id) = self.window_id(&global_data.state) else {
@@ -582,63 +663,18 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
             let ui = &state.theme.ui;
             let bg = ui.background;
             let bg_style = ui.text.on(bg);
-            let selected_bg = ui.selection;
             let normal_fg = ui.text;
             let error_fg = ui.error;
-            let selected_text_style = normal_fg.on(selected_bg);
+            let area = LogArea {
+                origin,
+                pane_width,
+                total_rows,
+            };
 
             let mut render_ops = RenderOpIRVec::new();
 
             if branch_picking {
-                // Builds only the rows in view, once the scroll offset follows the selection.
-                let (branch_rgb, tag_rgb) = ref_colors(&state.theme);
-                let shown = state.git_logs.get_mut(&window_id).map(|win| {
-                    crate::tui::modal::list::visible(&mut win.branch_picker, total_rows)
-                });
-                let picked = shown.and_then(|view| {
-                    let win = state.git_logs.get(&window_id)?;
-                    let rows: Vec<crate::tui::widgets::fuzzy_picker::PickerRow> = win
-                        .branch_picker
-                        .results[view.range]
-                        .iter()
-                        .map(
-                            |idx| match state.git_refs.as_ref().and_then(|refs| refs.get(*idx)) {
-                                Some(git_ref) => match git_ref.kind {
-                                    RefKind::Tag => {
-                                        crate::tui::widgets::fuzzy_picker::PickerRow::accented(
-                                            git_ref.name.clone(),
-                                            tag_rgb,
-                                        )
-                                    }
-                                    _ => crate::tui::widgets::fuzzy_picker::PickerRow::accented(
-                                        git_ref.name.clone(),
-                                        branch_rgb,
-                                    ),
-                                },
-                                None => crate::tui::widgets::fuzzy_picker::PickerRow::plain(""),
-                            },
-                        )
-                        .collect();
-                    Some((
-                        rows,
-                        view.selected,
-                        win.branch_picker.query.text().to_string(),
-                    ))
-                });
-                let colors = crate::tui::widgets::fuzzy_picker::PickerColors::in_pane(&state.theme);
-                if let Some((rows, selected, query)) = picked {
-                    let picker_ops = self.branch_fuzzy.render_results(
-                        colors,
-                        &query,
-                        &rows,
-                        Some(selected),
-                        0,
-                        vp_col(origin.col_index.as_u16()) + vp_row(origin.row_index.as_u16()),
-                        total_rows,
-                        pane_width,
-                    );
-                    global_data.pipeline.push(ZOrder::Normal, picker_ops);
-                }
+                self.render_branch_picker(global_data, window_id, origin, total_rows, pane_width);
             } else if visible == 0 {
                 let message = if let Some(err) = error {
                     (format!("error: {err}"), error_fg)
@@ -649,163 +685,211 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for GitLog
                 } else {
                     ("(no commits)".to_string(), normal_fg)
                 };
-                let message_style = message.1.on(bg);
-                for row_offset in 0..total_rows {
-                    render_ops += RenderOpCommon::MoveCursorPositionRelTo(
-                        origin,
-                        vp_col(0) + vp_row(row_offset as u16),
-                    );
-                    render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
-                    render_ops += RenderOpIR::PaintTextWithAttributes(
-                        " ".repeat(pane_width).into(),
-                        Some(bg_style),
-                    );
-                    if row_offset == 0 {
-                        render_ops +=
-                            RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
-                        render_ops += RenderOpCommon::ApplyColors(Some(message_style));
-                        render_ops += RenderOpIR::PaintTextWithAttributes(
-                            message.0.clone().into(),
-                            Some(message_style),
-                        );
-                    }
-                }
+                paint_log_message(
+                    &mut render_ops,
+                    &area,
+                    &message.0,
+                    message.1.on(bg),
+                    bg_style,
+                );
             } else {
                 let history = entries.as_ref().expect("visible > 0 implies entries");
-                let match_fg = ui.matched;
-                let linenum_bg = ui.line_number_bg;
-                let linenum_selected_fg = if linenum_bg == ui.selection {
-                    ui.cursor
-                } else {
-                    ui.selection_fg
+                let rows = LogRows {
+                    history,
+                    scroll,
+                    selected,
+                    entries: &row_entries,
+                    matches: &row_matches,
                 };
-                let linenum_normal_style = ui.line_number.on(linenum_bg);
-                let linenum_selected_style = linenum_selected_fg.on(linenum_bg);
-                let (branch_fg, tag_fg) = ref_colors(&state.theme);
-                for row_offset in 0..total_rows {
-                    let vis_idx = scroll + row_offset;
-                    render_ops += RenderOpCommon::MoveCursorPositionRelTo(
-                        origin,
-                        vp_col(0) + vp_row(row_offset as u16),
-                    );
-                    let is_selected = vis_idx == selected;
-                    let row_style = if is_selected {
-                        selected_text_style
-                    } else {
-                        bg_style
-                    };
-                    render_ops += RenderOpCommon::ApplyColors(Some(row_style));
-                    render_ops += RenderOpIR::PaintTextWithAttributes(
-                        " ".repeat(pane_width).into(),
-                        Some(row_style),
-                    );
-                    let Some(&entry_idx) = row_entries.get(row_offset) else {
-                        continue;
-                    };
-                    let Some(entry) = history.entries.get(entry_idx) else {
-                        continue;
-                    };
-                    let matches = row_matches.get(row_offset).map_or(&[][..], Vec::as_slice);
-                    let (left, summary) = log_row_parts(entry, pane_width);
-                    let left_width = crate::tui::widgets::text_layout::display_width(&left);
-                    render_ops += RenderOpCommon::MoveCursorPositionRelTo(
-                        origin,
-                        vp_col(0) + vp_row(row_offset as u16),
-                    );
-                    let left_style = if is_selected {
-                        linenum_selected_style
-                    } else {
-                        linenum_normal_style
-                    };
-                    render_ops += RenderOpCommon::ApplyColors(Some(left_style));
-                    render_ops +=
-                        RenderOpIR::PaintTextWithAttributes(left.into(), Some(left_style));
-
-                    let type_span = crate::git::commit_type_prefix(&summary).map(|(ty, len)| {
-                        (
-                            summary.char_indices().take_while(|(b, _)| *b < len).count(),
-                            commit_type_color(&state.theme, ty),
-                        )
-                    });
-
-                    let background = if is_selected { selected_bg } else { bg };
-                    let style_of = |char_i: usize| {
-                        let fg = match type_span.as_ref() {
-                            Some((len, color)) if char_i < *len => *color,
-                            _ if crate::tui::widgets::fuzzy::matched(matches, char_i) => match_fg,
-                            _ => normal_fg,
-                        };
-                        fg.on(background)
-                    };
-                    crate::tui::widgets::fuzzy::paint_runs(&mut render_ops, &summary, style_of);
-
-                    if let Some(entry_refs) = history.refs.get(&entry.id) {
-                        let available = pane_width
-                            .saturating_sub(left_width)
-                            .saturating_sub(crate::tui::widgets::text_layout::display_width(
-                                &summary,
-                            ))
-                            .saturating_sub(2);
-                        let (shown, ellipsis_kind) = layout_refs(available, entry_refs);
-                        let names_width = shown
-                            .iter()
-                            .map(|r| crate::tui::widgets::text_layout::display_width(&r.name))
-                            .sum::<usize>()
-                            + shown.len().saturating_sub(1);
-                        let ell_width = match ellipsis_kind {
-                            Some(_) if shown.is_empty() => 3,
-                            Some(_) => 4,
-                            None => 0,
-                        };
-                        let start = pane_width.saturating_sub(names_width + ell_width);
-                        render_ops += RenderOpCommon::MoveCursorPositionRelTo(
-                            origin,
-                            vp_col(start as u16) + vp_row(row_offset as u16),
-                        );
-                        for (i, git_ref) in shown.iter().enumerate() {
-                            if i > 0 {
-                                let sep_style = normal_fg.on(background);
-                                render_ops += RenderOpCommon::ApplyColors(Some(sep_style));
-                                render_ops += RenderOpIR::PaintTextWithAttributes(
-                                    " ".into(),
-                                    Some(sep_style),
-                                );
-                            }
-                            let fg = match git_ref.kind {
-                                RefKind::Tag => tag_fg,
-                                _ => branch_fg,
-                            };
-                            let style = fg.on(background);
-                            render_ops += RenderOpCommon::ApplyColors(Some(style));
-                            render_ops += RenderOpIR::PaintTextWithAttributes(
-                                git_ref.name.clone().into(),
-                                Some(style),
-                            );
-                        }
-                        if let Some(kind) = ellipsis_kind {
-                            let fg = match kind {
-                                RefKind::Tag => tag_fg,
-                                _ => branch_fg,
-                            };
-                            if !shown.is_empty() {
-                                let sep_style = normal_fg.on(background);
-                                render_ops += RenderOpCommon::ApplyColors(Some(sep_style));
-                                render_ops += RenderOpIR::PaintTextWithAttributes(
-                                    " ".into(),
-                                    Some(sep_style),
-                                );
-                            }
-                            let style = fg.on(background);
-                            render_ops += RenderOpCommon::ApplyColors(Some(style));
-                            render_ops +=
-                                RenderOpIR::PaintTextWithAttributes("...".into(), Some(style));
-                        }
-                    }
-                }
+                paint_log_rows(&mut render_ops, &state.theme, &area, &rows);
             }
 
             global_data.pipeline.push(ZOrder::Normal, render_ops);
         });
+    }
+}
+
+/// The area of the log's rows in a frame.
+struct LogArea {
+    origin: VPPos,
+    pane_width: usize,
+    total_rows: usize,
+}
+
+/// What a frame paints in the log's rows, one entry per row.
+struct LogRows<'a> {
+    history: &'a crate::git::LogHistory,
+    scroll: usize,
+    selected: usize,
+    entries: &'a [usize],
+    matches: &'a [Vec<u32>],
+}
+
+/// Blanks the area and writes `text` on its first row.
+fn paint_log_message(
+    render_ops: &mut RenderOpIRVec,
+    area: &LogArea,
+    text: &str,
+    message_style: TuiStyle,
+    bg_style: TuiStyle,
+) {
+    let LogArea {
+        origin,
+        pane_width,
+        total_rows,
+    } = *area;
+    for row_offset in 0..total_rows {
+        *render_ops +=
+            RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(row_offset as u16));
+        *render_ops += RenderOpCommon::ApplyColors(Some(bg_style));
+        *render_ops +=
+            RenderOpIR::PaintTextWithAttributes(" ".repeat(pane_width).into(), Some(bg_style));
+        if row_offset == 0 {
+            *render_ops += RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(0));
+            *render_ops += RenderOpCommon::ApplyColors(Some(message_style));
+            *render_ops +=
+                RenderOpIR::PaintTextWithAttributes(text.to_string().into(), Some(message_style));
+        }
+    }
+}
+
+/// Paints the log's rows: the selection stripe, the line-number column, the summary and the refs.
+fn paint_log_rows(
+    render_ops: &mut RenderOpIRVec,
+    theme: &crate::tui::theme::HelixTheme,
+    area: &LogArea,
+    rows: &LogRows,
+) {
+    use crate::git::RefKind;
+    let LogArea {
+        origin,
+        pane_width,
+        total_rows,
+    } = *area;
+    let LogRows {
+        history,
+        scroll,
+        selected,
+        entries: row_entries,
+        matches: row_matches,
+    } = *rows;
+    let ui = &theme.ui;
+    let bg = ui.background;
+    let bg_style = ui.text.on(bg);
+    let selected_bg = ui.selection;
+    let normal_fg = ui.text;
+    let selected_text_style = normal_fg.on(selected_bg);
+    let match_fg = ui.matched;
+    let linenum_bg = ui.line_number_bg;
+    let linenum_selected_fg = if linenum_bg == ui.selection {
+        ui.cursor
+    } else {
+        ui.selection_fg
+    };
+    let linenum_normal_style = ui.line_number.on(linenum_bg);
+    let linenum_selected_style = linenum_selected_fg.on(linenum_bg);
+    let (branch_fg, tag_fg) = ref_colors(theme);
+    for row_offset in 0..total_rows {
+        let vis_idx = scroll + row_offset;
+        *render_ops +=
+            RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(row_offset as u16));
+        let is_selected = vis_idx == selected;
+        let row_style = if is_selected {
+            selected_text_style
+        } else {
+            bg_style
+        };
+        *render_ops += RenderOpCommon::ApplyColors(Some(row_style));
+        *render_ops +=
+            RenderOpIR::PaintTextWithAttributes(" ".repeat(pane_width).into(), Some(row_style));
+        let Some(&entry_idx) = row_entries.get(row_offset) else {
+            continue;
+        };
+        let Some(entry) = history.entries.get(entry_idx) else {
+            continue;
+        };
+        let matches = row_matches.get(row_offset).map_or(&[][..], Vec::as_slice);
+        let (left, summary) = log_row_parts(entry, pane_width);
+        let left_width = crate::tui::widgets::text_layout::display_width(&left);
+        *render_ops +=
+            RenderOpCommon::MoveCursorPositionRelTo(origin, vp_col(0) + vp_row(row_offset as u16));
+        let left_style = if is_selected {
+            linenum_selected_style
+        } else {
+            linenum_normal_style
+        };
+        *render_ops += RenderOpCommon::ApplyColors(Some(left_style));
+        *render_ops += RenderOpIR::PaintTextWithAttributes(left.into(), Some(left_style));
+
+        let type_span = crate::git::commit_type_prefix(&summary).map(|(ty, len)| {
+            (
+                summary.char_indices().take_while(|(b, _)| *b < len).count(),
+                commit_type_color(theme, ty),
+            )
+        });
+
+        let background = if is_selected { selected_bg } else { bg };
+        let style_of = |char_i: usize| {
+            let fg = match type_span.as_ref() {
+                Some((len, color)) if char_i < *len => *color,
+                _ if crate::tui::widgets::fuzzy::matched(matches, char_i) => match_fg,
+                _ => normal_fg,
+            };
+            fg.on(background)
+        };
+        crate::tui::widgets::fuzzy::paint_runs(render_ops, &summary, style_of);
+
+        if let Some(entry_refs) = history.refs.get(&entry.id) {
+            let available = pane_width
+                .saturating_sub(left_width)
+                .saturating_sub(crate::tui::widgets::text_layout::display_width(&summary))
+                .saturating_sub(2);
+            let (shown, ellipsis_kind) = layout_refs(available, entry_refs);
+            let names_width = shown
+                .iter()
+                .map(|r| crate::tui::widgets::text_layout::display_width(&r.name))
+                .sum::<usize>()
+                + shown.len().saturating_sub(1);
+            let ell_width = match ellipsis_kind {
+                Some(_) if shown.is_empty() => 3,
+                Some(_) => 4,
+                None => 0,
+            };
+            let start = pane_width.saturating_sub(names_width + ell_width);
+            *render_ops += RenderOpCommon::MoveCursorPositionRelTo(
+                origin,
+                vp_col(start as u16) + vp_row(row_offset as u16),
+            );
+            for (i, git_ref) in shown.iter().enumerate() {
+                if i > 0 {
+                    let sep_style = normal_fg.on(background);
+                    *render_ops += RenderOpCommon::ApplyColors(Some(sep_style));
+                    *render_ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(sep_style));
+                }
+                let fg = match git_ref.kind {
+                    RefKind::Tag => tag_fg,
+                    _ => branch_fg,
+                };
+                let style = fg.on(background);
+                *render_ops += RenderOpCommon::ApplyColors(Some(style));
+                *render_ops +=
+                    RenderOpIR::PaintTextWithAttributes(git_ref.name.clone().into(), Some(style));
+            }
+            if let Some(kind) = ellipsis_kind {
+                let fg = match kind {
+                    RefKind::Tag => tag_fg,
+                    _ => branch_fg,
+                };
+                if !shown.is_empty() {
+                    let sep_style = normal_fg.on(background);
+                    *render_ops += RenderOpCommon::ApplyColors(Some(sep_style));
+                    *render_ops += RenderOpIR::PaintTextWithAttributes(" ".into(), Some(sep_style));
+                }
+                let style = fg.on(background);
+                *render_ops += RenderOpCommon::ApplyColors(Some(style));
+                *render_ops += RenderOpIR::PaintTextWithAttributes("...".into(), Some(style));
+            }
+        }
     }
 }
 
