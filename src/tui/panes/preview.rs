@@ -426,10 +426,7 @@ impl FilePreviewComponent {
             MouseInputKind::MouseDown(Button::Left) if in_content_rows && in_content_cols => {
                 if let Some(modifier) = crate::tui::selection::drag_modifier_from_mouse(&mouse) {
                     let state = &mut global_data.state;
-                    let window = Window::FilePreview(key);
-                    let scroll = state.pane_manager.window_scroll(&window);
-                    let rel_y = row.saturating_sub(origin_row);
-                    let line = (scroll + rel_y + 1).clamp(1, line_count(state, key).max(1));
+                    let line = self.line_at_row(state, key, row);
 
                     self.preview_drag_active = true;
                     self.start_drag(state, key, line, modifier);
@@ -482,17 +479,11 @@ impl FilePreviewComponent {
                             let byte_in_line = cursor_byte - data.line_starts[line_idx];
                             let character = crate::lsp::byte_to_utf16(line, byte_in_line);
 
-                            let hit = state.symbol_highlights.iter().position(|g| {
-                                !(g.needs_rebuild && g.locations.is_empty())
-                                    && ((g.origin_file == key
-                                        && g.origin_byte_start.is_some_and(|s| cursor_byte >= s)
-                                        && g.origin_byte_end.is_some_and(|e| cursor_byte < e))
-                                        || g.locations.iter().any(|l| {
-                                            l.file_key == key
-                                                && cursor_byte >= l.start_byte
-                                                && cursor_byte < l.end_byte
-                                        }))
-                            });
+                            let hit = crate::tui::symbols::group_at(
+                                &state.symbol_highlights,
+                                key,
+                                cursor_byte,
+                            );
 
                             if let Some(idx) = hit {
                                 state.symbol_highlights.remove(idx);
@@ -598,10 +589,7 @@ impl FilePreviewComponent {
             }
             MouseInputKind::MouseDrag(Button::Left) if self.preview_drag_active => {
                 let state = &mut global_data.state;
-                let window = Window::FilePreview(key);
-                let scroll = state.pane_manager.window_scroll(&window);
-                let rel_y = row.saturating_sub(origin_row);
-                let line = (scroll + rel_y + 1).clamp(1, line_count(state, key).max(1));
+                let line = self.line_at_row(state, key, row);
 
                 let before = state.highlights(key).to_vec();
                 self.update_drag(state, key, line);
@@ -674,6 +662,19 @@ impl FilePreviewComponent {
             state.mouse_drag_active = false;
             self.clicks.clear();
         }
+    }
+
+    /// The 1-based file line the content row `row` of the screen lands on, clamped to the file.
+    fn line_at_row(
+        &self,
+        state: &crate::tui::state::AppState,
+        key: crate::loader::FileKey,
+        row: usize,
+    ) -> usize {
+        use crate::tui::pane_manager::Window;
+        let scroll = state.pane_manager.window_scroll(&Window::FilePreview(key));
+        let rel_y = row.saturating_sub(self.content_origin_row);
+        (scroll + rel_y + 1).clamp(1, line_count(state, key).max(1))
     }
 
     /// Maps a screen position relative to the preview content origin to a
@@ -926,7 +927,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
         _has_focus: &mut HasFocus,
     ) -> CommonResult {
         use crate::tui::pane_manager::Window;
-        use crate::tui::selection::SelPoint;
         use crate::tui::theme::Color;
         throws!({
             let origin = current_box.style_adjusted_bounds.origin_pos;
@@ -985,45 +985,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
             let line_num_style = ui.line_number.on(pane_bg);
             let hl_line_num_style = ui.selection_fg.on(ui.line_number_bg);
 
-            let text_drag_lo;
-            let text_drag_hi;
-            let text_drag_single;
-            let text_drag_single_lo;
-            let text_drag_single_hi;
-            let has_text_selection = global_data
-                .state
-                .text_selection
-                .as_ref()
-                .is_some_and(|sel| sel.window == window);
-            if has_text_selection {
-                let (s, e) = match (
-                    global_data.state.text_selection.as_ref().unwrap().start,
-                    global_data.state.text_selection.as_ref().unwrap().end,
-                ) {
-                    (
-                        SelPoint::Preview {
-                            line_idx: s_line,
-                            byte_offset: s_byte,
-                        },
-                        SelPoint::Preview {
-                            line_idx: e_line,
-                            byte_offset: e_byte,
-                        },
-                    ) => ((s_line, s_byte), (e_line, e_byte)),
-                    _ => ((0, 0), (0, 0)),
-                };
-                text_drag_lo = s.0.min(e.0);
-                text_drag_hi = s.0.max(e.0);
-                text_drag_single = s.0 == e.0;
-                text_drag_single_lo = if text_drag_single { s.1.min(e.1) } else { 0 };
-                text_drag_single_hi = if text_drag_single { s.1.max(e.1) } else { 0 };
-            } else {
-                text_drag_lo = 0;
-                text_drag_hi = 0;
-                text_drag_single = false;
-                text_drag_single_lo = 0;
-                text_drag_single_hi = 0;
-            }
+            let selected = selected_lines(state, &window);
 
             // The symbol highlight ranges of this file, once per frame rather than once per
             // wrapped sub-row: absolute byte ranges with the colour of their group.
@@ -1039,21 +1001,15 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                 })
                 .collect();
 
-            let mut overlays: Vec<(usize, usize, Color, Option<Color>)> = Vec::new();
-            let mut intervals: Vec<(usize, usize, Color, Option<Color>)> = Vec::with_capacity(8);
+            let mut overlays: Vec<Overlay> = Vec::new();
+            let mut intervals: Vec<Overlay> = Vec::with_capacity(8);
             let mut rendered = 0usize;
             'rendered: for line_idx in scroll..total_lines {
                 let line = data.line(line_idx);
                 let line_byte_start = data.line_starts[line_idx];
-                let line_byte_end = line_byte_start + line.len();
-                let is_text_drag_multi = has_text_selection
-                    && !text_drag_single
-                    && line_idx >= text_drag_lo
-                    && line_idx <= text_drag_hi;
-                let is_text_drag_single =
-                    has_text_selection && text_drag_single && line_idx == text_drag_lo;
+                let is_text_drag_multi = selected.is_some_and(|sel| sel.covers_whole(line_idx));
                 let is_hl =
-                    !has_text_selection && Self::is_line_highlighted(state, file_key, line_idx + 1);
+                    selected.is_none() && Self::is_line_highlighted(state, file_key, line_idx + 1);
                 let row_bg_style = if is_text_drag_multi || is_hl {
                     hl_bg_style
                 } else {
@@ -1070,54 +1026,23 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
                     pane_bg
                 };
 
-                // What this line paints over its default background, once per line rather than
-                // once per sub-row: symbol highlights, then search matches (which win over them),
-                // then the selection (which wins over both). Left empty for a fully selected row
-                // so the selection's background stays uniform. Line-local bytes.
+                // Once per line; a fully selected row gets none, so its background stays uniform.
                 overlays.clear();
                 if !is_text_drag_multi {
-                    for &(start, end, color) in &symbol_ranges {
-                        if end <= line_byte_start || start >= line_byte_end {
-                            continue;
-                        }
-                        overlays.push((
-                            start.max(line_byte_start) - line_byte_start,
-                            end.min(line_byte_end) - line_byte_start,
-                            color,
-                            None,
-                        ));
-                    }
-                    if let Some(search) = state
-                        .previews
-                        .get(&file_key)
-                        .and_then(|p| p.search.as_ref())
-                    {
-                        for m in search.regex.find_iter(line) {
-                            if m.start() >= m.end() {
-                                continue;
-                            }
-                            let is_current = search.current == Some((line_idx, m.start()));
-                            let (bg, fg) = if is_current {
-                                (SEARCH_CURRENT, SEARCH_CURRENT_FG)
-                            } else {
-                                (SEARCH_MATCH, SEARCH_MATCH_FG)
-                            };
-                            overlays.push((
-                                m.start(),
-                                m.end(),
-                                Color::Rgb(bg),
-                                Some(Color::Rgb(fg)),
-                            ));
-                        }
-                    }
-                    if is_text_drag_single {
-                        overlays.push((
-                            text_drag_single_lo.saturating_sub(line_byte_start),
-                            text_drag_single_hi.saturating_sub(line_byte_start),
-                            hl_rgb,
-                            None,
-                        ));
-                    }
+                    line_overlays(
+                        &mut overlays,
+                        line,
+                        line_idx,
+                        line_byte_start,
+                        &symbol_ranges,
+                        state
+                            .previews
+                            .get(&file_key)
+                            .and_then(|preview| preview.search.as_ref()),
+                        selected
+                            .and_then(|sel| sel.bytes_in(line_idx))
+                            .map(|(lo, hi)| (lo, hi, hl_rgb)),
+                    );
                 }
 
                 let mut seg_start = 0usize;
@@ -1212,6 +1137,118 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for FilePr
 
             global_data.pipeline.push(ZOrder::Normal, render_ops);
         });
+    }
+}
+
+/// A line-local byte span painted over the background: start, end, background, fixed foreground.
+type Overlay = (
+    usize,
+    usize,
+    crate::tui::theme::Color,
+    Option<crate::tui::theme::Color>,
+);
+
+/// The lines the text selection of a window spans, in file order.
+#[derive(Clone, Copy)]
+struct SelectedLines {
+    first: usize,
+    last: usize,
+    /// The absolute bytes of a selection inside one line.
+    within_line: Option<(usize, usize)>,
+}
+
+impl SelectedLines {
+    /// Whether `line_idx` is selected end to end, as a line of a selection over several.
+    fn covers_whole(self, line_idx: usize) -> bool {
+        self.within_line.is_none() && (self.first..=self.last).contains(&line_idx)
+    }
+
+    /// The absolute bytes selected on `line_idx`, when the selection sits inside that line.
+    fn bytes_in(self, line_idx: usize) -> Option<(usize, usize)> {
+        self.within_line.filter(|_| self.first == line_idx)
+    }
+}
+
+/// The lines selected in `window`, or `None` when the text selection is another window's.
+fn selected_lines(
+    state: &crate::tui::state::AppState,
+    window: &crate::tui::pane_manager::Window,
+) -> Option<SelectedLines> {
+    use crate::tui::selection::SelPoint;
+    let selection = state
+        .text_selection
+        .as_ref()
+        .filter(|selection| selection.window == *window)?;
+    let (start, end) = match (selection.start, selection.end) {
+        (
+            SelPoint::Preview {
+                line_idx: start_line,
+                byte_offset: start_byte,
+            },
+            SelPoint::Preview {
+                line_idx: end_line,
+                byte_offset: end_byte,
+            },
+        ) => ((start_line, start_byte), (end_line, end_byte)),
+        _ => ((0, 0), (0, 0)),
+    };
+    let within_line = (start.0 == end.0).then(|| (start.1.min(end.1), start.1.max(end.1)));
+    Some(SelectedLines {
+        first: start.0.min(end.0),
+        last: start.0.max(end.0),
+        within_line,
+    })
+}
+
+/// Pushes what `line` paints over its background, symbols then search matches then `selected`.
+fn line_overlays(
+    overlays: &mut Vec<Overlay>,
+    line: &str,
+    line_idx: usize,
+    line_byte_start: usize,
+    symbol_ranges: &[(usize, usize, crate::tui::theme::Color)],
+    search: Option<&crate::tui::state::PreviewSearch>,
+    selected: Option<(usize, usize, crate::tui::theme::Color)>,
+) {
+    use crate::tui::theme::Color;
+    let line_byte_end = line_byte_start + line.len();
+    for &(start, end, color) in symbol_ranges {
+        if end <= line_byte_start || start >= line_byte_end {
+            continue;
+        }
+        overlays.push((
+            start.max(line_byte_start) - line_byte_start,
+            end.min(line_byte_end) - line_byte_start,
+            color,
+            None,
+        ));
+    }
+    if let Some(search) = search {
+        for found in search.regex.find_iter(line) {
+            if found.start() >= found.end() {
+                continue;
+            }
+            let is_current = search.current == Some((line_idx, found.start()));
+            let (bg, fg) = if is_current {
+                (SEARCH_CURRENT, SEARCH_CURRENT_FG)
+            } else {
+                (SEARCH_MATCH, SEARCH_MATCH_FG)
+            };
+            overlays.push((
+                found.start(),
+                found.end(),
+                Color::Rgb(bg),
+                Some(Color::Rgb(fg)),
+            ));
+        }
+    }
+    if let Some((lo, hi, color)) = selected {
+        overlays.push((
+            lo.saturating_sub(line_byte_start),
+            hi.saturating_sub(line_byte_start),
+            color,
+            None,
+        ));
     }
 }
 
@@ -2522,5 +2559,80 @@ mod mouse_tests {
             painted.contains(&("beta".to_string(), color)),
             "{painted:?}"
         );
+    }
+
+    fn search(pattern: &str, current: Option<(usize, usize)>) -> crate::tui::state::PreviewSearch {
+        use crate::tui::state::{PreviewSearch, SearchDirection};
+        PreviewSearch {
+            pattern: pattern.to_string(),
+            regex: regex::Regex::new(pattern).unwrap(),
+            direction: SearchDirection::Forward,
+            current,
+        }
+    }
+
+    #[test]
+    fn overlays_are_line_local_and_ordered_symbols_then_matches_then_selection() {
+        use crate::tui::theme::Color;
+        let symbol = Color::from_u8(1, 2, 3);
+        let selection = Color::from_u8(4, 5, 6);
+        let mut overlays = Vec::new();
+        // The line holds bytes 100..110 of the file; the symbol spans in from the line before.
+        line_overlays(
+            &mut overlays,
+            "ab ab cdef",
+            3,
+            100,
+            &[(95, 102, symbol), (200, 210, symbol)],
+            Some(&search("ab", Some((3, 3)))),
+            Some((106, 108, selection)),
+        );
+        assert_eq!(
+            overlays,
+            vec![
+                (0, 2, symbol, None),
+                (
+                    0,
+                    2,
+                    Color::Rgb(SEARCH_MATCH),
+                    Some(Color::Rgb(SEARCH_MATCH_FG))
+                ),
+                (
+                    3,
+                    5,
+                    Color::Rgb(SEARCH_CURRENT),
+                    Some(Color::Rgb(SEARCH_CURRENT_FG))
+                ),
+                (6, 8, selection, None),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_line_with_nothing_over_it_gets_no_overlay() {
+        let mut overlays = Vec::new();
+        line_overlays(&mut overlays, "plain", 0, 0, &[], None, None);
+        assert!(overlays.is_empty());
+    }
+
+    #[test]
+    fn the_lines_selected_are_those_between_its_ends_whichever_comes_first() {
+        use crate::tui::pane_manager::Window;
+        let (_dir, _component, mut data) = rig("a\nb\nc\n");
+        let window = Window::FilePreview(FileKey(0));
+        assert!(selected_lines(&data.state, &window).is_none());
+        select(&mut data, at(2, 4), at(0, 1));
+        let lines = selected_lines(&data.state, &window).unwrap();
+        assert!(lines.covers_whole(0) && lines.covers_whole(1) && lines.covers_whole(2));
+        assert!(!lines.covers_whole(3));
+        assert_eq!(lines.bytes_in(0), None);
+        select(&mut data, at(1, 9), at(1, 7));
+        let lines = selected_lines(&data.state, &window).unwrap();
+        assert!(
+            !lines.covers_whole(1),
+            "a selection inside a line is not whole"
+        );
+        assert_eq!(lines.bytes_in(1), Some((7, 9)));
+        assert_eq!(lines.bytes_in(0), None);
     }
 }

@@ -38,6 +38,25 @@ pub(crate) fn find(
     })
 }
 
+/// The group with byte `byte` of file `key` as its origin or one of its uses.
+pub(crate) fn group_at(
+    groups: &[crate::tui::state::SymbolHighlightGroup],
+    key: crate::loader::FileKey,
+    byte: usize,
+) -> Option<usize> {
+    groups.iter().position(|group| {
+        !(group.needs_rebuild && group.locations.is_empty())
+            && ((group.origin_file == key
+                && group.origin_byte_start.is_some_and(|start| byte >= start)
+                && group.origin_byte_end.is_some_and(|end| byte < end))
+                || group.locations.iter().any(|location| {
+                    location.file_key == key
+                        && byte >= location.start_byte
+                        && byte < location.end_byte
+                }))
+    })
+}
+
 /// Invalidates what a changed repository made stale: a group whose origin went away goes
 /// with it, one whose origin changed asks for its uses again, and one whose uses moved has
 /// the vanished ones dropped. Works in keys alone: the watcher already turned its paths into
@@ -192,6 +211,49 @@ mod tests {
             .iter()
             .map(|group| group.qualified_name.as_str())
             .collect()
+    }
+
+    #[test]
+    fn group_at_finds_the_group_whose_origin_or_use_holds_the_byte() {
+        use crate::loader::FileKey;
+        use crate::signal::SymbolRefLocation;
+        let mut origin = group("origin");
+        origin.origin_byte_start = Some(10);
+        origin.origin_byte_end = Some(14);
+        let mut used = group("used");
+        used.locations.push(SymbolRefLocation {
+            file_key: FileKey(1),
+            start_byte: 30,
+            end_byte: 34,
+        });
+        let groups = vec![origin, used];
+        assert_eq!(group_at(&groups, FileKey(0), 10), Some(0));
+        assert_eq!(group_at(&groups, FileKey(0), 13), Some(0));
+        assert_eq!(
+            group_at(&groups, FileKey(0), 14),
+            None,
+            "the end is exclusive"
+        );
+        assert_eq!(group_at(&groups, FileKey(1), 10), None, "another file");
+        assert_eq!(group_at(&groups, FileKey(1), 31), Some(1));
+        assert_eq!(group_at(&groups, FileKey(0), 31), None, "another file");
+    }
+
+    #[test]
+    fn group_at_skips_a_group_being_rebuilt_with_no_location() {
+        use crate::loader::FileKey;
+        use crate::signal::SymbolRefLocation;
+        let mut pending = group("pending");
+        pending.origin_byte_start = Some(0);
+        pending.origin_byte_end = Some(5);
+        pending.needs_rebuild = true;
+        assert_eq!(group_at(&[pending.clone()], FileKey(0), 2), None);
+        pending.locations.push(SymbolRefLocation {
+            file_key: FileKey(0),
+            start_byte: 20,
+            end_byte: 25,
+        });
+        assert_eq!(group_at(&[pending], FileKey(0), 2), Some(0));
     }
 
     #[test]
