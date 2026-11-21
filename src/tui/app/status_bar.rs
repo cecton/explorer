@@ -1,124 +1,20 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
+use std::borrow::Cow;
 use std::time::Instant;
 pub(super) fn render_status_bar(
     pipeline: &mut RenderPipeline,
     size: VPSize,
     state: &crate::tui::state::AppState,
-    theme: &crate::tui::theme::HelixTheme,
 ) {
-    use crate::tui::keymap::Action;
-    use crate::tui::pane_manager::Window;
+    let theme = &state.theme;
     let color_bg = theme.ui.statusline_bg;
     let color_fg = theme.ui.statusline_fg;
 
     let leader_style = color_fg.on_bold(color_bg);
     let normal_style = color_fg.on(color_bg);
 
-    // Status-bar shortcut hints are derived from the live keymap so they reflect any
-    // rebindings from config.kdl, rather than hardcoded key letters.
-    let leader_lbl = |a: Action| {
-        state
-            .keymap
-            .leader_key_for(a)
-            .map(|k| crate::tui::keymap::hint(&k))
-            .unwrap_or_default()
-    };
-    // Two global keys sharing a modifier read as one chord: `Ctrl+↑/↓`, not `Ctrl+↑/Ctrl+↓`.
-    let global_pair = |a: Action, b: Action| state.keymap.global_pair(a, b);
-
-    let (leader_text, rest_text) = if let Some(modal) = state.modal.as_ref() {
-        // A modal takes every key there is: the bar says what it takes, and nothing else.
-        (format!(" {} ", modal.title()), modal.hint().to_string())
-    } else if state.leader_active {
-        (
-            " Leader ".to_string(),
-            format!(
-                "{}:Picker  {}:Term  {}:Cmd  {}:Theme  {}:Git  {}:Chat  {}:Favorite  {}:Model  {}:To back  {}:Close  {}:Quit  {}:Next/Prev  {}:Cancel",
-                leader_lbl(Action::OpenWindowPicker),
-                leader_lbl(Action::OpenTerminal),
-                leader_lbl(Action::OpenCommandLine),
-                leader_lbl(Action::OpenThemePicker),
-                leader_lbl(Action::OpenGitLog),
-                leader_lbl(Action::OpenConversations),
-                leader_lbl(Action::ToggleFavorite),
-                leader_lbl(Action::OpenModelPicker),
-                leader_lbl(Action::SendToBack),
-                leader_lbl(Action::ClosePane),
-                leader_lbl(Action::Quit),
-                state
-                    .keymap
-                    .leader_pair(Action::FocusNext, Action::FocusPrev),
-                leader_lbl(Action::DismissLeader),
-            ),
-        )
-    } else {
-        let pane = {
-            let rest = match state.pane_manager.focused_window.as_ref() {
-                Some(Window::FilePreview(_)) => {
-                    "e:Edit  Bksp:Send to back  ::Command".to_string()
-                }
-                Some(Window::GitLog(_)) => {
-                    "Bksp:Send to back  b:Branch  ↑↓:Select  /:Search  Enter:Diff  Esc:Clear search".to_string()
-                }
-                Some(Window::CommitDiff(_)) => {
-                    "Bksp:Send to back  Esc:Close".to_string()
-                }
-                Some(Window::ConversationTree) => {
-                    "Bksp:Send to back  /:Search  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  dd:Delete  Esc:Clear search"
-                        .to_string()
-                }
-                Some(Window::Discussion(_)) => {
-                    "Enter:Send  Shift+Enter:New line".to_string()
-                }
-                Some(Window::Report(_)) => {
-                    "Bksp:Send to back  Esc:Close".to_string()
-                }
-                Some(Window::Terminal(_)) if !state.terminal_grabbed => {
-                    "Bksp:Send to back  Enter:grab".to_string()
-                }
-                Some(Window::Terminal(_)) | None => String::new(),
-            };
-            let alert = match state.pane_manager.focused_window {
-                Some(Window::ConversationTree) => conversation_tree_alert(state),
-                _ => None,
-            };
-            // Global shortcuts.
-            if let Some(alert) = alert {
-                alert
-            } else if (!matches!(state.pane_manager.focused_window, Some(Window::Terminal(_)))
-                || !state.terminal_grabbed)
-                && !state.mouse_drag_active
-            {
-                format!(
-                    "{}:Next/Prev  {}:Resize  {}:Move  {rest}",
-                    global_pair(Action::FocusNext, Action::FocusPrev),
-                    global_pair(Action::ResizeShrink, Action::ResizeGrow),
-                    global_pair(Action::MovePaneForward, Action::MovePaneBackward),
-                )
-            } else {
-                rest
-            }
-        };
-        (
-            format!(
-                " {}: Leader ",
-                crate::tui::keymap::hint(&state.keymap.leader_key)
-            ),
-            pane,
-        )
-    };
-
-    let styled_texts = tui_styled_texts! {
-        tui_styled_text! {
-            @style: leader_style,
-            @text: leader_text
-        },
-        tui_styled_text! {
-            @style: normal_style,
-            @text: rest_text
-        },
-    };
+    let (leader_text, rest_text) = hints(state);
 
     let row_idx = size.row_height.convert_to_index();
     let mut render_ops = RenderOpIRVec::new();
@@ -129,7 +25,14 @@ pub(super) fn render_status_bar(
         Some(normal_style),
     );
     render_ops += RenderOpCommon::MoveCursorPositionAbs(vp_col(0) + row_idx);
-    render_tui_styled_texts_into(&styled_texts, &mut render_ops);
+    for (text, style) in [
+        (leader_text.as_str(), leader_style),
+        (&rest_text, normal_style),
+    ] {
+        render_ops += RenderOpCommon::ApplyColors(Some(style));
+        render_ops += RenderOpIR::PaintTextWithAttributes(text.into(), Some(style));
+        render_ops += RenderOpCommon::ResetColor;
+    }
 
     // Right-aligned "dirty" flag (uncommitted staged/unstaged changes), shown in a
     // bright error-like theme color, followed by the usage of the spending behind the
@@ -198,6 +101,96 @@ pub(super) fn render_status_bar(
     }
 
     pipeline.push(ZOrder::Normal, render_ops);
+}
+
+/// What the bar says on its left: the title of the segment in front, then the hints.
+fn hints(state: &crate::tui::state::AppState) -> (String, Cow<'static, str>) {
+    use crate::tui::keymap::Action;
+    use crate::tui::pane_manager::Window;
+    // Status-bar shortcut hints are derived from the live keymap so they reflect any
+    // rebindings from config.kdl, rather than hardcoded key letters.
+    let leader_lbl = |a: Action| {
+        state
+            .keymap
+            .leader_key_for(a)
+            .map(|k| crate::tui::keymap::hint(&k))
+            .unwrap_or_default()
+    };
+    // Two global keys sharing a modifier read as one chord: `Ctrl+↑/↓`, not `Ctrl+↑/Ctrl+↓`.
+    let global_pair = |a: Action, b: Action| state.keymap.global_pair(a, b);
+
+    if let Some(modal) = state.modal.as_ref() {
+        // A modal takes every key there is: the bar says what it takes, and nothing else.
+        (format!(" {} ", modal.title()), Cow::Borrowed(modal.hint()))
+    } else if state.leader_active {
+        (
+            " Leader ".to_string(),
+            Cow::Owned(format!(
+                "{}:Picker  {}:Term  {}:Cmd  {}:Theme  {}:Git  {}:Chat  {}:Favorite  {}:Model  {}:To back  {}:Close  {}:Quit  {}:Next/Prev  {}:Cancel",
+                leader_lbl(Action::OpenWindowPicker),
+                leader_lbl(Action::OpenTerminal),
+                leader_lbl(Action::OpenCommandLine),
+                leader_lbl(Action::OpenThemePicker),
+                leader_lbl(Action::OpenGitLog),
+                leader_lbl(Action::OpenConversations),
+                leader_lbl(Action::ToggleFavorite),
+                leader_lbl(Action::OpenModelPicker),
+                leader_lbl(Action::SendToBack),
+                leader_lbl(Action::ClosePane),
+                leader_lbl(Action::Quit),
+                state
+                    .keymap
+                    .leader_pair(Action::FocusNext, Action::FocusPrev),
+                leader_lbl(Action::DismissLeader),
+            )),
+        )
+    } else {
+        let pane = {
+            let rest: &'static str = match state.pane_manager.focused_window.as_ref() {
+                Some(Window::FilePreview(_)) => "e:Edit  Bksp:Send to back  ::Command",
+                Some(Window::GitLog(_)) => {
+                    "Bksp:Send to back  b:Branch  ↑↓:Select  /:Search  Enter:Diff  Esc:Clear search"
+                }
+                Some(Window::CommitDiff(_)) => "Bksp:Send to back  Esc:Close",
+                Some(Window::ConversationTree) => {
+                    "Bksp:Send to back  /:Search  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  dd:Delete  Esc:Clear search"
+                }
+                Some(Window::Discussion(_)) => "Enter:Send  Shift+Enter:New line",
+                Some(Window::Report(_)) => "Bksp:Send to back  Esc:Close",
+                Some(Window::Terminal(_)) if !state.terminal_grabbed => {
+                    "Bksp:Send to back  Enter:grab"
+                }
+                Some(Window::Terminal(_)) | None => "",
+            };
+            let alert = match state.pane_manager.focused_window {
+                Some(Window::ConversationTree) => conversation_tree_alert(state),
+                _ => None,
+            };
+            // Global shortcuts.
+            if let Some(alert) = alert {
+                Cow::Owned(alert)
+            } else if (!matches!(state.pane_manager.focused_window, Some(Window::Terminal(_)))
+                || !state.terminal_grabbed)
+                && !state.mouse_drag_active
+            {
+                Cow::Owned(format!(
+                    "{}:Next/Prev  {}:Resize  {}:Move  {rest}",
+                    global_pair(Action::FocusNext, Action::FocusPrev),
+                    global_pair(Action::ResizeShrink, Action::ResizeGrow),
+                    global_pair(Action::MovePaneForward, Action::MovePaneBackward),
+                ))
+            } else {
+                Cow::Borrowed(rest)
+            }
+        };
+        (
+            format!(
+                " {}: Leader ",
+                crate::tui::keymap::hint(&state.keymap.leader_key)
+            ),
+            pane,
+        )
+    }
 }
 
 /// The status-bar clock: local time of day, 24h, as a `│ HH:MM ` segment.

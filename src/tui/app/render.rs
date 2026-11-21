@@ -96,7 +96,6 @@ pub(super) fn render(
                 &mut pipeline,
                 window_size,
                 &global_data.state,
-                &global_data.state.theme,
             );
         }
 
