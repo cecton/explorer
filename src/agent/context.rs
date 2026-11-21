@@ -390,18 +390,12 @@ pub fn commit_nudge(status: &str) -> crate::agent::Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use camino::Utf8PathBuf;
-
-    fn temp_dir() -> (tempfile::TempDir, Utf8PathBuf) {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
-        (tmp, dir)
-    }
+    use crate::util::test_support::temp_root;
 
     #[test]
     fn ancestor_with_transcript_is_replayed_exactly() {
         use crate::agent::Message;
-        let (_tmp, dir) = temp_dir();
+        let (_tmp, dir) = temp_root();
         std::fs::write(dir.join(crate::conversation::files::PROMPT), "ignored").unwrap();
         std::fs::write(
             dir.join(crate::conversation::files::TRANSCRIPT),
@@ -427,7 +421,7 @@ mod tests {
     #[test]
     fn ancestor_without_transcript_falls_back_to_prompt_and_reply() {
         use crate::agent::Message;
-        let (_tmp, dir) = temp_dir();
+        let (_tmp, dir) = temp_root();
         std::fs::write(dir.join(crate::conversation::files::PROMPT), "question").unwrap();
         std::fs::write(dir.join(crate::conversation::files::REPLY), "answer").unwrap();
         assert_eq!(
@@ -453,7 +447,7 @@ mod tests {
 
     #[test]
     fn empty_ancestor_contributes_nothing() {
-        let (_tmp, dir) = temp_dir();
+        let (_tmp, dir) = temp_root();
         assert!(ancestor_messages(&dir).is_empty());
     }
 
@@ -560,7 +554,7 @@ mod tests {
     #[test]
     fn system_prompt_holds_no_state_of_the_repository() {
         use crate::agent::Mode;
-        let (_tmp, root) = temp_dir();
+        let (_tmp, root) = temp_root();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
         let prompt = system_prompt(Some(Mode::Feedback), 3, &root);
         assert!(prompt.starts_with("You are the coding agent inside Explorer"));
@@ -584,7 +578,7 @@ mod tests {
     #[test]
     fn commit_prompt_states_the_configured_review_rounds() {
         use crate::agent::Mode;
-        let (_tmp, root) = temp_dir();
+        let (_tmp, root) = temp_root();
         let commit = system_prompt(Some(Mode::Commit), 7, &root);
         assert!(commit.contains("At most 7 review rounds"));
         assert!(!commit.contains(REVIEW_ROUNDS_PLACEHOLDER));
@@ -595,7 +589,7 @@ mod tests {
 
     #[test]
     fn environment_note_carries_the_head_the_date_and_the_root() {
-        let (_tmp, root) = temp_dir();
+        let (_tmp, root) = temp_root();
         let note = environment_note(&root, Some("abc123"), "2026-10-05");
         assert!(note.starts_with("[Note from Explorer:"));
         assert!(note.contains(&format!("- Repository root: {root}\n")));
@@ -607,7 +601,7 @@ mod tests {
 
     #[test]
     fn system_prompt_without_a_mode_keeps_everything_but_the_mode_prompt() {
-        let (_tmp, root) = temp_dir();
+        let (_tmp, root) = temp_root();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
         let prompt = system_prompt(None, 3, &root);
         assert!(prompt.starts_with("## The conversation tree"));
@@ -620,7 +614,7 @@ mod tests {
     #[test]
     fn replay_strips_the_workspace_note_only_in_commit_mode() {
         use crate::agent::{Message, Mode};
-        let (_tmp, root) = temp_dir();
+        let (_tmp, root) = temp_root();
         let first = root.join("a");
         let second = root.join("b");
         for dir in [&first, &second] {
@@ -709,7 +703,7 @@ mod tests {
     #[test]
     fn claude_prompt_has_the_mode_but_not_project_instructions() {
         use crate::agent::Mode;
-        let (_tmp, root) = temp_dir();
+        let (_tmp, root) = temp_root();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
         let prompt = claude_system_prompt(Some(Mode::Commit), 3);
         assert!(prompt.contains("**commit mode**"));
@@ -720,7 +714,7 @@ mod tests {
 
     #[test]
     fn handover_preamble_replays_ancestors_as_text() {
-        let (_tmp, root) = temp_dir();
+        let (_tmp, root) = temp_root();
         let first = root.join("a");
         let second = root.join("b");
         let empty = root.join("c");

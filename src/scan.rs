@@ -739,13 +739,8 @@ fn escaped(path: &camino::Utf8Path) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::test_support::temp_root;
     use camino::Utf8PathBuf;
-
-    fn temp_root() -> (tempfile::TempDir, Utf8PathBuf) {
-        let dir = tempfile::tempdir().unwrap();
-        let root = Utf8PathBuf::from_path_buf(dir.path().canonicalize().unwrap()).unwrap();
-        (dir, root)
-    }
 
     fn write(root: &camino::Utf8Path, name: &str, bytes: impl AsRef<[u8]>) {
         let path = root.join(name);

@@ -115,8 +115,8 @@ fn read_trimmed(dir: &camino::Utf8Path, name: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::test_support::temp_root;
     use crate::conversation::test_support::write_node;
+    use crate::util::test_support::temp_root;
 
     #[test]
     fn a_missing_file_reads_as_empty_and_a_written_one_reads_back() {

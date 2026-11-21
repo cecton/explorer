@@ -140,8 +140,8 @@ impl crate::conversation::ConversationTree {
 mod tests {
     use crate::conversation::ConversationTree;
     use crate::conversation::NodeId;
-    use crate::conversation::test_support::temp_root;
     use crate::conversation::test_support::write_node;
+    use crate::util::test_support::temp_root;
 
     fn toc_tree() -> (tempfile::TempDir, ConversationTree) {
         let (tmp, root) = temp_root();

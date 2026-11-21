@@ -538,18 +538,12 @@ mod tests {
     use crate::loader::FileKey;
     use crate::tui::pane_manager::{PaneSize, Window, WindowState};
     use crate::tui::state::TerminalPane;
+    use crate::util::test_support::temp_root;
     use camino::Utf8PathBuf;
     use parking_lot::Mutex;
     use r3bl_tui::{OfsBufVT100, VPSize};
     use std::sync::Arc;
-    use tempfile::TempDir;
     use tokio::sync::mpsc;
-
-    fn temp_root() -> (TempDir, Utf8PathBuf) {
-        let dir = TempDir::new().expect("temp dir");
-        let root = Utf8PathBuf::from_path_buf(dir.path().canonicalize().unwrap()).unwrap();
-        (dir, root)
-    }
 
     fn empty_state(root: Utf8PathBuf) -> crate::tui::state::AppState {
         use crate::tui::state::AppState;

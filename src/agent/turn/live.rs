@@ -457,12 +457,7 @@ impl Recorder {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn temp_dir() -> (tempfile::TempDir, camino::Utf8PathBuf) {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
-        (tmp, dir)
-    }
+    use crate::util::test_support::temp_root;
 
     #[test]
     fn a_turn_closes_only_when_idle_and_settled() {
@@ -496,7 +491,7 @@ mod tests {
 
     #[test]
     fn a_message_leaves_the_queue_only_once_it_is_written() {
-        let (_tmp, dir) = temp_dir();
+        let (_tmp, dir) = temp_root();
         let live = Arc::new(parking_lot::Mutex::new(LiveTurn::default()));
         let injector = Injector {
             live: Arc::clone(&live),
@@ -527,7 +522,7 @@ mod tests {
 
     #[test]
     fn an_injected_message_joins_the_prompt_block_and_the_transcript() {
-        let (_tmp, dir) = temp_dir();
+        let (_tmp, dir) = temp_root();
         std::fs::write(
             dir.join(crate::conversation::files::PROMPT),
             "the first prompt",
@@ -562,7 +557,7 @@ mod tests {
 
     #[test]
     fn cache_hits_are_those_of_the_first_request() {
-        let (_tmp, node_dir) = temp_dir();
+        let (_tmp, node_dir) = temp_root();
         let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let live = Arc::default();
         let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
@@ -574,7 +569,7 @@ mod tests {
 
     #[test]
     fn a_request_reports_its_size_and_a_chunk_goes_where_its_kind_says() {
-        let (_tmp, node_dir) = temp_dir();
+        let (_tmp, node_dir) = temp_root();
         let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let live = Arc::default();
         let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
@@ -594,7 +589,7 @@ mod tests {
 
     #[test]
     fn an_answer_with_nothing_to_move_leaves_the_revision_alone() {
-        let (_tmp, node_dir) = temp_dir();
+        let (_tmp, node_dir) = temp_root();
         let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let live = Arc::default();
         let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
@@ -616,7 +611,7 @@ mod tests {
 
     #[test]
     fn text_of_an_answer_that_calls_tools_moves_to_the_work_log() {
-        let (_tmp, node_dir) = temp_dir();
+        let (_tmp, node_dir) = temp_root();
         let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let mut recorder = Recorder::new(Arc::default(), node_dir.clone(), main_tx);
 
@@ -651,7 +646,7 @@ mod tests {
 
     #[test]
     fn a_sub_agent_logs_its_tool_calls_in_the_work_log_of_its_caller_too() {
-        let (_tmp, node_dir) = temp_dir();
+        let (_tmp, node_dir) = temp_root();
         let agent_dir = node_dir
             .join(crate::conversation::files::AGENTS_DIR)
             .join("1");
@@ -688,7 +683,7 @@ mod tests {
 
     #[test]
     fn thinking_of_tool_calling_answers_is_dropped_and_the_last_one_kept() {
-        let (_tmp, node_dir) = temp_dir();
+        let (_tmp, node_dir) = temp_root();
         let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let mut recorder = Recorder::new(Arc::default(), node_dir, main_tx);
 
@@ -711,7 +706,7 @@ mod tests {
 
     #[test]
     fn every_change_to_a_text_a_window_copies_bumps_the_revision() {
-        let (_tmp, node_dir) = temp_dir();
+        let (_tmp, node_dir) = temp_root();
         let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let live = Arc::default();
         let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
@@ -738,7 +733,7 @@ mod tests {
 
     #[test]
     fn the_running_log_hides_the_dropped_rounds() {
-        let (_tmp, node_dir) = temp_dir();
+        let (_tmp, node_dir) = temp_root();
         let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let mut recorder = Recorder::new(Arc::default(), node_dir, main_tx);
 

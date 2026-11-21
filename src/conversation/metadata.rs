@@ -211,8 +211,8 @@ pub(crate) fn write(dir: &camino::Utf8Path, meta: &Metadata) -> std::io::Result<
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::test_support::temp_root;
     use crate::conversation::test_support::write_node;
+    use crate::util::test_support::temp_root;
 
     #[test]
     fn metadata_round_trips_every_key() {

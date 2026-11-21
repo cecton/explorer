@@ -509,8 +509,8 @@ pub fn conversations_dir(repo_root: &camino::Utf8Path) -> Option<camino::Utf8Pat
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::conversation::test_support::temp_root;
     use crate::conversation::test_support::write_node;
+    use crate::util::test_support::temp_root;
 
     #[test]
     fn load_builds_tree_and_tolerates_missing_files() {

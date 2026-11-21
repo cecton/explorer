@@ -7,12 +7,6 @@ pub(crate) fn write_node(dir: &camino::Utf8Path, files: &[(&str, &str)]) {
     }
 }
 
-pub(crate) fn temp_root() -> (tempfile::TempDir, camino::Utf8PathBuf) {
-    let tmp = tempfile::tempdir().unwrap();
-    let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
-    (tmp, root)
-}
-
 /// A tree with one root node, at `1970-01-02T00-00-01Z`.
 pub(crate) fn tree_with_node(
     root: &camino::Utf8Path,

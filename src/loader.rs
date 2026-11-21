@@ -276,6 +276,7 @@ impl LoadedFile {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::test_support::temp_root;
 
     fn fd(content: &str) -> FileData {
         FileData {
@@ -322,12 +323,6 @@ mod tests {
         let data = fd("— dash\n");
         assert_eq!(data.line_bounds(7), data.line_bounds(0));
         assert_eq!(data.line_bounds(0), (0, data.content.len()));
-    }
-
-    fn temp_root() -> (tempfile::TempDir, camino::Utf8PathBuf) {
-        let tmp = tempfile::tempdir().expect("temp dir");
-        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).expect("utf8");
-        (tmp, root)
     }
 
     /// Every text file of the tree is loaded, in the order the walk answers them, so a
