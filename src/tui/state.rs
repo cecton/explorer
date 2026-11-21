@@ -408,7 +408,7 @@ pub struct AppState {
     /// modal closes.
     pub modal_origin: Option<crate::tui::pane_manager::Window>,
     /// The box the open modal's list was painted in: a wheel moves it, its rows are the page.
-    pub modal_box: Option<crate::tui::modal::ModalBox>,
+    pub modal_list: Option<crate::tui::modal::ModalBox>,
     pub window_picker:
         crate::tui::widgets::fuzzy_picker::FuzzyPickerState<crate::tui::pane_manager::Window>,
     pub theme_picker: crate::tui::widgets::fuzzy_picker::FuzzyPickerState<String>,

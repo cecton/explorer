@@ -74,7 +74,7 @@ impl Modal {
     pub fn close(state: &mut crate::tui::state::AppState) {
         Self::revert_previewed_theme(state);
         state.modal = None;
-        state.modal_box = None;
+        state.modal_list = None;
         state.window_picker.reset();
         state.theme_picker.reset();
         state.model_picker.reset();
@@ -256,21 +256,20 @@ pub fn render(
     // An empty list keeps one row, where "No results" or the reason for it is painted.
     let box_ = ModalBox::for_modal(surface, results.max(1));
     let list = box_.list_box();
-    state.modal_box = Some(list);
+    state.modal_list = Some(list);
     let mut ops = box_.render_frame(
         state.theme.ui.overlay,
         state.theme.ui.overlay_border,
         modal.title(),
     );
 
-    let mut query_ops = RenderOpIRVec::new();
     let (input, prompt) = match &modal {
         Modal::WindowPicker => (&mut state.window_picker.query, ""),
         Modal::ThemePicker => (&mut state.theme_picker.query, ""),
         Modal::ModelPicker(_) => (&mut state.model_picker.query, "Model: "),
     };
     crate::tui::widgets::title_row::render_input_title(
-        &mut query_ops,
+        &mut ops,
         &box_.query_box(),
         input,
         prompt,
@@ -278,7 +277,6 @@ pub fn render(
         BarColors::in_overlay(&state.theme),
         1,
     );
-    ops.list.extend(query_ops.list);
 
     let rows = match &modal {
         Modal::WindowPicker => {
@@ -563,7 +561,7 @@ mod tests {
         assert_eq!(state.modal, Some(Modal::ThemePicker));
         let ops = render(&mut state, &mut ModalPainters::new(), screen).expect("the modal paints");
         let modal = ModalBox::for_modal(screen, state.theme_picker.results.len());
-        assert_eq!(state.modal_box, Some(modal.list_box()));
+        assert_eq!(state.modal_list, Some(modal.list_box()));
 
         let pane_style = crate::tui::theme::Color::from_u8(255, 255, 255)
             .on(crate::tui::theme::Color::from_u8(0, 0, 0));
@@ -601,7 +599,7 @@ mod tests {
 
     /// The first row of the list, read back as text.
     fn list_row_text(state: &AppState, screen: VPSize, ops: RenderOpIRVec) -> String {
-        let list = state.modal_box.expect("the list was painted");
+        let list = state.modal_list.expect("the list was painted");
         let mut pipeline = render_pipeline!();
         pipeline.push(ZOrder::High, ops);
         let top = list.origin.row_index.as_u16();
@@ -771,7 +769,7 @@ mod tests {
             Some(Window::ConversationTree)
         );
         assert!(state.modal_origin.is_none());
-        assert!(state.modal_box.is_none());
+        assert!(state.modal_list.is_none());
     }
 
     /// The window the modal opened over can be closed from behind it: the keyboard is not

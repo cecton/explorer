@@ -80,10 +80,10 @@ pub(crate) fn paint_rows(
 /// A wheel outside the modal's list moves nothing: the panes behind it are out of reach.
 pub(crate) fn wheel_outside(state: &crate::tui::state::AppState, input_event: &InputEvent) -> bool {
     matches!(input_event, InputEvent::Mouse(mouse)
-        if !state.modal_box.is_some_and(|list| list.contains(mouse.pos)))
+        if !state.modal_list.is_some_and(|list| list.contains(mouse.pos)))
 }
 
 /// The rows the open modal's list shows at once: the page a PageUp/PageDown moves by.
 pub(crate) fn page_size(state: &crate::tui::state::AppState) -> usize {
-    state.modal_box.map_or(0, |list| list.rows)
+    state.modal_list.map_or(0, |list| list.rows)
 }
