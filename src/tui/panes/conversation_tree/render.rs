@@ -526,6 +526,325 @@ mod tests {
     use crate::tui::panes::conversation_tree::test_support::ids;
     use crate::tui::panes::conversation_tree::test_support::tree_with;
 
+    use crate::tui::pane_manager::Window;
+    use crate::tui::panes::conversation_tree::ConversationTreeComponent;
+    use crate::tui::state::AppState;
+    use crate::tui::state::RowTarget;
+
+    type Data = GlobalData<AppState, crate::signal::AppSignal>;
+
+    struct Screen(Vec<Vec<PixelChar>>);
+
+    impl Screen {
+        fn text(&self, row: usize) -> String {
+            let line: String = self.0[row]
+                .iter()
+                .map(|pixel| match pixel {
+                    PixelChar::PlainText { display_char, .. } => *display_char,
+                    _ => ' ',
+                })
+                .collect();
+            line.trim_end().to_string()
+        }
+
+        fn texts(&self) -> Vec<String> {
+            (0..self.0.len()).map(|row| self.text(row)).collect()
+        }
+
+        fn style(&self, row: usize, col: usize) -> TuiStyle {
+            match self.0[row][col] {
+                PixelChar::PlainText { style, .. } => style,
+                _ => TuiStyle::default(),
+            }
+        }
+    }
+
+    fn data_over(tree: crate::conversation::ConversationTree, rows: usize) -> Data {
+        let mut state = AppState::for_test(camino::Utf8PathBuf::from("/tmp"));
+        *state.conversations.write() = tree;
+        state.tree_view.loaded = true;
+        state
+            .pane_manager
+            .set_window_view(&Window::ConversationTree, 0, 100, rows);
+        crate::tui::test_support::global_data(state)
+    }
+
+    fn component() -> ConversationTreeComponent {
+        ConversationTreeComponent::new(crate::tui::pane_component::pane_id(0))
+    }
+
+    /// Renders one frame of the pane at `cols` x `rows` and reads the screen back.
+    fn frame(
+        component: &mut ConversationTreeComponent,
+        global_data: &mut Data,
+        cols: u16,
+        rows: u16,
+    ) -> Screen {
+        let size = vp_width(cols) + vp_height(rows);
+        component
+            .render_pane(global_data, crate::tui::test_support::frame_box(cols, rows))
+            .unwrap();
+        let pipeline = std::mem::take(&mut global_data.pipeline);
+        let mut ofs_buf = OfsBuf::new(Flat2DArray::new_empty(size, PixelChar::Spacer));
+        pipeline.compose_render_ops_into_ofs_buf(
+            size,
+            &mut ofs_buf,
+            &mut std::default::Default::default(),
+        );
+        Screen(
+            (0..rows)
+                .map(|row| ofs_buf.get_row(vp_row(row)).unwrap().to_vec())
+                .collect(),
+        )
+    }
+
+    fn tree_of(
+        nodes: &[(&str, &[(&str, &str)])],
+    ) -> (tempfile::TempDir, crate::conversation::ConversationTree) {
+        use crate::conversation::ConversationTree;
+        use crate::conversation::test_support::write_node;
+        use crate::util::test_support::temp_root;
+        let (tmp, root) = temp_root();
+        for (path, files) in nodes {
+            write_node(&root.join(path), files);
+        }
+        let tree = ConversationTree::load(&root);
+        (tmp, tree)
+    }
+
+    /// `count` root nodes named `n0`, `n1`, ..., with a title each.
+    fn numbered_tree(count: usize) -> (tempfile::TempDir, crate::conversation::ConversationTree) {
+        let names: Vec<String> = (0..count).map(|i| format!("n{i}")).collect();
+        let nodes: Vec<(&str, &[(&str, &str)])> = names
+            .iter()
+            .map(|name| {
+                (
+                    name.as_str(),
+                    &[(crate::conversation::files::TITLE, "x")][..],
+                )
+            })
+            .collect();
+        tree_of(&nodes)
+    }
+
+    fn node_id(name: &str) -> crate::conversation::NodeId {
+        use crate::conversation::NodeId;
+        NodeId::new(name)
+    }
+
+    fn select(data: &mut Data, name: &str) {
+        data.state.tree_view.selected = Some(RowTarget::Node(node_id(name)));
+    }
+
+    #[test]
+    fn an_empty_tree_says_why_over_a_blank_pane() {
+        let (_tmp, tree) = tree_of(&[]);
+        let mut data = data_over(tree, 4);
+        let mut component = component();
+        data.state.tree_view.loaded = false;
+        let screen = frame(&mut component, &mut data, 30, 4);
+        assert_eq!(screen.texts(), ["Loading conversations…", "", "", ""]);
+        data.state.tree_view.loaded = true;
+        let screen = frame(&mut component, &mut data, 30, 4);
+        assert_eq!(screen.texts(), ["(no conversations)", "", "", ""]);
+        let pane_bg = data.state.theme.ui.background.tui();
+        assert_eq!(screen.style(3, 29).color_bg, pane_bg);
+        assert_eq!(
+            data.state
+                .pane_manager
+                .window_scroll(&Window::ConversationTree),
+            0
+        );
+    }
+
+    #[test]
+    fn a_filter_without_a_match_says_so() {
+        let (_tmp, tree) = tree_of(&[("a1", &[(crate::conversation::files::TITLE, "First")])]);
+        let mut data = data_over(tree, 3);
+        data.state.tree_view.query.set_text("zzzz");
+        let screen = frame(&mut component(), &mut data, 30, 3);
+        assert_eq!(screen.texts(), ["No matches", "", ""]);
+    }
+
+    #[test]
+    fn rows_draw_rails_markers_and_the_commit_label() {
+        let (_tmp, tree) = tree_of(&[
+            (
+                "a1",
+                &[
+                    (crate::conversation::files::TITLE, "First thing"),
+                    (
+                        crate::conversation::files::METADATA,
+                        "commits: abc1234def abc9999aaa\n",
+                    ),
+                ],
+            ),
+            (
+                "a1/a2",
+                &[
+                    (crate::conversation::files::TITLE, "Reply"),
+                    (crate::conversation::files::METADATA, "status: failed\n"),
+                ],
+            ),
+            (
+                "a1/b2",
+                &[
+                    (crate::conversation::files::TITLE, "Compacted"),
+                    (crate::conversation::files::METADATA, "type: compact\n"),
+                ],
+            ),
+            ("b1", &[(crate::conversation::files::TITLE, "Second")]),
+        ]);
+        let mut data = data_over(tree, 6);
+        data.state.tree_view.expanded.insert(node_id("a1"));
+        select(&mut data, "b1");
+        let screen = frame(&mut component(), &mut data, 30, 6);
+        assert_eq!(
+            screen.texts(),
+            [
+                "   - First thing    abc9999 +1",
+                " ✗ ├── Reply",
+                " ≡ └── Compacted",
+                "     Second",
+                "",
+                "",
+            ]
+        );
+    }
+
+    #[test]
+    fn the_selected_row_wraps_its_title_and_shows_its_summary_on_the_selection_color() {
+        let (_tmp, tree) = tree_of(&[
+            ("a1", &[(crate::conversation::files::TITLE, "First thing")]),
+            (
+                "b1",
+                &[
+                    (
+                        crate::conversation::files::TITLE,
+                        "Second thing that has a quite long title to wrap",
+                    ),
+                    (crate::conversation::files::SUMMARY, "sum"),
+                ],
+            ),
+        ]);
+        let mut data = data_over(tree, 6);
+        let theme = data.state.theme.clone();
+        let screen = frame(&mut component(), &mut data, 30, 6);
+        assert_eq!(
+            screen.texts(),
+            [
+                "     First thing",
+                "     Second thing that has a",
+                "     quite long title to wrap",
+                "     sum",
+                "",
+                "",
+            ]
+        );
+        assert_eq!(screen.style(0, 29).color_bg, theme.ui.background.tui());
+        for row in 1..4 {
+            assert_eq!(screen.style(row, 29).color_bg, theme.ui.selection.tui());
+        }
+        assert_eq!(screen.style(4, 0).color_bg, theme.ui.background.tui());
+        assert_eq!(screen.style(3, 5).color_fg, theme.ui.dim.tui());
+        assert_eq!(screen.style(1, 5).color_fg, theme.ui.text.tui());
+    }
+
+    #[test]
+    fn a_narrow_pane_cuts_a_row_short_and_leaves_room_for_the_label() {
+        let (_tmp, tree) = tree_of(&[
+            (
+                "a1",
+                &[
+                    (
+                        crate::conversation::files::TITLE,
+                        "A title far too long for the pane",
+                    ),
+                    (
+                        crate::conversation::files::METADATA,
+                        "commits: abc1234def\n",
+                    ),
+                ],
+            ),
+            ("b1", &[(crate::conversation::files::TITLE, "Second")]),
+        ]);
+        let mut data = data_over(tree, 3);
+        let mut component = component();
+        let screen = frame(&mut component, &mut data, 20, 3);
+        assert_eq!(screen.texts(), ["     A title abc1234", "     Second", ""]);
+        assert_eq!(component.label_zones, [Some((13, 7)), None]);
+    }
+
+    #[test]
+    fn a_queued_prompt_is_listed_under_its_parent_in_dim_text() {
+        use crate::tui::state::PendingTurn;
+        let (_tmp, tree) = tree_of(&[("a1", &[(crate::conversation::files::TITLE, "First")])]);
+        let mut data = data_over(tree, 3);
+        data.state.queued_turns.push(PendingTurn {
+            window: 0,
+            parent: Some(node_id("a1")),
+        });
+        let screen = frame(&mut component(), &mut data, 30, 3);
+        assert_eq!(screen.texts(), ["     First", " 1 └── (empty prompt)", ""]);
+        assert_eq!(screen.style(1, 8).color_fg, data.state.theme.ui.dim.tui());
+    }
+
+    #[test]
+    fn a_filter_lists_the_matches_flat_with_the_matched_text_underlined() {
+        let (_tmp, tree) = tree_of(&[
+            ("a1", &[(crate::conversation::files::TITLE, "First thing")]),
+            ("b1", &[(crate::conversation::files::TITLE, "Second item")]),
+        ]);
+        let mut data = data_over(tree, 3);
+        data.state.tree_view.query.set_text("item");
+        let screen = frame(&mut component(), &mut data, 30, 3);
+        assert_eq!(screen.texts()[0], "     Second item");
+        for col in 12..16 {
+            assert!(screen.style(0, col).attribs.underline.is_some());
+        }
+        assert!(screen.style(0, 5).attribs.underline.is_none());
+        assert_eq!(
+            screen.style(0, 12).color_fg,
+            data.state.theme.ui.matched.tui()
+        );
+    }
+
+    #[test]
+    fn an_armed_row_turns_the_error_color() {
+        let (_tmp, tree) = tree_of(&[("a1", &[(crate::conversation::files::TITLE, "First")])]);
+        let mut data = data_over(tree, 2);
+        select(&mut data, "a1");
+        data.state.tree_view.armed_delete = Some(node_id("a1"));
+        let screen = frame(&mut component(), &mut data, 30, 2);
+        assert_eq!(screen.style(0, 5).color_fg, data.state.theme.ui.error.tui());
+    }
+
+    #[test]
+    fn a_new_selection_scrolls_into_view_and_a_growing_tree_follows_the_bottom() {
+        let (_tmp, tree) = numbered_tree(10);
+        let mut data = data_over(tree, 4);
+        let window = Window::ConversationTree;
+        let mut component = component();
+        select(&mut data, "n9");
+        frame(&mut component, &mut data, 30, 4);
+        assert_eq!(data.state.pane_manager.window_scroll(&window), 6);
+        select(&mut data, "n0");
+        frame(&mut component, &mut data, 30, 4);
+        assert_eq!(data.state.pane_manager.window_scroll(&window), 0);
+        select(&mut data, "n5");
+        frame(&mut component, &mut data, 30, 4);
+        assert_eq!(data.state.pane_manager.window_scroll(&window), 2);
+        assert_eq!(component.line_rows, [2, 3, 4, 5]);
+        select(&mut data, "n9");
+        frame(&mut component, &mut data, 30, 4);
+        assert_eq!(data.state.pane_manager.window_scroll(&window), 6);
+        let (_grown_tmp, grown) = numbered_tree(11);
+        *data.state.conversations.write() = grown;
+        frame(&mut component, &mut data, 30, 4);
+        assert_eq!(data.state.pane_manager.window_scroll(&window), 7);
+        assert_eq!(component.line_rows, [7, 8, 9, 10]);
+    }
+
     fn prefixes(tree: &crate::conversation::ConversationTree, expanded: &[&str]) -> Vec<String> {
         layout_rows(tree, &ids(expanded))
             .iter()
