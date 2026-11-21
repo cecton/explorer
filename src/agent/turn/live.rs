@@ -391,6 +391,15 @@ impl Recorder {
         }
     }
 
+    /// One streamed chunk of an answer: thinking or reply text.
+    pub fn chunk(&mut self, is_thinking: bool, text: &str) {
+        if is_thinking {
+            self.reasoning(text);
+        } else {
+            self.text(text);
+        }
+    }
+
     /// Thinking of the answer in progress; shown dimmed and never recorded.
     pub fn reasoning(&mut self, chunk: &str) {
         let mut live = self.live.lock();
@@ -427,6 +436,14 @@ impl Recorder {
         if live.cached_in.is_none() {
             live.cached_in = cached;
         }
+    }
+
+    /// The sizes one request reported, as far as it reported them.
+    pub fn request_size(&mut self, tokens_in: Option<u64>, cached_in: Option<u64>) {
+        if let Some(tokens) = tokens_in {
+            self.tokens_in(tokens);
+        }
+        self.cached_in(cached_in);
     }
 
     pub fn session(&mut self, session_id: String) {
@@ -554,6 +571,26 @@ mod tests {
         recorder.cached_in(Some(0));
         recorder.cached_in(Some(20_000));
         assert_eq!(live.lock().cached_in, Some(0));
+    }
+
+    #[test]
+    fn a_request_reports_its_size_and_a_chunk_goes_where_its_kind_says() {
+        let (_tmp, node_dir) = temp_dir();
+        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
+        let live = Arc::default();
+        let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
+
+        recorder.request_size(Some(100), Some(40));
+        recorder.request_size(None, Some(90));
+        assert_eq!(live.lock().tokens_in, Some(100));
+        assert_eq!(live.lock().cached_in, Some(40));
+        recorder.request_size(Some(120), None);
+        assert_eq!(live.lock().tokens_in, Some(120));
+
+        recorder.chunk(true, "hm");
+        recorder.chunk(false, "ok");
+        assert_eq!(live.lock().thinking, "hm");
+        assert_eq!(live.lock().reply, "ok");
     }
 
     #[test]

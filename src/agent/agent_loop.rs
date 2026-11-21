@@ -228,13 +228,7 @@ async fn run_loop(
             system,
             messages,
             &tool_specs,
-            |is_thinking, text| {
-                if is_thinking {
-                    recorder.reasoning(text);
-                } else {
-                    recorder.text(text);
-                }
-            },
+            |is_thinking, text| recorder.chunk(is_thinking, text),
         )
         .await
         {
@@ -247,10 +241,7 @@ async fn run_loop(
                 return Err(error);
             }
         };
-        if let Some(tokens) = response.tokens_in {
-            recorder.tokens_in(tokens);
-        }
-        recorder.cached_in(response.cached_in);
+        recorder.request_size(response.tokens_in, response.cached_in);
 
         // Detect if response contains excessive Chinese before moving the text.
         let detected_chinese = has_excessive_chinese(&response.text);
