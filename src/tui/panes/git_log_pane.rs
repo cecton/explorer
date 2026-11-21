@@ -60,8 +60,9 @@ impl GitLogPaneComponent {
         match state.repo.clone() {
             Some(repo) => {
                 tokio::task::spawn_blocking(move || {
-                    let result = crate::git::load_commit_diff(&repo, id)
-                        .map(|text| Arc::new(crate::git::classify_diff(&text)));
+                    let result = crate::git::load_commit_diff(&repo, id).map(|(summary, text)| {
+                        (summary, Arc::new(crate::git::classify_diff(&text)))
+                    });
                     crate::signal::send(&main_tx, AppSignal::CommitDiffLoaded { id, result });
                 });
             }

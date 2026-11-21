@@ -19,35 +19,43 @@ impl CommitDiffPaneComponent {
         }
     }
 
-    fn commit_summary(state: &crate::tui::state::AppState, id: [u8; 20]) -> Option<String> {
-        state
-            .git_logs
-            .values()
-            .filter_map(|win| win.entries.as_ref())
-            .flat_map(|history| history.entries.iter())
-            .find(|entry| entry.id == id)
-            .map(|entry| entry.summary.clone())
-    }
-
     pub(crate) fn title(state: &crate::tui::state::AppState, id: [u8; 20]) -> String {
         let short = crate::git::short_id(&id);
-        match Self::commit_summary(state, id) {
-            Some(summary) => format!("commit {short} {summary}"),
-            None => format!("commit {short}"),
+        match state.commit_diffs.get(&id) {
+            Some(diff) if !diff.summary.is_empty() => format!("commit {short} {}", diff.summary),
+            _ => format!("commit {short}"),
         }
     }
 
-    fn kind_color(
-        theme: &crate::tui::theme::HelixTheme,
-        kind: crate::git::DiffKind,
-    ) -> crate::tui::theme::Color {
+    fn kind_colors(theme: &crate::tui::theme::HelixTheme) -> DiffColors {
+        DiffColors {
+            file: theme.color_for_scope("function"),
+            hunk: theme.color_for_scope("diff.delta"),
+            add: theme.color_for_scope("diff.plus"),
+            del: theme.color_for_scope("diff.minus"),
+            context: theme.ui.text,
+        }
+    }
+}
+
+/// The colors of the diff row kinds, resolved once per frame.
+struct DiffColors {
+    file: crate::tui::theme::Color,
+    hunk: crate::tui::theme::Color,
+    add: crate::tui::theme::Color,
+    del: crate::tui::theme::Color,
+    context: crate::tui::theme::Color,
+}
+
+impl DiffColors {
+    fn of(&self, kind: crate::git::DiffKind) -> crate::tui::theme::Color {
         use crate::git::DiffKind;
         match kind {
-            DiffKind::FileHeader | DiffKind::File => theme.color_for_scope("function"),
-            DiffKind::Hunk => theme.color_for_scope("diff.delta"),
-            DiffKind::Add => theme.color_for_scope("diff.plus"),
-            DiffKind::Del => theme.color_for_scope("diff.minus"),
-            DiffKind::Context => theme.ui.text,
+            DiffKind::FileHeader | DiffKind::File => self.file,
+            DiffKind::Hunk => self.hunk,
+            DiffKind::Add => self.add,
+            DiffKind::Del => self.del,
+            DiffKind::Context => self.context,
         }
     }
 }
@@ -56,7 +64,7 @@ impl CommitDiffPaneComponent {
 pub(crate) fn diff_loaded(
     state: &mut crate::tui::state::AppState,
     id: [u8; 20],
-    result: &Result<std::sync::Arc<Vec<crate::git::DiffLine>>, String>,
+    result: &Result<(String, std::sync::Arc<Vec<crate::git::DiffLine>>), String>,
 ) {
     use crate::tui::pane_manager::Window;
     let still_open = state
@@ -69,7 +77,8 @@ pub(crate) fn diff_loaded(
     }
     let entry = state.commit_diffs.entry(id).or_default();
     match result {
-        Ok(lines) => {
+        Ok((summary, lines)) => {
+            entry.summary.clone_from(summary);
             entry.lines = Some(std::sync::Arc::clone(lines));
             entry.error = None;
         }
@@ -223,6 +232,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
                     );
                 }
                 (Some(lines), _) => {
+                    let colors = Self::kind_colors(&state.theme);
                     for row_offset in 0..total_rows {
                         render_ops += RenderOpCommon::MoveCursorPositionRelTo(
                             origin,
@@ -241,7 +251,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Commit
                             origin,
                             vp_col(0) + vp_row(row_offset as u16),
                         );
-                        let fg = Self::kind_color(&state.theme, line.kind);
+                        let fg = colors.of(line.kind);
                         let style = fg.on(pane_bg);
                         let text = diff_row_text(&line.text, pane_width);
                         render_ops += RenderOpCommon::ApplyColors(Some(style));
@@ -301,5 +311,29 @@ mod tests {
                 "{pane_width}: {text:?}"
             );
         }
+    }
+
+    #[test]
+    fn a_diff_title_shows_its_summary_without_a_log_window() {
+        use crate::tui::state::AppState;
+        use crate::tui::state::CommitDiffState;
+        let mut state = AppState::default();
+        let id = [7u8; 20];
+        let short = crate::git::short_id(&id);
+        assert_eq!(
+            CommitDiffPaneComponent::title(&state, id),
+            format!("commit {short}")
+        );
+        state.commit_diffs.insert(
+            id,
+            CommitDiffState {
+                summary: "fix: a bug".to_string(),
+                ..Default::default()
+            },
+        );
+        assert_eq!(
+            CommitDiffPaneComponent::title(&state, id),
+            format!("commit {short} fix: a bug")
+        );
     }
 }

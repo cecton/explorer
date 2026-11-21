@@ -88,7 +88,7 @@ pub enum AppSignal {
     /// Result of an async `git::load_commit_diff` run for `id`.
     CommitDiffLoaded {
         id: [u8; 20],
-        result: Result<Arc<Vec<crate::git::DiffLine>>, String>,
+        result: Result<(String, Arc<Vec<crate::git::DiffLine>>), String>,
     },
     /// Result of an async `git::is_dirty` check.
     DirtyStatusLoaded(Result<bool, String>),

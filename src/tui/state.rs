@@ -331,6 +331,7 @@ impl ModelCatalog {
 
 #[derive(Clone, Default)]
 pub struct CommitDiffState {
+    pub summary: String,
     pub lines: Option<Arc<Vec<crate::git::DiffLine>>>,
     pub error: Option<String>,
 }

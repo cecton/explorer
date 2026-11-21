@@ -155,11 +155,7 @@ pub fn load_log(
             .ok()
             .and_then(|sig| sig.time().ok())
             .unwrap_or_default();
-        let first_line = commit
-            .message_raw_sloppy()
-            .split(|&b| b == b'\n')
-            .next()
-            .unwrap_or(b"");
+        let first_line = first_message_line(commit.message_raw_sloppy());
         let mut id = [0u8; 20];
         id.copy_from_slice(info.id.as_bytes());
         entries.push(LogEntry {
@@ -420,11 +416,17 @@ pub fn is_dirty(repo: &gix::ThreadSafeRepository) -> Result<bool, String> {
         .map_err(|e| format!("check status: {e}"))
 }
 
-pub fn load_commit_diff(repo: &gix::ThreadSafeRepository, id: [u8; 20]) -> Result<String, String> {
+/// The first message line of commit `id` and its unified diff against its first parent.
+pub fn load_commit_diff(
+    repo: &gix::ThreadSafeRepository,
+    id: [u8; 20],
+) -> Result<(String, String), String> {
     let repo = repo.to_thread_local();
     let commit = repo
         .find_commit(gix::ObjectId::from(id))
         .map_err(|e| format!("find commit: {e}"))?;
+    let summary =
+        String::from_utf8_lossy(first_message_line(commit.message_raw_sloppy())).into_owned();
 
     let parent_tree = match commit.parent_ids().next() {
         Some(parent_id) => {
@@ -484,7 +486,11 @@ pub fn load_commit_diff(repo: &gix::ThreadSafeRepository, id: [u8; 20]) -> Resul
             file_diff(&repo, algorithm, &path, old_id, new_id, &mut out)?;
         }
     }
-    Ok(out)
+    Ok((summary, out))
+}
+
+fn first_message_line(message: &[u8]) -> &[u8] {
+    message.split(|&b| b == b'\n').next().unwrap_or(b"")
 }
 
 fn file_diff(
@@ -743,7 +749,9 @@ mod tests {
         let root = camino::Utf8PathBuf::from(env!("CARGO_MANIFEST_DIR"));
         let repo = gix::ThreadSafeRepository::open(root.as_std_path()).expect("open repo");
         let history = load_log(&repo, None).expect("load_log");
-        let diff = load_commit_diff(&repo, history.entries[0].id).expect("load_commit_diff");
+        let (summary, diff) =
+            load_commit_diff(&repo, history.entries[0].id).expect("load_commit_diff");
+        assert_eq!(summary, history.entries[0].summary);
         let lines = classify_diff(&diff);
         if !lines.is_empty() {
             assert_eq!(lines[0].kind, DiffKind::FileHeader);
