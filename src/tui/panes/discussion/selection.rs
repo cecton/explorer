@@ -7,7 +7,7 @@ pub(crate) enum DragKind {
     /// A Shift or Ctrl drag: adds to or removes from the highlights `node` had when the
     /// drag began.
     Highlight {
-        modifier: crate::tui::widgets::contrast::DragModifier,
+        modifier: crate::tui::selection::DragModifier,
         node: crate::conversation::NodeId,
         snapshot: Vec<(usize, usize)>,
     },
@@ -145,7 +145,7 @@ impl crate::tui::panes::discussion::DiscussionComponent {
             .as_ref()
             .filter(|_| discussion.agent.is_none());
         let kind = match (
-            crate::tui::widgets::contrast::drag_modifier_from_mouse(mouse),
+            crate::tui::selection::drag_modifier_from_mouse(mouse),
             highlighted,
         ) {
             (Some(modifier), Some(node)) => {
@@ -211,8 +211,8 @@ impl crate::tui::panes::discussion::DiscussionComponent {
     /// Extends the drag to the word under the mouse. A drag never leaves the text it
     /// began in: past it, it reaches that text's start or end.
     pub(crate) fn update_drag(&mut self, state: &mut crate::tui::state::AppState, pos: VPPos) {
+        use crate::tui::selection::DragModifier;
         use crate::tui::selection::SelPoint;
-        use crate::tui::widgets::contrast::DragModifier;
         if !self.drag_stands(state) {
             return;
         }

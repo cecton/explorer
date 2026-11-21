@@ -7,31 +7,6 @@
 #[allow(clippy::wildcard_imports)] // r3bl is Explorer's shared vocabulary: see AGENTS.md
 use r3bl_tui::*;
 
-/// A drag that moves a highlight range rather than selecting text.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum DragModifier {
-    /// Adds the dragged range to the highlights.
-    Shift,
-    /// Removes the dragged range from the highlights.
-    Ctrl,
-}
-
-/// The modifier a mouse event carries, when it carries exactly one of the two that mark.
-pub(crate) fn drag_modifier_from_mouse(mouse: &MouseInput) -> Option<DragModifier> {
-    let mask = mouse.maybe_modifier_keys?;
-    let shift = mask.shift_key_state == KeyState::Pressed;
-    let ctrl = mask.ctrl_key_state == KeyState::Pressed;
-    let alt = mask.alt_key_state == KeyState::Pressed;
-    if alt {
-        return None;
-    }
-    match (shift, ctrl) {
-        (true, false) => Some(DragModifier::Shift),
-        (false, true) => Some(DragModifier::Ctrl),
-        _ => None,
-    }
-}
-
 /// Perceived brightness on a 0-255 scale (standard luma weights). Good enough for
 /// picking readable terminal text; not meant to be WCAG-certified color science.
 fn luminance(c: RgbValue) -> f32 {
@@ -115,39 +90,5 @@ mod tests {
         let dark = Color::from_u8(30, 30, 30);
         assert_eq!(ensure_readable_fg(Color::Ansi(8), dark), Color::Ansi(8));
         assert_eq!(ensure_readable_fg(dark, Color::Default), dark);
-    }
-
-    #[test]
-    fn a_drag_marks_with_exactly_one_modifier() {
-        use r3bl_tui::KeyState;
-        let with = |shift: KeyState, ctrl: KeyState, alt: KeyState| MouseInput {
-            kind: r3bl_tui::MouseInputKind::MouseDrag(r3bl_tui::Button::Left),
-            pos: r3bl_tui::VPPos::default(),
-            maybe_modifier_keys: Some(ModifierKeysMask {
-                shift_key_state: shift,
-                ctrl_key_state: ctrl,
-                alt_key_state: alt,
-            }),
-        };
-        let (on, off) = (KeyState::Pressed, KeyState::NotPressed);
-        assert_eq!(
-            drag_modifier_from_mouse(&with(on, off, off)),
-            Some(DragModifier::Shift)
-        );
-        assert_eq!(
-            drag_modifier_from_mouse(&with(off, on, off)),
-            Some(DragModifier::Ctrl)
-        );
-        assert_eq!(drag_modifier_from_mouse(&with(on, on, off)), None);
-        assert_eq!(drag_modifier_from_mouse(&with(on, off, on)), None);
-        assert_eq!(drag_modifier_from_mouse(&with(off, off, off)), None);
-        assert_eq!(
-            drag_modifier_from_mouse(&MouseInput {
-                kind: r3bl_tui::MouseInputKind::MouseDrag(r3bl_tui::Button::Left),
-                pos: r3bl_tui::VPPos::default(),
-                maybe_modifier_keys: None,
-            }),
-            None
-        );
     }
 }

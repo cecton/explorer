@@ -40,7 +40,7 @@ pub struct FilePreviewComponent {
     /// Highlights of the file when the current range drag started; empty when none is active.
     drag_snapshot: Vec<(usize, usize)>,
     drag_start_line: Option<usize>,
-    drag_modifier: Option<crate::tui::widgets::contrast::DragModifier>,
+    drag_modifier: Option<crate::tui::selection::DragModifier>,
     /// Cached geometry of the content area at last render, used for mouse event handling.
     content_origin_row: usize,
     content_origin_col: usize,
@@ -365,7 +365,7 @@ impl FilePreviewComponent {
         state: &crate::tui::state::AppState,
         key: crate::loader::FileKey,
         line: usize,
-        modifier: crate::tui::widgets::contrast::DragModifier,
+        modifier: crate::tui::selection::DragModifier,
     ) {
         self.drag_snapshot.clear();
         self.drag_snapshot.extend_from_slice(state.highlights(key));
@@ -379,6 +379,7 @@ impl FilePreviewComponent {
         key: crate::loader::FileKey,
         current_line: usize,
     ) {
+        use crate::tui::selection::DragModifier;
         let Some(start) = self.drag_start_line else {
             return;
         };
@@ -388,7 +389,6 @@ impl FilePreviewComponent {
         let snapshot = self.drag_snapshot.as_slice();
         let lo = start.min(current_line);
         let hi = start.max(current_line);
-        use crate::tui::widgets::contrast::DragModifier;
         let new_ranges = match modifier {
             DragModifier::Shift => union_ranges(snapshot, lo, hi),
             DragModifier::Ctrl => subtract_ranges(snapshot, lo, hi),
@@ -424,9 +424,7 @@ impl FilePreviewComponent {
 
         match mouse.kind {
             MouseInputKind::MouseDown(Button::Left) if in_content_rows && in_content_cols => {
-                if let Some(modifier) =
-                    crate::tui::widgets::contrast::drag_modifier_from_mouse(&mouse)
-                {
+                if let Some(modifier) = crate::tui::selection::drag_modifier_from_mouse(&mouse) {
                     let state = &mut global_data.state;
                     let window = Window::FilePreview(key);
                     let scroll = state.pane_manager.window_scroll(&window);
