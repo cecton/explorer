@@ -22,7 +22,7 @@ pub enum AfterAgents {
 }
 
 impl AfterAgents {
-    pub fn command(&self) -> &str {
+    fn command(&self) -> &str {
         match self {
             Self::Pending(command)
             | Self::Countdown { command, .. }
@@ -55,7 +55,7 @@ pub enum Tick {
 }
 
 /// What the 1s tick does to `after`: `idle` means no turn runs and none is queued.
-pub fn tick_action(after: &AfterAgents, idle: bool, now: Instant) -> Tick {
+fn tick_action(after: &AfterAgents, idle: bool, now: Instant) -> Tick {
     match after {
         AfterAgents::Countdown { .. } if !idle => Tick::Revert,
         AfterAgents::Countdown { deadline, .. } if now >= *deadline => Tick::Fire,
@@ -64,11 +64,11 @@ pub fn tick_action(after: &AfterAgents, idle: bool, now: Instant) -> Tick {
 }
 
 /// Whole seconds left before the command runs, rounded up.
-pub fn seconds_left(deadline: Instant, now: Instant) -> u64 {
+fn seconds_left(deadline: Instant, now: Instant) -> u64 {
     deadline.saturating_duration_since(now).as_secs_f64().ceil() as u64
 }
 
-pub fn is_idle(state: &crate::tui::state::AppState) -> bool {
+fn is_idle(state: &crate::tui::state::AppState) -> bool {
     state.running_turns.is_empty() && state.queued_turns.is_empty()
 }
 

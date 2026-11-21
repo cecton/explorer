@@ -107,6 +107,14 @@ pub(crate) struct AliasRow {
     from_config: bool,
 }
 
+impl AliasRow {
+    /// What the row says after the name: `= command`, marked when the config defines it.
+    fn detail(&self) -> String {
+        let origin = if self.from_config { " (config)" } else { "" };
+        format!("= {}{origin}", self.command)
+    }
+}
+
 /// One row of the palette, whatever it came from.
 pub(crate) enum Entry {
     Command(&'static Command),
@@ -128,10 +136,7 @@ impl Entry {
                 command.description.to_string()
             }
             Self::Command(command) => format!("{}   {}", command.argument, command.description),
-            Self::Alias(alias) => {
-                let origin = if alias.from_config { " (config)" } else { "" };
-                format!("= {}{origin}", alias.command)
-            }
+            Self::Alias(alias) => alias.detail(),
         }
     }
 
@@ -218,7 +223,7 @@ fn is_alias(state: &crate::tui::state::AppState, word: &str) -> bool {
 /// names are prefix-matched too since typing one is how it runs. Only while that word is
 /// being typed — once it is followed by a space the line takes an argument, and once it
 /// names something exactly the line's own hint says more than a one-line description.
-pub(crate) fn palette_entries(typed: &str, state: &crate::tui::state::AppState) -> Vec<Entry> {
+fn palette_entries(typed: &str, state: &crate::tui::state::AppState) -> Vec<Entry> {
     if typed.contains(char::is_whitespace) || typed.starts_with('!') {
         return Vec::new();
     }
@@ -261,7 +266,7 @@ impl CommandLine {
     /// Take the entry at `selected` as the typed text, so a second Enter runs it. A name
     /// that takes an argument is only written out, with a space after it: the input never
     /// holds a command the user has not seen.
-    pub fn accept(&mut self, entries: &[Entry]) {
+    fn accept(&mut self, entries: &[Entry]) {
         let Some(entry) = entries.get(self.selected) else {
             return;
         };
@@ -277,19 +282,11 @@ impl CommandLine {
         input_event: &InputEvent,
         global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
     ) -> bool {
-        if global_data.state.command_line.is_none() {
+        let Some(command_line) = global_data.state.command_line.as_mut() else {
             return false;
-        }
-        if !matches!(input_event, InputEvent::Mouse(_))
-            && global_data
-                .state
-                .command_line
-                .as_ref()
-                .is_some_and(|command_line| command_line.input.selecting())
-        {
-            if let Some(command_line) = global_data.state.command_line.as_mut() {
-                command_line.input.cancel_select();
-            }
+        };
+        if !matches!(input_event, InputEvent::Mouse(_)) && command_line.input.selecting() {
+            command_line.input.cancel_select();
             global_data.state.mouse_drag_active = false;
         }
         let entries =
@@ -311,25 +308,13 @@ impl CommandLine {
         // work a frame does not need.
         match &input_event {
             InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::Tab),
+                key: Key::SpecialKey(key @ (SpecialKey::Tab | SpecialKey::BackTab)),
             }) => {
                 let entries = entries(global_data);
                 if !entries.is_empty()
                     && let Some(command_line) = global_data.state.command_line.as_mut()
                 {
-                    command_line.move_selection(true, entries.len());
-                    command_line.error = None;
-                }
-                return true;
-            }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::SpecialKey(SpecialKey::BackTab),
-            }) => {
-                let entries = entries(global_data);
-                if !entries.is_empty()
-                    && let Some(command_line) = global_data.state.command_line.as_mut()
-                {
-                    command_line.move_selection(false, entries.len());
+                    command_line.move_selection(*key == SpecialKey::Tab, entries.len());
                     command_line.error = None;
                 }
                 return true;
@@ -415,7 +400,7 @@ impl CommandLine {
     }
 
     /// Moves the palette's highlight, wrapping, and returns whether it moved.
-    pub fn move_selection(&mut self, down: bool, entries: usize) -> bool {
+    fn move_selection(&mut self, down: bool, entries: usize) -> bool {
         if entries == 0 {
             return false;
         }
@@ -429,7 +414,7 @@ impl CommandLine {
 }
 
 /// Runs the typed command: the command line closes, or stays open with the error.
-pub fn run_command_line(
+fn run_command_line(
     global_data: &mut GlobalData<crate::tui::state::AppState, crate::signal::AppSignal>,
 ) {
     use crate::tui::pane_manager::Window;
@@ -681,7 +666,7 @@ fn run_untrust(run: &mut CommandRun<'_>) -> Result<(), String> {
 
 /// Scans the repository and shows what it found in a report window. Runs in place: a scan
 /// of a large repository takes a fraction of a second, and nothing is written anywhere.
-pub(crate) fn scan_into_report(state: &mut crate::tui::state::AppState) {
+fn scan_into_report(state: &mut crate::tui::state::AppState) {
     use crate::scan::Severity;
     use crate::tui::panes::report_pane::ReportComponent;
     let report = crate::scan::scan(&state.root);
@@ -744,7 +729,7 @@ fn set_alias(state: &mut crate::tui::state::AppState, argument: &str) -> Result<
 
 /// `text` with its first word replaced by the alias it names, the project's before the
 /// config's; the rest is appended as typed. A miss returns `text` unchanged.
-pub fn resolve_alias(state: &crate::tui::state::AppState, text: &str) -> String {
+fn resolve_alias(state: &crate::tui::state::AppState, text: &str) -> String {
     let trimmed = text.trim_start();
     let (word, rest) = match trimmed.split_once(char::is_whitespace) {
         Some((word, rest)) => (word, rest.trim_start()),
@@ -793,10 +778,7 @@ fn command_hint(typed: &str, state: &crate::tui::state::AppState) -> Option<Stri
         ("alias", None, _) => {
             let entries: Vec<String> = alias_rows(state)
                 .iter()
-                .map(|alias| {
-                    let origin = if alias.from_config { " (config)" } else { "" };
-                    format!("{} = {}{origin}", alias.name, alias.command)
-                })
+                .map(|alias| format!("{} {}", alias.name, alias.detail()))
                 .collect();
             if entries.is_empty() {
                 "no aliases · alias <name> <shell command>".to_string()
@@ -853,10 +835,7 @@ fn command_hint(typed: &str, state: &crate::tui::state::AppState) -> Option<Stri
             None => alias_rows(state)
                 .into_iter()
                 .find(|alias| alias.name == name)
-                .map(|alias| {
-                    let origin = if alias.from_config { " (config)" } else { "" };
-                    format!("= {}{origin}", alias.command)
-                })?,
+                .map(|alias| alias.detail())?,
         },
         _ => return None,
     };
@@ -987,7 +966,7 @@ pub fn render_command_line(
 }
 
 /// The terminal a `!` command opens: a plain shell when the command is empty.
-pub fn shell_signal(
+fn shell_signal(
     shell_cmd: &str,
     file: Option<&camino::Utf8Path>,
     state: &crate::tui::state::AppState,
