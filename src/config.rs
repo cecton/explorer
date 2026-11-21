@@ -188,6 +188,9 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                         _ => {}
                     }
                 }
+                if settings.endpoints.iter().any(|known| known.name == name) {
+                    return Err(format!("endpoint '{name}' is defined twice"));
+                }
                 let name = name.to_string();
                 use crate::endpoint::EndpointKind;
                 use crate::endpoint::Provider;
@@ -491,6 +494,13 @@ mod config_tests {
         assert_eq!(config.after_agents.grace_seconds, 0);
         assert!(parse("after-agents { grace-seconds \"x\" }").is_err());
         assert!(parse("after-agents { grace-seconds -1 }").is_err());
+    }
+
+    #[test]
+    fn an_endpoint_declared_twice_is_an_error_naming_it() {
+        let config =
+            "agent {\n endpoint \"a\" {\n url \"u\"\n }\n endpoint \"a\" {\n url \"v\"\n }\n}";
+        assert_eq!(parse(config).unwrap_err(), "endpoint 'a' is defined twice");
     }
 
     #[test]

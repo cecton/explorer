@@ -240,7 +240,9 @@ agent {
 - `agent`: the endpoints, and the model that writes the titles and summaries of the
   tree. Without `summary-model` a node is titled by the first line of its prompt. An
   `openrouter` endpoint states what its API key has spent and the limit it enforces in
-  the status bar, or what is left of the account's credit when the key has no limit.
+  the status bar, or what is left of the account's credit when the key has no limit. An
+  endpoint name is declared once: a second `endpoint` of the same name fails the config at
+  startup, naming it.
 
 Tokens stay out of the configuration, in `~/.local/share/explorer/auth.kdl`, one line
 per endpoint name. A `claude-code` endpoint needs none.
