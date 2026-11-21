@@ -220,11 +220,6 @@ mod tests {
         assert_eq!(names(&groups), ["b"]);
     }
 
-    fn state() -> crate::tui::state::AppState {
-        use crate::tui::state::AppState;
-        AppState::for_test(camino::Utf8PathBuf::from("/tmp/nowhere"))
-    }
-
     fn location(key: usize) -> crate::signal::SymbolRefLocation {
         crate::signal::SymbolRefLocation {
             file_key: crate::loader::FileKey(key),
@@ -249,7 +244,8 @@ mod tests {
     /// The file a group starts in is gone, so the group goes with it.
     #[test]
     fn a_group_whose_origin_was_removed_goes() {
-        let mut state = state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         state.symbol_highlights = vec![group("a"), group("b")];
         state.symbol_highlights[1].origin_file = crate::loader::FileKey(3);
 
@@ -261,7 +257,8 @@ mod tests {
     /// A file the group starts in changed: its name and location have to be resolved again.
     #[test]
     fn a_group_whose_origin_changed_is_asked_for_again() {
-        let mut state = state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         let mut changed = group("a");
         changed.locations = vec![location(1), location(2)];
         changed.origin_byte_start = Some(4);
@@ -279,7 +276,8 @@ mod tests {
     /// the ones elsewhere, and nothing is re-resolved.
     #[test]
     fn a_group_loses_the_uses_of_a_file_that_changed() {
-        let mut state = state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         let mut group = group("a");
         group.locations = vec![location(1), location(5)];
         state.symbol_highlights = vec![group];
@@ -293,7 +291,8 @@ mod tests {
     /// A batch that touched no file leaves every group as it was.
     #[test]
     fn an_empty_batch_leaves_the_groups_alone() {
-        let mut state = state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         let mut group = group("a");
         group.locations = vec![location(1)];
         state.symbol_highlights = vec![group];
@@ -325,7 +324,8 @@ mod tests {
     /// A fresh answer adds a group in the next unused colour and asks nothing.
     #[test]
     fn a_fresh_answer_adds_a_group() {
-        let mut state = state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         answered(&mut state, &answer("a", None, 0, 1, 2));
 
         assert_eq!(names(&state.symbol_highlights), ["a"]);
@@ -339,7 +339,8 @@ mod tests {
     /// A second name takes the next colour rather than reusing the first.
     #[test]
     fn a_second_name_takes_another_colour() {
-        let mut state = state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         answered(&mut state, &answer("a", None, 0, 1, 0));
         answered(&mut state, &answer("b", None, 1, 1, 0));
 
@@ -356,7 +357,8 @@ mod tests {
     /// A rebuild updates the group in place instead of adding a second one.
     #[test]
     fn a_rebuild_updates_the_group_it_names() {
-        let mut state = state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         answered(&mut state, &answer("a", None, 0, 1, 0));
         state.symbol_highlights[0].needs_rebuild = true;
         state.session_dirty = false;
@@ -373,7 +375,8 @@ mod tests {
     /// An answer with no location anywhere drops a group that was marked.
     #[test]
     fn an_empty_answer_drops_the_marked_group() {
-        let mut state = state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         answered(&mut state, &answer("a", None, 0, 1, 0));
         state.session_dirty = false;
 
@@ -386,7 +389,8 @@ mod tests {
     /// An answer for a group unmarked while the request was in flight has nothing to do.
     #[test]
     fn a_rebuild_of_an_unmarked_group_does_nothing() {
-        let mut state = state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
 
         answered(&mut state, &answer("a", Some(0), 0, 1, 0));
         assert!(state.symbol_highlights.is_empty());
@@ -396,7 +400,8 @@ mod tests {
     /// Two groups of one name never both survive an answer for it.
     #[test]
     fn an_answer_leaves_one_group_per_name() {
-        let mut state = state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         answered(&mut state, &answer("a", None, 0, 1, 0));
         answered(&mut state, &answer("a", None, 4, 1, 0));
         assert_eq!(state.symbol_highlights.len(), 1);

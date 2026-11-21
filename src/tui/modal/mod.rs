@@ -300,11 +300,6 @@ mod tests {
     use crate::tui::pane_manager::Window;
     use crate::tui::state::AppState;
     use crate::tui::state::ModelPickerPurpose;
-    use camino::Utf8PathBuf;
-
-    fn state() -> AppState {
-        AppState::for_test(Utf8PathBuf::from("/tmp/nowhere"))
-    }
 
     fn size(cols: u16, rows: u16) -> VPSize {
         vp_width(cols) + vp_height(rows)
@@ -559,7 +554,7 @@ mod tests {
     fn the_frame_paints_the_open_modal_over_the_panes() {
         use crate::tui::modal::list::ModalPainters;
         use crate::tui::modal::theme_picker;
-        let mut state = state();
+        let mut state = AppState::blank_for_test();
         crate::tui::focus::focus_window(&mut state, Window::ConversationTree);
         theme_picker::open(&mut state);
 
@@ -620,7 +615,7 @@ mod tests {
     fn a_modal_with_no_result_says_so() {
         use crate::tui::modal::list::ModalPainters;
         use crate::tui::modal::theme_picker;
-        let mut state = state();
+        let mut state = AppState::blank_for_test();
         theme_picker::open(&mut state);
         state.theme_picker.results.clear();
         state.theme_picker.selected = None;
@@ -635,7 +630,7 @@ mod tests {
     #[test]
     fn the_model_picker_with_nothing_to_offer_says_why() {
         use crate::tui::modal::list::ModalPainters;
-        let mut state = state();
+        let mut state = AppState::blank_for_test();
         Modal::open(
             &mut state,
             Modal::ModelPicker(ModelPickerPurpose::Window(1)),
@@ -670,7 +665,7 @@ mod tests {
     #[test]
     fn a_dispatch_keeps_the_event_inside_the_modal() {
         use crate::tui::modal::theme_picker;
-        let mut state = state();
+        let mut state = AppState::blank_for_test();
         crate::tui::focus::focus_window(&mut state, Window::ConversationTree);
         theme_picker::open(&mut state);
         let (main_tx, _rx) = tokio::sync::mpsc::channel(1);
@@ -719,7 +714,7 @@ mod tests {
 
     #[test]
     fn opening_a_modal_releases_the_keyboard_and_a_selection() {
-        let mut state = state();
+        let mut state = AppState::blank_for_test();
         crate::tui::focus::focus_window(&mut state, Window::ConversationTree);
         state.terminal_grabbed = true;
         state.mouse_drag_active = true;
@@ -749,7 +744,7 @@ mod tests {
 
     #[test]
     fn opening_another_modal_over_the_theme_picker_reverts_the_preview() {
-        let mut state = state();
+        let mut state = AppState::blank_for_test();
         let confirmed = previewing_another_theme(&mut state);
         Modal::open(&mut state, Modal::WindowPicker);
         assert_eq!(state.theme.name(), confirmed);
@@ -757,7 +752,7 @@ mod tests {
 
     #[test]
     fn closing_the_theme_picker_any_way_reverts_the_preview() {
-        let mut state = state();
+        let mut state = AppState::blank_for_test();
         let confirmed = previewing_another_theme(&mut state);
         Modal::close(&mut state);
         assert_eq!(state.theme.name(), confirmed);
@@ -765,7 +760,7 @@ mod tests {
 
     #[test]
     fn closing_a_modal_returns_the_keyboard_to_the_window_it_opened_over() {
-        let mut state = state();
+        let mut state = AppState::blank_for_test();
         crate::tui::focus::focus_window(&mut state, Window::ConversationTree);
         Modal::open(&mut state, Modal::WindowPicker);
         Modal::close(&mut state);
@@ -783,7 +778,7 @@ mod tests {
     /// given to a window that is no longer there.
     #[test]
     fn closing_a_modal_over_a_closed_window_leaves_the_focus_alone() {
-        let mut state = state();
+        let mut state = AppState::blank_for_test();
         crate::tui::focus::focus_window(&mut state, Window::ConversationTree);
         crate::tui::focus::focus_window(&mut state, Window::Report(0));
         Modal::open(&mut state, Modal::WindowPicker);
@@ -796,7 +791,7 @@ mod tests {
 
     #[test]
     fn a_modal_opened_twice_keeps_the_origin_of_the_first_one() {
-        let mut state = state();
+        let mut state = AppState::blank_for_test();
         crate::tui::focus::focus_window(&mut state, Window::ConversationTree);
         Modal::open(&mut state, Modal::ThemePicker);
         Modal::open(
