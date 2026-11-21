@@ -1163,11 +1163,6 @@ mod tests {
         assert_eq!(node_mode(tree.node(&id).unwrap()), Mode::Feedback);
     }
 
-    fn empty_state() -> crate::tui::state::AppState {
-        use crate::tui::state::AppState;
-        AppState::for_test(Utf8PathBuf::from("/tmp"))
-    }
-
     /// A state over a done root `a1` and its failed child `a2`, which was sent with the
     /// `review` command; window 0 shows `a1` and window 1 shows `a2`.
     fn state_with_failed_child() -> (tempfile::TempDir, crate::tui::state::AppState) {
@@ -1176,6 +1171,7 @@ mod tests {
         use crate::conversation::ConversationTree;
         use crate::conversation::NodeId;
         use crate::model_spec::ModelSpec;
+        use crate::tui::state::AppState;
         use crate::tui::state::DiscussionState;
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
@@ -1199,7 +1195,7 @@ mod tests {
         .unwrap();
         std::fs::write(child.join(crate::conversation::files::INPUT), "/review foo").unwrap();
 
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         *state.conversations.write() = ConversationTree::load(&root);
         state.agent = Arc::new(AgentConfig {
             commands: vec![
@@ -1401,8 +1397,9 @@ mod tests {
         use crate::tui::selection::DocPart;
         use crate::tui::selection::SelPoint;
         use crate::tui::selection::TextSelection;
+        use crate::tui::state::AppState;
         use crate::tui::state::DiscussionState;
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         let entries: Vec<String> = work_log.iter().map(|entry| (*entry).to_string()).collect();
         state.discussions.insert(
             0,
@@ -1635,7 +1632,8 @@ mod tests {
 
     #[test]
     fn a_queued_prompt_moves_one_place_at_a_time_and_stops_at_the_ends() {
-        let mut state = empty_state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         queue(&mut state, &[7, 8, 9]);
 
         move_queued(&mut state, 9, true);
@@ -2242,6 +2240,7 @@ mod tests {
     async fn opening_a_node_starts_nothing_and_keeps_what_the_attempt_left() {
         use crate::conversation::ConversationTree;
         use crate::conversation::NodeId;
+        use crate::tui::state::AppState;
         let tmp = tempfile::tempdir().unwrap();
         let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
         let dir = root.join("a1").join("a2");
@@ -2266,7 +2265,7 @@ mod tests {
             .unwrap();
         std::fs::create_dir_all(dir.join(crate::conversation::files::PROCESSES_DIR)).unwrap();
 
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         *state.conversations.write() = ConversationTree::load(&root);
         let (main_tx, _main_rx) = tokio::sync::mpsc::channel(1);
         DiscussionComponent::open(&mut state, main_tx, NodeId::new("a2"), None);
@@ -2326,9 +2325,10 @@ mod tests {
     fn global_data_with_drafts(
         drafts: &[&str],
     ) -> GlobalData<crate::tui::state::AppState, crate::signal::AppSignal> {
+        use crate::tui::state::AppState;
         use crate::tui::state::DiscussionState;
         use crate::tui::widgets::input_line::InputLine;
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         for (id, draft) in drafts.iter().enumerate() {
             state.discussions.insert(
                 id,
@@ -2346,8 +2346,9 @@ mod tests {
     #[test]
     fn a_discussion_moved_to_another_slot_is_not_laid_out_again() {
         use crate::tui::pane_manager::Window;
+        use crate::tui::state::AppState;
         use crate::tui::state::DiscussionState;
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         for id in [0, 1] {
             state.discussions.insert(
                 id,
@@ -2515,9 +2516,10 @@ mod tests {
     #[test]
     fn a_window_input_holds_the_mouse_while_it_selects() {
         use crate::tui::pane_manager::Window;
+        use crate::tui::state::AppState;
         use crate::tui::state::DiscussionState;
         use crate::tui::widgets::input_line::InputLine;
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         state.discussions.insert(
             0,
             DiscussionState {

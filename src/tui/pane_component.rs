@@ -737,25 +737,11 @@ mod tests {
     fn a_click_on_the_rightmost_column_of_a_full_screen_program_reaches_it() {
         use crate::tui::pane_manager::Window;
         use crate::tui::state::{AppState, TerminalPane};
-        let mut ofs_buf = OfsBufVT100::new_empty(vp_width(20) + vp_height(5));
-        let _unused = ofs_buf.apply_ansi_bytes("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
-        let pane = TerminalPane {
-            ofs_buf,
-            title: None,
-            pty_input_tx: std::sync::Arc::new(tx),
-            child_killer: None,
-            last_size: vp_width(20) + vp_height(5),
-            is_command_pane: false,
-            exited: false,
-            exit_code: None,
-            exit_signal: None,
-            scroll_offset: 0,
-            cwd: camino::Utf8PathBuf::from("/"),
-            command: None,
-            flush_pending: Default::default(),
-        };
-        let mut state = AppState::for_test(camino::Utf8PathBuf::from("/tmp/nowhere"));
+        let (mut pane, mut rx) = TerminalPane::for_test(vp_width(20) + vp_height(5));
+        let _unused = pane
+            .ofs_buf
+            .apply_ansi_bytes("\x1b[?1049h\x1b[?1000h\x1b[?1006h");
+        let mut state = AppState::blank_for_test();
         state
             .terminal_panes
             .insert(0, std::sync::Arc::new(parking_lot::Mutex::new(pane)));

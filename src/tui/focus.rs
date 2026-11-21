@@ -149,34 +149,14 @@ mod tests {
     use crate::tui::state::PreviewInput;
     use crate::tui::state::SearchDirection;
     use crate::tui::state::TerminalPane;
-    use camino::Utf8PathBuf;
-    use r3bl_tui::OfsBufVT100;
     use r3bl_tui::VPSize;
     use std::sync::Arc;
-    use tokio::sync::mpsc;
-
-    fn empty_state() -> AppState {
-        AppState::for_test(Utf8PathBuf::from("/tmp/nowhere"))
-    }
 
     /// Nothing here needs a PTY: the pane is the state `close_terminal` works on.
     fn dummy_terminal_pane(scroll_offset: usize) -> TerminalPane {
-        let (pty_input_tx, _) = mpsc::channel(1);
-        TerminalPane {
-            ofs_buf: OfsBufVT100::new_empty(VPSize::default()),
-            title: None,
-            pty_input_tx: Arc::new(pty_input_tx),
-            child_killer: None,
-            last_size: VPSize::default(),
-            is_command_pane: false,
-            exited: false,
-            exit_code: None,
-            exit_signal: None,
-            scroll_offset,
-            cwd: Utf8PathBuf::from("/tmp/nowhere"),
-            command: None,
-            flush_pending: Default::default(),
-        }
+        let (mut pane, _) = TerminalPane::for_test(VPSize::default());
+        pane.scroll_offset = scroll_offset;
+        pane
     }
 
     fn insert_terminal(state: &mut AppState, id: usize, scroll_offset: usize) {
@@ -207,7 +187,7 @@ mod tests {
 
     #[test]
     fn closing_a_preview_drops_its_state_and_refocuses_the_next_window() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         let key = FileKey(7);
         focus_window(&mut state, Window::ConversationTree);
         focus_window(&mut state, Window::FilePreview(key));
@@ -235,7 +215,7 @@ mod tests {
 
     #[test]
     fn closing_a_preview_keeps_only_its_highlights() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         let key = FileKey(7);
         focus_window(&mut state, Window::FilePreview(key));
         state.set_highlights(key, vec![(2, 4)]);
@@ -254,7 +234,7 @@ mod tests {
 
     #[test]
     fn clearing_a_preview_without_highlights_leaves_no_entry() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         let key = FileKey(7);
         state.set_input(
             key,
@@ -272,7 +252,7 @@ mod tests {
 
     #[test]
     fn a_terminal_is_grabbed_unless_it_is_scrolled_back() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         with_terminal(&mut state, 0, 0);
         assert!(
             state.terminal_grabbed,
@@ -298,7 +278,7 @@ mod tests {
     /// moved onto a terminal without the user pointing at it must leave the keyboard free.
     #[test]
     fn tabbing_onto_a_terminal_does_not_grab_the_keyboard() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         focus_window(&mut state, Window::ConversationTree);
         insert_terminal(&mut state, 0, 0);
         state.pane_manager.push_window(Window::Terminal(0));
@@ -317,7 +297,7 @@ mod tests {
     /// keyboard, unless it is scrolled back into its history.
     #[test]
     fn pointing_at_a_terminal_grabs_the_keyboard() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         focus_window(&mut state, Window::ConversationTree);
         insert_terminal(&mut state, 0, 0);
         state.pane_manager.push_window(Window::Terminal(0));
@@ -330,7 +310,7 @@ mod tests {
             "pointing at a live terminal grabs it"
         );
 
-        let mut scrolled = empty_state();
+        let mut scrolled = AppState::blank_for_test();
         focus_window(&mut scrolled, Window::ConversationTree);
         insert_terminal(&mut scrolled, 1, 4);
         scrolled.pane_manager.push_window(Window::Terminal(1));
@@ -347,7 +327,7 @@ mod tests {
     /// focused terminal keeps the keyboard it had, grabbed or not.
     #[test]
     fn closing_a_background_terminal_leaves_the_focused_one_as_it_was() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         insert_terminal(&mut state, 0, 0);
         insert_terminal(&mut state, 1, 0);
         state.pane_manager.push_window(Window::Terminal(1));
@@ -370,7 +350,7 @@ mod tests {
     /// terminal it lands on is a terminal focus arrives at, so it does not inherit a grab.
     #[test]
     fn focus_moving_between_terminals_releases_the_keyboard() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         insert_terminal(&mut state, 0, 0);
         insert_terminal(&mut state, 1, 0);
         state.pane_manager.push_window(Window::Terminal(1));
@@ -391,7 +371,7 @@ mod tests {
     /// second one does not inherit the first one's grab.
     #[test]
     fn a_closed_grabbed_terminal_does_not_hand_its_grab_to_the_next() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         insert_terminal(&mut state, 0, 0);
         insert_terminal(&mut state, 1, 0);
         state.pane_manager.push_window(Window::Terminal(1));
@@ -410,7 +390,7 @@ mod tests {
 
     #[test]
     fn closing_an_editor_terminal_restores_the_preview_it_replaced() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         let key = FileKey(3);
         state.pane_manager.push_window(Window::FilePreview(key));
         open_editor_terminal(&mut state, 0, key);
@@ -440,7 +420,7 @@ mod tests {
 
     #[test]
     fn closing_a_terminal_without_a_preview_removes_its_window() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         focus_window(&mut state, Window::ConversationTree);
         with_terminal(&mut state, 0, 0);
 
@@ -464,7 +444,7 @@ mod tests {
     /// back the preview it was opened from.
     #[test]
     fn close_window_of_an_editor_terminal_restores_its_preview() {
-        let mut state = empty_state();
+        let mut state = AppState::blank_for_test();
         let key = FileKey(5);
         state.pane_manager.push_window(Window::FilePreview(key));
         open_editor_terminal(&mut state, 2, key);

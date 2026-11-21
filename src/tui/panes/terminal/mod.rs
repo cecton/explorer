@@ -922,27 +922,13 @@ mod tests {
     /// mouse tracking, like `fzf --height`.
     fn tracking_terminal_state(grabbed: bool) -> crate::tui::state::AppState {
         use crate::tui::state::{AppState, TerminalPane};
-        use r3bl_tui::{OfsBufVT100, vp_height, vp_width};
+        use r3bl_tui::{vp_height, vp_width};
         use std::sync::Arc;
-        let mut ofs_buf = OfsBufVT100::new_empty(vp_width(20) + vp_height(5));
-        let _unused = ofs_buf.apply_ansi_bytes("\x1b[?1000h\x1b[?1006hhello world");
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let pane = TerminalPane {
-            ofs_buf,
-            title: None,
-            pty_input_tx: Arc::new(tx),
-            child_killer: None,
-            last_size: vp_width(20) + vp_height(5),
-            is_command_pane: false,
-            exited: false,
-            exit_code: None,
-            exit_signal: None,
-            scroll_offset: 0,
-            cwd: camino::Utf8PathBuf::from("/"),
-            command: None,
-            flush_pending: Default::default(),
-        };
-        let mut state = AppState::for_test(camino::Utf8PathBuf::from("/tmp/nowhere"));
+        let (mut pane, _rx) = TerminalPane::for_test(vp_width(20) + vp_height(5));
+        let _unused = pane
+            .ofs_buf
+            .apply_ansi_bytes("\x1b[?1000h\x1b[?1006hhello world");
+        let mut state = AppState::blank_for_test();
         state
             .terminal_panes
             .insert(0, Arc::new(parking_lot::Mutex::new(pane)));
@@ -1204,27 +1190,10 @@ mod tests {
         use super::extract_terminal_text;
         use crate::tui::selection::SelPoint;
         use crate::tui::state::TerminalPane;
-        use r3bl_tui::{OfsBufVT100, vp_height, vp_width};
-        use std::sync::Arc;
+        use r3bl_tui::{vp_height, vp_width};
 
-        let mut ofs_buf = OfsBufVT100::new_empty(vp_width(20) + vp_height(5));
-        let _unused = ofs_buf.apply_ansi_bytes("hello world\r\nsecond line");
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
-        let pane = TerminalPane {
-            ofs_buf,
-            title: None,
-            pty_input_tx: Arc::new(tx),
-            child_killer: None,
-            last_size: vp_width(20) + vp_height(5),
-            is_command_pane: false,
-            exited: false,
-            exit_code: None,
-            exit_signal: None,
-            scroll_offset: 0,
-            cwd: camino::Utf8PathBuf::from("/"),
-            command: None,
-            flush_pending: Default::default(),
-        };
+        let (mut pane, _rx) = TerminalPane::for_test(vp_width(20) + vp_height(5));
+        let _unused = pane.ofs_buf.apply_ansi_bytes("hello world\r\nsecond line");
 
         let start = SelPoint::Terminal {
             viewport_row: 0,

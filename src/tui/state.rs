@@ -676,10 +676,39 @@ impl AppState {
 }
 
 #[cfg(test)]
+impl TerminalPane {
+    /// An empty pane of `size` that no PTY backs, and the receiver of what is typed into it.
+    pub(crate) fn for_test(size: VPSize) -> (Self, tokio::sync::mpsc::Receiver<PtyInputEvent>) {
+        let (pty_input_tx, rx) = tokio::sync::mpsc::channel(8);
+        let pane = Self {
+            ofs_buf: OfsBufVT100::new_empty(size),
+            title: None,
+            pty_input_tx: Arc::new(pty_input_tx),
+            child_killer: None,
+            last_size: size,
+            is_command_pane: false,
+            exited: false,
+            exit_code: None,
+            exit_signal: None,
+            scroll_offset: 0,
+            cwd: camino::Utf8PathBuf::from("/"),
+            command: None,
+            flush_pending: Default::default(),
+        };
+        (pane, rx)
+    }
+}
+
+#[cfg(test)]
 impl AppState {
     /// A state over `root` with no files, the default theme and the default keymap.
     pub(crate) fn for_test(root: camino::Utf8PathBuf) -> Self {
         Self::for_test_with_files(Vec::new(), root)
+    }
+
+    /// `for_test` over a root that does not exist.
+    pub(crate) fn blank_for_test() -> Self {
+        Self::for_test(camino::Utf8PathBuf::from("/tmp/nowhere"))
     }
 
     /// Like `for_test`, over `files`.

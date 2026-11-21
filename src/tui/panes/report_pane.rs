@@ -236,15 +236,11 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Report
 mod tests {
     use super::*;
 
-    fn empty_state() -> crate::tui::state::AppState {
-        use crate::tui::state::AppState;
-        AppState::for_test(camino::Utf8PathBuf::from("/tmp/nowhere"))
-    }
-
     #[test]
     fn a_report_gets_its_own_window_and_is_replaced_in_place() {
         use crate::tui::pane_manager::Window;
-        let mut state = empty_state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         let first = ReportComponent::show(
             &mut state,
             "Repository scan".to_string(),
@@ -291,7 +287,8 @@ mod tests {
     #[test]
     fn a_report_is_never_saved_in_the_session() {
         use crate::tui::session::Session;
-        let mut state = empty_state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         ReportComponent::show(&mut state, "t".to_string(), "m".to_string());
         let session = Session::from_state(&state);
         assert!(session.panes.is_empty(), "{:?}", session.panes.len());
@@ -305,7 +302,8 @@ mod tests {
     #[test]
     fn esc_closes_the_window_and_drops_the_report() {
         use crate::tui::pane_manager::Window;
-        let mut state = empty_state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         let id = ReportComponent::show(&mut state, "t".to_string(), "m".to_string());
         let mut global_data = crate::tui::test_support::global_data(state);
         let mut component = ReportComponent::new(crate::tui::pane_component::pane_id(0));
@@ -331,7 +329,8 @@ mod tests {
     /// The markdown is laid out once, not on every frame that paints the report.
     #[test]
     fn a_frame_lays_the_markdown_out_again_only_when_the_report_or_the_width_moves() {
-        let mut state = empty_state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         let id = ReportComponent::show(&mut state, "t".to_string(), "# one\n\n- a".to_string());
         let mut global_data = crate::tui::test_support::global_data(state);
         let mut component = ReportComponent::new(crate::tui::pane_component::pane_id(0));
@@ -453,7 +452,8 @@ mod tests {
     #[test]
     fn a_report_moved_to_another_slot_is_not_laid_out_again() {
         use crate::tui::pane_manager::Window;
-        let mut state = empty_state();
+        use crate::tui::state::AppState;
+        let mut state = AppState::blank_for_test();
         let id = ReportComponent::show(&mut state, "t".to_string(), "# one\n\n- a".to_string());
         let mut global_data = crate::tui::test_support::global_data(state);
         let renders = |state: &crate::tui::state::AppState| {

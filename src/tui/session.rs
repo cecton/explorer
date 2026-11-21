@@ -516,32 +516,15 @@ mod tests {
     use crate::util::test_support::temp_root;
     use camino::Utf8PathBuf;
     use parking_lot::Mutex;
-    use r3bl_tui::{OfsBufVT100, VPSize};
+    use r3bl_tui::VPSize;
     use std::sync::Arc;
-    use tokio::sync::mpsc;
-
-    fn empty_state(root: Utf8PathBuf) -> crate::tui::state::AppState {
-        use crate::tui::state::AppState;
-        AppState::for_test(root)
-    }
 
     fn dummy_terminal_pane(cwd: Utf8PathBuf, command: Option<String>) -> TerminalPane {
-        let (pty_input_tx, _) = mpsc::channel(1);
-        TerminalPane {
-            ofs_buf: OfsBufVT100::new_empty(VPSize::default()),
-            title: None,
-            pty_input_tx: Arc::new(pty_input_tx),
-            child_killer: None,
-            last_size: VPSize::default(),
-            is_command_pane: command.is_some(),
-            exited: false,
-            exit_code: None,
-            exit_signal: None,
-            scroll_offset: 0,
-            cwd,
-            command,
-            flush_pending: Default::default(),
-        }
+        let (mut pane, _) = TerminalPane::for_test(VPSize::default());
+        pane.is_command_pane = command.is_some();
+        pane.cwd = cwd;
+        pane.command = command;
+        pane
     }
 
     #[test]
@@ -599,9 +582,10 @@ mod tests {
 
     #[test]
     fn a_previewed_theme_is_not_saved_until_it_is_confirmed() {
+        use crate::tui::state::AppState;
         use crate::tui::theme::HelixTheme;
         let (_dir, root) = temp_root();
-        let mut state = empty_state(root);
+        let mut state = AppState::for_test(root);
         let confirmed = state.saved_theme.name().to_string();
         let other = HelixTheme::theme_names()
             .find(|name| *name != confirmed)
@@ -696,8 +680,9 @@ mod tests {
 
     #[test]
     fn session_apply_creates_stubs_and_restores_highlights() {
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
-        let mut state = empty_state(root.clone());
+        let mut state = AppState::for_test(root.clone());
 
         let session = Session {
             panes: vec![PaneRecord {
@@ -797,8 +782,9 @@ mod tests {
 
     #[test]
     fn session_apply_stores_terminal_restore_infos() {
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
-        let mut state = empty_state(root.clone());
+        let mut state = AppState::for_test(root.clone());
 
         let session = Session {
             panes: vec![PaneRecord {
@@ -882,8 +868,9 @@ mod tests {
     #[test]
     fn conversation_tree_round_trips_with_its_expanded_set() {
         use crate::conversation::NodeId;
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
-        let mut state = empty_state(root.clone());
+        let mut state = AppState::for_test(root.clone());
         state.pane_manager.window_stack = vec![Window::ConversationTree];
         state
             .tree_view
@@ -895,7 +882,7 @@ mod tests {
         let json = serde_json::to_string(&session).expect("serialize session");
         let restored: Session = serde_json::from_str(&json).expect("deserialize session");
 
-        let mut fresh = empty_state(root);
+        let mut fresh = AppState::for_test(root);
         restored.apply(&mut fresh);
         assert_eq!(
             fresh.pane_manager.window_stack,
@@ -911,15 +898,16 @@ mod tests {
 
     #[test]
     fn conversation_tree_filter_round_trips_through_session() {
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
-        let mut state = empty_state(root.clone());
+        let mut state = AppState::for_test(root.clone());
         state.tree_view.query.set_text("queue esc");
 
         let session = Session::from_state(&state);
         let json = serde_json::to_string(&session).expect("serialize session");
         let restored: Session = serde_json::from_str(&json).expect("deserialize session");
 
-        let mut fresh = empty_state(root);
+        let mut fresh = AppState::for_test(root);
         restored.apply(&mut fresh);
         assert_eq!(fresh.tree_view.query.text(), "queue esc");
     }
@@ -927,8 +915,9 @@ mod tests {
     #[test]
     fn aliases_round_trip_through_session() {
         use crate::config::Alias;
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
-        let mut state = empty_state(root.clone());
+        let mut state = AppState::for_test(root.clone());
         let alias = Alias {
             name: "ci".to_string(),
             command: "cargo test".to_string(),
@@ -938,15 +927,16 @@ mod tests {
         let json = serde_json::to_string(&Session::from_state(&state)).expect("serialize");
         let restored: Session = serde_json::from_str(&json).expect("deserialize session");
 
-        let mut fresh = empty_state(root);
+        let mut fresh = AppState::for_test(root);
         restored.apply(&mut fresh);
         assert_eq!(fresh.project_aliases, [alias]);
     }
 
     #[test]
     fn trust_round_trips_through_session() {
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
-        let mut state = empty_state(root.clone());
+        let mut state = AppState::for_test(root.clone());
         assert!(
             !state.trusted,
             "a repository is untrusted until the user says so"
@@ -956,7 +946,7 @@ mod tests {
         let json = serde_json::to_string(&Session::from_state(&state)).expect("serialize");
         let restored: Session = serde_json::from_str(&json).expect("deserialize session");
 
-        let mut fresh = empty_state(root.clone());
+        let mut fresh = AppState::for_test(root.clone());
         restored.apply(&mut fresh);
         assert!(fresh.trusted);
 
@@ -964,7 +954,7 @@ mod tests {
         let path = session_file_path(&root).unwrap();
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(&path, "{}").unwrap();
-        let mut old = empty_state(root);
+        let mut old = AppState::for_test(root);
         load_session(&old.root)
             .expect("an older file must load")
             .apply(&mut old);
@@ -975,8 +965,9 @@ mod tests {
     #[test]
     fn mcp_servers_round_trip_through_session() {
         use crate::agent::mcp::McpServerDecl;
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
-        let mut state = empty_state(root.clone());
+        let mut state = AppState::for_test(root.clone());
         let egui = McpServerDecl {
             name: "egui".to_string(),
             program: "egui-mcp".to_string(),
@@ -986,7 +977,7 @@ mod tests {
         let json = serde_json::to_string(&Session::from_state(&state)).expect("serialize");
         let restored: Session = serde_json::from_str(&json).expect("deserialize session");
 
-        let mut fresh = empty_state(root);
+        let mut fresh = AppState::for_test(root);
         restored.apply(&mut fresh);
         assert_eq!(fresh.mcp_servers, [egui]);
     }
@@ -994,9 +985,10 @@ mod tests {
     #[test]
     fn discussion_highlights_round_trip_through_session() {
         use crate::conversation::NodeId;
+        use crate::tui::state::AppState;
         use crate::tui::state::NodeHighlights;
         let (_dir, root) = temp_root();
-        let mut state = empty_state(root.clone());
+        let mut state = AppState::for_test(root.clone());
         let node = NodeId::new("2026-10-05T14-32-07Z");
         let highlights = NodeHighlights {
             prompt: vec![(0, 4)],
@@ -1010,7 +1002,7 @@ mod tests {
         let json = serde_json::to_string(&session).expect("serialize session");
         let restored: Session = serde_json::from_str(&json).expect("deserialize session");
 
-        let mut fresh = empty_state(root);
+        let mut fresh = AppState::for_test(root);
         restored.apply(&mut fresh);
         assert_eq!(fresh.discussion_highlights.len(), 1);
         assert_eq!(fresh.discussion_highlights.get(&node), Some(&highlights));
@@ -1018,8 +1010,9 @@ mod tests {
 
     #[test]
     fn commit_diff_pane_round_trips_through_session() {
+        use crate::tui::state::AppState;
         let (_dir, root) = temp_root();
-        let mut state = empty_state(root.clone());
+        let mut state = AppState::for_test(root.clone());
         let id = [0x42u8; 20];
         state.pane_manager.window_stack = vec![Window::CommitDiff(id)];
         state.pane_manager.window_states.insert(
@@ -1049,7 +1042,7 @@ mod tests {
         };
         assert_eq!(hash, &hex::encode([0x42u8; 20]));
 
-        let mut restored = empty_state(root.clone());
+        let mut restored = AppState::for_test(root.clone());
         session.apply(&mut restored);
         assert_eq!(
             restored.pane_manager.window_stack,
@@ -1059,11 +1052,12 @@ mod tests {
 
     #[test]
     fn git_log_pane_round_trips_with_branch_and_query() {
+        use crate::tui::state::AppState;
         use crate::tui::state::GitLogWindowState;
         use crate::tui::state::LogSource;
         use crate::tui::widgets::input_line::InputLine;
         let (_dir, root) = temp_root();
-        let mut state = empty_state(root.clone());
+        let mut state = AppState::for_test(root.clone());
         state.pane_manager.window_stack = vec![Window::GitLog(7)];
         state.pane_manager.window_states.insert(
             Window::GitLog(7),
@@ -1093,7 +1087,7 @@ mod tests {
         assert_eq!(query, "fix:");
         assert_eq!(scroll, &4);
 
-        let mut restored = empty_state(root.clone());
+        let mut restored = AppState::for_test(root.clone());
         session.apply(&mut restored);
         // The window takes a fresh id: the saved one means nothing to the new run.
         assert_eq!(restored.pane_manager.window_stack, vec![Window::GitLog(0)]);
