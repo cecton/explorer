@@ -553,6 +553,8 @@ fn blob_data(repo: &gix::Repository, id: gix::ObjectId) -> Result<Vec<u8>, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::test_support::commit;
+    use crate::util::test_support::temp_repo;
 
     #[test]
     fn classify_diff_assigns_kinds_by_prefix() {
@@ -657,25 +659,6 @@ mod tests {
     fn short_id_is_seven_hex_chars() {
         let id = [0xabu8; 20];
         assert_eq!(short_id(&id), "abababa");
-    }
-
-    fn temp_repo() -> (tempfile::TempDir, camino::Utf8PathBuf) {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = camino::Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
-        git_output(&root, &["init", "-q"]).unwrap();
-        git_output(&root, &["config", "user.name", "test"]).unwrap();
-        git_output(&root, &["config", "user.email", "t@example.com"]).unwrap();
-        (tmp, root)
-    }
-
-    fn commit(root: &camino::Utf8Path, file: &str, content: &str, message: &str) -> String {
-        std::fs::write(root.join(file), content).unwrap();
-        git_output(root, &["add", "-A"]).unwrap();
-        git_output(root, &["commit", "-q", "-m", message]).unwrap();
-        git_output(root, &["rev-parse", "HEAD"])
-            .unwrap()
-            .trim()
-            .to_string()
     }
 
     #[test]

@@ -125,6 +125,8 @@ pub fn format_committed(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::util::test_support::git;
+    use crate::util::test_support::temp_repo;
 
     #[test]
     fn keeps_the_line_breaks_of_prose() {
@@ -213,9 +215,8 @@ mod tests {
 
     #[test]
     fn lists_and_formats_untracked_files_with_non_ascii_names() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
-        git(root, &["init", "-q"]);
+        let (_tmp, root) = temp_repo();
+        let root = root.as_path();
         std::fs::write(root.join("café.md"), "|a|b|\n|-|-|\n").unwrap();
         let changes = crate::git::working_tree_changes(root).unwrap();
         assert_eq!(changes, [camino::Utf8PathBuf::from("café.md")]);
@@ -227,9 +228,8 @@ mod tests {
 
     #[test]
     fn a_directory_expands_to_its_markdown_without_ignored_or_excluded_files() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
-        git(root, &["init", "-q"]);
+        let (_tmp, root) = temp_repo();
+        let root = root.as_path();
         for dir in ["docs/deep", "vendor", "build"] {
             std::fs::create_dir_all(root.join(dir)).unwrap();
         }
@@ -261,9 +261,8 @@ mod tests {
 
     #[test]
     fn a_directory_name_with_glob_characters_is_taken_literally() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
-        git(root, &["init", "-q"]);
+        let (_tmp, root) = temp_repo();
+        let root = root.as_path();
         std::fs::create_dir_all(root.join("a[1]")).unwrap();
         std::fs::create_dir_all(root.join("a1")).unwrap();
         std::fs::write(root.join("a[1]/x.md"), "|a|b|\n|-|-|\n").unwrap();
@@ -274,23 +273,10 @@ mod tests {
         );
     }
 
-    fn git(root: &camino::Utf8Path, args: &[&str]) -> String {
-        let output = std::process::Command::new("git")
-            .current_dir(root)
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(output.status.success(), "{args:?}");
-        String::from_utf8(output.stdout).unwrap().trim().to_string()
-    }
-
     #[test]
     fn formats_what_a_turn_committed_into_its_newest_commit() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
-        git(root, &["init", "-q"]);
-        git(root, &["config", "user.name", "t"]);
-        git(root, &["config", "user.email", "t@t"]);
+        let (_tmp, root) = temp_repo();
+        let root = root.as_path();
         std::fs::write(root.join("a.txt"), "1").unwrap();
         git(root, &["add", "-A"]);
         git(root, &["commit", "-qm", "init"]);
@@ -311,11 +297,8 @@ mod tests {
 
     #[test]
     fn formats_the_first_commit_of_a_repository_without_commits() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
-        git(root, &["init", "-q"]);
-        git(root, &["config", "user.name", "t"]);
-        git(root, &["config", "user.email", "t@t"]);
+        let (_tmp, root) = temp_repo();
+        let root = root.as_path();
         std::fs::write(root.join("a.md"), "|a|b|\n|-|-|\n|1|2|\n").unwrap();
         git(root, &["add", "-A"]);
         git(root, &["commit", "-qm", "docs: table"]);
@@ -334,9 +317,8 @@ mod tests {
 
     #[test]
     fn format_paths_expands_directories_and_refuses_outside_paths() {
-        let tmp = tempfile::tempdir().unwrap();
-        let root = camino::Utf8Path::from_path(tmp.path()).unwrap();
-        git(root, &["init", "-q"]);
+        let (_tmp, root) = temp_repo();
+        let root = root.as_path();
         std::fs::create_dir(root.join("docs")).unwrap();
         std::fs::write(root.join("docs/a.md"), "|a|b|\n|-|-|\n|1|2|\n").unwrap();
         git(root, &["add", "-A"]);
