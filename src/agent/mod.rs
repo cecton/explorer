@@ -2,6 +2,8 @@ pub mod agent_loop;
 pub mod claude_code;
 pub mod commands;
 pub mod context;
+#[cfg(test)]
+mod fake_llm;
 pub mod llm;
 pub mod mcp;
 pub mod models;

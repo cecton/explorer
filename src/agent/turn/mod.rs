@@ -4,6 +4,8 @@
 
 mod close;
 pub(crate) mod live;
+#[cfg(test)]
+mod pin;
 pub(crate) mod title;
 
 use std::sync::Arc;
