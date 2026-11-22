@@ -59,6 +59,7 @@ impl Server {
             root: self.root.clone(),
             tree: std::sync::Arc::clone(&self.tree),
             node: crate::conversation::NodeId::new(EXTERNAL_NODE),
+            node_dir: None,
             background: std::sync::Arc::default(),
             mcp,
         }

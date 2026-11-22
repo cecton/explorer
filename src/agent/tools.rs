@@ -19,6 +19,8 @@ pub struct ToolContext {
     pub tree: Arc<parking_lot::RwLock<crate::conversation::ConversationTree>>,
     /// The node whose turn is running.
     pub node: crate::conversation::NodeId,
+    /// The directory of that node, where background commands write their output.
+    pub node_dir: Option<camino::Utf8PathBuf>,
     /// Background commands of the turn, shared with its sub-agents.
     pub background: Arc<Background>,
     /// Tools of the MCP servers running when the turn started.
@@ -269,9 +271,8 @@ pub async fn try_run(
             blocking(move || grep(&root, &args)).await
         }
         "shell" if args.get("background").and_then(serde_json::Value::as_bool) == Some(true) => {
-            let dir = context.tree.read().node_dir(&context.node);
-            match dir {
-                Some(dir) => shell_background(root, &dir, &context.background, &args),
+            match &context.node_dir {
+                Some(dir) => shell_background(root, dir, &context.background, &args),
                 None => Err("this turn has no node directory for the output".to_string()),
             }
         }
@@ -661,6 +662,7 @@ mod tests {
             root: root.to_owned(),
             tree: Arc::default(),
             node: NodeId::new("current"),
+            node_dir: None,
             background: Arc::default(),
             mcp: McpTools::default(),
         }
@@ -873,6 +875,7 @@ mod tests {
             root: root.clone(),
             tree: Arc::new(parking_lot::RwLock::new(ConversationTree::load(&store))),
             node: NodeId::new("n1"),
+            node_dir: Some(store.join("n1")),
             background: Arc::default(),
             mcp: McpTools::default(),
         };
@@ -1062,6 +1065,7 @@ mod tests {
             root: root.clone(),
             tree: Arc::new(parking_lot::RwLock::new(ConversationTree::load(&store))),
             node: NodeId::new("n2"),
+            node_dir: Some(node_dir.join("n2")),
             background: Arc::default(),
             mcp: McpTools::default(),
         };

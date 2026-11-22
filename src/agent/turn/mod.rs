@@ -436,6 +436,7 @@ async fn run_own_loop(
         root: request.root.clone(),
         tree: Arc::clone(&request.tree),
         node: request.node.clone(),
+        node_dir: Some(request.node_dir.clone()),
         background: Arc::default(),
         mcp: mcp.clone(),
     };
