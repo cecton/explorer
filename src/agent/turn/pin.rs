@@ -323,10 +323,17 @@ mod tests {
         assert_eq!(outcome.error, None);
         assert_eq!(handle.live.lock().reply, "partial");
         assert_eq!(read_file(&setup.node_dir, "reply.md"), "partial");
-        // The answer in progress is not in the transcript: only the prompt is.
+        // What the answer streamed joins the transcript, so a follow-up replays it.
         let messages = transcript_of(&setup);
-        assert_eq!(messages.len(), 1);
+        assert_eq!(messages.len(), 2);
         assert_eq!(messages[0]["role"], "user");
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "partial");
+        assert!(
+            messages[1]["tool_calls"]
+                .as_array()
+                .is_none_or(|calls| calls.is_empty())
+        );
     }
 
     #[tokio::test]

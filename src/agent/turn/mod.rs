@@ -165,8 +165,8 @@ pub fn report_usage(
 /// Starts the turn of a node already created on disk and returns its handle. The
 /// outcome arrives as `AppSignal::TurnFinished`.
 pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle {
-    use crate::agent::Mode;
     use crate::agent::turn::live::LiveTurn;
+    use crate::agent::{Backend, Mode};
     use crate::conversation::NodeStatus;
     use crate::signal::AppSignal;
     let live = Arc::new(parking_lot::Mutex::new(LiveTurn::new()));
@@ -196,6 +196,10 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
             },
             _ = cancel_rx.wait_for(|cancelled| *cancelled) => (NodeStatus::Cancelled, None),
         };
+        // A dropped run never flushed; only own-loop nodes keep a transcript.
+        if status == NodeStatus::Cancelled && matches!(request.backend, Backend::OpenAi(_)) {
+            recorder.flush_partial_answer();
+        }
         recorder.flush_reply();
         request
             .tree
