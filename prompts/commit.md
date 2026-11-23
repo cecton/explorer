@@ -100,13 +100,12 @@ below, or on a round rejected under step 4.
 A sub-agent result can note that the run hit its time budget and its answer may be
 partial. Take such a review report by what it found. With findings in hand, the
 wrap-up is its report: go on with the round as usual. Finding nothing and leaving its
-analysis unfinished, continue the same run once (pass its `agent_id`) to finish
-exactly the analysis it had left: no new areas, and tell it it has at most about half
-the original budget before it must stop. Never continue it twice. Finding nothing
-with its analysis complete, it is the clean round like any other. A run cut short still
-settles leads on its way, and those belong on the list like any other: the continuation
-replays the run's own transcript and keeps them, while the rounds after it have only the
-list.
+analysis unfinished, start one more round, with the leads so far and the parts it did not
+get to examine on the list, to finish exactly the analysis it had left: no new areas, and
+tell it it has at most about half the original budget before it must stop. Never do this
+twice for one round. Finding nothing with its analysis complete, it is the clean round
+like any other. A run cut short still settles leads on its way, and those belong on the
+list like any other.
 
 At most {review_rounds} review rounds per commit. When even the last round changed
 something, the commit never reached a clean review: say so first in your reply, as the

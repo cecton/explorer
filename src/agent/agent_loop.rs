@@ -1,7 +1,5 @@
 use std::collections::{HashSet, VecDeque};
-use std::future::Future;
 use std::hash::{DefaultHasher, Hash, Hasher};
-use std::pin::Pin;
 use std::time::{Duration, Instant};
 
 /// Threshold for detecting excessive Chinese characters (0.0 to 1.0).
@@ -162,29 +160,11 @@ fn stall_error(call: &crate::agent::ToolCall, limit: u32) -> String {
     )
 }
 
-/// Our own agent loop, until an answer asks for no tool; boxed, as sub-agents recurse into it.
-/// `subagents` is what the run lends to the `agent` tool; `None` for a sub-agent, which
-/// cannot start one in turn.
-#[allow(clippy::too_many_arguments)] // the turn's inputs; two call sites
-pub fn run<'a>(
-    context: &'a crate::agent::tools::ToolContext,
-    subagents: Option<&'a crate::agent::subagent::Subagents>,
-    target: &'a crate::agent::llm::LlmTarget,
-    session: &'a str,
-    system: &'a str,
-    messages: &'a mut Vec<crate::agent::Message>,
-    recorder: &'a mut dyn crate::agent::sink::Sink,
-    limits: Limits,
-) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
-    Box::pin(run_loop(
-        context, subagents, target, session, system, messages, recorder, limits,
-    ))
-}
-
-#[allow(clippy::too_many_arguments)]
-async fn run_loop(
+/// Our own agent loop, until an answer asks for no tool; `agent_tool` is None for a sub-agent.
+#[allow(clippy::too_many_arguments)] // the turn's inputs
+pub async fn run(
     context: &crate::agent::tools::ToolContext,
-    subagents: Option<&crate::agent::subagent::Subagents>,
+    agent_tool: Option<crate::agent::llm::ToolSpec>,
     target: &crate::agent::llm::LlmTarget,
     session: &str,
     system: &str,
@@ -194,21 +174,14 @@ async fn run_loop(
 ) -> Result<(), String> {
     use crate::agent::Message;
     use crate::agent::ToolCall;
-    // The `agent` tool is advertised only when sub-agents can run.
-    let agent_spec =
-        subagents.map(|subagents| crate::agent::subagent::spec(&subagents.config.roles));
-    let tool_specs = crate::agent::tools::specs(context, agent_spec);
+    let can_call_agents = agent_tool.is_some();
+    let tool_specs = crate::agent::tools::specs(context, agent_tool);
     let mut warned = false;
     let mut stalls = StallDetector::new(limits.repeat_limit);
     let mut nameless_rounds = 0;
     loop {
-        // What the user sent while the turn was working joins here, after the tool
-        // results of the round before: the next request carries it. Each leaves the
-        // queue only as it is taken, so a round that dies leaves the rest for the input.
-        let injector = recorder.injector();
-        while let Some(content) = injector.front() {
-            messages.push(injector.wrote(&content));
-        }
+        // Messages the user sent while the turn worked join after the last tool results.
+        messages.extend(recorder.injected().await);
         if let Some((started, limit)) = limits.budget {
             let elapsed = started.elapsed();
             if let Some(nudge) = time_nudge(elapsed, limit, warned) {
@@ -290,9 +263,8 @@ async fn run_loop(
         }
         nameless_rounds = 0;
         if response.tool_calls.is_empty() {
-            // An answer that calls no tools ends the turn, unless something the user
-            // sent arrived while it streamed: that keeps the loop going.
-            if !injector.pending() {
+            // An answer without tools ends the turn, unless something joined while it streamed.
+            if !recorder.settle().await {
                 return Ok(());
             }
             continue;
@@ -308,9 +280,10 @@ async fn run_loop(
             } else {
                 crate::agent::tools::describe(call)
             });
-            let content = match subagents {
-                Some(subagents) if is_agent => recorder.run_agent(context, subagents, call).await,
-                _ => crate::agent::tools::run(context, call).await,
+            let content = if is_agent && can_call_agents {
+                recorder.run_agent(call).await
+            } else {
+                crate::agent::tools::run(context, call).await
             };
             match stalls.record(signature(call, &content)) {
                 Some(Stall::Fail) => failed = Some(call),

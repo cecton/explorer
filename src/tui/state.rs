@@ -37,9 +37,6 @@ pub struct TreeViewState {
     pub selected: Option<RowTarget>,
     /// Roots and forks whose children are shown; everything else is collapsed.
     pub expanded: HashSet<crate::conversation::NodeId>,
-    /// Nodes whose sub-agent runs are listed under them. Never saved: they are hidden
-    /// at startup.
-    pub shown_agents: HashSet<crate::conversation::NodeId>,
     /// Node a first `d` marked for deletion; a second one on it deletes.
     pub armed_delete: Option<crate::conversation::NodeId>,
     /// False until the startup load of the tree has finished.
@@ -69,8 +66,6 @@ impl TreeViewState {
 pub struct DiscussionState {
     /// Node shown; `None` for a new conversation whose first prompt is not sent yet.
     pub node: Option<crate::conversation::NodeId>,
-    /// Sub-agent run of `node` shown instead of the node itself, read-only.
-    pub agent: Option<u32>,
     pub prompt: String,
     pub reply: String,
     /// Work log of the node's turn: narration and tool calls, never part of the reply.
@@ -120,16 +115,10 @@ pub struct PendingTurn {
     pub parent: Option<crate::conversation::NodeId>,
 }
 
-/// What a Conversation Tree row points at: a node, a sub-agent run of a node, or a
-/// queued prompt whose node does not exist yet.
+/// What a Conversation Tree row points at: a node, or a queued prompt not yet a node.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum RowTarget {
     Node(crate::conversation::NodeId),
-    /// Sub-agent run `index` of `node`.
-    Agent {
-        node: crate::conversation::NodeId,
-        index: u32,
-    },
     /// A prompt waiting in the queue, by the window that holds it. `position` is its
     /// place in the queue, shown in the gutter.
     Queued {
@@ -143,7 +132,7 @@ impl RowTarget {
     pub fn node(&self) -> Option<&crate::conversation::NodeId> {
         match self {
             Self::Node(id) => Some(id),
-            Self::Agent { .. } | Self::Queued { .. } => None,
+            Self::Queued { .. } => None,
         }
     }
 }
@@ -204,10 +193,7 @@ impl DiscussionState {
         self.live_revision = Some(live.revision());
     }
 
-    /// Replaces what the window shows with the texts of a node or sub-agent run read
-    /// from disk. A running turn's texts are taken again at the next frame, since the
-    /// disk copy is not the live one: the reply may be up to a second old, the thinking
-    /// was never written, and the work log has none of the rounds the turn dropped.
+    /// Shows the node's texts read from disk; a running turn's live texts are retaken next frame.
     pub fn show_content(&mut self, prompt: String, reply: String, work_log: Vec<String>) {
         self.prompt = prompt;
         self.reply = reply;
@@ -572,11 +558,7 @@ impl AppState {
     ) -> Option<&mut crate::tui::widgets::input_line::InputLine> {
         use crate::tui::pane_manager::Window;
         match window {
-            Window::Discussion(id) => self
-                .discussions
-                .get_mut(id)
-                .filter(|shown| shown.agent.is_none())
-                .map(|shown| &mut shown.draft),
+            Window::Discussion(id) => self.discussions.get_mut(id).map(|shown| &mut shown.draft),
             Window::GitLog(id) => {
                 let win = self.git_logs.get_mut(id)?;
                 if win.search_active {

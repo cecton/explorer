@@ -199,10 +199,6 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 let Some(row) = rows.get(index) else {
                     return EventPropagation::ConsumedRender;
                 };
-                if let RowTarget::Agent { node, .. } = &row.target {
-                    state.tree_view.selected = Some(RowTarget::Node(node.clone()));
-                    return EventPropagation::ConsumedRender;
-                }
                 let Some(id) = row.target.node().cloned() else {
                     return EventPropagation::ConsumedRender;
                 };
@@ -225,7 +221,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
                 Some(RowTarget::Node(id)) => {
                     crate::tui::panes::discussion::queue::take_back(state, main_tx, id);
                 }
-                Some(RowTarget::Agent { .. }) | None => {}
+                None => {}
             },
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Backspace),
@@ -238,31 +234,6 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
             }) => {
                 if let Some(row) = rows.get(index) {
                     Self::open_row(state, main_tx, &row.target);
-                }
-            }
-            InputEvent::Keyboard(KeyPress::Plain {
-                key: Key::Character('s'),
-            }) => {
-                let node = match rows.get(index).map(|row| &row.target) {
-                    Some(RowTarget::Node(id)) => Some(id.clone()),
-                    Some(RowTarget::Agent { node, .. }) => Some(node.clone()),
-                    Some(RowTarget::Queued { .. }) | None => None,
-                };
-                if let Some(node) = node
-                    && state
-                        .conversations
-                        .read()
-                        .node(&node)
-                        .is_some_and(|shown| !shown.agents.is_empty())
-                {
-                    let view = &mut state.tree_view;
-                    if view.shown_agents.remove(&node) {
-                        if matches!(view.selected, Some(RowTarget::Agent { .. })) {
-                            view.selected = Some(RowTarget::Node(node));
-                        }
-                    } else {
-                        view.shown_agents.insert(node);
-                    }
                 }
             }
             InputEvent::Keyboard(KeyPress::Plain {
@@ -409,7 +380,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
         EventPropagation::ConsumedRender
     }
 
-    /// Enter and a double click: show a queued window, or open a node or sub-agent run.
+    /// Enter and a double click: show a queued window, or open a node.
     fn open_row(
         state: &mut crate::tui::state::AppState,
         main_tx: crate::signal::MainTx,
@@ -419,10 +390,7 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
         use crate::tui::state::RowTarget;
         match target {
             RowTarget::Queued { window, .. } => DiscussionComponent::show(state, *window),
-            RowTarget::Node(id) => DiscussionComponent::open(state, main_tx, id.clone(), None),
-            RowTarget::Agent { node, index } => {
-                DiscussionComponent::open(state, main_tx, node.clone(), Some(*index));
-            }
+            RowTarget::Node(id) => DiscussionComponent::open(state, main_tx, id.clone()),
         }
     }
 
@@ -514,7 +482,6 @@ impl crate::tui::panes::conversation_tree::ConversationTreeComponent {
         };
         for id in &removed {
             state.tree_view.expanded.remove(id);
-            state.tree_view.shown_agents.remove(id);
             state.discussion_highlights.remove(id);
         }
         let closed: Vec<usize> = state

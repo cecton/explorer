@@ -83,7 +83,8 @@ pub struct TurnRequest {
     /// Model that titles and summarizes the node once its turn is done.
     pub summary_backend: Option<crate::agent::Backend>,
     /// Id of the conversation's root node, sent to OpenAI-compatible servers as the
-    /// session of every request.
+    /// session of the turn's requests; a sub-agent's requests carry it with its node and
+    /// run number appended.
     pub session: String,
     /// Claude Code session of the parent node, to fork when the backend is the CLI and the
     /// turn is a feedback turn.
@@ -165,12 +166,12 @@ pub fn report_usage(
 /// Starts the turn of a node already created on disk and returns its handle. The
 /// outcome arrives as `AppSignal::TurnFinished`.
 pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle {
+    use crate::agent::Mode;
     use crate::agent::turn::live::LiveTurn;
-    use crate::agent::{Backend, Mode};
     use crate::conversation::NodeStatus;
     use crate::signal::AppSignal;
     let live = Arc::new(parking_lot::Mutex::new(LiveTurn::new()));
-    let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(false);
+    let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
     let handle = TurnHandle {
         live: Arc::clone(&live),
         started: Instant::now(),
@@ -187,24 +188,16 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
     }
 
     tokio::spawn(async move {
-        let mut recorder =
-            live::Recorder::new(Arc::clone(&live), request.node_dir.clone(), main_tx.clone());
-        let (mut status, mut error) = tokio::select! {
-            result = run(&request, &mut recorder) => match result {
-                Ok(()) => (NodeStatus::Done, None),
-                Err(error) => (NodeStatus::Failed, Some(with_compact_hint(error))),
-            },
-            _ = cancel_rx.wait_for(|cancelled| *cancelled) => (NodeStatus::Cancelled, None),
+        let mut recorder = live::Recorder::new(Arc::clone(&live), request.node_dir.clone());
+        let result = run(&request, &mut recorder, cancel_rx.clone()).await;
+        // However the run ended, a turn cancelled while it ran is cancelled.
+        let cancelled = *cancel_rx.borrow();
+        let (mut status, mut error) = match result {
+            _ if cancelled => (NodeStatus::Cancelled, None),
+            Ok(()) => (NodeStatus::Done, None),
+            Err(error) => (NodeStatus::Failed, Some(with_compact_hint(error))),
         };
-        // A dropped run never flushed; only own-loop nodes keep a transcript.
-        if status == NodeStatus::Cancelled && matches!(request.backend, Backend::OpenAi(_)) {
-            recorder.flush_partial_answer();
-        }
         recorder.flush_reply();
-        request
-            .tree
-            .write()
-            .cancel_running_agents(&request.node, crate::util::time::now_secs());
         let mut head_after = request.repo.as_ref().and_then(crate::git::head_id);
         // The markdown a commit turn committed is formatted into its newest commit.
         if request.mode == Mode::Commit {
@@ -280,14 +273,27 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
     handle
 }
 
-async fn run(request: &TurnRequest, recorder: &mut live::Recorder) -> Result<(), String> {
+/// Runs the backend; cancelled, it returns early and the caller reads the cancel as the outcome.
+async fn run(
+    request: &TurnRequest,
+    recorder: &mut live::Recorder,
+    mut cancel: tokio::sync::watch::Receiver<bool>,
+) -> Result<(), String> {
     use crate::agent::Backend;
-    let mcp = request.mcp.snapshot().await;
+    let mcp = tokio::select! {
+        mcp = request.mcp.snapshot() => mcp,
+        _ = cancel.wait_for(|cancelled| *cancelled) => return Ok(()),
+    };
     match &request.backend {
         Backend::OpenAi(target) => {
-            run_own_loop(request, &mcp, target, &request.spec, recorder).await
+            run_own_loop(request, &mcp, target, &request.spec, recorder, cancel).await
         }
-        Backend::ClaudeCode(target) => run_claude_code(request, &mcp, target, recorder).await,
+        Backend::ClaudeCode(target) => {
+            tokio::select! {
+                result = run_claude_code(request, &mcp, target, recorder) => result,
+                _ = cancel.wait_for(|cancelled| *cancelled) => Ok(()),
+            }
+        }
     }
 }
 
@@ -324,14 +330,19 @@ async fn run_claude_code(
     use crate::agent::Message;
     use crate::agent::Mode;
     use crate::agent::claude_code::Run;
+    use crate::agent::mcp::McpTools;
     use crate::agent::privileged::PrivilegedSocket;
+    use crate::agent::tools::ToolContext;
     // Open until the run is over: the CLI's tool server asks it for the conversation.
-    let socket = PrivilegedSocket::start(
-        request.root.clone(),
-        Arc::clone(&request.tree),
-        request.node.clone(),
-        &crate::agent::privileged::PRIVILEGED,
-    )?;
+    let socket = PrivilegedSocket::start(ToolContext {
+        root: request.root.clone(),
+        tree: Arc::clone(&request.tree),
+        node: request.node.clone(),
+        node_dir: None,
+        background: Arc::default(),
+        mcp: McpTools::default(),
+        privileged: None,
+    })?;
     let socket_path = socket.path();
     let (system, message) = {
         let request = request.clone();
@@ -386,13 +397,15 @@ async fn run_own_loop(
     target: &crate::agent::llm::LlmTarget,
     spec: &crate::model_spec::ModelSpec,
     recorder: &mut live::Recorder,
+    cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
     use crate::agent::Message;
     use crate::agent::Mode;
-    use crate::agent::agent_loop::Limits;
-    use crate::agent::subagent::Subagents;
+    use crate::agent::driver::Closing;
+    use crate::agent::privileged::PrivilegedSocket;
     use crate::agent::tools::ToolContext;
-    let (system, mut messages) = {
+    use crate::agent::wire::Start;
+    let (system, messages) = {
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
             let system = crate::agent::context::system_prompt(
@@ -413,85 +426,49 @@ async fn run_own_loop(
     if let Some(sent) = messages.last() {
         recorder.message(sent);
     }
-    if request.compact.is_some() {
-        // A compact turn is a single answer, without tools.
-        recorder.begin_answer();
-        let response = match crate::agent::llm::stream_chat(
-            target,
-            &request.session,
-            &system,
-            &messages,
-            &[],
-            |is_thinking, text| recorder.chunk(is_thinking, text),
-        )
-        .await
-        {
-            Ok(response) => response,
-            Err(error) => {
-                recorder.flush_partial_answer();
-                return Err(error);
-            }
-        };
-        recorder.request_size(response.tokens_in, response.cached_in);
-        recorder.message(&Message::Assistant {
-            content: response.text,
-            tool_calls: Vec::new(),
-        });
-        return Ok(());
-    }
-    let subagents = Subagents {
-        config: Arc::clone(&request.agent),
-        mode: request.mode,
-        date: request.date.clone(),
-        repo: request.repo.clone(),
-        spec: spec.clone(),
+    let compact = request.compact.is_some();
+    // Open until the run is over, for the agent process's tools; none if compact.
+    let socket = if compact {
+        None
+    } else {
+        Some(PrivilegedSocket::start(ToolContext {
+            root: request.root.clone(),
+            tree: Arc::clone(&request.tree),
+            node: request.node.clone(),
+            node_dir: Some(request.node_dir.clone()),
+            background: Arc::default(),
+            mcp: mcp.clone(),
+            privileged: None,
+        })?)
     };
-    let tool_context = ToolContext {
+    let start = Start {
+        target: target.clone(),
+        session: request.session.clone(),
+        system,
+        messages,
         root: request.root.clone(),
-        tree: Arc::clone(&request.tree),
-        node: request.node.clone(),
-        node_dir: Some(request.node_dir.clone()),
-        background: Arc::default(),
-        mcp: mcp.clone(),
-    };
-    let limits = Limits {
-        budget: None,
+        node: request.node.as_str().to_string(),
+        node_dir: request.node_dir.clone(),
+        mcp: mcp.decls(),
+        socket: socket.as_ref().map(PrivilegedSocket::path),
+        agents: (!compact).then(|| {
+            crate::agent::subagent::agents(
+                &request.agent,
+                spec,
+                target,
+                &request.date,
+                request.mode,
+            )
+        }),
         repeat_limit: request.agent.repeat_limit,
+        compact,
     };
-    crate::agent::agent_loop::run(
-        &tool_context,
-        Some(&subagents),
-        target,
-        &request.session,
-        &system,
-        &mut messages,
-        recorder,
-        limits,
-    )
-    .await?;
-    if request.mode == Mode::Feedback {
-        return Ok(());
-    }
-    // A commit turn is not over while the working tree is dirty: stay in the loop and
-    // ask for the commit. The nudge goes in the transcript but is never shown.
-    let mut sent = 0;
-    while let Some(nudge) = crate::agent::context::next_commit_nudge(&request.root, sent).await? {
-        sent += 1;
-        recorder.message(&nudge);
-        messages.push(nudge);
-        crate::agent::agent_loop::run(
-            &tool_context,
-            Some(&subagents),
-            target,
-            &request.session,
-            &system,
-            &mut messages,
-            recorder,
-            limits,
-        )
-        .await?;
-    }
-    Ok(())
+    // A commit turn is asked to commit while its tree is dirty; the nudge is never shown.
+    let closing = Closing {
+        commit_root: (request.mode == Mode::Commit && !compact).then_some(request.root.as_path()),
+        cancel,
+    };
+    crate::agent::driver::run(&start, closing, recorder).await
 }
 
 /// Points to `/compact` when an endpoint refuses a request for being too long.

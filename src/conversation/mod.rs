@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-pub(crate) mod agents;
 pub mod files;
 pub mod metadata;
 pub(crate) mod toc;
@@ -94,8 +93,6 @@ pub struct Node {
     pub meta: metadata::Metadata,
     pub title: Option<String>,
     pub summary: Option<String>,
-    /// Sub-agent runs of the node's turn, oldest first.
-    pub agents: Vec<agents::AgentRecord>,
     /// First line of the prompt as typed, kept only when the node has no title.
     prompt_first_line: Option<String>,
     /// Creation time in local time, `YYYY-MM-DD HH:MM`, derived from the id.
@@ -133,7 +130,6 @@ impl Node {
             meta: metadata::read(dir),
             title,
             summary: files::read_summary(dir),
-            agents: agents::read(dir),
             prompt_first_line,
             created_display,
         }
@@ -351,7 +347,6 @@ impl ConversationTree {
             meta,
             title: None,
             summary: None,
-            agents: Vec::new(),
             prompt_first_line: files::first_line(input.unwrap_or(prompt)),
             created_display: crate::util::time::format_log_time(
                 now_secs,
@@ -737,24 +732,10 @@ mod tests {
         let summarized = tree.revision();
         tree.toggle_favorite(&id).unwrap();
         let favorited = tree.revision();
-        let agent = tree
-            .create_agent(&id, 0, Metadata::default(), "task")
-            .unwrap();
-        let agent_created = tree.revision();
-        tree.set_agent_title(&id, agent, "Ran".to_string());
-        let agent_titled = tree.revision();
         tree.delete(&id).unwrap();
         let deleted = tree.revision();
 
-        let moved = [
-            created,
-            titled,
-            summarized,
-            favorited,
-            agent_created,
-            agent_titled,
-            deleted,
-        ];
+        let moved = [created, titled, summarized, favorited, deleted];
         for (i, before) in moved.iter().enumerate() {
             assert_ne!(*before, fresh);
             assert!(

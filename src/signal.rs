@@ -112,15 +112,6 @@ pub enum AppSignal {
     /// The shared spinner advances one frame (`SPINNER_INTERVAL`); renders only while
     /// a turn runs and the conversation tree or a Discussion is shown.
     TurnTick,
-    /// The turn of `node` started a sub-agent, already recorded in the tree.
-    SubagentStarted {
-        node: crate::conversation::NodeId,
-    },
-    /// Sub-agent run `index` of `node` ended; its outcome is in the tree.
-    SubagentFinished {
-        node: crate::conversation::NodeId,
-        index: u32,
-    },
     /// The MCP server `name` started, failed or is starting again.
     McpStatus {
         name: String,
@@ -142,12 +133,6 @@ pub enum AppSignal {
     /// The new attempt at the title and summary of `node` ended, whatever its outcome.
     NodeRetitleEnded {
         node: crate::conversation::NodeId,
-    },
-    /// `title.md` of sub-agent run `index` of `node` was written.
-    AgentTitleReady {
-        node: crate::conversation::NodeId,
-        index: u32,
-        title: String,
     },
     /// `summary.md` of `node` was written.
     NodeSummaryReady {

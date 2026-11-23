@@ -153,7 +153,7 @@ fn hints(state: &crate::tui::state::AppState) -> (String, Cow<'static, str>) {
                 }
                 Some(Window::CommitDiff(_)) => "Bksp:Send to back  Esc:Close",
                 Some(Window::ConversationTree) => {
-                    "Bksp:Send to back  /:Search  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  s:Sub-agents  dd:Delete  Esc:Clear search"
+                    "Bksp:Send to back  /:Search  n:New  m:Other model  e:Edit  c:Commits  f:Favorite  dd:Delete  Esc:Clear search"
                 }
                 Some(Window::Discussion(_)) => "Enter:Send  Shift+Enter:New line",
                 Some(Window::Report(_)) => "Bksp:Send to back  Esc:Close",
@@ -202,10 +202,7 @@ fn clock_text(now: i64, offset_secs: i32) -> String {
 const USAGE_WARNING_PERCENT: u32 = 75;
 const USAGE_ERROR_PERCENT: u32 = 90;
 
-/// The endpoint the spending on screen belongs to: the selected row of the open Model
-/// Picker, else the model of a Discussion window, else the endpoint of the Conversation
-/// Tree's selected node or sub-agent run (for a queued row, the model of the window holding
-/// the prompt).
+/// The endpoint the spending on screen belongs to: the picker, window or tree row in focus.
 fn focused_endpoint(state: &crate::tui::state::AppState) -> Option<String> {
     use crate::tui::modal::Modal;
     use crate::tui::pane_manager::Window;
@@ -223,13 +220,6 @@ fn focused_endpoint(state: &crate::tui::state::AppState) -> Option<String> {
         Window::Discussion(id) => window_endpoint(id),
         Window::ConversationTree => match state.tree_view.selected.as_ref()? {
             RowTarget::Node(node) => state.conversations.read().node(node)?.meta.endpoint.clone(),
-            RowTarget::Agent { node, index } => state
-                .conversations
-                .read()
-                .agent(node, *index)?
-                .meta
-                .endpoint
-                .clone(),
             RowTarget::Queued { window, .. } => window_endpoint(window),
         },
         _ => None,

@@ -89,9 +89,7 @@ impl crate::tui::panes::discussion::DiscussionComponent {
         let shown: Vec<usize> = state
             .discussions
             .iter()
-            .filter(|(_, discussion)| {
-                discussion.node.as_ref() == Some(node) && discussion.agent.is_none()
-            })
+            .filter(|(_, discussion)| discussion.node.as_ref() == Some(node))
             .map(|(id, _)| *id)
             .collect();
         let Some(&first) = shown.first() else {
@@ -179,7 +177,7 @@ impl crate::tui::panes::discussion::DiscussionComponent {
                 (live.reply.clone(), live.work_log.clone())
             };
             for (id, discussion) in state.discussions.iter_mut() {
-                if discussion.node.as_ref() == Some(node) && discussion.agent.is_none() {
+                if discussion.node.as_ref() == Some(node) {
                     discussion.show_finished_turn(&reply, &work_log);
                     if outcome.status == NodeStatus::Done {
                         discussion.thinking.clear();
@@ -205,8 +203,6 @@ impl crate::tui::panes::discussion::DiscussionComponent {
         if let Some(handle) = &finished {
             Self::restore_injected(state, node, handle);
         }
-        // A cancel cuts its sub-agent short, without the signal of its end.
-        Self::reload_agent_windows(state, main_tx.clone(), node, None);
         // A turn may have moved HEAD or discarded its work: refresh what shows git state.
         for (id, win) in &state.git_logs {
             GitLogPaneComponent::reload_log(state.repo.clone(), main_tx.clone(), *id, &win.source);

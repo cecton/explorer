@@ -175,15 +175,10 @@ fn surface_size(window_size: VPSize) -> VPSize {
     col_count + row_count
 }
 
-/// Stops the turns still running, keeping what they produced: a turn with a reply or
-/// commits is cancelled, part of the discussion, and one with neither fails, both
-/// through the rule a turn that ends on its own goes through, so a commit turn's
-/// commits count. Its sub-agent runs end with it: left running they would load as
-/// "interrupted" and lose the duration a cancelled one records.
+/// Stops the running turns, recording each as a turn that ends on its own would.
 fn stop_running_turns(state: &crate::tui::state::AppState) {
     use crate::agent::Mode;
     let head_now = state.repo.as_ref().and_then(crate::git::head_id);
-    let now_secs = crate::util::time::now_secs();
     for (node, handle) in &state.running_turns {
         handle.cancel();
         let reply = handle.live.lock().reply.clone();
@@ -202,7 +197,6 @@ fn stop_running_turns(state: &crate::tui::state::AppState) {
                 node.as_str()
             );
         }
-        tree.cancel_running_agents(node, now_secs);
     }
 }
 
@@ -288,7 +282,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn stopping_a_turn_at_exit_ends_its_running_sub_agents_with_it() {
+    fn stopping_a_turn_at_exit_keeps_what_it_produced() {
         use crate::agent::Mode;
         use crate::agent::turn::TurnHandle;
         use crate::conversation::ConversationTree;
@@ -301,13 +295,6 @@ mod tests {
         let node = tree
             .create_node(None, 86_401, Metadata::default(), "p", None)
             .unwrap();
-        let running = Metadata {
-            status: Some(NodeStatus::Running),
-            ..Default::default()
-        };
-        tree.create_agent(&node, 86_402, running, "task").unwrap();
-        let run_dir = tree.agent_dir(&node, 1).unwrap();
-        files::write_reply(&run_dir, "a partial answer").unwrap();
 
         let mut state = crate::tui::state::AppState::for_test(root);
         *state.conversations.write() = tree;
@@ -316,27 +303,13 @@ mod tests {
             TurnHandle::for_test(Mode::Commit, "half an answer"),
         );
 
-        let before = crate::util::time::now_secs();
         stop_running_turns(&state);
-        let after = crate::util::time::now_secs();
 
         let tree = state.conversations.read();
         let cut_short = &tree.node(&node).unwrap().meta;
         assert_eq!(cut_short.status, Some(NodeStatus::Cancelled));
         assert_eq!(cut_short.commits, Vec::<String>::new());
-        let run = tree.agent(&node, 1).unwrap();
-        assert_eq!(run.meta.status, Some(NodeStatus::Cancelled));
-        assert!(run.meta.error.is_none());
-        // A run cut short records its duration from its creation stamp; left running it
-        // would reload as "interrupted" with none. The clock the function reads sits
-        // between these two.
-        let secs = run.meta.secs.expect("a cancelled run records its duration");
-        assert!(
-            (before - 86_402..=after - 86_402).contains(&(secs as i64)),
-            "{secs} is not between {} and {}",
-            before - 86_402,
-            after - 86_402
-        );
-        assert_eq!(files::read_reply(&run_dir), "a partial answer");
+        let dir = tree.node_dir(&node).unwrap();
+        assert_eq!(files::read_reply(&dir), "half an answer");
     }
 }

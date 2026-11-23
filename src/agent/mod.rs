@@ -1,7 +1,9 @@
 pub mod agent_loop;
+pub mod child;
 pub mod claude_code;
 pub mod commands;
 pub mod context;
+pub mod driver;
 #[cfg(test)]
 mod fake_llm;
 pub mod llm;
@@ -13,6 +15,7 @@ pub mod sink;
 pub mod subagent;
 pub mod tools;
 pub mod turn;
+pub mod wire;
 
 /// How a turn runs: for the teacher, or for the executor.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

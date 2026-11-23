@@ -221,7 +221,6 @@ fn build_lines(
     pane_width: usize,
 ) -> (Vec<Line>, (usize, usize)) {
     use crate::tui::panes::conversation_tree::layout;
-    use crate::tui::state::RowTarget;
     let mut lines: Vec<Line> = Vec::with_capacity(rows.len() + 8);
     let mut selected_span = (0, 0);
     for (row_idx, row) in rows.iter().enumerate() {
@@ -229,15 +228,7 @@ fn build_lines(
             let prefix_width =
                 gutter_width + crate::tui::widgets::text_layout::display_width(&row_prefix(row));
             let width = pane_width.saturating_sub(prefix_width).max(1);
-            let text = match &row.target {
-                RowTarget::Agent { node, index } => tree
-                    .agent(node, *index)
-                    .map(|agent| agent.title())
-                    .unwrap_or_default(),
-                RowTarget::Node(_) | RowTarget::Queued { .. } => {
-                    std::borrow::Cow::Owned(queued_text(state, row))
-                }
-            };
+            let text = queued_text(state, row);
             let start = lines.len();
             lines.push(Line {
                 row: row_idx,
@@ -346,21 +337,10 @@ impl LinePainter<'_> {
             gutter_width + crate::tui::widgets::text_layout::display_width(&rail_prefix);
         let text_column = fold_column + crate::tui::widgets::text_layout::display_width(fold_text);
 
-        // A queued prompt or a sub-agent run is not a node: nothing to arm, fold or label.
+        // A queued prompt is not a node: nothing to arm, fold or label.
         let Some(node) = row_info.target.node().and_then(|id| self.tree.node(id)) else {
             let (glyph, glyph_fg) = match &row_info.target {
                 RowTarget::Queued { position, .. } => (Some(queue_glyph(*position)), colors.dim),
-                RowTarget::Agent { node, index } => {
-                    let meta = self.tree.agent(node, *index).map(|agent| &agent.meta);
-                    let fg = match meta.and_then(|meta| meta.status) {
-                        Some(NodeStatus::Failed) => colors.error,
-                        _ => colors.running,
-                    };
-                    (
-                        meta.and_then(|meta| state_marker(meta, self.spinner_tick)),
-                        fg,
-                    )
-                }
                 RowTarget::Node(_) => return None,
             };
             paint_plain(ops, gutter_width, &rail_prefix, gutter);

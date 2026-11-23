@@ -93,6 +93,12 @@ async fn main() {
             .with_ansi(false)
             .compact()
             .init();
+        agent::driver::set_log(path, args.log_level);
+    }
+
+    // Its whole input is the start line its parent writes: no repository, no configuration.
+    if args.agent {
+        std::process::exit(agent::child::main().await);
     }
 
     // Before the root lookup below, which panics outside a repository: a server started

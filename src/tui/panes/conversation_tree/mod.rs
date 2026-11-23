@@ -238,11 +238,7 @@ pub(crate) fn conversations_loaded(
         .iter()
         .filter_map(|(id, discussion)| {
             let node = discussion.node.as_ref()?;
-            let exists = match discussion.agent {
-                Some(index) => tree.agent(node, index).is_some(),
-                None => tree.node(node).is_some(),
-            };
-            Some((*id, exists))
+            Some((*id, tree.node(node).is_some()))
         })
         .collect();
     for (id, exists) in restored {

@@ -21,13 +21,15 @@ pub struct ToolContext {
     pub node: crate::conversation::NodeId,
     /// The directory of that node, where background commands write their output.
     pub node_dir: Option<camino::Utf8PathBuf>,
-    /// Background commands of the turn, shared with its sub-agents.
+    /// Background commands of the run, killed when it ends.
     pub background: Arc<Background>,
-    /// Tools of the MCP servers running when the turn started.
+    /// Tools of the MCP servers the run itself started.
     pub mcp: crate::agent::mcp::McpTools,
+    /// The turn's socket: privileged tools are asked of the turn that owns it, not run here.
+    pub privileged: Option<camino::Utf8PathBuf>,
 }
 
-/// The process groups of a turn's background commands, killed when the turn ends.
+/// The process groups of an agent run's background commands, killed when the run ends.
 #[derive(Default)]
 pub struct Background {
     // Never waited for: a zombie leader keeps the group id from being reused.
@@ -249,6 +251,11 @@ pub async fn try_run(
     use crate::agent::mcp::McpTools;
     let args = call.arguments.clone();
     let root = context.root.as_path();
+    if let Some(socket) = &context.privileged
+        && crate::agent::privileged::PRIVILEGED.contains(&call.name.as_str())
+    {
+        return crate::agent::privileged::call(socket, &call.name, args).await;
+    }
     match call.name.as_str() {
         "conversation" => {
             let tree = Arc::clone(&context.tree);
@@ -665,6 +672,7 @@ mod tests {
             node_dir: None,
             background: Arc::default(),
             mcp: McpTools::default(),
+            privileged: None,
         }
     }
 
@@ -878,6 +886,7 @@ mod tests {
             node_dir: Some(store.join("n1")),
             background: Arc::default(),
             mcp: McpTools::default(),
+            privileged: None,
         };
         let start = std::time::Instant::now();
         let started = run(
@@ -1068,6 +1077,7 @@ mod tests {
             node_dir: Some(node_dir.join("n2")),
             background: Arc::default(),
             mcp: McpTools::default(),
+            privileged: None,
         };
         let ask = |arguments| test_call("conversation", arguments);
 

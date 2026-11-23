@@ -26,6 +26,10 @@ pub(crate) struct Reply {
     hang: bool,
     /// Runs when the request arrives, before anything is sent.
     on_request: Option<Box<dyn FnOnce() + Send>>,
+    /// Holds the answer back until it resolves, after the request arrived.
+    gate: Option<tokio::sync::oneshot::Receiver<()>>,
+    /// Resolved once every part was written, before a hang.
+    written: Option<std::sync::mpsc::Sender<()>>,
 }
 
 impl Reply {
@@ -34,6 +38,8 @@ impl Reply {
             parts: Vec::new(),
             hang: false,
             on_request: None,
+            gate: None,
+            written: None,
         }
     }
 
@@ -70,6 +76,18 @@ impl Reply {
     /// `action` runs when the request arrives, before the answer streams.
     pub(crate) fn on_request(mut self, action: impl FnOnce() + Send + 'static) -> Self {
         self.on_request = Some(Box::new(action));
+        self
+    }
+
+    /// The answer streams only once `open` resolves, so a test can act while it is held.
+    pub(crate) fn after(mut self, open: tokio::sync::oneshot::Receiver<()>) -> Self {
+        self.gate = Some(open);
+        self
+    }
+
+    /// `written` resolves once the whole answer is on the wire.
+    pub(crate) fn then_signal(mut self, written: std::sync::mpsc::Sender<()>) -> Self {
+        self.written = Some(written);
         self
     }
 }
@@ -134,6 +152,9 @@ async fn serve(
     if let Some(action) = reply.on_request.take() {
         action();
     }
+    if let Some(open) = reply.gate.take() {
+        let _ = open.await;
+    }
     stream
         .write_all(
             b"HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n",
@@ -175,6 +196,9 @@ async fn serve(
             .write_all(format!("data: {chunk}\n\n").as_bytes())
             .await?;
         stream.flush().await?;
+    }
+    if let Some(written) = reply.written.take() {
+        let _ = written.send(());
     }
     if reply.hang {
         std::future::pending::<()>().await;

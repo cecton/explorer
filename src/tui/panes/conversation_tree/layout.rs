@@ -43,10 +43,7 @@ impl TreeRow {
     }
 }
 
-/// The rows the window shows, and what matched in them while the filter holds a word:
-/// the tree with a provisional row per queued prompt and per sub-agent run, or the
-/// matches of the filter, flat. `cache` keeps the filter's last answer, so a frame that
-/// changes neither the query nor the tree does not pay for it again.
+/// The rows the window shows, or the flat matches of a filter; `cache` keeps its last answer.
 pub(crate) fn rows(
     state: &crate::tui::state::AppState,
     tree: &crate::conversation::ConversationTree,
@@ -56,13 +53,9 @@ pub(crate) fn rows(
     std::sync::Arc<[crate::tui::panes::conversation_tree::filter::FilterMatch]>,
 ) {
     if !state.tree_view.filtering() {
-        let rows = with_agents(
-            with_queued(
-                layout_rows(tree, &state.tree_view.expanded),
-                &state.queued_turns,
-            ),
-            tree,
-            &state.tree_view.shown_agents,
+        let rows = with_queued(
+            layout_rows(tree, &state.tree_view.expanded),
+            &state.queued_turns,
         );
         return (rows, std::sync::Arc::default());
     }
@@ -228,53 +221,6 @@ fn with_queued(rows: Vec<TreeRow>, queue: &[crate::tui::state::PendingTurn]) -> 
         lines.push(row);
         for queued in extra[index].drain(..) {
             lines.push(queued);
-        }
-    }
-    lines
-}
-
-/// The rows with one row per sub-agent run of the turn of each node in `shown`, right
-/// after the node's row and one level below it.
-fn with_agents(
-    rows: Vec<TreeRow>,
-    tree: &crate::conversation::ConversationTree,
-    shown: &HashSet<crate::conversation::NodeId>,
-) -> Vec<TreeRow> {
-    use crate::tui::state::RowTarget;
-    if shown.is_empty() {
-        return rows;
-    }
-    let mut lines = Vec::with_capacity(rows.len());
-    for (index, row) in rows.iter().enumerate() {
-        lines.push(row.clone());
-        let Some(id) = row.target.node().filter(|id| shown.contains(*id)) else {
-            continue;
-        };
-        let Some(node) = tree.node(id) else {
-            continue;
-        };
-        // Rows hanging from the node below its runs keep the arm going past them.
-        let hangs = rows
-            .get(index + 1)
-            .is_some_and(|next| next.rails.len() > row.rails.len());
-        let last = node.agents.len().saturating_sub(1);
-        for (position, agent) in node.agents.iter().enumerate() {
-            let continues = position != last || hangs;
-            let mut rails = row.rails.clone();
-            rails.push(continues);
-            lines.push(TreeRow {
-                target: RowTarget::Agent {
-                    node: id.clone(),
-                    index: agent.index,
-                },
-                rails,
-                fold: Fold::Leaf,
-                branch: if continues {
-                    Branch::Start
-                } else {
-                    Branch::LastStart
-                },
-            });
         }
     }
     lines
@@ -518,52 +464,5 @@ mod tests {
             }],
         );
         assert_eq!(rows.len(), 1);
-    }
-
-    #[test]
-    fn sub_agent_runs_hang_from_their_node_only_when_shown() {
-        use crate::conversation::NodeId;
-        use crate::tui::state::RowTarget;
-        let (_tmp, tree) = tree_with(&["a1/a2", "a1/agents/1", "a1/agents/2", "b1/agents/1"]);
-        let agent = |index| RowTarget::Agent {
-            node: NodeId::new("a1"),
-            index,
-        };
-        let layout = |expanded: &[&str], shown: &[&str]| {
-            let rows = with_agents(layout_rows(&tree, &ids(expanded)), &tree, &ids(shown));
-            rows.into_iter()
-                .map(|row| (row.target, row.rails, row.branch))
-                .collect::<Vec<_>>()
-        };
-        let node = |name| RowTarget::Node(NodeId::new(name));
-
-        assert_eq!(
-            layout(&["a1"], &[]),
-            [
-                (node("a1"), vec![], Branch::None),
-                (node("a2"), vec![false], Branch::LastStart),
-                (node("b1"), vec![], Branch::None),
-            ]
-        );
-        // The thread below the root keeps the arm going past the runs.
-        assert_eq!(
-            layout(&["a1"], &["a1"]),
-            [
-                (node("a1"), vec![], Branch::None),
-                (agent(1), vec![true], Branch::Start),
-                (agent(2), vec![true], Branch::Start),
-                (node("a2"), vec![false], Branch::LastStart),
-                (node("b1"), vec![], Branch::None),
-            ]
-        );
-        assert_eq!(
-            layout(&[], &["a1"]),
-            [
-                (node("a1"), vec![], Branch::None),
-                (agent(1), vec![true], Branch::Start),
-                (agent(2), vec![false], Branch::LastStart),
-                (node("b1"), vec![], Branch::None),
-            ]
-        );
     }
 }

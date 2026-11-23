@@ -6,18 +6,3 @@ pub(crate) fn write_node(dir: &camino::Utf8Path, files: &[(&str, &str)]) {
         std::fs::write(dir.join(name), content).unwrap();
     }
 }
-
-/// A tree with one root node, at `1970-01-02T00-00-01Z`.
-pub(crate) fn tree_with_node(
-    root: &camino::Utf8Path,
-) -> (
-    crate::conversation::ConversationTree,
-    crate::conversation::NodeId,
-) {
-    use crate::conversation::metadata::Metadata;
-    let mut tree = crate::conversation::ConversationTree::load(root);
-    let node = tree
-        .create_node(None, 86_401, Metadata::default(), "p", None)
-        .unwrap();
-    (tree, node)
-}

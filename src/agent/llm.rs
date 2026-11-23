@@ -2,7 +2,7 @@ use std::sync::OnceLock;
 use std::time::Duration;
 
 /// Where and how to run one model: an OpenAI-compatible server, a model and an effort.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct LlmTarget {
     pub url: String,
     pub token: String,
@@ -11,6 +11,7 @@ pub struct LlmTarget {
 }
 
 /// A tool as advertised to the model.
+#[derive(Clone, serde::Serialize, serde::Deserialize)]
 pub struct ToolSpec {
     pub name: String,
     pub description: String,

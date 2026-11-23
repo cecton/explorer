@@ -10,8 +10,6 @@ use std::time::{Duration, Instant};
 const REPLY_FLUSH_INTERVAL: Duration = Duration::from_secs(1);
 /// Opens the line of a tool call in the work log.
 pub const TOOL_LINE_PREFIX: &str = "- ";
-/// Sets a sub-agent's tool calls apart in the work log of the turn that called it.
-const SUBAGENT_INDENT: &str = "  ";
 /// Handed out to every change of the texts a window copies, across turns: a window
 /// compares the revision of one turn against the one it holds, and a resumed turn must
 /// not reach the number its predecessor stopped at.
@@ -49,12 +47,10 @@ pub struct LiveTurn {
     pub session_id: Option<String>,
     /// What the CLI last reported of the subscription's limits.
     pub usage: Option<crate::usage::Usage>,
-    /// The sub-agent this turn is waiting for.
-    pub subagent: Option<LiveSubagent>,
     /// What the user sent while the turn was working, waiting to join the loop at its
     /// next round.
     pub injected: VecDeque<String>,
-    /// The turn takes no more messages: the Claude Code driver closed the CLI's stdin.
+    /// The turn takes no more messages: its driver closed it.
     pub closed: bool,
     /// The change that last touched a text a window copies: a window takes them only
     /// when this moved. The stamps come from one counter for the whole process, so two
@@ -77,14 +73,6 @@ impl LiveTurn {
         live.touch();
         live
     }
-}
-
-/// A sub-agent run in progress, as the turn that called it sees it.
-#[derive(Clone)]
-pub struct LiveSubagent {
-    pub index: u32,
-    pub started: Instant,
-    pub live: Arc<parking_lot::Mutex<LiveTurn>>,
 }
 
 impl LiveTurn {
@@ -116,9 +104,7 @@ impl LiveTurn {
     }
 }
 
-/// What the user sends while a turn is working. The own loop drains it; the Claude
-/// Code driver writes it to the CLI's stdin. Either way it joins the prompt block,
-/// the node's `prompt.md` and the transcript when it is sent.
+/// What the user sends while a turn works, taken by its driver: the own loop or Claude Code.
 #[derive(Clone)]
 pub(crate) struct Injector {
     live: Arc<parking_lot::Mutex<LiveTurn>>,
@@ -131,9 +117,21 @@ impl Injector {
         self.live.lock().injected.front().cloned()
     }
 
-    /// Whether a message is waiting.
-    pub(crate) fn pending(&self) -> bool {
-        !self.live.lock().injected.is_empty()
+    /// The messages that wait, oldest first.
+    pub(crate) fn queued(&self) -> Vec<String> {
+        self.live.lock().injected.iter().cloned().collect()
+    }
+
+    /// The messages that wait, oldest first, or `None`; the turn closes then only if `close`.
+    pub(crate) fn settle(&self, close: bool) -> Option<Vec<String>> {
+        let mut live = self.live.lock();
+        if live.injected.is_empty() {
+            if close {
+                live.closed = true;
+            }
+            return None;
+        }
+        Some(live.injected.iter().cloned().collect())
     }
 
     /// Closes the turn when none waits and `settled`, under the lock `inject` takes.
@@ -146,7 +144,7 @@ impl Injector {
         idle
     }
 
-    /// Opens the turn to messages again: a new run of the CLI has a stdin of its own.
+    /// Opens the turn to messages again, for a new run of its agent or CLI.
     pub(crate) fn open(&self) {
         self.live.lock().closed = false;
     }
@@ -156,22 +154,19 @@ impl Injector {
         self.live.lock().closed = true;
     }
 
-    /// Records one as written and takes it out of the queue. It leaves the queue only
-    /// here, once the model has it: a write that fails, or a task dropped mid-write,
-    /// leaves the message for the window to give back.
-    pub(crate) fn wrote(&self, content: &str) -> crate::agent::Message {
+    /// Records one as written and takes it out of the queue; a write that never happens leaves it.
+    pub(crate) fn wrote(&self, content: &str) {
         {
             let mut live = self.live.lock();
             if live.injected.front().map(String::as_str) == Some(content) {
                 live.injected.pop_front();
             }
         }
-        self.sent(content)
+        self.sent(content);
     }
 
-    /// Records one as sent: it joins the prompt block, `prompt.md` and the transcript,
-    /// and is handed back for the loop to push onto its messages.
-    fn sent(&self, content: &str) -> crate::agent::Message {
+    /// Records one as sent: it joins the prompt block, `prompt.md` and the transcript.
+    fn sent(&self, content: &str) {
         use crate::agent::Message;
         {
             let mut live = self.live.lock();
@@ -194,7 +189,6 @@ impl Injector {
             injected: false,
         };
         append_transcript(&self.node_dir, &message);
-        message
     }
 }
 
@@ -203,22 +197,12 @@ impl Injector {
 pub struct Recorder {
     pub(crate) live: Arc<parking_lot::Mutex<LiveTurn>>,
     node_dir: camino::Utf8PathBuf,
-    main_tx: crate::signal::MainTx,
-    /// The recorder of the turn that called this sub-agent, which logs its tool calls
-    /// too.
-    caller: Option<Caller>,
     /// Where the text of the current answer starts in the live reply.
     answer_start: usize,
     last_flush: Instant,
     /// Chars of thinking recorded for the answer in progress; lets the recorder drop
     /// the live thinking when the answer turns out to call tools.
     thinking_start: usize,
-}
-
-/// Where a sub-agent's tool calls are copied: the work log of the calling turn.
-struct Caller {
-    live: Arc<parking_lot::Mutex<LiveTurn>>,
-    node_dir: camino::Utf8PathBuf,
 }
 
 /// Appends one message to the `transcript.jsonl` of `dir`, which is what a child node
@@ -254,44 +238,17 @@ fn append_work_log(dir: &camino::Utf8Path, live: &parking_lot::Mutex<LiveTurn>, 
 }
 
 impl Recorder {
-    pub(super) fn new(
+    pub(crate) fn new(
         live: Arc<parking_lot::Mutex<LiveTurn>>,
         node_dir: camino::Utf8PathBuf,
-        main_tx: crate::signal::MainTx,
     ) -> Self {
         Self {
             live,
             node_dir,
-            main_tx,
-            caller: None,
             answer_start: 0,
             last_flush: Instant::now(),
             thinking_start: 0,
         }
-    }
-
-    /// The recorder of a sub-agent run kept in `dir`, whose tool calls also go to this
-    /// turn's work log.
-    pub(crate) fn subagent(&self, dir: camino::Utf8PathBuf) -> Self {
-        Self {
-            caller: Some(Caller {
-                live: Arc::clone(&self.live),
-                node_dir: self.node_dir.clone(),
-            }),
-            ..Self::new(
-                Arc::new(parking_lot::Mutex::new(LiveTurn::new())),
-                dir,
-                self.main_tx.clone(),
-            )
-        }
-    }
-
-    pub(crate) fn main_tx(&self) -> crate::signal::MainTx {
-        self.main_tx.clone()
-    }
-
-    pub(crate) fn send(&self, signal: crate::signal::AppSignal) {
-        crate::signal::send(&self.main_tx, signal);
     }
 
     pub(crate) fn flush_reply(&mut self) {
@@ -366,10 +323,6 @@ impl Recorder {
 
     /// Adds a tool call to the work log and shows it as the activity in progress.
     pub fn tool_call(&mut self, description: String) {
-        if let Some(caller) = &self.caller {
-            let entry = format!("{SUBAGENT_INDENT}{TOOL_LINE_PREFIX}{description}");
-            append_work_log(&caller.node_dir, &caller.live, entry);
-        }
         self.log(format!("{TOOL_LINE_PREFIX}{description}"));
         self.activity(Some(description));
     }
@@ -454,53 +407,6 @@ impl Recorder {
     }
 }
 
-impl crate::agent::sink::Sink for Recorder {
-    fn injector(&self) -> Injector {
-        Recorder::injector(self)
-    }
-
-    fn message(&mut self, message: &crate::agent::Message) {
-        Recorder::message(self, message);
-    }
-
-    fn begin_answer(&mut self) {
-        Recorder::begin_answer(self);
-    }
-
-    fn chunk(&mut self, is_thinking: bool, text: &str) {
-        Recorder::chunk(self, is_thinking, text);
-    }
-
-    fn flush_partial_answer(&mut self) {
-        Recorder::flush_partial_answer(self);
-    }
-
-    fn answer_calls_tools(&mut self) {
-        Recorder::answer_calls_tools(self);
-    }
-
-    fn request_size(&mut self, tokens_in: Option<u64>, cached_in: Option<u64>) {
-        Recorder::request_size(self, tokens_in, cached_in);
-    }
-
-    fn tool_call(&mut self, description: String) {
-        Recorder::tool_call(self, description);
-    }
-
-    fn activity(&mut self, activity: Option<String>) {
-        Recorder::activity(self, activity);
-    }
-
-    fn run_agent<'a>(
-        &'a mut self,
-        context: &'a crate::agent::tools::ToolContext,
-        subagents: &'a crate::agent::subagent::Subagents,
-        call: &'a crate::agent::ToolCall,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + 'a>> {
-        Box::pin(crate::agent::subagent::run(context, subagents, call, self))
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -520,6 +426,23 @@ mod tests {
         assert!(!live.lock().closed);
         live.lock().injected.clear();
         assert!(injector.close_if_idle(true));
+        assert!(live.lock().closed);
+    }
+
+    #[test]
+    fn a_settle_takes_what_waits_and_closes_only_when_nothing_does() {
+        let live = Arc::new(parking_lot::Mutex::new(LiveTurn::default()));
+        let injector = Injector {
+            live: Arc::clone(&live),
+            node_dir: camino::Utf8PathBuf::new(),
+        };
+        live.lock().injected.push_back("late".to_string());
+        assert_eq!(injector.settle(true), Some(vec!["late".to_string()]));
+        assert!(!live.lock().closed);
+        live.lock().injected.clear();
+        assert_eq!(injector.settle(false), None);
+        assert!(!live.lock().closed);
+        assert_eq!(injector.settle(true), None);
         assert!(live.lock().closed);
     }
 
@@ -605,9 +528,8 @@ mod tests {
     #[test]
     fn cache_hits_are_those_of_the_first_request() {
         let (_tmp, node_dir) = temp_root();
-        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let live = Arc::default();
-        let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
+        let mut recorder = Recorder::new(Arc::clone(&live), node_dir);
 
         recorder.cached_in(Some(0));
         recorder.cached_in(Some(20_000));
@@ -617,9 +539,8 @@ mod tests {
     #[test]
     fn a_request_reports_its_size_and_a_chunk_goes_where_its_kind_says() {
         let (_tmp, node_dir) = temp_root();
-        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let live = Arc::default();
-        let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
+        let mut recorder = Recorder::new(Arc::clone(&live), node_dir);
 
         recorder.request_size(Some(100), Some(40));
         recorder.request_size(None, Some(90));
@@ -637,9 +558,8 @@ mod tests {
     #[test]
     fn an_answer_with_nothing_to_move_leaves_the_revision_alone() {
         let (_tmp, node_dir) = temp_root();
-        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let live = Arc::default();
-        let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
+        let mut recorder = Recorder::new(Arc::clone(&live), node_dir);
 
         recorder.begin_answer();
         let before = live.lock().revision;
@@ -659,8 +579,7 @@ mod tests {
     #[test]
     fn text_of_an_answer_that_calls_tools_moves_to_the_work_log() {
         let (_tmp, node_dir) = temp_root();
-        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
-        let mut recorder = Recorder::new(Arc::default(), node_dir.clone(), main_tx);
+        let mut recorder = Recorder::new(Arc::default(), node_dir.clone());
 
         recorder.begin_answer();
         recorder.text("Let me look.\n");
@@ -692,47 +611,9 @@ mod tests {
     }
 
     #[test]
-    fn a_sub_agent_logs_its_tool_calls_in_the_work_log_of_its_caller_too() {
-        let (_tmp, node_dir) = temp_root();
-        let agent_dir = node_dir
-            .join(crate::conversation::files::AGENTS_DIR)
-            .join("1");
-        std::fs::create_dir_all(&agent_dir).unwrap();
-        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
-        let mut recorder = Recorder::new(Arc::default(), node_dir.clone(), main_tx);
-        recorder.tool_call("agent reviewer: Review".to_string());
-        let mut child = recorder.subagent(agent_dir.clone());
-
-        child.begin_answer();
-        child.text("Reading.");
-        child.answer_calls_tools();
-        child.tool_call("read a.txt".to_string());
-        child.begin_answer();
-        child.text("Looks fine.");
-        child.flush_reply();
-
-        let read =
-            |dir: &camino::Utf8Path, name: &str| std::fs::read_to_string(dir.join(name)).unwrap();
-        assert_eq!(
-            read(&agent_dir, crate::conversation::files::ACTIVITY),
-            "Reading.\n- read a.txt\n"
-        );
-        assert_eq!(
-            read(&agent_dir, crate::conversation::files::REPLY),
-            "Looks fine."
-        );
-        assert_eq!(
-            read(&node_dir, crate::conversation::files::ACTIVITY),
-            "- agent reviewer: Review\n  - read a.txt\n"
-        );
-        assert!(recorder.live.lock().reply.is_empty());
-    }
-
-    #[test]
     fn thinking_of_tool_calling_answers_is_dropped_and_the_last_one_kept() {
         let (_tmp, node_dir) = temp_root();
-        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
-        let mut recorder = Recorder::new(Arc::default(), node_dir, main_tx);
+        let mut recorder = Recorder::new(Arc::default(), node_dir);
 
         recorder.begin_answer();
         recorder.reasoning("should I look?");
@@ -754,9 +635,8 @@ mod tests {
     #[test]
     fn every_change_to_a_text_a_window_copies_bumps_the_revision() {
         let (_tmp, node_dir) = temp_root();
-        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
         let live = Arc::default();
-        let mut recorder = Recorder::new(Arc::clone(&live), node_dir, main_tx);
+        let mut recorder = Recorder::new(Arc::clone(&live), node_dir);
         let revision = |live: &Arc<parking_lot::Mutex<LiveTurn>>| live.lock().revision();
 
         let start = revision(&live);
@@ -781,8 +661,7 @@ mod tests {
     #[test]
     fn the_running_log_hides_the_dropped_rounds() {
         let (_tmp, node_dir) = temp_root();
-        let (main_tx, _main_rx) = tokio::sync::mpsc::channel(8);
-        let mut recorder = Recorder::new(Arc::default(), node_dir, main_tx);
+        let mut recorder = Recorder::new(Arc::default(), node_dir);
 
         // First tool-calling round
         recorder.begin_answer();

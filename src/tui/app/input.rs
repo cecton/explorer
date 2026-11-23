@@ -128,7 +128,6 @@ pub(super) fn handle(
                     Some(Window::Discussion(id)) => state
                         .discussions
                         .get(&id)
-                        .filter(|discussion| discussion.agent.is_none())
                         .and_then(|discussion| discussion.node.clone()),
                     Some(Window::ConversationTree) => state
                         .tree_view
@@ -156,11 +155,7 @@ pub(super) fn handle(
             }
             Some(Action::OpenModelPicker) => {
                 if let Some(Window::Discussion(id)) = global_data.state.pane_manager.focused_window
-                    && global_data
-                        .state
-                        .discussions
-                        .get(&id)
-                        .is_some_and(|discussion| discussion.agent.is_none())
+                    && global_data.state.discussions.contains_key(&id)
                 {
                     let main_tx = global_data.main_thread_channel_sender.clone();
                     let purpose = ModelPickerPurpose::Window(id);

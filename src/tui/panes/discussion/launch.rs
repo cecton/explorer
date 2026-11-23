@@ -121,42 +121,21 @@ pub(crate) fn window_is_running(state: &crate::tui::state::AppState, id: usize) 
         .is_some_and(|node| state.running_turns.contains_key(node))
 }
 
-/// The sub-agent run window `discussion` shows, while it runs.
-pub(crate) fn running_agent(
-    state: &crate::tui::state::AppState,
-    discussion: &crate::tui::state::DiscussionState,
-) -> Option<crate::agent::turn::live::LiveSubagent> {
-    let index = discussion.agent?;
-    let handle = state.running_turns.get(discussion.node.as_ref()?)?;
-    let running = handle.live.lock().subagent.clone()?;
-    (running.index == index).then_some(running)
-}
-
-/// What the turn or the sub-agent run window `discussion` shows has produced so far,
-/// while it runs.
+/// What the turn of the node window `discussion` shows has produced so far, while it runs.
 pub(crate) fn running_output(
     state: &crate::tui::state::AppState,
     discussion: &crate::tui::state::DiscussionState,
 ) -> Option<Arc<parking_lot::Mutex<crate::agent::turn::live::LiveTurn>>> {
-    match discussion.agent {
-        Some(_) => running_agent(state, discussion).map(|running| running.live),
-        None => {
-            let handle = state.running_turns.get(discussion.node.as_ref()?)?;
-            Some(Arc::clone(&handle.live))
-        }
-    }
+    let handle = state.running_turns.get(discussion.node.as_ref()?)?;
+    Some(Arc::clone(&handle.live))
 }
 
-/// Metadata of the node or the sub-agent run window `discussion` shows.
+/// Metadata of the node window `discussion` shows.
 pub(crate) fn shown_meta<'a>(
     tree: &'a crate::conversation::ConversationTree,
     discussion: &crate::tui::state::DiscussionState,
 ) -> Option<&'a crate::conversation::metadata::Metadata> {
-    let node = discussion.node.as_ref()?;
-    match discussion.agent {
-        Some(index) => tree.agent(node, index).map(|agent| &agent.meta),
-        None => tree.node(node).map(|node| &node.meta),
-    }
+    tree.node(discussion.node.as_ref()?).map(|node| &node.meta)
 }
 
 /// The mode a node was run in; a compact node counts as feedback.

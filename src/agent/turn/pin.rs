@@ -1,7 +1,7 @@
 //! What a turn on the own agent loop records, pinned end to end against a scripted
-//! server: the files of the node and of its sub-agent run, the live counters, the
-//! requests the model received and the outcome the main loop is told. The loop is going
-//! to move to a process of its own; these tests say what it must keep doing.
+//! server: the files of the node, the live counters, the
+//! requests the model received and the outcome the main loop is told. The loop runs in an
+//! `explorer agent` process (a test binary stands in for it, see `agent/child.rs`).
 
 #[cfg(test)]
 mod tests {
@@ -199,28 +199,18 @@ mod tests {
             Reply::new().text("All done.").usage(200, Some(50)),
         ];
         let setup = setup(Mode::Feedback, script).await;
-        let (handle, outcome, signals) = run_turn(&setup, async |handle| {
+        let (handle, outcome, _) = run_turn(&setup, async |handle| {
             *slot.lock() = Some(Arc::clone(&handle.live));
         })
         .await;
 
-        assert_eq!(outcome.status, NodeStatus::Done);
         assert_eq!(outcome.error, None);
+        assert_eq!(outcome.status, NodeStatus::Done);
         assert_eq!(outcome.tokens_in, Some(200));
         assert_eq!(outcome.cached_in, Some(40));
         assert!(outcome.commits.is_empty());
         assert!(!outcome.reset);
         assert_eq!(outcome.session_id, None);
-        let started = signals
-            .iter()
-            .filter(|signal| matches!(signal, AppSignal::SubagentStarted { .. }))
-            .count();
-        let finished = signals
-            .iter()
-            .filter(|signal| matches!(signal, AppSignal::SubagentFinished { .. }))
-            .count();
-        assert_eq!((started, finished), (1, 1));
-
         {
             let live = handle.live.lock();
             assert_eq!(live.reply, "All done.");
@@ -274,10 +264,7 @@ mod tests {
         assert_eq!(messages[3]["content"], "hi\n");
         assert_eq!(messages[4]["content"], "also check x");
         assert_eq!(messages[5]["tool_calls"][0]["name"], "agent");
-        assert_eq!(
-            messages[6]["content"],
-            "agent_id: 1970-01-01T00-00-01Z/1\n\nsub answer"
-        );
+        assert_eq!(messages[6]["content"], "sub answer");
         assert_eq!(messages[7]["content"], "All done.");
         assert_eq!(
             messages[0]["content"],
@@ -288,16 +275,19 @@ mod tests {
             )
         );
 
-        let agent_dir = setup.node_dir.join("agents").join("1");
-        assert_eq!(read_file(&agent_dir, "reply.md"), "sub answer");
-        assert_eq!(read_file(&agent_dir, "prompt.md"), "check the file");
-        let sub_messages = transcript(&agent_dir);
-        assert_eq!(sub_messages.last().unwrap()["content"], "sub answer");
-
         let requests = setup.server.requests();
         assert_eq!(requests.len(), 4);
         assert_eq!(last_user_text(&setup, 1), "also check x");
+        // The sub-agent starts from its task alone and leaves no record of its own.
         assert!(last_user_text(&setup, 2).ends_with("check the file"));
+        let sub_roles: Vec<&str> = requests[2]["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|message| message["role"].as_str().unwrap())
+            .collect();
+        assert_eq!(sub_roles, ["system", "user"]);
+        assert!(!setup.node_dir.join("agents").exists());
         assert_eq!(requests[0]["model"], "model");
         assert_eq!(requests[0]["stream"], true);
     }
@@ -333,6 +323,223 @@ mod tests {
             messages[1]["tool_calls"]
                 .as_array()
                 .is_none_or(|calls| calls.is_empty())
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancelled_run_records_what_it_wrote_before_it_stopped() {
+        // Held until the test holds the live turn: the driver has applied none of it yet.
+        let (open, opened) = tokio::sync::oneshot::channel();
+        let (written, was_written) = std::sync::mpsc::channel();
+        let script = vec![
+            Reply::new()
+                .after(opened)
+                .text("a")
+                .text("b")
+                .text("c")
+                .then_signal(written)
+                .hang(),
+        ];
+        let setup = setup(Mode::Feedback, script).await;
+        let (_, outcome, _) = run_turn(&setup, async |handle| {
+            for _ in 0..2000 {
+                if setup.server.requests().len() == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let live = handle.live.lock();
+            let _ = open.send(());
+            was_written
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the server never wrote the answer");
+            // Not an await: a blocked driver would take the runtime's timer with it.
+            std::thread::sleep(Duration::from_millis(300));
+            handle.cancel();
+            drop(live);
+        })
+        .await;
+
+        assert_eq!(outcome.status, NodeStatus::Cancelled);
+        assert_eq!(read_file(&setup.node_dir, "reply.md"), "abc");
+        let messages = transcript_of(&setup);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["content"], "abc");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_cancel_that_lands_before_the_final_answer_is_applied_records_it_once() {
+        // Held until the test holds the live turn: the driver has applied none of it yet.
+        let (open, opened) = tokio::sync::oneshot::channel();
+        let (written, was_written) = std::sync::mpsc::channel();
+        let script = vec![
+            Reply::new()
+                .after(opened)
+                .text("Final.")
+                .then_signal(written),
+        ];
+        let setup = setup(Mode::Feedback, script).await;
+        let (_, outcome, _) = run_turn(&setup, async |handle| {
+            for _ in 0..2000 {
+                if setup.server.requests().len() == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            let live = handle.live.lock();
+            let _ = open.send(());
+            was_written
+                .recv_timeout(Duration::from_secs(30))
+                .expect("the server never wrote the answer");
+            // The cancel lands before the driver applies the first event: the drain applies the rest.
+            std::thread::sleep(Duration::from_millis(300));
+            handle.cancel();
+            drop(live);
+        })
+        .await;
+
+        assert_eq!(outcome.status, NodeStatus::Cancelled);
+        assert_eq!(read_file(&setup.node_dir, "reply.md"), "Final.");
+        let messages = transcript_of(&setup);
+        assert_eq!(messages.len(), 2);
+        assert_eq!(messages[1]["role"], "assistant");
+        assert_eq!(messages[1]["content"], "Final.");
+    }
+
+    /// Whether the process `pid` still runs; an unreaped zombie does not.
+    fn process_runs(pid: &str) -> bool {
+        std::fs::read_to_string(format!("/proc/{pid}/stat")).is_ok_and(|stat| {
+            // The state follows the command name, which is in parentheses.
+            stat.rsplit_once(')')
+                .is_some_and(|(_, rest)| !rest.trim_start().starts_with('Z'))
+        })
+    }
+
+    /// Asserts that the process `pid` has stopped, within a few seconds.
+    async fn assert_stopped(pid: &str, what: &str) {
+        let mut running_now = true;
+        for _ in 0..600 {
+            running_now = process_runs(pid);
+            if !running_now {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert!(!running_now, "{what} {pid} outlived the turn");
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelling_a_turn_leaves_no_background_command_running() {
+        let (tmp, dir) = temp_root();
+        let pid_file = dir.join("background.pid");
+        let script = vec![
+            Reply::new().call(
+                "c1",
+                "shell",
+                json!({"command": format!("echo $$ > {pid_file}; exec sleep 300"), "background": true}),
+            ),
+            Reply::new().text("waiting").hang(),
+        ];
+        let setup = setup(Mode::Feedback, script).await;
+        let (_, outcome, _) = run_turn(&setup, async |handle| {
+            for _ in 0..2000 {
+                if handle.live.lock().reply == "waiting" {
+                    handle.cancel();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            panic!("the second answer never streamed");
+        })
+        .await;
+        assert_eq!(outcome.status, NodeStatus::Cancelled);
+        let pid = std::fs::read_to_string(&pid_file).unwrap();
+        assert_stopped(pid.trim(), "the background command").await;
+        drop(tmp);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelling_a_turn_inside_a_subagent_leaves_no_process_running() {
+        let (tmp, dir) = temp_root();
+        let pid_file = dir.join("subagent-background.pid");
+        let script = vec![
+            Reply::new().call(
+                "c1",
+                "agent",
+                json!({"description": "Sleep", "prompt": "start a background command"}),
+            ),
+            Reply::new().call(
+                "c2",
+                "shell",
+                json!({"command": format!("echo $PPID $$ > {pid_file}; exec sleep 300"), "background": true}),
+            ),
+            Reply::new().hang(),
+        ];
+        let setup = setup(Mode::Feedback, script).await;
+        let (_, outcome, _) = run_turn(&setup, async |handle| {
+            for _ in 0..2000 {
+                // The file holds the agent process, then the command's: both are written.
+                if std::fs::read_to_string(&pid_file)
+                    .is_ok_and(|pids| pids.split_whitespace().count() == 2)
+                {
+                    // The sub-agent's answer hangs while its background command runs.
+                    handle.cancel();
+                    return;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            panic!("the sub-agent never started its background command");
+        })
+        .await;
+        // Nothing was said but tool calls, so the cut-short turn fails; the teardown is the point.
+        assert_eq!(outcome.status, NodeStatus::Failed);
+        let pids = std::fs::read_to_string(&pid_file).unwrap();
+        let mut pids = pids.split_whitespace();
+        let agent = pids.next().unwrap().to_string();
+        let command = pids.next().unwrap().to_string();
+        // The sub-agent runs inside the agent process: it is gone by the time the turn closed.
+        assert!(!process_runs(&agent), "the agent {agent} outlived the turn");
+        assert_stopped(&command, "the sub-agent's background command").await;
+        drop(tmp);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_sent_during_the_final_answer_keeps_the_turn_going() {
+        let slot: Arc<parking_lot::Mutex<Option<Arc<parking_lot::Mutex<LiveTurn>>>>> =
+            Arc::default();
+        let steer = {
+            let slot = Arc::clone(&slot);
+            move || {
+                for _ in 0..1000 {
+                    if let Some(live) = slot.lock().as_ref() {
+                        live.lock().injected.push_back("one more thing".to_string());
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                panic!("the turn never started");
+            }
+        };
+        let script = vec![
+            Reply::new().on_request(steer).text("First."),
+            Reply::new().text("Second."),
+        ];
+        let setup = setup(Mode::Feedback, script).await;
+        let (handle, outcome, _) = run_turn(&setup, async |handle| {
+            *slot.lock() = Some(Arc::clone(&handle.live));
+        })
+        .await;
+
+        assert_eq!(outcome.status, NodeStatus::Done);
+        assert_eq!(setup.server.requests().len(), 2);
+        assert_eq!(last_user_text(&setup, 1), "one more thing");
+        assert_eq!(handle.live.lock().reply, "First.\n\nSecond.");
+        // It left the queue because the model read it, and it is in the transcript.
+        assert!(handle.live.lock().injected.is_empty());
+        assert!(
+            transcript_of(&setup)
+                .iter()
+                .any(|message| message["content"] == "one more thing")
         );
     }
 
@@ -392,5 +599,46 @@ mod tests {
             read_file(&setup.node_dir, "reply.md"),
             "Done.\n\nCommitted."
         );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_message_queued_at_the_settle_of_a_commit_turn_comes_before_the_nudge() {
+        let slot: Arc<parking_lot::Mutex<Option<Arc<parking_lot::Mutex<LiveTurn>>>>> =
+            Arc::default();
+        let steer = {
+            let slot = Arc::clone(&slot);
+            move || {
+                for _ in 0..1000 {
+                    if let Some(live) = slot.lock().as_ref() {
+                        live.lock().injected.push_back("one more thing".to_string());
+                        return;
+                    }
+                    std::thread::sleep(Duration::from_millis(5));
+                }
+                panic!("the turn never started");
+            }
+        };
+        let script = vec![
+            Reply::new().call("c1", "shell", json!({"command": "echo x > new.txt"})),
+            Reply::new().on_request(steer).text("First."),
+            // The message the user sent, answered while the tree is still dirty.
+            Reply::new().text("Second."),
+            Reply::new().call(
+                "c2",
+                "shell",
+                json!({"command": "git add -A && git commit -q -m 'feat: add new'"}),
+            ),
+            Reply::new().text("Committed."),
+        ];
+        let setup = setup(Mode::Commit, script).await;
+        let (_, outcome, _) = run_turn(&setup, async |handle| {
+            *slot.lock() = Some(Arc::clone(&handle.live));
+        })
+        .await;
+
+        assert_eq!(outcome.status, NodeStatus::Done);
+        assert_eq!(setup.server.requests().len(), 5);
+        assert_eq!(last_user_text(&setup, 2), "one more thing");
+        assert!(last_user_text(&setup, 3).starts_with("The working tree still has"));
     }
 }

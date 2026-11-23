@@ -69,6 +69,7 @@ impl Server {
             node_dir: None,
             background: std::sync::Arc::default(),
             mcp,
+            privileged: None,
         }
     }
 
@@ -429,17 +430,22 @@ done
 
     #[tokio::test]
     async fn conversation_goes_to_the_turns_socket_when_there_is_one() {
+        use crate::agent::mcp::McpTools;
         use crate::agent::privileged::PrivilegedSocket;
+        use crate::agent::tools::ToolContext;
         use crate::conversation::NodeId;
         let (_tmp, root, _) = server();
         // The socket's tree is the one that knows the node; a read from disk would not.
         let tree = std::sync::Arc::default();
-        let socket = PrivilegedSocket::start(
-            root.clone(),
+        let socket = PrivilegedSocket::start(ToolContext {
+            root: root.clone(),
             tree,
-            NodeId::new("n7"),
-            &crate::agent::privileged::PRIVILEGED,
-        )
+            node: NodeId::new("n7"),
+            node_dir: None,
+            background: std::sync::Arc::default(),
+            mcp: McpTools::default(),
+            privileged: None,
+        })
         .unwrap();
         let server = Server::start(root, Vec::new(), Some(socket.path()));
         let reply = ask(

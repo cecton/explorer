@@ -2,18 +2,22 @@
 //! tools only Explorer can serve: those that read its own state (the `conversation` tool
 //! needs the tree held in memory, current down to nodes not yet flushed).
 //!
-//! A turn opens one socket and the names it answers are fixed when it opens, so whoever
-//! finds the path can ask for no more than the turn's own tool list offers. The socket
-//! lives in a private directory removed with the guard, and nothing outlives the turn.
-//! The wire is one JSON line per request, `{"name", "arguments"}`, and one per reply,
-//! `{"ok"}` or `{"error"}`.
+//! A turn opens one socket, whose answers are no more than the turn's own tool list offers.
+//! It lives in a private directory removed with the guard. The wire is one JSON line per
+//! request, `{"name", "arguments"}`, and one per reply, `{"ok"}` or `{"error"}`.
 
 use std::sync::Arc;
 
 /// The tools served through the socket instead of where the agent runs.
 pub const PRIVILEGED: [&str; 1] = ["conversation"];
 
-/// A turn's socket; dropping it stops the answers and removes the socket.
+/// The longest path a unix socket address takes, less the terminating NUL.
+const SOCKET_PATH_MAX: usize = 107;
+
+/// `/explorer-turn-` and six random characters, then `/tools.sock`.
+const SOCKET_PATH_SUFFIX: usize = 32;
+
+/// A turn's socket; dropping it stops the calls it is answering and removes the socket.
 pub struct PrivilegedSocket {
     // Removed on drop, with the socket inside.
     _dir: tempfile::TempDir,
@@ -22,42 +26,40 @@ pub struct PrivilegedSocket {
 }
 
 impl PrivilegedSocket {
-    /// Opens `node`'s turn socket, answering the `allowed` tools of `tree`; needs a tokio runtime.
-    pub fn start(
-        root: camino::Utf8PathBuf,
-        tree: Arc<parking_lot::RwLock<crate::conversation::ConversationTree>>,
-        node: crate::conversation::NodeId,
-        allowed: &'static [&'static str],
-    ) -> Result<Self, String> {
-        use crate::agent::mcp::McpTools;
-        use crate::agent::tools::ToolContext;
+    /// Opens the turn's socket for `context`; needs a tokio runtime.
+    pub fn start(context: crate::agent::tools::ToolContext) -> Result<Self, String> {
         use std::os::unix::fs::PermissionsExt;
-        let base = std::env::var_os("XDG_RUNTIME_DIR")
-            .map(std::path::PathBuf::from)
-            .filter(|dir| dir.is_dir())
-            .unwrap_or_else(std::env::temp_dir);
+        let base = socket_base(
+            std::env::var_os("XDG_RUNTIME_DIR").map(std::path::PathBuf::from),
+            std::env::temp_dir(),
+        );
         let dir = tempfile::Builder::new()
             .prefix("explorer-turn-")
             .tempdir_in(base)
             .map_err(|e| format!("could not make the tool socket's directory: {e}"))?;
         let path = camino::Utf8PathBuf::from_path_buf(dir.path().join("tools.sock"))
             .map_err(|path| format!("the tool socket's path is not UTF-8: {}", path.display()))?;
+        if path.as_str().len() > SOCKET_PATH_MAX {
+            return Err(format!("the tool socket's path is too long: {path}"));
+        }
         let listener = tokio::net::UnixListener::bind(&path)
             .map_err(|e| format!("could not open the tool socket: {e}"))?;
         std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))
             .map_err(|e| format!("could not restrict the tool socket: {e}"))?;
-        let context = Arc::new(ToolContext {
-            root,
-            tree,
-            node,
-            node_dir: None,
-            background: Arc::default(),
-            mcp: McpTools::default(),
-        });
+        let context = Arc::new(context);
         let task = tokio::spawn(async move {
-            while let Ok((stream, _)) = listener.accept().await {
-                tokio::spawn(answer(stream, Arc::clone(&context), allowed));
+            // Dropped with this task, which stops every call still running.
+            let mut connections = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    accepted = listener.accept() => {
+                        let Ok((stream, _)) = accepted else { break };
+                        connections.spawn(answer(stream, Arc::clone(&context)));
+                    }
+                    Some(_) = connections.join_next() => {}
+                }
             }
+            while connections.join_next().await.is_some() {}
         });
         Ok(Self {
             _dir: dir,
@@ -77,19 +79,25 @@ impl Drop for PrivilegedSocket {
     }
 }
 
+/// `$XDG_RUNTIME_DIR` when it is a directory with room for the path, else the temp dir.
+fn socket_base(
+    runtime_dir: Option<std::path::PathBuf>,
+    temp_dir: std::path::PathBuf,
+) -> std::path::PathBuf {
+    runtime_dir
+        .filter(|dir| dir.is_dir() && dir.as_os_str().len() + SOCKET_PATH_SUFFIX <= SOCKET_PATH_MAX)
+        .unwrap_or(temp_dir)
+}
+
 /// Answers the requests of one connection until the client closes it.
-async fn answer(
-    stream: tokio::net::UnixStream,
-    context: Arc<crate::agent::tools::ToolContext>,
-    allowed: &'static [&'static str],
-) {
+async fn answer(stream: tokio::net::UnixStream, context: Arc<crate::agent::tools::ToolContext>) {
     use crate::agent::ToolCall;
     use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
     let (reader, mut writer) = stream.into_split();
     let mut lines = tokio::io::BufReader::new(reader).split(b'\n');
     while let Ok(Some(line)) = lines.next_segment().await {
         let reply = match serde_json::from_slice::<Request>(&line) {
-            Ok(request) if allowed.contains(&request.name.as_str()) => {
+            Ok(request) if PRIVILEGED.contains(&request.name.as_str()) => {
                 let call = ToolCall {
                     id: String::new(),
                     name: request.name,
@@ -154,14 +162,23 @@ pub async fn call(
 mod tests {
     use super::*;
 
+    fn context() -> crate::agent::tools::ToolContext {
+        use crate::agent::mcp::McpTools;
+        use crate::agent::tools::ToolContext;
+        use crate::conversation::NodeId;
+        ToolContext {
+            root: camino::Utf8PathBuf::from("/repo"),
+            tree: Arc::default(),
+            node: NodeId::new("n1"),
+            node_dir: None,
+            background: Arc::default(),
+            mcp: McpTools::default(),
+            privileged: None,
+        }
+    }
+
     fn socket() -> (PrivilegedSocket, camino::Utf8PathBuf) {
-        let socket = PrivilegedSocket::start(
-            camino::Utf8PathBuf::from("/repo"),
-            Arc::default(),
-            crate::conversation::NodeId::new("n1"),
-            &PRIVILEGED,
-        )
-        .unwrap();
+        let socket = PrivilegedSocket::start(context()).unwrap();
         let path = socket.path();
         (socket, path)
     }
@@ -180,7 +197,7 @@ mod tests {
     #[tokio::test]
     async fn the_socket_refuses_a_name_the_turn_did_not_allow() {
         let (_socket, path) = socket();
-        for name in ["shell", "write", "format_markdown"] {
+        for name in ["shell", "write", "format_markdown", "agent"] {
             let refused = call(&path, name, serde_json::json!({"command": "true"})).await;
             assert_eq!(refused, Err(format!("unknown tool: {name}")));
         }
@@ -199,5 +216,18 @@ mod tests {
                 .await
                 .is_err()
         );
+    }
+
+    #[test]
+    fn the_socket_directory_falls_back_when_the_runtime_dir_has_no_room() {
+        let tmp = tempfile::tempdir().unwrap();
+        let temp = std::path::PathBuf::from("/fallback");
+        let short = tmp.path().to_path_buf();
+        assert_eq!(socket_base(Some(short.clone()), temp.clone()), short);
+        assert_eq!(socket_base(None, temp.clone()), temp);
+        assert_eq!(socket_base(Some(short.join("missing")), temp.clone()), temp);
+        let long = short.join("a".repeat(80));
+        std::fs::create_dir(&long).unwrap();
+        assert_eq!(socket_base(Some(long), temp.clone()), temp);
     }
 }

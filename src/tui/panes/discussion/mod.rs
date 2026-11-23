@@ -149,7 +149,7 @@ impl DiscussionComponent {
             return;
         };
         match crate::tui::panes::discussion::launch::start_turn(state, main_tx.clone(), launch) {
-            Ok(sibling) => Self::open(state, main_tx, sibling, None),
+            Ok(sibling) => Self::open(state, main_tx, sibling),
             Err(refusal) => state.tree_view.notice = Some(refusal.into_reason()),
         }
     }
@@ -189,28 +189,22 @@ impl DiscussionComponent {
         Self::show(state, id);
     }
 
-    /// Focuses the window already showing `node` (or sub-agent run `index` of it), or
-    /// opens a new one and loads what it shows from disk. The window starts with the
-    /// model that ran it and an empty draft: opening never runs anything.
+    /// Focuses the window showing `node`, or opens one with the model that ran it.
     pub(crate) fn open(
         state: &mut crate::tui::state::AppState,
         main_tx: crate::signal::MainTx,
         node: crate::conversation::NodeId,
-        agent: Option<u32>,
     ) {
         use crate::tui::state::DiscussionState;
         let existing = state
             .discussions
             .iter()
-            .find(|(_, discussion)| {
-                discussion.node.as_ref() == Some(&node) && discussion.agent == agent
-            })
+            .find(|(_, discussion)| discussion.node.as_ref() == Some(&node))
             .map(|(id, _)| *id);
         let id = existing.unwrap_or_else(|| {
             let id = state.next_id();
             let mut discussion = DiscussionState {
                 node: Some(node),
-                agent,
                 ..Default::default()
             };
             discussion.model = crate::tui::panes::discussion::launch::shown_meta(
@@ -223,30 +217,6 @@ impl DiscussionComponent {
             id
         });
         Self::show(state, id);
-    }
-
-    /// Reads again the windows showing sub-agent runs of `node`, or only run `index`:
-    /// while a run is in progress they follow its live output, which is gone once it
-    /// ends.
-    pub(crate) fn reload_agent_windows(
-        state: &crate::tui::state::AppState,
-        main_tx: crate::signal::MainTx,
-        node: &crate::conversation::NodeId,
-        index: Option<u32>,
-    ) {
-        let shown: Vec<usize> = state
-            .discussions
-            .iter()
-            .filter(|(_, discussion)| {
-                discussion.node.as_ref() == Some(node)
-                    && discussion.agent.is_some()
-                    && index.is_none_or(|index| discussion.agent == Some(index))
-            })
-            .map(|(id, _)| *id)
-            .collect();
-        for id in shown {
-            Self::load_content(state, main_tx.clone(), id);
-        }
     }
 
     /// Opens a window for a new conversation, offering the model last picked.
@@ -264,8 +234,7 @@ impl DiscussionComponent {
         Self::show(state, id);
     }
 
-    /// Reads the prompt and reply of window `id`'s node or sub-agent run off the UI
-    /// thread.
+    /// Reads the prompt and reply of window `id`'s node off the UI thread.
     pub(crate) fn load_content(
         state: &crate::tui::state::AppState,
         main_tx: crate::signal::MainTx,
@@ -278,13 +247,7 @@ impl DiscussionComponent {
         let Some(node) = discussion.node.clone() else {
             return;
         };
-        let dir = {
-            let tree = state.conversations.read();
-            match discussion.agent {
-                Some(index) => tree.agent_dir(&node, index),
-                None => tree.node_dir(&node),
-            }
-        };
+        let dir = state.conversations.read().node_dir(&node);
         let Some(dir) = dir else {
             return;
         };
@@ -414,15 +377,10 @@ impl DiscussionComponent {
             .get(&window_id)
             .and_then(|discussion| {
                 let node = discussion.node.as_ref()?;
-                match discussion.agent {
-                    Some(index) => tree
-                        .agent(node, index)
-                        .map(|agent| agent.title().into_owned()),
-                    None => tree.node(node).map(|node| {
-                        let marker = if node.meta.favorite { "* " } else { "" };
-                        format!("{marker}{}", node.display_title())
-                    }),
-                }
+                tree.node(node).map(|node| {
+                    let marker = if node.meta.favorite { "* " } else { "" };
+                    format!("{marker}{}", node.display_title())
+                })
             })
             .unwrap_or_else(|| "New conversation".to_string())
     }
@@ -512,12 +470,9 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
         let Some(discussion) = state.discussions.get_mut(&id) else {
             return Ok(EventPropagation::Propagate);
         };
-        // A sub-agent run is read-only: its window neither sends nor cancels.
-        let read_only = discussion.agent.is_some();
         let running = discussion
             .node
             .as_ref()
-            .filter(|_| !read_only)
             .and_then(|node| state.running_turns.get(node));
         let queued = state.queued_turns.iter().any(|entry| entry.window == id);
         let scroll = state.pane_manager.window_scroll(&window);
@@ -526,7 +481,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
         let target = match &input_event {
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Enter),
-            }) if !read_only => {
+            }) => {
                 Self::send(state, main_tx, id);
                 return Ok(EventPropagation::ConsumedRender);
             }
@@ -654,7 +609,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                 ..
             }) => scroll + crate::tui::pane_manager::WHEEL_STEP,
             _ => {
-                if !read_only && discussion.draft.handle_key(&input_event) {
+                if discussion.draft.handle_key(&input_event) {
                     discussion.notice = None;
                     state.mark_session_dirty();
                     return Ok(EventPropagation::ConsumedRender);
@@ -726,25 +681,20 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
 
             let (status, alert) =
                 crate::tui::panes::discussion::status::status_line(state, window_id, discussion);
-            let read_only = discussion.agent.is_some();
             let hint =
                 crate::agent::commands::placeholder(discussion.draft.text(), &state.agent.commands)
                     .or_else(|| {
                         crate::tui::panes::discussion::status::resume_hint(state, discussion)
                     });
-            let input_rows = if read_only {
-                0
-            } else {
-                discussion
-                    .draft
-                    .height(
-                        hint.as_deref(),
-                        "",
-                        pane_width as u16,
-                        (total_rows / 2).max(1),
-                    )
-                    .min(total_rows)
-            };
+            let input_rows = discussion
+                .draft
+                .height(
+                    hint.as_deref(),
+                    "",
+                    pane_width as u16,
+                    (total_rows / 2).max(1),
+                )
+                .min(total_rows);
             let status_rows = usize::from(total_rows > input_rows);
             let doc_rows = total_rows - input_rows - status_rows;
 
@@ -784,7 +734,6 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             let highlights = discussion
                 .node
                 .as_ref()
-                .filter(|_| !read_only)
                 .and_then(|node| state.discussion_highlights.get(node));
             // Each part carries either the selection in progress or the node's highlights,
             // never both: a selection hides the highlights, as in the file preview. A
@@ -879,7 +828,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
                 .pane_manager
                 .set_window_scroll_max(&window, line_count);
             state.pane_manager.set_window_scroll(&window, scroll);
-            if !read_only && let Some(discussion) = state.discussions.get_mut(&window_id) {
+            if let Some(discussion) = state.discussions.get_mut(&window_id) {
                 discussion.draft.render(
                     &mut input_ops,
                     hint.as_deref().map(|hint| (hint, status_fg)),
@@ -2263,7 +2212,7 @@ mod tests {
         let mut state = AppState::blank_for_test();
         *state.conversations.write() = ConversationTree::load(&root);
         let (main_tx, _main_rx) = tokio::sync::mpsc::channel(1);
-        DiscussionComponent::open(&mut state, main_tx, NodeId::new("a2"), None);
+        DiscussionComponent::open(&mut state, main_tx, NodeId::new("a2"));
 
         assert_eq!(state.discussions.len(), 1);
         let discussion = state.discussions.values().next().unwrap();

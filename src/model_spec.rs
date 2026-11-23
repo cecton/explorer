@@ -1,7 +1,7 @@
 use std::fmt;
 
 /// Reasoning effort offered for every model. `Default` sends no effort parameter.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum Effort {
     Default,
     Low,

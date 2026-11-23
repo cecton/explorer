@@ -27,8 +27,7 @@ pub enum Resume<'a> {
     Continue(&'a str),
 }
 
-/// What every run of one turn has in common: only the prompt and the session it starts
-/// from differ between a turn's first run, a sub-agent's run and a commit nudge.
+/// What every run of one turn shares: only its prompt and session differ.
 #[derive(Clone, Copy)]
 pub struct Run<'a> {
     pub target: &'a ClaudeTarget,

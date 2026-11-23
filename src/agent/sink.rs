@@ -1,13 +1,18 @@
-//! `Sink`: everything the own agent loop reports while it runs, so the loop does not
-//! care whether it writes a node's files directly (`Recorder`) or sends them elsewhere.
+//! `Sink`: everything the own agent loop reports while it runs and asks of its host. The
+//! loop runs in an `explorer agent` process, whose sink writes the events its parent
+//! turn applies to the node.
 
 use std::future::Future;
 use std::pin::Pin;
 
 /// What a run of `agent_loop::run` reports and asks of whoever hosts it.
 pub trait Sink: Send {
-    /// The queue of what the user sends while the turn works.
-    fn injector(&self) -> crate::agent::turn::live::Injector;
+    /// The messages that joined since the last round: user input and Explorer's notes.
+    fn injected(&mut self)
+    -> Pin<Box<dyn Future<Output = Vec<crate::agent::Message>> + Send + '_>>;
+
+    /// The last answer called no tool: whether the run goes on, with what joined it waiting.
+    fn settle(&mut self) -> Pin<Box<dyn Future<Output = bool> + Send + '_>>;
 
     /// Records one message of the transcript.
     fn message(&mut self, message: &crate::agent::Message);
@@ -36,8 +41,6 @@ pub trait Sink: Send {
     /// Runs one call of the `agent` tool and returns its result for the model.
     fn run_agent<'a>(
         &'a mut self,
-        context: &'a crate::agent::tools::ToolContext,
-        subagents: &'a crate::agent::subagent::Subagents,
         call: &'a crate::agent::ToolCall,
     ) -> Pin<Box<dyn Future<Output = String> + Send + 'a>>;
 }

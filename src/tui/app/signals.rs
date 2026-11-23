@@ -162,17 +162,6 @@ pub(super) fn handle(
                     state.tree_view.notice = Some(notice);
                 }
             }
-            AppSignal::SubagentStarted { node } => {
-                state.tree_view.shown_agents.insert(node.clone());
-            }
-            AppSignal::SubagentFinished { node, index } => {
-                DiscussionComponent::reload_agent_windows(
-                    state,
-                    global_data.main_thread_channel_sender.clone(),
-                    node,
-                    Some(*index),
-                );
-            }
             AppSignal::TurnFinished { node, outcome } => {
                 DiscussionComponent::turn_finished(
                     state,
@@ -186,12 +175,6 @@ pub(super) fn handle(
             }
             AppSignal::NodeRetitleEnded { node } => {
                 state.tree_view.retitling.remove(node);
-            }
-            AppSignal::AgentTitleReady { node, index, title } => {
-                state
-                    .conversations
-                    .write()
-                    .set_agent_title(node, *index, title.clone());
             }
             AppSignal::NodeSummaryReady { node, summary } => {
                 state

@@ -139,11 +139,7 @@ impl crate::tui::panes::discussion::DiscussionComponent {
         let (content_revision, shown_log_start) =
             (discussion.content_revision, discussion.shown_log_start());
         let laid_out = part_is_on_screen(state, discussion, part);
-        // A sub-agent run has no highlights: a modified drag selects too.
-        let highlighted = discussion
-            .node
-            .as_ref()
-            .filter(|_| discussion.agent.is_none());
+        let highlighted = discussion.node.as_ref();
         let kind = match (
             crate::tui::selection::drag_modifier_from_mouse(mouse),
             highlighted,

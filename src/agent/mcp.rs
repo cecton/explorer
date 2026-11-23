@@ -85,11 +85,21 @@ pub(crate) fn notify(main_tx: crate::signal::MainTx) -> Notify {
     })
 }
 
-/// The MCP servers of the repository, running for as long as Explorer does.
+/// The MCP servers one agent process started, running for as long as that process does.
 #[derive(Default)]
 pub struct McpHost {
     root: camino::Utf8PathBuf,
     servers: parking_lot::Mutex<BTreeMap<String, Arc<Server>>>,
+}
+
+impl Drop for McpHost {
+    /// The process may exit before the tasks starting servers run again: kill them here.
+    fn drop(&mut self) {
+        for server in self.servers.get_mut().values() {
+            server.phase.send_replace(Phase::Removed);
+            server.kill_starting();
+        }
+    }
 }
 
 impl McpHost {
@@ -108,6 +118,7 @@ impl McpHost {
             phase: tokio::sync::watch::Sender::new(Phase::Starting),
             notify,
             restarting: tokio::sync::Mutex::new(()),
+            starting: parking_lot::Mutex::new(None),
         });
         let replaced = self
             .servers
@@ -174,8 +185,7 @@ impl McpHost {
     }
 }
 
-/// The MCP tools of one turn, shared with its sub-agents: what the servers offered when
-/// the turn started.
+/// The MCP tools of one agent process, from the servers that process started.
 #[derive(Clone, Default)]
 pub struct McpTools {
     host: Arc<McpHost>,
@@ -192,6 +202,14 @@ struct ServerTools {
 impl McpTools {
     pub fn is_tool(name: &str) -> bool {
         name.starts_with(TOOL_PREFIX)
+    }
+
+    /// The servers these tools come from, for a process that starts them itself.
+    pub fn decls(&self) -> Vec<McpServerDecl> {
+        self.servers
+            .iter()
+            .map(|server| server.decl.clone())
+            .collect()
     }
 
     pub fn specs(&self) -> Vec<crate::agent::llm::ToolSpec> {
@@ -266,9 +284,18 @@ struct Server {
     phase: tokio::sync::watch::Sender<Phase>,
     notify: Notify,
     restarting: tokio::sync::Mutex<()>,
+    /// Until the handshake ends: no `Client` owns it yet, so nothing else kills its group.
+    starting: parking_lot::Mutex<Option<u32>>,
 }
 
 impl Server {
+    /// Kills the process still being started, with its group.
+    fn kill_starting(&self) {
+        if let Some(pid) = self.starting.lock().take() {
+            crate::util::process::kill_group(pid, crate::util::process::KILL);
+        }
+    }
+
     fn status(&self) -> McpStatus {
         match &*self.phase.borrow() {
             Phase::Starting => McpStatus::Starting,
@@ -286,8 +313,11 @@ impl Server {
         // A server removed while it starts is killed then, not once its handshake times out.
         let removed = phase.wait_for(|phase| matches!(phase, Phase::Removed));
         let started = tokio::select! {
-            started = Client::start(&self.decl.program, &self.root) => started,
-            _ = removed => return,
+            started = Client::start(&self.decl.program, &self.root, &self.starting) => started,
+            _ = removed => {
+                self.kill_starting();
+                return;
+            }
         };
         let launched = match started {
             Ok((client, mut tools)) => {
@@ -455,7 +485,11 @@ impl Drop for Waiting<'_> {
 
 impl Client {
     /// Spawns `program` in `root`, goes through the handshake and lists its tools.
-    async fn start(program: &str, root: &camino::Utf8Path) -> Result<(Self, Vec<McpTool>), String> {
+    async fn start(
+        program: &str,
+        root: &camino::Utf8Path,
+        starting: &parking_lot::Mutex<Option<u32>>,
+    ) -> Result<(Self, Vec<McpTool>), String> {
         let mut child = tokio::process::Command::new(program)
             .current_dir(root)
             .stdin(Stdio::piped())
@@ -486,8 +520,10 @@ impl Client {
             reader,
             _child: child,
         };
-        let tools = client.handshake().await?;
-        Ok((client, tools))
+        *starting.lock() = client.pid;
+        let tools = client.handshake().await;
+        *starting.lock() = None;
+        Ok((client, tools?))
     }
 
     async fn handshake(&self) -> Result<Vec<McpTool>, String> {
@@ -904,12 +940,10 @@ done
         assert_eq!(host.status("fake"), Some(McpStatus::Ready(4)));
     }
 
-    #[tokio::test]
-    async fn a_server_removed_while_it_starts_is_killed_at_once() {
-        let (tmp, decl) = fake_server();
-        let host = host(&tmp);
+    /// Starts the fake server slowly, so that it is still in its handshake; returns its pid.
+    async fn start_slowly(host: &McpHost, tmp: &tempfile::TempDir, decl: &McpServerDecl) -> u32 {
         std::fs::write(tmp.path().join("slow-start"), "").unwrap();
-        host.start(&decl, no_notify());
+        host.start(decl, no_notify());
         let started = tmp.path().join("started");
         let pid = async {
             loop {
@@ -921,11 +955,13 @@ done
                 tokio::time::sleep(Duration::from_millis(10)).await;
             }
         };
-        let pid = tokio::time::timeout(Duration::from_secs(5), pid)
+        tokio::time::timeout(Duration::from_secs(5), pid)
             .await
-            .expect("the server starts");
-        host.remove("fake");
-        // Gone or a zombie: the handshake would have ended a second later.
+            .expect("the server starts")
+    }
+
+    /// Asserts that the process `pid` is gone or a zombie, long before its handshake ends.
+    async fn assert_killed(pid: u32) {
         let dead = || {
             std::fs::read_to_string(format!("/proc/{pid}/stat")).map_or(true, |stat| {
                 stat.rsplit(") ")
@@ -940,7 +976,25 @@ done
         };
         tokio::time::timeout(Duration::from_millis(500), killed)
             .await
-            .expect("the removed server is killed");
+            .expect("the server is killed");
+    }
+
+    #[tokio::test]
+    async fn a_server_removed_while_it_starts_is_killed_at_once() {
+        let (tmp, decl) = fake_server();
+        let host = host(&tmp);
+        let pid = start_slowly(&host, &tmp, &decl).await;
+        host.remove("fake");
+        assert_killed(pid).await;
+    }
+
+    #[tokio::test]
+    async fn a_host_dropped_while_a_server_starts_kills_it_at_once() {
+        let (tmp, decl) = fake_server();
+        let host = host(&tmp);
+        let pid = start_slowly(&host, &tmp, &decl).await;
+        drop(host);
+        assert_killed(pid).await;
     }
 
     #[test]

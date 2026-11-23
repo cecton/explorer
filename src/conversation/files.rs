@@ -1,4 +1,4 @@
-//! The files a node or a sub-agent run keeps, and the reading and writing of the ones
+//! The files a node keeps, and the reading and writing of the ones
 //! that have a shape.
 
 /// The metadata of a node or a run: `key: value` lines.
@@ -18,7 +18,7 @@ pub(crate) const TRANSCRIPT: &str = "transcript.jsonl";
 pub(crate) const TITLE: &str = "title.md";
 /// What the summary model made of the node's outcome.
 pub(crate) const SUMMARY: &str = "summary.md";
-/// Directory holding the sub-agent runs of a node's turn; never a node of its own.
+/// Where sub-agent runs were once recorded: never read as a node.
 pub(crate) const AGENTS_DIR: &str = "agents";
 /// Directory holding the output logs of a node's background commands; never a node of
 /// its own.

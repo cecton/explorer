@@ -20,8 +20,7 @@ pub(crate) fn marker_bg(theme: &crate::tui::theme::HelixTheme) -> crate::tui::th
     )
 }
 
-/// One-line description of the outcome of a node or a sub-agent run, and whether it
-/// reports a failure.
+/// One-line description of the outcome of a node, and whether it reports a failure.
 pub(crate) fn status_text(meta: &crate::conversation::metadata::Metadata) -> (String, bool) {
     use crate::conversation::NodeStatus;
     use crate::conversation::NodeType;
@@ -108,7 +107,7 @@ pub(crate) fn resume_hint(
     state: &crate::tui::state::AppState,
     discussion: &crate::tui::state::DiscussionState,
 ) -> Option<String> {
-    if discussion.agent.is_some() || !discussion.draft.text().trim().is_empty() {
+    if !discussion.draft.text().trim().is_empty() {
         return None;
     }
     crate::tui::panes::discussion::launch::resumes_on_message(state, discussion)
@@ -129,23 +128,12 @@ pub(crate) fn status_line(
     if !discussion.loaded {
         return ("Loading…".to_string(), false);
     }
-    if discussion.agent.is_some()
-        && let Some(running) =
-            crate::tui::panes::discussion::launch::running_agent(state, discussion)
-    {
-        return (
-            progress_text(&running.live.lock(), running.started, state.spinner_tick),
-            false,
-        );
-    }
     let queued = crate::tui::panes::discussion::queue::queue_hint(state, id);
     let Some(node) = &discussion.node else {
         let help = "Enter:Send  Shift+Enter:New line";
         return (queued.unwrap_or_else(|| help.to_string()), false);
     };
-    if discussion.agent.is_none()
-        && let Some(handle) = state.running_turns.get(node)
-    {
+    if let Some(handle) = state.running_turns.get(node) {
         let mut text = progress_text(&handle.live.lock(), handle.started, state.spinner_tick);
         text.push_str(" · ");
         text.push_str(queued.as_deref().unwrap_or("Esc:Cancel"));
@@ -171,8 +159,7 @@ pub(crate) fn status_line(
     (text, failed)
 }
 
-/// The progress of a turn or a sub-agent run started at `started`: spinner, time,
-/// activity and context size.
+/// The progress of a turn started at `started`: spinner, time, activity and context size.
 fn progress_text(
     live: &crate::agent::turn::live::LiveTurn,
     started: Instant,

@@ -23,12 +23,6 @@ pub struct Metadata {
     pub error: Option<String>,
     /// Wall-clock seconds the turn took.
     pub secs: Option<u64>,
-    /// Role a sub-agent ran as; `None` for the default one and for nodes.
-    pub role: Option<String>,
-    /// What the delegating agent called a sub-agent's task.
-    pub description: Option<String>,
-    /// The sub-agent run this one continues, as an agent id.
-    pub resumed_from: Option<String>,
 }
 
 /// How a turn ended, applied to the node's metadata on the main thread.
@@ -102,9 +96,6 @@ impl Metadata {
                 "cached-in" => meta.cached_in = value.parse().ok(),
                 "secs" => meta.secs = value.parse().ok(),
                 "error" => meta.error = Some(value.to_string()),
-                "role" => meta.role = Some(value.to_string()),
-                "description" => meta.description = Some(value.to_string()),
-                "resumed-from" => meta.resumed_from = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -146,9 +137,6 @@ impl Metadata {
         push("cached-in", cached_in.as_deref());
         push("secs", secs.as_deref());
         push("error", self.error.as_deref());
-        push("role", self.role.as_deref());
-        push("description", self.description.as_deref());
-        push("resumed-from", self.resumed_from.as_deref());
         out
     }
 
@@ -184,8 +172,7 @@ pub fn cut_short_outcome(
     }
 }
 
-/// Reads the metadata of a node or a sub-agent run; one left running by a previous
-/// instance of Explorer is marked interrupted on disk.
+/// Reads a node's metadata; a run left running by a previous instance is interrupted.
 pub(crate) fn read(dir: &camino::Utf8Path) -> Metadata {
     use crate::conversation::NodeStatus;
     use crate::conversation::files;
@@ -202,7 +189,7 @@ pub(crate) fn read(dir: &camino::Utf8Path) -> Metadata {
     meta
 }
 
-/// Writes the metadata of a node or a sub-agent run through.
+/// Writes the metadata of a node through.
 pub(crate) fn write(dir: &camino::Utf8Path, meta: &Metadata) -> std::io::Result<()> {
     use crate::conversation::files;
     crate::util::fs::write_atomic(&dir.join(files::METADATA), &meta.to_text())
@@ -238,9 +225,6 @@ mod tests {
             cached_in: Some(81_920),
             secs: Some(95),
             error: Some("rate limited: try later".into()),
-            role: Some("reviewer".into()),
-            description: Some("Review the change".into()),
-            resumed_from: Some("2026-10-05T14-32-07Z/1".into()),
         };
         assert_eq!(Metadata::parse(&meta.to_text()), meta);
     }

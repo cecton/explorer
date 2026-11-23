@@ -9,6 +9,8 @@ pub struct Args {
     /// `mcp-serve [root] [--own-tools-only] [--privileged-socket <path>]`: serves Explorer's
     /// own agent tools over stdio as an MCP server.
     pub mcp_serve: Option<McpServe>,
+    /// `agent`: runs the own agent loop of the turn that started it (`src/agent/child.rs`).
+    pub agent: bool,
 }
 
 /// What an `mcp-serve` subcommand was asked for.
@@ -31,12 +33,14 @@ pub fn parse_args() -> Args {
     let (fmt_md, serving) = match subcommand.as_deref() {
         Some("fmt-md") => (true, false),
         Some("mcp-serve") => (false, true),
+        Some("agent") => (false, false),
         Some(other) => {
             eprintln!("unknown subcommand '{other}'");
             std::process::exit(2);
         }
         None => (false, false),
     };
+    let agent = subcommand.as_deref() == Some("agent");
     let log_file: Option<String> = args
         .opt_value_from_str("--log-file")
         .expect("invalid --log-file");
@@ -101,5 +105,6 @@ pub fn parse_args() -> Args {
         scan,
         fmt_md,
         mcp_serve,
+        agent,
     }
 }
