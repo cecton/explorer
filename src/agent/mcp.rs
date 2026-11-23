@@ -231,7 +231,11 @@ impl McpTools {
     /// The `--mcp-config` of a Claude Code run, which starts the servers itself: the
     /// repository's own, and Explorer's, which serves the `conversation` and
     /// `format_markdown` tools a client has no other way to reach.
-    pub fn claude_config(&self, root: &camino::Utf8Path) -> String {
+    pub fn claude_config(
+        &self,
+        root: &camino::Utf8Path,
+        privileged_socket: Option<&camino::Utf8Path>,
+    ) -> String {
         let mut servers: serde_json::Map<String, serde_json::Value> = serde_json::Map::new();
         for server in &self.servers {
             let config = serde_json::json!({"command": server.decl.program, "args": []});
@@ -239,7 +243,7 @@ impl McpTools {
         }
         // The run gets the repository's servers from the loop above, so Explorer's own
         // server would only offer them a second time under longer names.
-        let (name, config) = crate::agent::serve::claude_server(root, true);
+        let (name, config) = crate::agent::serve::claude_server(root, true, privileged_socket);
         servers.insert(name, config);
         serde_json::json!({ "mcpServers": servers }).to_string()
     }
@@ -781,7 +785,8 @@ done
                 .is_err()
         );
         let root = camino::Utf8Path::new("/repo");
-        let config: serde_json::Value = serde_json::from_str(&tools.claude_config(root)).unwrap();
+        let config: serde_json::Value =
+            serde_json::from_str(&tools.claude_config(root, None)).unwrap();
         // The repository's server keeps its plain name, and Explorer's own tools are there
         // too, without the repository's servers offered a second time.
         assert_eq!(
@@ -799,7 +804,8 @@ done
         let (_tmp, _decl) = fake_server();
         let tools = crate::agent::mcp::McpTools::default();
         let config: serde_json::Value =
-            serde_json::from_str(&tools.claude_config(camino::Utf8Path::new("/repo"))).unwrap();
+            serde_json::from_str(&tools.claude_config(camino::Utf8Path::new("/repo"), None))
+                .unwrap();
         assert_eq!(
             config["mcpServers"]["explorer"]["args"],
             serde_json::json!(["mcp-serve", "/repo", crate::agent::serve::OWN_TOOLS_ONLY])

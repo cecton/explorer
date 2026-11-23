@@ -802,6 +802,7 @@ async fn run_claude_code(
         root: &context.root,
         system,
         mcp: &context.mcp,
+        privileged_socket: None,
     };
     // A resumed run forks the session of the run it continues; one whose session is gone
     // opens fresh, with the chain as plain text, which `from` handles either way.

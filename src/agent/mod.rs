@@ -7,6 +7,7 @@ mod fake_llm;
 pub mod llm;
 pub mod mcp;
 pub mod models;
+pub mod privileged;
 pub mod serve;
 pub mod sink;
 pub mod subagent;

@@ -324,6 +324,15 @@ async fn run_claude_code(
     use crate::agent::Message;
     use crate::agent::Mode;
     use crate::agent::claude_code::Run;
+    use crate::agent::privileged::PrivilegedSocket;
+    // Open until the run is over: the CLI's tool server asks it for the conversation.
+    let socket = PrivilegedSocket::start(
+        request.root.clone(),
+        Arc::clone(&request.tree),
+        request.node.clone(),
+        &crate::agent::privileged::PRIVILEGED,
+    )?;
+    let socket_path = socket.path();
     let (system, message) = {
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
@@ -341,6 +350,7 @@ async fn run_claude_code(
         root: &request.root,
         system: &system,
         mcp,
+        privileged_socket: Some(&socket_path),
     };
     run.from(
         &message,

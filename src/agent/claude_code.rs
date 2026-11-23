@@ -35,6 +35,8 @@ pub struct Run<'a> {
     pub root: &'a camino::Utf8Path,
     pub system: &'a str,
     pub mcp: &'a crate::agent::mcp::McpTools,
+    /// The turn's tool socket, which Explorer's tool server asks for what only the turn knows.
+    pub privileged_socket: Option<&'a camino::Utf8Path>,
 }
 
 impl Run<'_> {
@@ -329,7 +331,9 @@ fn arguments(config: &Run<'_>, resume: Resume<'_>) -> Vec<String> {
         }
         Resume::Continue(session) => args.extend(["--resume", session].map(str::to_string)),
     }
-    let config = config.mcp.claude_config(config.root);
+    let config = config
+        .mcp
+        .claude_config(config.root, config.privileged_socket);
     args.push("--mcp-config".to_string());
     args.push(config);
     // Only the servers of this repository, never those of the user's own setup.
@@ -682,6 +686,7 @@ mod tests {
             root: camino::Utf8Path::new("/repo"),
             system: "SYSTEM",
             mcp: &mcp,
+            privileged_socket: None,
         };
         let joined = |config: &Run<'_>, resume| arguments(config, resume).join(" ");
 

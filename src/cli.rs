@@ -6,8 +6,8 @@ pub struct Args {
     pub scan: bool,
     /// `fmt-md [paths]`: formats the markdown and exits; `Some(empty)` means the working tree.
     pub fmt_md: Option<Vec<camino::Utf8PathBuf>>,
-    /// `mcp-serve [root] [--own-tools-only]`: serves Explorer's own agent tools over
-    /// stdio as an MCP server.
+    /// `mcp-serve [root] [--own-tools-only] [--privileged-socket <path>]`: serves Explorer's
+    /// own agent tools over stdio as an MCP server.
     pub mcp_serve: Option<McpServe>,
 }
 
@@ -18,6 +18,8 @@ pub struct McpServe {
     /// Serve only Explorer's own tools, without starting the repository's MCP servers:
     /// the client already has them from its own configuration.
     pub own_tools_only: bool,
+    /// The turn's socket: `conversation` is asked of that turn, not read from disk.
+    pub privileged_socket: Option<camino::Utf8PathBuf>,
 }
 
 pub fn parse_args() -> Args {
@@ -57,6 +59,12 @@ pub fn parse_args() -> Args {
     // Both subcommands take their own options after their name, so they are read from
     // what is left once the global ones are gone. Only `mcp-serve` knows this one.
     let own_tools_only = serving && args.contains("--own-tools-only");
+    let privileged_socket: Option<camino::Utf8PathBuf> = match serving {
+        true => args
+            .opt_value_from_str("--privileged-socket")
+            .expect("invalid --privileged-socket"),
+        false => None,
+    };
     let rest: Vec<std::ffi::OsString> = args.finish();
     let utf8 = |arg: std::ffi::OsString| {
         camino::Utf8PathBuf::from_path_buf(arg.into()).unwrap_or_else(|arg| {
@@ -84,6 +92,7 @@ pub fn parse_args() -> Args {
             .find(|arg| !arg.as_encoded_bytes().starts_with(b"-"))
             .map(utf8),
         own_tools_only,
+        privileged_socket,
     });
     Args {
         log_file,

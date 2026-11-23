@@ -45,8 +45,6 @@ futures-util = "0.3"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 dprint-plugin-markdown = "0.28.2"
 dprint-core = "0.71"
-
-[dev-dependencies]
 tempfile = "3"
 
 [patch.crates-io]

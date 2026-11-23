@@ -116,7 +116,9 @@ async fn main() {
             true => Vec::new(),
             false => tui::session::session_mcp_servers(&root),
         };
-        std::process::exit(agent::serve::serve(root, servers).await);
+        std::process::exit(
+            agent::serve::serve(root, servers, serve.privileged_socket.clone()).await,
+        );
     }
 
     let root = camino::Utf8PathBuf::from_path_buf(loader::find_git_root())
