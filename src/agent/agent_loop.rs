@@ -173,7 +173,7 @@ pub fn run<'a>(
     session: &'a str,
     system: &'a str,
     messages: &'a mut Vec<crate::agent::Message>,
-    recorder: &'a mut crate::agent::turn::live::Recorder,
+    recorder: &'a mut dyn crate::agent::sink::Sink,
     limits: Limits,
 ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>> {
     Box::pin(run_loop(
@@ -189,7 +189,7 @@ async fn run_loop(
     session: &str,
     system: &str,
     messages: &mut Vec<crate::agent::Message>,
-    recorder: &mut crate::agent::turn::live::Recorder,
+    recorder: &mut dyn crate::agent::sink::Sink,
     limits: Limits,
 ) -> Result<(), String> {
     use crate::agent::Message;
@@ -309,9 +309,7 @@ async fn run_loop(
                 crate::agent::tools::describe(call)
             });
             let content = match subagents {
-                Some(subagents) if is_agent => {
-                    crate::agent::subagent::run(context, subagents, call, recorder).await
-                }
+                Some(subagents) if is_agent => recorder.run_agent(context, subagents, call).await,
                 _ => crate::agent::tools::run(context, call).await,
             };
             match stalls.record(signature(call, &content)) {

@@ -454,6 +454,53 @@ impl Recorder {
     }
 }
 
+impl crate::agent::sink::Sink for Recorder {
+    fn injector(&self) -> Injector {
+        Recorder::injector(self)
+    }
+
+    fn message(&mut self, message: &crate::agent::Message) {
+        Recorder::message(self, message);
+    }
+
+    fn begin_answer(&mut self) {
+        Recorder::begin_answer(self);
+    }
+
+    fn chunk(&mut self, is_thinking: bool, text: &str) {
+        Recorder::chunk(self, is_thinking, text);
+    }
+
+    fn flush_partial_answer(&mut self) {
+        Recorder::flush_partial_answer(self);
+    }
+
+    fn answer_calls_tools(&mut self) {
+        Recorder::answer_calls_tools(self);
+    }
+
+    fn request_size(&mut self, tokens_in: Option<u64>, cached_in: Option<u64>) {
+        Recorder::request_size(self, tokens_in, cached_in);
+    }
+
+    fn tool_call(&mut self, description: String) {
+        Recorder::tool_call(self, description);
+    }
+
+    fn activity(&mut self, activity: Option<String>) {
+        Recorder::activity(self, activity);
+    }
+
+    fn run_agent<'a>(
+        &'a mut self,
+        context: &'a crate::agent::tools::ToolContext,
+        subagents: &'a crate::agent::subagent::Subagents,
+        call: &'a crate::agent::ToolCall,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = String> + Send + 'a>> {
+        Box::pin(crate::agent::subagent::run(context, subagents, call, self))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

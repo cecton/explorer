@@ -8,6 +8,7 @@ pub mod llm;
 pub mod mcp;
 pub mod models;
 pub mod serve;
+pub mod sink;
 pub mod subagent;
 pub mod tools;
 pub mod turn;
