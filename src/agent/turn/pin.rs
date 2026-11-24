@@ -11,7 +11,9 @@ mod tests {
     use crate::agent::turn::{TurnHandle, TurnRequest};
     use crate::conversation::NodeStatus;
     use crate::signal::AppSignal;
-    use crate::util::test_support::{commit, temp_repo, temp_root};
+    use crate::util::test_support::{
+        commit, git, init_repo, temp_repo, temp_root, temp_root_in_target,
+    };
     use serde_json::{Value, json};
     use std::sync::Arc;
     use std::time::Duration;
@@ -27,13 +29,21 @@ mod tests {
     }
 
     async fn setup(mode: Mode, script: Vec<Reply>) -> Setup {
+        setup_in(mode, script, temp_repo()).await
+    }
+
+    /// Like `setup`, in the repository given, which holds no commit yet.
+    async fn setup_in(
+        mode: Mode,
+        script: Vec<Reply>,
+        (tmp, root): (tempfile::TempDir, camino::Utf8PathBuf),
+    ) -> Setup {
         use crate::agent::AgentConfig;
         use crate::agent::mcp::McpHost;
         use crate::conversation::ConversationTree;
         use crate::conversation::metadata::Metadata;
         use crate::endpoint::{Endpoint, EndpointKind, Provider};
         use crate::model_spec::ModelSpec;
-        let (tmp, root) = temp_repo();
         let head = commit(&root, "hello.txt", "hello world\n", "init");
         let server = FakeLlm::start(script).await;
         // Outside the repository, so the tree never shows up as uncommitted work.
@@ -557,6 +567,119 @@ mod tests {
             "{:?}",
             outcome.error
         );
+    }
+
+    /// A repository with a build in its `target/`, where the reflink copy can be made.
+    fn repo_with_a_build() -> (tempfile::TempDir, camino::Utf8PathBuf) {
+        let (tmp, root) = temp_root_in_target("pin-workspace-");
+        init_repo(&root);
+        std::fs::write(root.join(".gitignore"), "/target\n").unwrap();
+        std::fs::create_dir_all(root.join("target/debug")).unwrap();
+        std::fs::write(root.join("target/debug/artifact"), "built").unwrap();
+        (tmp, root)
+    }
+
+    fn tool_result(setup: &Setup, n: usize, call: &str) -> String {
+        let requests = setup.server.requests();
+        let messages = requests[n]["messages"].as_array().unwrap();
+        let result = messages
+            .iter()
+            .find(|message| message["role"] == "tool" && message["tool_call_id"] == call)
+            .unwrap();
+        result["content"].as_str().unwrap().to_string()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_feedback_turn_with_a_build_cache_works_in_a_copy_and_leaves_the_repository_alone() {
+        use crate::agent::context::SANDBOX_NOTE;
+        let script = vec![
+            Reply::new().call(
+                "c1",
+                "shell",
+                json!({"command": "pwd -P; echo changed > hello.txt; echo made > made.txt; cat target/debug/artifact"}),
+            ),
+            Reply::new().call(
+                "c2",
+                "agent",
+                json!({"description": "Write", "prompt": "write a file"}),
+            ),
+            Reply::new().call("c3", "shell", json!({"command": "echo sub > from_sub.txt"})),
+            Reply::new().text("sub done"),
+            Reply::new().text("All done."),
+        ];
+        let setup = setup_in(Mode::Feedback, script, repo_with_a_build()).await;
+        let (handle, outcome, _) = run_turn(&setup, async |_| {}).await;
+        if let Some(reason) = &outcome.in_place {
+            // Without namespaces or reflinks the turn runs in place, as the next test covers.
+            assert!(
+                reason.contains("sandbox does not work")
+                    || reason.contains("cannot clone")
+                    || reason.contains("cargo target directory"),
+                "{reason}"
+            );
+            return;
+        }
+        assert_eq!(outcome.status, NodeStatus::Done);
+        assert_eq!(handle.live.lock().in_place, None);
+
+        let seen = tool_result(&setup, 1, "c1");
+        assert!(seen.starts_with(setup.root.as_str()), "{seen}");
+        assert!(seen.trim_end().ends_with("built"), "{seen}");
+        assert_eq!(
+            std::fs::read_to_string(setup.root.join("hello.txt")).unwrap(),
+            "hello world\n"
+        );
+        assert!(!setup.root.join("made.txt").exists());
+        assert!(!setup.root.join("from_sub.txt").exists());
+        assert!(outcome.reset);
+        assert_eq!(git(&setup.root, &["status", "--short"]), "");
+        assert!(last_user_text(&setup, 0).contains(SANDBOX_NOTE));
+        assert!(last_user_text(&setup, 2).contains(SANDBOX_NOTE));
+        let left = || {
+            std::fs::read_dir(setup.root.join("target/explorer"))
+                .map(|entries| entries.count())
+                .unwrap_or(0)
+        };
+        for _ in 0..250 {
+            if left() == 0 {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        panic!("the copy was not deleted");
+    }
+
+    #[tokio::test]
+    async fn a_feedback_turn_without_a_build_cache_runs_in_place_and_says_why() {
+        use crate::agent::context::{FEEDBACK_NOTE, SANDBOX_NOTE};
+        let script = vec![
+            Reply::new().call("c1", "shell", json!({"command": "echo x > scratch.txt"})),
+            Reply::new().text("Done."),
+        ];
+        let setup = setup(Mode::Feedback, script).await;
+        let (handle, outcome, _) = run_turn(&setup, async |_| {}).await;
+        assert_eq!(outcome.status, NodeStatus::Done);
+        let reason = outcome.in_place.as_deref().unwrap();
+        assert!(
+            reason.contains("no target/") || reason.contains("cargo target directory"),
+            "{reason}"
+        );
+        assert_eq!(handle.live.lock().in_place.as_deref(), Some(reason));
+        assert!(outcome.reset);
+        assert!(!setup.root.join("scratch.txt").exists());
+        assert!(last_user_text(&setup, 0).contains(FEEDBACK_NOTE));
+        assert!(!last_user_text(&setup, 0).contains(SANDBOX_NOTE));
+    }
+
+    #[tokio::test]
+    async fn a_commit_turn_never_uses_a_copy() {
+        // In a repository a feedback turn would copy, so the mode alone decides.
+        let script = vec![Reply::new().text("Nothing to do.")];
+        let setup = setup_in(Mode::Commit, script, repo_with_a_build()).await;
+        let (handle, outcome, _) = run_turn(&setup, async |_| {}).await;
+        assert_eq!(outcome.in_place, None);
+        assert_eq!(handle.live.lock().in_place, None);
+        assert!(!setup.root.join("target/explorer").exists());
     }
 
     #[tokio::test]

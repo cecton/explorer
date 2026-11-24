@@ -111,8 +111,9 @@ pub(crate) fn child(arguments: &[std::ffi::OsString]) -> ! {
     if !root.is_absolute() || !workspace.is_absolute() {
         fail("the root and the workspace must be absolute paths");
     }
-    if root.starts_with(&workspace) || workspace.starts_with(&root) {
-        fail("the root and the workspace must not be nested in each other");
+    // A workspace inside the root is bound over it; the other way round would shadow the root.
+    if root.starts_with(&workspace) {
+        fail("the root must not be inside the workspace");
     }
     if !check && command.is_empty() {
         fail("no command after --");
@@ -144,37 +145,38 @@ pub(crate) fn child(arguments: &[std::ffi::OsString]) -> ! {
 }
 
 #[cfg(test)]
+/// The test binary is not `explorer`, so the tests that run it build the real one first.
+pub(crate) fn built_explorer() -> std::path::PathBuf {
+    use serde_json::Value;
+    use std::path::PathBuf;
+    use std::process::{Command, Stdio};
+    use std::sync::OnceLock;
+    static BUILT: OnceLock<PathBuf> = OnceLock::new();
+    BUILT
+        .get_or_init(|| {
+            let output = Command::new(env!("CARGO"))
+                .args(["build", "--bin", "explorer", "--message-format=json"])
+                .args(cfg!(not(debug_assertions)).then_some("--release"))
+                .stderr(Stdio::inherit())
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "could not build the explorer binary"
+            );
+            String::from_utf8_lossy(&output.stdout)
+                .lines()
+                .filter_map(|line| serde_json::from_str::<Value>(line).ok())
+                .find_map(|message| message["executable"].as_str().map(PathBuf::from))
+                .expect("cargo reported no executable")
+        })
+        .clone()
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::util::test_support::temp_root;
-
-    /// The built `explorer` binary, located and rebuilt once per test process by cargo itself.
-    fn explorer() -> std::path::PathBuf {
-        use serde_json::Value;
-        use std::path::PathBuf;
-        use std::process::{Command, Stdio};
-        use std::sync::OnceLock;
-        static BUILT: OnceLock<PathBuf> = OnceLock::new();
-        BUILT
-            .get_or_init(|| {
-                let output = Command::new(env!("CARGO"))
-                    .args(["build", "--bin", "explorer", "--message-format=json"])
-                    .args(cfg!(not(debug_assertions)).then_some("--release"))
-                    .stderr(Stdio::inherit())
-                    .output()
-                    .unwrap();
-                assert!(
-                    output.status.success(),
-                    "could not build the explorer binary"
-                );
-                String::from_utf8_lossy(&output.stdout)
-                    .lines()
-                    .filter_map(|line| serde_json::from_str::<Value>(line).ok())
-                    .find_map(|message| message["executable"].as_str().map(PathBuf::from))
-                    .expect("cargo reported no executable")
-            })
-            .clone()
-    }
 
     /// Whether namespaces work here; the namespace tests skip without them, the setup check does not.
     fn usable() -> bool {
@@ -213,7 +215,7 @@ mod tests {
         command: &[&str],
     ) -> std::process::Command {
         use std::process::Command;
-        let mut cmd = Command::new(explorer());
+        let mut cmd = Command::new(built_explorer());
         cmd.arg("sandbox-exec")
             .arg("--root")
             .arg(root)
@@ -226,7 +228,7 @@ mod tests {
 
     fn check(root: &camino::Utf8Path, workspace: &camino::Utf8Path) -> std::process::Command {
         use std::process::Command;
-        let mut cmd = Command::new(explorer());
+        let mut cmd = Command::new(built_explorer());
         cmd.arg("sandbox-exec")
             .arg("--root")
             .arg(root)
@@ -345,13 +347,25 @@ mod tests {
     }
 
     #[test]
-    fn nested_root_and_workspace_are_refused() {
+    fn a_root_inside_the_workspace_is_refused() {
         let (_dirs, root, _workspace) = dirs();
-        let output = exec(&root, &root.join("inner"), &["true"])
-            .output()
-            .unwrap();
+        let parent = root.parent().unwrap();
+        let output = exec(&root, parent, &["true"]).output().unwrap();
         assert_eq!(output.status.code(), Some(SETUP_FAILED));
         let stderr = String::from_utf8_lossy(&output.stderr);
-        assert!(stderr.contains("nested"), "{stderr}");
+        assert!(stderr.contains("inside the workspace"), "{stderr}");
+    }
+
+    #[test]
+    fn a_workspace_inside_the_root_is_mounted_over_it() {
+        if !usable() {
+            return;
+        }
+        let (_dirs, root, _workspace) = dirs();
+        let inner = root.join("target").join("explorer").join("copy");
+        std::fs::create_dir_all(&inner).unwrap();
+        std::fs::write(inner.join("copy"), "copy").unwrap();
+        let output = exec(&root, &inner, &["cat", "copy"]).output().unwrap();
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "copy");
     }
 }

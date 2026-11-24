@@ -1,14 +1,24 @@
 //! What a turn does to the working tree when it ends: a commit turn keeps its commits and
-//! loses what it left uncommitted, a feedback turn loses both.
+//! loses what it left uncommitted, a feedback turn loses both. A feedback turn that worked
+//! in a copy of the repository leaves the repository as it was: the copy is what goes.
 
 /// Whatever a turn left uncommitted is discarded, and a commit turn's commits are
 /// collected; the tree was clean when the turn started.
 pub(super) async fn close(
     request: &crate::agent::turn::TurnRequest,
     head_after: Option<String>,
+    workspace: Option<&crate::agent::workspace::Workspace>,
 ) -> (Vec<String>, bool) {
     use crate::agent::Mode;
+    use crate::agent::workspace::Workspace;
     match request.mode {
+        Mode::Feedback if let Some(Workspace::Cloned(path)) = workspace => {
+            let path = path.clone();
+            let left_work = tokio::task::spawn_blocking(move || left_uncommitted(&path))
+                .await
+                .unwrap_or(true);
+            (Vec::new(), left_work)
+        }
         Mode::Feedback => {
             let root = request.root.clone();
             let reset = tokio::task::spawn_blocking(move || discard_turn_work(&root))
@@ -31,6 +41,17 @@ pub(super) async fn close(
             .await
             .unwrap_or_default();
             (commits, reset)
+        }
+    }
+}
+
+/// Whether a copy holds work its turn left uncommitted; unknown counts as yes.
+fn left_uncommitted(copy: &camino::Utf8Path) -> bool {
+    match crate::git::status_short(copy) {
+        Ok(status) => !status.trim().is_empty(),
+        Err(e) => {
+            tracing::warn!("cannot check the copy after the turn: {e}");
+            true
         }
     }
 }

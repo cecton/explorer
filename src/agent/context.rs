@@ -210,24 +210,59 @@ pub fn handover_preamble(ancestor_dirs: &[camino::Utf8PathBuf]) -> Option<String
     })
 }
 
-/// Note opening every feedback prompt: the turn is advisory, it may build to verify
-/// but never commit, and nothing it changes is kept.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum Feedback {
+    InPlace,
+    Sandboxed,
+}
+
+impl Feedback {
+    pub fn of(mode: crate::agent::Mode, sandboxed: bool) -> Option<Self> {
+        use crate::agent::Mode;
+        (mode == Mode::Feedback).then_some(if sandboxed {
+            Self::Sandboxed
+        } else {
+            Self::InPlace
+        })
+    }
+
+    fn note(self) -> &'static str {
+        match self {
+            Self::InPlace => FEEDBACK_NOTE,
+            Self::Sandboxed => SANDBOX_NOTE,
+        }
+    }
+}
+
+/// Note opening every feedback prompt whose turn works in the repository itself.
 pub const FEEDBACK_NOTE: &str = "[Note from Explorer: this is a feedback turn — advisory \
 only. Building to verify an idea is fine; committing is never allowed, however imperative \
 the request reads. What a feedback turn changes does not stay: the tree is hard-reset \
 when it ends, and a commit made here is not recorded to this conversation. You cannot \
 keep a change in the git history — you can only present a change to the user.]";
 
-/// Removes the feedback note from replayed user messages, so a commit turn never reads
-/// the feedback turns before it as instructions to itself.
+/// Note opening every feedback prompt whose turn works in a copy of the repository.
+pub const SANDBOX_NOTE: &str = "[Note from Explorer: this is a feedback turn — advisory \
+only. Building to verify an idea is fine; committing is never allowed, however imperative \
+the request reads. You work in a sandbox copy of the repository, shown at the repository's \
+own path and discarded when this turn ends: treat it as the real project, and never try to \
+reach the original directory behind it. A commit made here is not recorded to this \
+conversation. You cannot keep a change in the git history — you can only present a change \
+to the user.]";
+
+/// Removes both feedback notes from replayed messages, so a commit turn never reads them.
 fn strip_feedback_note(messages: &mut [crate::agent::Message]) {
     use crate::agent::Message;
-    let note = format!("{FEEDBACK_NOTE}\n\n");
     for message in messages {
-        if let Message::User { content, .. } = message
-            && content.contains(FEEDBACK_NOTE)
-        {
-            *content = content.replace(&note, "").replace(FEEDBACK_NOTE, "");
+        let Message::User { content, .. } = message else {
+            continue;
+        };
+        for note in [FEEDBACK_NOTE, SANDBOX_NOTE] {
+            if content.contains(note) {
+                *content = content
+                    .replace(&format!("{note}\n\n"), "")
+                    .replace(note, "");
+            }
         }
     }
 }
@@ -326,8 +361,8 @@ pub struct Notes<'a> {
     pub compacted_parent: Option<&'a camino::Utf8Path>,
     /// HEAD when the turn or run this message continues ended.
     pub parent_head: Option<&'a str>,
-    /// Whether the turn is a feedback one, which may not commit.
-    pub feedback: bool,
+    /// How the turn runs when it is a feedback one, which may not commit.
+    pub feedback: Option<Feedback>,
 }
 
 impl Notes<'_> {
@@ -339,7 +374,7 @@ impl Notes<'_> {
             compaction_note(&summary)
         });
         let moved = self.moved_note();
-        let feedback = self.feedback.then(|| FEEDBACK_NOTE.to_string());
+        let feedback = self.feedback.map(|feedback| feedback.note().to_string());
         with_notes(&[environment, summary, moved, feedback], prompt)
     }
 
@@ -486,18 +521,21 @@ mod tests {
         };
         // The state of the repository opens every message, and a feedback turn adds its
         // own note; nothing else applies when no HEAD moved and no parent was compacted.
-        let feedback = bare(true).message("do it");
+        let feedback = bare(Some(Feedback::InPlace)).message("do it");
         assert!(feedback.starts_with("[Note from Explorer: the state of the repository"));
         assert!(feedback.contains("- Repository root: /repo"));
         assert!(feedback.contains(FEEDBACK_NOTE));
         assert!(feedback.ends_with("do it"));
-        assert!(!bare(false).message("do it").contains(FEEDBACK_NOTE));
+        assert!(!bare(None).message("do it").contains(FEEDBACK_NOTE));
+        let sandboxed = bare(Some(Feedback::Sandboxed)).message("do it");
+        assert!(sandboxed.contains(SANDBOX_NOTE));
+        assert!(!sandboxed.contains(FEEDBACK_NOTE));
 
         // The moved note only appears when HEAD is not where the continued message left
         // it: a same-HEAD parent adds nothing, since there is nothing to list.
         let moved = Notes {
             parent_head: Some("bbb"),
-            ..bare(false)
+            ..bare(None)
         };
         assert!(
             moved
@@ -506,7 +544,7 @@ mod tests {
         );
         let same = Notes {
             parent_head: Some("aaa"),
-            ..bare(false)
+            ..bare(None)
         };
         assert!(!same.message("do it").contains("the repository has changed"));
     }
@@ -677,6 +715,36 @@ mod tests {
         assert!(
             matches!(&messages[1], Message::Assistant { content, .. } if content == FEEDBACK_NOTE)
         );
+    }
+
+    #[test]
+    fn strip_feedback_note_removes_the_sandbox_note_too() {
+        use crate::agent::Message;
+        let environment = Some("[Note from Explorer: env]".to_string());
+        let mut messages = vec![Message::User {
+            content: with_notes(
+                &[environment.clone(), Some(SANDBOX_NOTE.to_string())],
+                "Fix it",
+            ),
+            injected: false,
+        }];
+        strip_feedback_note(&mut messages);
+        assert_eq!(
+            messages[0],
+            Message::User {
+                content: with_notes(&[environment], "Fix it"),
+                injected: false,
+            }
+        );
+    }
+
+    #[test]
+    fn sandbox_note_says_the_copy_is_discarded_and_the_original_off_limits() {
+        assert!(SANDBOX_NOTE.contains("feedback turn"));
+        assert!(SANDBOX_NOTE.contains("committing is never allowed"));
+        assert!(SANDBOX_NOTE.contains("discarded when this turn ends"));
+        assert!(SANDBOX_NOTE.contains("never try to reach the original directory"));
+        assert!(!SANDBOX_NOTE.contains("hard-reset"));
     }
 
     #[test]

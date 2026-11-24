@@ -18,13 +18,30 @@ pub(crate) fn git(root: &camino::Utf8Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_string()
 }
 
+/// A fresh temporary directory under this crate's `target/`, on the filesystem reflinks need.
+pub(crate) fn temp_root_in_target(prefix: &str) -> (tempfile::TempDir, camino::Utf8PathBuf) {
+    let base = camino::Utf8Path::new(env!("CARGO_MANIFEST_DIR")).join("target");
+    std::fs::create_dir_all(&base).unwrap();
+    let tmp = tempfile::Builder::new()
+        .prefix(prefix)
+        .tempdir_in(&base)
+        .unwrap();
+    let root = camino::Utf8PathBuf::from_path_buf(tmp.path().canonicalize().unwrap()).unwrap();
+    (tmp, root)
+}
+
+/// Makes `root` a repository without commits, with a test identity.
+pub(crate) fn init_repo(root: &camino::Utf8Path) {
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.name", "test"]);
+    git(root, &["config", "user.email", "test@example.com"]);
+    git(root, &["config", "commit.gpgsign", "false"]);
+}
+
 /// A fresh repository without commits.
 pub(crate) fn temp_repo() -> (tempfile::TempDir, camino::Utf8PathBuf) {
     let (tmp, root) = temp_root();
-    git(&root, &["init", "-q"]);
-    git(&root, &["config", "user.name", "test"]);
-    git(&root, &["config", "user.email", "test@example.com"]);
-    git(&root, &["config", "commit.gpgsign", "false"]);
+    init_repo(&root);
     (tmp, root)
 }
 

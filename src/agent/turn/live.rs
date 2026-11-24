@@ -32,6 +32,8 @@ pub struct LiveTurn {
     log_start: usize,
     /// The tool call in progress, as shown on the status line.
     pub activity: Option<String>,
+    /// Why a feedback turn runs in the repository itself and not in a copy of it.
+    pub in_place: Option<String>,
     /// The thinking streamed so far in the answer in progress; shown dimmed in the
     /// discussion window and never recorded.
     pub thinking: String,

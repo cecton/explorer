@@ -12,6 +12,8 @@ pub struct Metadata {
     pub head_after: Option<String>,
     pub commits: Vec<String>,
     pub scratch_reset: bool,
+    /// Why a feedback turn ran in the repository itself and not in a copy of it.
+    pub in_place: Option<String>,
     pub favorite: bool,
     pub command: Option<String>,
     /// Set for a custom command sent without the mode's system prompt.
@@ -41,6 +43,8 @@ pub struct TurnOutcome {
     pub reset: bool,
     /// Claude Code session of the turn; `None` for our own loop.
     pub session_id: Option<String>,
+    /// Why a feedback turn ran in the repository itself and not in a copy of it.
+    pub in_place: Option<String>,
 }
 
 impl Metadata {
@@ -56,6 +60,7 @@ impl Metadata {
         self.commits.clone_from(&outcome.commits);
         self.scratch_reset = outcome.reset;
         self.session_id.clone_from(&outcome.session_id);
+        self.in_place.clone_from(&outcome.in_place);
     }
 
     /// Records a turn cut short, with the commits it made and the HEAD it ended on. The
@@ -88,6 +93,7 @@ impl Metadata {
                     meta.commits = value.split_whitespace().map(str::to_string).collect();
                 }
                 "scratch-reset" => meta.scratch_reset = value == "true",
+                "in-place" => meta.in_place = Some(value.to_string()),
                 "favorite" => meta.favorite = value == "true",
                 "command" => meta.command = Some(value.to_string()),
                 "system-prompt" => meta.no_system_prompt = value == "off",
@@ -129,6 +135,7 @@ impl Metadata {
         push("head-after", self.head_after.as_deref());
         push("commits", (!commits.is_empty()).then_some(commits.as_str()));
         push("scratch-reset", self.scratch_reset.then_some("true"));
+        push("in-place", self.in_place.as_deref());
         push("favorite", self.favorite.then_some("true"));
         push("command", self.command.as_deref());
         push("system-prompt", self.no_system_prompt.then_some("off"));
@@ -217,6 +224,7 @@ mod tests {
             head_after: Some("bbbb".into()),
             commits: vec!["bbbb".into(), "cccc".into()],
             scratch_reset: true,
+            in_place: Some("no build cache".into()),
             favorite: true,
             command: Some("review".into()),
             no_system_prompt: true,

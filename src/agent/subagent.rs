@@ -143,8 +143,8 @@ pub struct Agents {
     pub general: Delegate,
     /// `YYYY-MM-DD`, for the repository note.
     pub date: String,
-    /// A feedback turn's sub-agents get the feedback note: they must not commit either.
-    pub feedback: bool,
+    /// A feedback turn's sub-agents get its feedback note: they must not commit either.
+    pub feedback: Option<crate::agent::context::Feedback>,
 }
 
 /// How one kind of sub-agent runs, resolved by the turn so the process needs no config.
@@ -173,10 +173,10 @@ pub fn agents(
     caller: &crate::model_spec::ModelSpec,
     caller_target: &crate::agent::llm::LlmTarget,
     date: &str,
-    mode: crate::agent::Mode,
+    feedback: Option<crate::agent::context::Feedback>,
 ) -> Agents {
+    use crate::agent::Backend;
     use crate::agent::llm::LlmTarget;
-    use crate::agent::{Backend, Mode};
     use crate::model_spec::ModelSpec;
     let openai = |spec: &ModelSpec| match config.backend(spec) {
         Some(Backend::OpenAi(target)) => Some(target),
@@ -234,7 +234,7 @@ pub fn agents(
         roles,
         general,
         date: date.to_string(),
-        feedback: mode == Mode::Feedback,
+        feedback,
     }
 }
 
@@ -578,7 +578,7 @@ mod tests {
     #[test]
     fn a_role_that_cannot_run_in_an_agent_process_is_left_out() {
         use crate::agent::AgentConfig;
-        use crate::agent::Mode;
+        use crate::agent::context::Feedback;
         use crate::agent::llm::LlmTarget;
         use crate::endpoint::EndpointKind;
         use crate::model_spec::{Effort, ModelSpec};
@@ -608,7 +608,13 @@ mod tests {
             model: "m".to_string(),
             effort: Effort::Low,
         };
-        let agents = agents(&config, &caller, &target, "2026-11-23", Mode::Feedback);
+        let agents = agents(
+            &config,
+            &caller,
+            &target,
+            "2026-11-23",
+            Some(Feedback::Sandboxed),
+        );
         let names: Vec<&str> = agents.roles.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["fast"]);
         let fast = &agents.roles[0].1;
@@ -617,7 +623,7 @@ mod tests {
         // A call without a role runs on the caller's model, which has nothing to fall back on.
         assert_eq!(agents.general.target.url, "http://fake");
         assert!(agents.general.fallback.is_none());
-        assert!(agents.feedback);
+        assert_eq!(agents.feedback, Some(Feedback::Sandboxed));
         let spec = &agents.tool.schema["properties"]["role"]["enum"];
         assert_eq!(*spec, serde_json::json!(["fast"]));
     }
@@ -625,7 +631,6 @@ mod tests {
     #[test]
     fn a_role_without_a_model_runs_on_the_caller_when_the_subagent_model_cannot() {
         use crate::agent::AgentConfig;
-        use crate::agent::Mode;
         use crate::agent::llm::LlmTarget;
         use crate::endpoint::EndpointKind;
         use crate::model_spec::{Effort, ModelSpec};
@@ -645,7 +650,7 @@ mod tests {
             model: "m".to_string(),
             effort: Effort::Low,
         };
-        let agents = agents(&config, &caller, &target, "2026-11-23", Mode::Commit);
+        let agents = agents(&config, &caller, &target, "2026-11-23", None);
         let names: Vec<&str> = agents.roles.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["plain"]);
         let plain = &agents.roles[0].1;
@@ -653,6 +658,6 @@ mod tests {
         assert_eq!(plain.target.url, "http://fake");
         assert!(plain.fallback.is_none());
         assert_eq!(agents.general.spec, "fake/m/low");
-        assert!(!agents.feedback);
+        assert_eq!(agents.feedback, None);
     }
 }

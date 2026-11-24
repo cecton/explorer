@@ -286,7 +286,8 @@ it is an ordinary feedback turn: the agent may try things, and they are discarde
 Explorer is used every day by its owner and by nobody else. Know this before trying it:
 
 - The agent runs every tool call without asking, the shell included. What protects you
-  is git, not a sandbox.
+  is git. A feedback turn in a repository that has a build works in a copy of it: a guard
+  against accidents, not a sandbox.
 - Code intelligence is Rust only.
 - There is no file tree: files are opened by name.
 - Not built yet: git status and blame panes, an export of the tree into the repository,

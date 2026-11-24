@@ -36,6 +36,7 @@ pub struct Run<'a> {
     pub mcp: &'a crate::agent::mcp::McpTools,
     /// The turn's tool socket, which Explorer's tool server asks for what only the turn knows.
     pub privileged_socket: Option<&'a camino::Utf8Path>,
+    pub sandbox: Option<&'a crate::agent::workspace::Sandbox>,
 }
 
 impl Run<'_> {
@@ -395,9 +396,16 @@ async fn run(
     let injector: Injector = recorder.injector();
     // The recorder may come from a run that closed it: a commit nudge, a lost session.
     injector.open();
-    let mut child = tokio::process::Command::new("claude")
+    let mut command = match config.sandbox {
+        Some(sandbox) => sandbox.command("claude"),
+        None => {
+            let mut command = tokio::process::Command::new("claude");
+            command.current_dir(config.root);
+            command
+        }
+    };
+    let mut child = command
         .args(arguments(config, resume))
-        .current_dir(config.root)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -686,6 +694,7 @@ mod tests {
             system: "SYSTEM",
             mcp: &mcp,
             privileged_socket: None,
+            sandbox: None,
         };
         let joined = |config: &Run<'_>, resume| arguments(config, resume).join(" ");
 

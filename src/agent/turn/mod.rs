@@ -106,16 +106,15 @@ pub struct TurnRequest {
 
 /// The text to send for `request`: what the turn asks, preceded by the notes Explorer
 /// adds. Reads files and runs git.
-fn message_to_send(request: &TurnRequest) -> String {
-    use crate::agent::Mode;
-    use crate::agent::context::Notes;
+fn message_to_send(request: &TurnRequest, sandboxed: bool) -> String {
+    use crate::agent::context::{Feedback, Notes};
     let notes = Notes {
         root: &request.root,
         head: request.head.as_deref(),
         date: &request.date,
         compacted_parent: request.compacted_parent.as_deref(),
         parent_head: request.parent_head.as_deref(),
-        feedback: request.mode == Mode::Feedback,
+        feedback: Feedback::of(request.mode, sandboxed),
     };
     let ask = match &request.compact {
         Some(instructions) => crate::agent::context::compact_request(instructions),
@@ -189,7 +188,15 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
 
     tokio::spawn(async move {
         let mut recorder = live::Recorder::new(Arc::clone(&live), request.node_dir.clone());
-        let result = run(&request, &mut recorder, cancel_rx.clone()).await;
+        let workspace = prepare_workspace(&request, &mut recorder).await;
+        let sandbox = workspace
+            .as_ref()
+            .and_then(|workspace| workspace.sandbox(&request.root));
+        let in_place = workspace
+            .as_ref()
+            .and_then(|workspace| workspace.in_place_reason())
+            .map(str::to_string);
+        let result = run(&request, sandbox.as_ref(), &mut recorder, cancel_rx.clone()).await;
         // However the run ended, a turn cancelled while it ran is cancelled.
         let cancelled = *cancel_rx.borrow();
         let (mut status, mut error) = match result {
@@ -214,7 +221,10 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
             }
         }
         // Whatever a turn left uncommitted is discarded, however it ended.
-        let (commits, reset) = close::close(&request, head_after.clone()).await;
+        let (commits, reset) = close::close(&request, head_after.clone(), workspace.as_ref()).await;
+        if let Some(workspace) = workspace {
+            workspace.release();
+        }
         // A turn cut short before it said anything has nothing to show and nothing to
         // build on: it fails. One with a reply or commits stays cancelled, part of the
         // discussion.
@@ -243,6 +253,7 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
             commits: commits.clone(),
             reset,
             session_id,
+            in_place,
         };
         crate::signal::send(
             &main_tx,
@@ -273,9 +284,31 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
     handle
 }
 
+async fn prepare_workspace(
+    request: &TurnRequest,
+    recorder: &mut live::Recorder,
+) -> Option<crate::agent::workspace::Workspace> {
+    use crate::agent::Mode;
+    use crate::agent::workspace::Workspace;
+    if request.mode != Mode::Feedback || request.compact.is_some() {
+        return None;
+    }
+    recorder.activity(Some("preparing workspace".to_string()));
+    let (root, node) = (request.root.clone(), request.node.as_str().to_string());
+    let workspace = tokio::task::spawn_blocking(move || Workspace::prepare(&root, &node))
+        .await
+        .unwrap_or_else(|e| Workspace::InPlace {
+            reason: crate::util::text::single_line(&format!("the copy failed: {e}")),
+        });
+    recorder.activity(None);
+    recorder.live.lock().in_place = workspace.in_place_reason().map(str::to_string);
+    Some(workspace)
+}
+
 /// Runs the backend; cancelled, it returns early and the caller reads the cancel as the outcome.
 async fn run(
     request: &TurnRequest,
+    sandbox: Option<&crate::agent::workspace::Sandbox>,
     recorder: &mut live::Recorder,
     mut cancel: tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
@@ -286,11 +319,20 @@ async fn run(
     };
     match &request.backend {
         Backend::OpenAi(target) => {
-            run_own_loop(request, &mcp, target, &request.spec, recorder, cancel).await
+            run_own_loop(
+                request,
+                sandbox,
+                &mcp,
+                target,
+                &request.spec,
+                recorder,
+                cancel,
+            )
+            .await
         }
         Backend::ClaudeCode(target) => {
             tokio::select! {
-                result = run_claude_code(request, &mcp, target, recorder) => result,
+                result = run_claude_code(request, sandbox, &mcp, target, recorder) => result,
                 _ = cancel.wait_for(|cancelled| *cancelled) => Ok(()),
             }
         }
@@ -323,6 +365,7 @@ fn start_session(request: &TurnRequest) -> crate::agent::claude_code::Resume<'_>
 
 async fn run_claude_code(
     request: &TurnRequest,
+    sandbox: Option<&crate::agent::workspace::Sandbox>,
     mcp: &crate::agent::mcp::McpTools,
     target: &crate::agent::claude_code::ClaudeTarget,
     recorder: &mut live::Recorder,
@@ -344,6 +387,7 @@ async fn run_claude_code(
         privileged: None,
     })?;
     let socket_path = socket.path();
+    let sandboxed = sandbox.is_some();
     let (system, message) = {
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
@@ -351,7 +395,7 @@ async fn run_claude_code(
                 request.system_prompt.then_some(request.mode),
                 request.agent.review_rounds,
             );
-            (system, message_to_send(&request))
+            (system, message_to_send(&request, sandboxed))
         })
         .await
         .map_err(|e| e.to_string())?
@@ -362,6 +406,7 @@ async fn run_claude_code(
         system: &system,
         mcp,
         privileged_socket: Some(&socket_path),
+        sandbox,
     };
     run.from(
         &message,
@@ -393,6 +438,7 @@ async fn run_claude_code(
 
 async fn run_own_loop(
     request: &TurnRequest,
+    sandbox: Option<&crate::agent::workspace::Sandbox>,
     mcp: &crate::agent::mcp::McpTools,
     target: &crate::agent::llm::LlmTarget,
     spec: &crate::model_spec::ModelSpec,
@@ -401,10 +447,12 @@ async fn run_own_loop(
 ) -> Result<(), String> {
     use crate::agent::Message;
     use crate::agent::Mode;
+    use crate::agent::context::Feedback;
     use crate::agent::driver::Closing;
     use crate::agent::privileged::PrivilegedSocket;
     use crate::agent::tools::ToolContext;
     use crate::agent::wire::Start;
+    let sandboxed = sandbox.is_some();
     let (system, messages) = {
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
@@ -415,7 +463,7 @@ async fn run_own_loop(
             );
             let mut messages = crate::agent::context::replay(&request.ancestor_dirs, request.mode);
             messages.push(Message::User {
-                content: message_to_send(&request),
+                content: message_to_send(&request, sandboxed),
                 injected: false,
             });
             (system, messages)
@@ -457,7 +505,7 @@ async fn run_own_loop(
                 spec,
                 target,
                 &request.date,
-                request.mode,
+                Feedback::of(request.mode, sandboxed),
             )
         }),
         repeat_limit: request.agent.repeat_limit,
@@ -465,6 +513,7 @@ async fn run_own_loop(
     };
     // A commit turn is asked to commit while its tree is dirty; the nudge is never shown.
     let closing = Closing {
+        sandbox,
         commit_root: (request.mode == Mode::Commit && !compact).then_some(request.root.as_path()),
         cancel,
     };

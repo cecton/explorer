@@ -19,7 +19,12 @@ static LOG: OnceLock<(String, tracing_core::LevelFilter)> = OnceLock::new();
 
 /// Records where the parent logs, so the agent processes it starts log to the same file.
 pub fn set_log(file: &str, level: tracing_core::LevelFilter) {
-    let _ = LOG.set((file.to_string(), level));
+    // Absolute: the agent runs in its turn's copy, where a relative path is another file.
+    let file = std::path::absolute(file)
+        .ok()
+        .and_then(|path| camino::Utf8PathBuf::from_path_buf(path).ok())
+        .map_or_else(|| file.to_string(), camino::Utf8PathBuf::into_string);
+    let _ = LOG.set((file, level));
 }
 
 /// Whether `pid` has exited, without reaping it: its owner still holds the child.
@@ -101,25 +106,24 @@ impl Drop for ChildGuard {
 }
 
 /// The command that starts `explorer agent`.
-fn command() -> tokio::process::Command {
+fn command(sandbox: Option<&crate::agent::workspace::Sandbox>) -> tokio::process::Command {
     use std::process::Stdio;
     // The program of this process, even if the file was replaced since it started.
     #[cfg(not(test))]
-    let mut command = {
-        let mut command = tokio::process::Command::new("/proc/self/exe");
-        command.arg("agent");
-        command
-    };
+    let (program, args) = (std::path::PathBuf::from("/proc/self/exe"), ["agent"]);
     // A test binary is not `explorer`: it runs the one test that stands in for it.
     #[cfg(test)]
-    let mut command = {
-        let program = std::env::current_exe().expect("the test binary has a path");
-        let mut command = tokio::process::Command::new(program);
-        command
-            .args(["--exact", "agent::child::tests::as_agent", "--nocapture"])
-            .env(crate::agent::child::AS_AGENT, "1");
-        command
+    let (program, args) = (
+        std::env::current_exe().expect("the test binary has a path"),
+        ["--exact", "agent::child::tests::as_agent", "--nocapture"],
+    );
+    let mut command = match sandbox {
+        Some(sandbox) => sandbox.command(&program),
+        None => tokio::process::Command::new(&program),
     };
+    command.args(args);
+    #[cfg(test)]
+    command.env(crate::agent::child::AS_AGENT, "1");
     if let Some((file, level)) = LOG.get() {
         command.args([
             "--log-file",
@@ -141,6 +145,7 @@ pub(crate) const CANCELLED: &str = crate::conversation::CANCELLED_ERROR;
 
 /// What the turn asks of a run besides what it records.
 pub struct Closing<'a> {
+    pub sandbox: Option<&'a crate::agent::workspace::Sandbox>,
     /// A commit turn: the repository to ask for a commit while its tree is dirty.
     pub commit_root: Option<&'a camino::Utf8Path>,
     /// Set by the turn to cancel the run.
@@ -158,7 +163,7 @@ pub async fn run(
         return Err(CANCELLED.to_string());
     }
     let mut child = ChildGuard::new(
-        command()
+        command(closing.sandbox)
             .spawn()
             .map_err(|e| format!("failed to start the agent process: {e}"))?,
     )?;
@@ -487,6 +492,7 @@ mod tests {
         recorder.live.lock().closed = true;
         let (_tx, cancel) = tokio::sync::watch::channel(true);
         let closing = Closing {
+            sandbox: None,
             commit_root: None,
             cancel,
         };
@@ -505,6 +511,7 @@ mod tests {
             let mut recorder = recorder();
             let (_tx, cancel) = tokio::sync::watch::channel(false);
             let closing = Closing {
+                sandbox: None,
                 commit_root: None,
                 cancel,
             };
