@@ -143,8 +143,8 @@ pub struct Agents {
     pub general: Delegate,
     /// `YYYY-MM-DD`, for the repository note.
     pub date: String,
-    /// A feedback turn's sub-agents get the workspace note: they must not commit either.
-    pub workspace: bool,
+    /// A feedback turn's sub-agents get the feedback note: they must not commit either.
+    pub feedback: bool,
 }
 
 /// How one kind of sub-agent runs, resolved by the turn so the process needs no config.
@@ -234,7 +234,7 @@ pub fn agents(
         roles,
         general,
         date: date.to_string(),
-        workspace: mode == Mode::Feedback,
+        feedback: mode == Mode::Feedback,
     }
 }
 
@@ -340,7 +340,7 @@ impl Subagents {
         let message = {
             let root = self.context.root.clone();
             let date = self.agents.date.clone();
-            let workspace = self.agents.workspace;
+            let feedback = self.agents.feedback;
             tokio::task::spawn_blocking(move || {
                 use crate::agent::context::Notes;
                 let head = gix::ThreadSafeRepository::open(root.as_std_path())
@@ -353,7 +353,7 @@ impl Subagents {
                     date: &date,
                     compacted_parent: None,
                     parent_head: None,
-                    workspace,
+                    feedback,
                 }
                 .message(&prompt)
             })
@@ -617,7 +617,7 @@ mod tests {
         // A call without a role runs on the caller's model, which has nothing to fall back on.
         assert_eq!(agents.general.target.url, "http://fake");
         assert!(agents.general.fallback.is_none());
-        assert!(agents.workspace);
+        assert!(agents.feedback);
         let spec = &agents.tool.schema["properties"]["role"]["enum"];
         assert_eq!(*spec, serde_json::json!(["fast"]));
     }
@@ -653,6 +653,6 @@ mod tests {
         assert_eq!(plain.target.url, "http://fake");
         assert!(plain.fallback.is_none());
         assert_eq!(agents.general.spec, "fake/m/low");
-        assert!(!agents.workspace);
+        assert!(!agents.feedback);
     }
 }

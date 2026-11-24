@@ -276,7 +276,7 @@ input hints at while the draft is only the command name: `<commit-like>` and the
 description, so the command documents itself where it is used.
 
 `system-prompt: off` is what makes this one work. The turn gets no mode prompt and no
-workspace note, and it closes like a commit turn instead of being reset, so the
+feedback note, and it closes like a commit turn instead of being reset, so the
 `git reset --soft` it runs sticks and the squashed commit is recorded to the node. The
 flag is stored with the node, so replaying it later behaves the same. A command without
 it is an ordinary feedback turn: the agent may try things, and they are discarded.

@@ -115,7 +115,7 @@ fn message_to_send(request: &TurnRequest) -> String {
         date: &request.date,
         compacted_parent: request.compacted_parent.as_deref(),
         parent_head: request.parent_head.as_deref(),
-        workspace: request.mode == Mode::Feedback,
+        feedback: request.mode == Mode::Feedback,
     };
     let ask = match &request.compact {
         Some(instructions) => crate::agent::context::compact_request(instructions),
@@ -298,7 +298,7 @@ async fn run(
 }
 
 /// The parent session a turn forks. Only feedback turns fork: a fork replays the parent's
-/// earlier user messages, which carry the feedback-turn workspace note.
+/// earlier user messages, which carry the feedback note.
 fn fork_source(mode: crate::agent::Mode, parent_session: Option<&str>) -> Option<&str> {
     use crate::agent::Mode;
     parent_session.filter(|_| mode == Mode::Feedback)

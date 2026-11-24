@@ -147,7 +147,7 @@ fn repair_tail(messages: &mut Vec<crate::agent::Message>) {
 }
 
 /// The messages the ancestors `dirs` contribute, oldest first. A commit turn never reads the
-/// feedback turns before it as instructions to itself, so their workspace note is removed.
+/// feedback turns before it as instructions to itself, so their feedback note is removed.
 pub fn replay(
     dirs: &[camino::Utf8PathBuf],
     mode: crate::agent::Mode,
@@ -155,7 +155,7 @@ pub fn replay(
     use crate::agent::Mode;
     let mut messages: Vec<_> = dirs.iter().flat_map(|dir| ancestor_messages(dir)).collect();
     if mode == Mode::Commit {
-        strip_workspace_note(&mut messages);
+        strip_feedback_note(&mut messages);
     }
     messages
 }
@@ -212,7 +212,7 @@ pub fn handover_preamble(ancestor_dirs: &[camino::Utf8PathBuf]) -> Option<String
 
 /// Note opening every feedback prompt: the turn is advisory, it may build to verify
 /// but never commit, and nothing it changes is kept.
-pub const WORKSPACE_NOTE: &str = "[Note from Explorer: this is a feedback turn — advisory \
+pub const FEEDBACK_NOTE: &str = "[Note from Explorer: this is a feedback turn — advisory \
 only. Building to verify an idea is fine; committing is never allowed, however imperative \
 the request reads. What a feedback turn changes does not stay: the tree is hard-reset \
 when it ends, and a commit made here is not recorded to this conversation. You cannot \
@@ -220,14 +220,14 @@ keep a change in the git history — you can only present a change to the user.]
 
 /// Removes the feedback note from replayed user messages, so a commit turn never reads
 /// the feedback turns before it as instructions to itself.
-fn strip_workspace_note(messages: &mut [crate::agent::Message]) {
+fn strip_feedback_note(messages: &mut [crate::agent::Message]) {
     use crate::agent::Message;
-    let note = format!("{WORKSPACE_NOTE}\n\n");
+    let note = format!("{FEEDBACK_NOTE}\n\n");
     for message in messages {
         if let Message::User { content, .. } = message
-            && content.contains(WORKSPACE_NOTE)
+            && content.contains(FEEDBACK_NOTE)
         {
-            *content = content.replace(&note, "").replace(WORKSPACE_NOTE, "");
+            *content = content.replace(&note, "").replace(FEEDBACK_NOTE, "");
         }
     }
 }
@@ -327,7 +327,7 @@ pub struct Notes<'a> {
     /// HEAD when the turn or run this message continues ended.
     pub parent_head: Option<&'a str>,
     /// Whether the turn is a feedback one, which may not commit.
-    pub workspace: bool,
+    pub feedback: bool,
 }
 
 impl Notes<'_> {
@@ -339,8 +339,8 @@ impl Notes<'_> {
             compaction_note(&summary)
         });
         let moved = self.moved_note();
-        let workspace = self.workspace.then(|| WORKSPACE_NOTE.to_string());
-        with_notes(&[environment, summary, moved, workspace], prompt)
+        let feedback = self.feedback.then(|| FEEDBACK_NOTE.to_string());
+        with_notes(&[environment, summary, moved, feedback], prompt)
     }
 
     /// What changed in the repository since the message this one continues, when HEAD
@@ -476,22 +476,22 @@ mod tests {
     #[test]
     fn a_message_opens_with_the_notes_its_fields_ask_for() {
         let root = camino::Utf8Path::new("/repo");
-        let bare = |workspace| Notes {
+        let bare = |feedback| Notes {
             root,
             head: Some("aaa"),
             date: "2026-11-13",
             compacted_parent: None,
             parent_head: None,
-            workspace,
+            feedback,
         };
         // The state of the repository opens every message, and a feedback turn adds its
         // own note; nothing else applies when no HEAD moved and no parent was compacted.
         let feedback = bare(true).message("do it");
         assert!(feedback.starts_with("[Note from Explorer: the state of the repository"));
         assert!(feedback.contains("- Repository root: /repo"));
-        assert!(feedback.contains(WORKSPACE_NOTE));
+        assert!(feedback.contains(FEEDBACK_NOTE));
         assert!(feedback.ends_with("do it"));
-        assert!(!bare(false).message("do it").contains(WORKSPACE_NOTE));
+        assert!(!bare(false).message("do it").contains(FEEDBACK_NOTE));
 
         // The moved note only appears when HEAD is not where the continued message left
         // it: a same-HEAD parent adds nothing, since there is nothing to list.
@@ -610,7 +610,7 @@ mod tests {
     }
 
     #[test]
-    fn replay_strips_the_workspace_note_only_in_commit_mode() {
+    fn replay_strips_the_feedback_note_only_in_commit_mode() {
         use crate::agent::{Message, Mode};
         let (_tmp, root) = temp_root();
         let first = root.join("a");
@@ -618,7 +618,7 @@ mod tests {
         for dir in [&first, &second] {
             std::fs::create_dir_all(dir).unwrap();
         }
-        let feedback = with_notes(&[Some(WORKSPACE_NOTE.to_string())], "first");
+        let feedback = with_notes(&[Some(FEEDBACK_NOTE.to_string())], "first");
         std::fs::write(first.join(crate::conversation::files::PROMPT), &feedback).unwrap();
         std::fs::write(second.join(crate::conversation::files::PROMPT), "second").unwrap();
         let dirs = [first, second];
@@ -652,21 +652,21 @@ mod tests {
     }
 
     #[test]
-    fn strip_workspace_note_leaves_the_other_notes_and_the_prompt() {
+    fn strip_feedback_note_leaves_the_other_notes_and_the_prompt() {
         use crate::agent::Message;
         let environment = Some("[Note from Explorer: env]".to_string());
-        let workspace = Some(WORKSPACE_NOTE.to_string());
+        let feedback = Some(FEEDBACK_NOTE.to_string());
         let mut messages = vec![
             Message::User {
-                content: with_notes(&[environment.clone(), workspace], "Fix it"),
+                content: with_notes(&[environment.clone(), feedback], "Fix it"),
                 injected: false,
             },
             Message::Assistant {
-                content: WORKSPACE_NOTE.to_string(),
+                content: FEEDBACK_NOTE.to_string(),
                 tool_calls: Vec::new(),
             },
         ];
-        strip_workspace_note(&mut messages);
+        strip_feedback_note(&mut messages);
         assert_eq!(
             messages[0],
             Message::User {
@@ -675,17 +675,17 @@ mod tests {
             }
         );
         assert!(
-            matches!(&messages[1], Message::Assistant { content, .. } if content == WORKSPACE_NOTE)
+            matches!(&messages[1], Message::Assistant { content, .. } if content == FEEDBACK_NOTE)
         );
     }
 
     #[test]
-    fn workspace_note_states_the_reset_contract() {
-        assert!(WORKSPACE_NOTE.contains("feedback turn"));
-        assert!(WORKSPACE_NOTE.contains("hard-reset"));
-        assert!(WORKSPACE_NOTE.contains("committing is never allowed"));
-        assert!(WORKSPACE_NOTE.contains("not recorded to this conversation"));
-        assert!(!WORKSPACE_NOTE.contains("only way to keep a change"));
+    fn feedback_note_states_the_reset_contract() {
+        assert!(FEEDBACK_NOTE.contains("feedback turn"));
+        assert!(FEEDBACK_NOTE.contains("hard-reset"));
+        assert!(FEEDBACK_NOTE.contains("committing is never allowed"));
+        assert!(FEEDBACK_NOTE.contains("not recorded to this conversation"));
+        assert!(!FEEDBACK_NOTE.contains("only way to keep a change"));
     }
 
     #[test]

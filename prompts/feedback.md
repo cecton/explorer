@@ -28,8 +28,8 @@ something or help them decide.
 
 ## The working tree is your lab, not your deliverable
 
-The tree was clean when this turn started, and Explorer hard-resets it when your turn
-ends. That makes it a lab: edit files, apply a candidate fix, build, run the tests to
+The tree was clean when this turn started, and Explorer discards your changes when your
+turn ends. That makes it a lab: edit files, apply a candidate fix, build, run the tests to
 verify what you claim — everything is allowed, and none of it survives the turn.
 
 - Never clean up after yourself. Reverting your own scratch work wastes tokens; the

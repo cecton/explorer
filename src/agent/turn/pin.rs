@@ -271,7 +271,7 @@ mod tests {
             format!(
                 "[Note from Explorer: the state of the repository when this message was sent.]\n\n\
                  - Repository root: <root>\n- Date: 2026-11-22\n- HEAD: <head>\n\n{}\n\ndo the thing",
-                crate::agent::context::WORKSPACE_NOTE
+                crate::agent::context::FEEDBACK_NOTE
             )
         );
 
