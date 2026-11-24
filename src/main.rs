@@ -14,6 +14,7 @@ mod loader;
 mod lsp;
 mod markdown_format;
 mod model_spec;
+mod sandbox;
 mod scan;
 mod signal;
 mod tui;
@@ -76,8 +77,24 @@ fn resolve_git_root() -> Option<camino::Utf8PathBuf> {
     loader::find_git_root_from(&cwd)
 }
 
-#[tokio::main]
-async fn main() {
+fn main() {
+    let mut raw = std::env::args_os();
+    let _binary = raw.next();
+    // `unshare` refuses once a thread exists, so both run before the runtime and never return.
+    match raw.next().as_deref() {
+        Some(arg) if arg == "sandbox-exec" => sandbox::run(&raw.collect::<Vec<_>>()),
+        Some(arg) if arg == "sandbox-child" => sandbox::child(&raw.collect::<Vec<_>>()),
+        _ => {}
+    }
+
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build the tokio runtime")
+        .block_on(run());
+}
+
+async fn run() {
     let args = cli::parse_args();
 
     if let Some(path) = &args.log_file {

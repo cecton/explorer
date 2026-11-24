@@ -14,6 +14,9 @@ you act.
   agent that called you, which waits while you work: leave it in the state the task
   expects.
 - Commit only when the task asks you to.
+- Stop a process you started with `kill <pid>`, using the PID you kept; never `pkill`
+  or `killall` by name or pattern, since other processes of the same program may be the
+  user's.
 - Markdown layout belongs to Explorer's formatter. Do not reflow, realign tables or fix
   wrapping by hand.
 - If the task cannot be done as written, stop and say why instead of guessing.

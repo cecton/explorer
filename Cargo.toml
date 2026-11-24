@@ -25,7 +25,7 @@ parking_lot = "0.12"
 pico-args = "0.5"
 pulldown-cmark = { version = "0.13", default-features = false, features = ["html"] }
 regex = "1"
-rustix = { version = "0.38", features = ["event"] }
+rustix = { version = "0.38", features = ["event", "mount", "thread", "process"] }
 r3bl_tui = { path = "vendor/r3bl-open-core/tui" }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"

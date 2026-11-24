@@ -34,6 +34,9 @@ verify what you claim — everything is allowed, and none of it survives the tur
 
 - Never clean up after yourself. Reverting your own scratch work wastes tokens; the
   reset does it for you.
+- Stop a process you started with `kill <pid>`, using the PID you kept; never `pkill`
+  or `killall` by name or pattern, since other processes of the same program may be the
+  user's.
 - Never run `git commit`, and never move or rewrite history: no merge, rebase, reset,
   checkout, stash or push. Git history is the ledger of changes the user has validated,
   and only a commit turn may append to it. A repository without your commits is a

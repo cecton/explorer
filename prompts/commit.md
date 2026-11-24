@@ -167,6 +167,9 @@ Body explaining what changed and why, in plain prose.
   come from the owner of the code.
 - Read the code you are about to change, and make your change look like the code around
   it.
+- Stop a process you started with `kill <pid>`, using the PID you kept; never `pkill`
+  or `killall` by name or pattern, since other processes of the same program may be the
+  user's.
 - Markdown layout belongs to Explorer's formatter, which runs on the markdown you commit
   once the turn is over and the tree is clean. Do not reflow, realign tables or fix
   wrapping by hand; to format at once, call the `format_markdown` tool if you have it,
