@@ -50,6 +50,7 @@ pub struct AgentSettings {
     pub subagent_model: Option<crate::model_spec::ModelSpec>,
     pub review_rounds: Option<u32>,
     pub repeat_limit: Option<u32>,
+    pub parallel_copies: Option<u32>,
 }
 
 impl Config {
@@ -224,6 +225,13 @@ fn parse_agent(node: &kdl::KdlNode) -> Result<AgentSettings, String> {
                         "agent.repeat-limit must have an integer argument of 0 (off) or at least 2",
                     )?;
                 settings.repeat_limit = Some(limit);
+            }
+            "parallel-copies" => {
+                let copies = int_arg(child)
+                    .and_then(|n| u32::try_from(n).ok())
+                    .filter(|n| *n >= 1)
+                    .ok_or("agent.parallel-copies must have an integer argument of at least 1")?;
+                settings.parallel_copies = Some(copies);
             }
             _ => {}
         }

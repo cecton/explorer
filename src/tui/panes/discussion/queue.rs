@@ -1,6 +1,19 @@
 /// Forgets the prompt queued by `window`, when it has one.
 pub(crate) fn drop_queue_entry(state: &mut crate::tui::state::AppState, window: usize) {
+    let head = state
+        .queued_turns
+        .first()
+        .is_some_and(|entry| entry.window == window);
+    let queued = state
+        .queued_turns
+        .iter()
+        .any(|entry| entry.window == window);
     state.queued_turns.retain(|entry| entry.window != window);
+    state.release_pending |= head;
+    // The notice said the prompt waited in the queue; once taken back it is a draft again.
+    if queued && let Some(discussion) = state.discussions.get_mut(&window) {
+        discussion.notice = None;
+    }
 }
 
 /// Takes back the head-most prompt queued below `parent`, if any: it returns to the
@@ -108,15 +121,13 @@ impl crate::tui::panes::discussion::DiscussionComponent {
         state.mark_session_dirty();
     }
 
-    /// Starts the queued prompts, next first, for as long as no turn is running. Each is
-    /// composed from its window as it stands now. A prompt that can no longer be sent
-    /// leaves the queue with a notice; a dirty working tree holds the whole queue back.
+    /// Starts the queued prompts in order, for as long as each is admitted.
     pub(crate) fn release_queue(
         state: &mut crate::tui::state::AppState,
         main_tx: crate::signal::MainTx,
     ) {
         use crate::tui::panes::discussion::launch::Refusal;
-        while state.running_turns.is_empty() {
+        loop {
             let Some(entry) = state.queued_turns.first().cloned() else {
                 return;
             };

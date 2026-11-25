@@ -9,6 +9,7 @@ mod pin;
 pub(crate) mod title;
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
 /// How often the spinners advance one frame.
@@ -19,12 +20,63 @@ pub fn spinner_char(tick: u8) -> char {
     SPINNER[tick as usize % SPINNER.len()]
 }
 
+/// How a turn holds the repository, which decides what may run beside it (`admit`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Claim {
+    /// Works in the repository itself: a commit turn, or a feedback turn planned in place.
+    Exclusive,
+    /// Has no tools, so touches nothing.
+    Compact,
+    /// A feedback turn working in a copy; the number of these is capped.
+    Copy,
+}
+
+impl Claim {
+    pub fn of(plan: Option<&crate::agent::workspace::Plan>, compact: bool) -> Self {
+        use crate::agent::workspace::Plan;
+        match plan {
+            Some(Plan::Copy) => Self::Copy,
+            None if compact => Self::Compact,
+            Some(Plan::InPlace { .. }) | None => Self::Exclusive,
+        }
+    }
+}
+
+/// Whether a turn with `claim` may start beside the turns `running`, or why it must wait.
+pub fn admit(
+    running: impl Iterator<Item = Claim>,
+    claim: Claim,
+    parallel_copies: u32,
+) -> Result<(), String> {
+    let (mut turns, mut copies) = (0_usize, 0_u32);
+    for running in running {
+        if running == Claim::Exclusive {
+            return Err("a turn is working in the repository itself; wait for it to finish".into());
+        }
+        turns += 1;
+        copies += u32::from(running == Claim::Copy);
+    }
+    match claim {
+        Claim::Exclusive if turns > 0 => Err(format!(
+            "{turns} other turn{} running; this one needs the repository alone",
+            if turns == 1 { " is" } else { "s are" }
+        )),
+        Claim::Copy if copies >= parallel_copies => Err(format!(
+            "{copies} feedback turn{} already work{} in copies of the repository (parallel-copies)",
+            if copies == 1 { "" } else { "s" },
+            if copies == 1 { "s" } else { "" },
+        )),
+        _ => Ok(()),
+    }
+}
+
 /// Main-thread handle on a running turn.
 #[derive(Clone)]
 pub struct TurnHandle {
     pub live: Arc<parking_lot::Mutex<live::LiveTurn>>,
     pub started: Instant,
     pub mode: crate::agent::Mode,
+    pub claim: Claim,
     /// HEAD when the prompt was sent: what a commit turn's commits are counted from.
     pub head_before: Option<String>,
     cancel: Arc<tokio::sync::watch::Sender<bool>>,
@@ -49,6 +101,7 @@ impl TurnHandle {
             ))),
             started: Instant::now(),
             mode,
+            claim: Claim::Exclusive,
             head_before: None,
             cancel: Arc::new(cancel),
         }
@@ -69,6 +122,8 @@ pub struct TurnRequest {
     /// HEAD when this prompt was sent.
     pub head: Option<String>,
     pub root: camino::Utf8PathBuf,
+    /// What a feedback turn with tools does about the repository; `None` for any other turn.
+    pub workspace: Option<crate::agent::workspace::Plan>,
     pub repo: Option<gix::ThreadSafeRepository>,
     pub prompt: String,
     /// `YYYY-MM-DD`, for the system prompt.
@@ -108,13 +163,18 @@ pub struct TurnRequest {
 /// adds. Reads files and runs git.
 fn message_to_send(request: &TurnRequest, sandboxed: bool) -> String {
     use crate::agent::context::{Feedback, Notes};
+    // A compact turn has no tools, so the feedback note would promise a reset that never applies.
+    let feedback = match request.compact {
+        Some(_) => None,
+        None => Feedback::of(request.mode, sandboxed),
+    };
     let notes = Notes {
         root: &request.root,
         head: request.head.as_deref(),
         date: &request.date,
         compacted_parent: request.compacted_parent.as_deref(),
         parent_head: request.parent_head.as_deref(),
-        feedback: Feedback::of(request.mode, sandboxed),
+        feedback,
     };
     let ask = match &request.compact {
         Some(instructions) => crate::agent::context::compact_request(instructions),
@@ -162,8 +222,7 @@ pub fn report_usage(
     });
 }
 
-/// Starts the turn of a node already created on disk and returns its handle. The
-/// outcome arrives as `AppSignal::TurnFinished`.
+/// Starts the turn of a node already on disk; its outcome is `AppSignal::TurnFinished`.
 pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle {
     use crate::agent::Mode;
     use crate::agent::turn::live::LiveTurn;
@@ -175,6 +234,7 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
         live: Arc::clone(&live),
         started: Instant::now(),
         mode: request.mode,
+        claim: Claim::of(request.workspace.as_ref(), request.compact.is_some()),
         head_before: request.head.clone(),
         cancel: Arc::new(cancel_tx),
     };
@@ -186,9 +246,17 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
         live.prompt = request.prompt.clone();
     }
 
-    tokio::spawn(async move {
+    let request_node = request.node.clone();
+    let started = handle.started;
+    let finished_tx = main_tx.clone();
+    let outcome_sent = Arc::new(AtomicBool::new(false));
+    let body_sent = Arc::clone(&outcome_sent);
+    let body = tokio::spawn(async move {
         let mut recorder = live::Recorder::new(Arc::clone(&live), request.node_dir.clone());
-        let workspace = prepare_workspace(&request, &mut recorder).await;
+        let (workspace, prepared) = match prepare_workspace(&request, &mut recorder).await {
+            Ok(workspace) => (workspace, Ok(())),
+            Err(reason) => (None, Err(reason)),
+        };
         let sandbox = workspace
             .as_ref()
             .and_then(|workspace| workspace.sandbox(&request.root));
@@ -196,7 +264,10 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
             .as_ref()
             .and_then(|workspace| workspace.in_place_reason())
             .map(str::to_string);
-        let result = run(&request, sandbox.as_ref(), &mut recorder, cancel_rx.clone()).await;
+        let result = match prepared {
+            Ok(()) => run(&request, sandbox.as_ref(), &mut recorder, cancel_rx.clone()).await,
+            Err(reason) => Err(reason),
+        };
         // However the run ended, a turn cancelled while it ran is cancelled.
         let cancelled = *cancel_rx.borrow();
         let (mut status, mut error) = match result {
@@ -255,6 +326,7 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
             session_id,
             in_place,
         };
+        body_sent.store(true, Ordering::SeqCst);
         crate::signal::send(
             &main_tx,
             AppSignal::TurnFinished {
@@ -280,29 +352,76 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
             .await;
         }
     });
+    tokio::spawn(report_panic(
+        body,
+        request_node,
+        started,
+        finished_tx,
+        outcome_sent,
+    ));
 
     handle
 }
 
+/// Ends a turn whose task panicked, unless its outcome was already sent.
+async fn report_panic(
+    body: tokio::task::JoinHandle<()>,
+    node: crate::conversation::NodeId,
+    started: Instant,
+    main_tx: crate::signal::MainTx,
+    outcome_sent: Arc<AtomicBool>,
+) {
+    use crate::conversation::NodeStatus;
+    use crate::conversation::metadata::TurnOutcome;
+    use crate::signal::AppSignal;
+    let Err(error) = body.await else { return };
+    if !error.is_panic() || outcome_sent.load(Ordering::SeqCst) {
+        return;
+    }
+    let outcome = TurnOutcome {
+        status: NodeStatus::Failed,
+        error: Some("the turn panicked".to_string()),
+        secs: started.elapsed().as_secs(),
+        head_after: None,
+        tokens_in: None,
+        cached_in: None,
+        commits: Vec::new(),
+        reset: false,
+        session_id: None,
+        in_place: None,
+    };
+    crate::signal::send(&main_tx, AppSignal::TurnFinished { node, outcome });
+}
+
+/// A failed copy fails the turn: admitted beside others, it cannot run in the repository.
 async fn prepare_workspace(
     request: &TurnRequest,
     recorder: &mut live::Recorder,
-) -> Option<crate::agent::workspace::Workspace> {
-    use crate::agent::Mode;
-    use crate::agent::workspace::Workspace;
-    if request.mode != Mode::Feedback || request.compact.is_some() {
-        return None;
-    }
-    recorder.activity(Some("preparing workspace".to_string()));
-    let (root, node) = (request.root.clone(), request.node.as_str().to_string());
-    let workspace = tokio::task::spawn_blocking(move || Workspace::prepare(&root, &node))
-        .await
-        .unwrap_or_else(|e| Workspace::InPlace {
-            reason: crate::util::text::single_line(&format!("the copy failed: {e}")),
-        });
-    recorder.activity(None);
-    recorder.live.lock().in_place = workspace.in_place_reason().map(str::to_string);
-    Some(workspace)
+) -> Result<Option<crate::agent::workspace::Workspace>, String> {
+    use crate::agent::workspace::{Plan, Workspace};
+    let reason = match &request.workspace {
+        None => return Ok(None),
+        Some(Plan::InPlace { reason, .. }) => reason.clone(),
+        Some(Plan::Copy) => {
+            recorder.activity(Some("preparing workspace".to_string()));
+            let (root, node) = (request.root.clone(), request.node.as_str().to_string());
+            let copy = tokio::task::spawn_blocking(move || Workspace::copy(&root, &node))
+                .await
+                .unwrap_or_else(|e| Err(format!("the copy failed: {e}")));
+            recorder.activity(None);
+            return match copy {
+                Ok(workspace) => Ok(Some(workspace)),
+                Err(reason) => {
+                    crate::agent::workspace::copy_failed(&reason);
+                    Err(format!(
+                        "cannot copy the repository for this turn: {reason}"
+                    ))
+                }
+            };
+        }
+    };
+    tracing::info!("turn {} runs in place: {reason}", request.node.as_str());
+    Ok(Some(Workspace::InPlace { reason }))
 }
 
 /// Runs the backend; cancelled, it returns early and the caller reads the cancel as the outcome.
@@ -331,10 +450,8 @@ async fn run(
             .await
         }
         Backend::ClaudeCode(target) => {
-            tokio::select! {
-                result = run_claude_code(request, sandbox, &mcp, target, recorder) => result,
-                _ = cancel.wait_for(|cancelled| *cancelled) => Ok(()),
-            }
+            // `run_claude_code` stops the CLI's group itself when cancelled.
+            run_claude_code(request, sandbox, &mcp, target, recorder, &mut cancel).await
         }
     }
 }
@@ -369,6 +486,7 @@ async fn run_claude_code(
     mcp: &crate::agent::mcp::McpTools,
     target: &crate::agent::claude_code::ClaudeTarget,
     recorder: &mut live::Recorder,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), String> {
     use crate::agent::Message;
     use crate::agent::Mode;
@@ -407,14 +525,20 @@ async fn run_claude_code(
         mcp,
         privileged_socket: Some(&socket_path),
         sandbox,
+        compact: request.compact.is_some(),
     };
     run.from(
         &message,
         start_session(request),
         &request.ancestor_dirs,
         recorder,
+        cancel,
     )
     .await?;
+    // A cancelled run ends here: the caller reads the cancel as the turn's outcome.
+    if *cancel.borrow() {
+        return Ok(());
+    }
     if request.mode == Mode::Feedback {
         return Ok(());
     }
@@ -431,7 +555,11 @@ async fn run_claude_code(
         let Message::User { content: nudge, .. } = nudge else {
             break;
         };
-        run.resume(&nudge, &session, recorder).await?;
+        run.resume(&nudge, &session, recorder, cancel).await?;
+        // A cancelled run returns `Ok`, so the loop must look: no nudge for a turn that is over.
+        if *cancel.borrow() {
+            return Ok(());
+        }
     }
     Ok(())
 }
@@ -538,12 +666,127 @@ fn with_compact_hint(error: String) -> String {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn a_panicking_turn_task_still_reports_its_end() {
+        use crate::conversation::NodeId;
+        use crate::conversation::NodeStatus;
+        use crate::signal::AppSignal;
+        let (main_tx, mut main_rx) = tokio::sync::mpsc::channel(4);
+        let body = tokio::spawn(async { panic!("boom") });
+        let node = NodeId::new("n1");
+        let sent = Arc::new(AtomicBool::new(false));
+        report_panic(body, node.clone(), Instant::now(), main_tx, sent).await;
+        let Some(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
+            AppSignal::TurnFinished {
+                node: finished,
+                outcome,
+            },
+        )) = main_rx.recv().await
+        else {
+            panic!("no TurnFinished");
+        };
+        assert_eq!(finished, node);
+        assert_eq!(outcome.status, NodeStatus::Failed);
+        assert!(outcome.error.unwrap().contains("panicked"));
+    }
+
+    #[tokio::test]
+    async fn a_turn_task_that_ends_normally_reports_nothing_more() {
+        use crate::conversation::NodeId;
+        let (main_tx, mut main_rx) = tokio::sync::mpsc::channel(4);
+        let body = tokio::spawn(async {});
+        let node = NodeId::new("n1");
+        let sent = Arc::new(AtomicBool::new(false));
+        report_panic(body, node, Instant::now(), main_tx, sent).await;
+        assert!(main_rx.recv().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn a_panic_after_the_outcome_was_sent_reports_nothing_more() {
+        use crate::conversation::NodeId;
+        let (main_tx, mut main_rx) = tokio::sync::mpsc::channel(4);
+        let sent = Arc::new(AtomicBool::new(false));
+        let body_sent = Arc::clone(&sent);
+        let body = tokio::spawn(async move {
+            body_sent.store(true, Ordering::SeqCst);
+            panic!("boom")
+        });
+        let node = NodeId::new("n1");
+        report_panic(body, node, Instant::now(), main_tx, sent).await;
+        assert!(main_rx.recv().await.is_none());
+    }
+
     #[test]
     fn spinner_char_follows_the_tick_and_wraps() {
         assert_eq!(spinner_char(0), '⠋');
         assert_eq!(spinner_char(1), '⠙');
         assert_eq!(spinner_char(9), '⠏');
         assert_eq!(spinner_char(10), '⠋');
+    }
+
+    #[test]
+    fn admission_lets_copies_and_compacts_overlap_and_everything_else_run_alone() {
+        use crate::agent::turn::Claim;
+        let admitted = |running: &[Claim], claim| admit(running.iter().copied(), claim, 2).is_ok();
+        for claim in [Claim::Exclusive, Claim::Compact, Claim::Copy] {
+            assert!(admitted(&[], claim), "{claim:?} alone");
+            assert!(
+                !admitted(&[Claim::Exclusive], claim),
+                "{claim:?} beside exclusive"
+            );
+        }
+        assert!(admitted(&[Claim::Copy], Claim::Copy));
+        assert!(admitted(&[Claim::Copy, Claim::Compact], Claim::Compact));
+        assert!(admitted(&[Claim::Compact], Claim::Copy));
+        assert!(!admitted(&[Claim::Copy], Claim::Exclusive));
+        assert!(!admitted(&[Claim::Compact], Claim::Exclusive));
+        assert!(!admitted(&[Claim::Copy, Claim::Copy], Claim::Exclusive));
+    }
+
+    #[test]
+    fn admission_caps_the_copies_and_says_what_it_waits_for() {
+        use crate::agent::turn::Claim;
+        assert!(admit([Claim::Copy].into_iter(), Claim::Copy, 2).is_ok());
+        let full = admit(
+            [Claim::Copy, Claim::Compact, Claim::Copy].into_iter(),
+            Claim::Copy,
+            2,
+        )
+        .unwrap_err();
+        assert!(
+            full.contains("2 feedback turns") && full.contains("parallel-copies"),
+            "{full}"
+        );
+        let one = admit([Claim::Copy].into_iter(), Claim::Copy, 1).unwrap_err();
+        assert!(one.contains("1 feedback turn already works"), "{one}");
+        assert!(
+            admit(
+                [Claim::Compact, Claim::Compact, Claim::Compact].into_iter(),
+                Claim::Compact,
+                1
+            )
+            .is_ok()
+        );
+        let alone = admit([Claim::Copy, Claim::Copy].into_iter(), Claim::Exclusive, 4).unwrap_err();
+        assert!(alone.contains("2 other turns are running"), "{alone}");
+        let alone = admit([Claim::Copy].into_iter(), Claim::Exclusive, 4).unwrap_err();
+        assert!(alone.contains("1 other turn is running"), "{alone}");
+        let held = admit([Claim::Exclusive].into_iter(), Claim::Copy, 4).unwrap_err();
+        assert!(held.contains("repository itself"), "{held}");
+    }
+
+    #[test]
+    fn the_claim_follows_the_plan_and_the_compact() {
+        use crate::agent::turn::Claim;
+        use crate::agent::workspace::Plan;
+        let in_place = Plan::InPlace {
+            reason: "no build".to_string(),
+            failure: None,
+        };
+        assert_eq!(Claim::of(Some(&Plan::Copy), false), Claim::Copy);
+        assert_eq!(Claim::of(Some(&in_place), false), Claim::Exclusive);
+        assert_eq!(Claim::of(None, false), Claim::Exclusive);
+        assert_eq!(Claim::of(None, true), Claim::Compact);
     }
 
     #[test]
@@ -574,6 +817,7 @@ mod tests {
                 parent_head: None,
                 head: None,
                 root: camino::Utf8PathBuf::new(),
+                workspace: None,
                 repo: None,
                 prompt: "go".to_string(),
                 date: "2026-11-13".to_string(),

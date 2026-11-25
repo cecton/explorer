@@ -37,6 +37,8 @@ pub struct Run<'a> {
     /// The turn's tool socket, which Explorer's tool server asks for what only the turn knows.
     pub privileged_socket: Option<&'a camino::Utf8Path>,
     pub sandbox: Option<&'a crate::agent::workspace::Sandbox>,
+    /// A compact turn answers without tools, as the own loop does.
+    pub compact: bool,
 }
 
 impl Run<'_> {
@@ -50,6 +52,7 @@ impl Run<'_> {
         start: Resume<'_>,
         ancestors: &[camino::Utf8PathBuf],
         recorder: &mut crate::agent::turn::live::Recorder,
+        cancel: &mut tokio::sync::watch::Receiver<bool>,
     ) -> Result<(), String> {
         let mut opening = prompt.to_string();
         let mut resume = start;
@@ -59,7 +62,7 @@ impl Run<'_> {
                 opening = open_fresh(ancestors, &opening).await?;
                 anchored = true;
             }
-            let attempt = run(&self, &opening, resume, recorder).await;
+            let attempt = run(&self, &opening, resume, recorder, cancel).await;
             match attempt {
                 Ok(()) => return Ok(()),
                 Err(RunError::Failed(error)) => return Err(error),
@@ -76,8 +79,9 @@ impl Run<'_> {
         prompt: &str,
         session: &str,
         recorder: &mut crate::agent::turn::live::Recorder,
+        cancel: &mut tokio::sync::watch::Receiver<bool>,
     ) -> Result<(), String> {
-        run(&self, prompt, Resume::Continue(session), recorder)
+        run(&self, prompt, Resume::Continue(session), recorder, cancel)
             .await
             .map_err(|error| match error {
                 RunError::SessionGone => "the Claude Code session of this turn is gone".to_string(),
@@ -100,6 +104,7 @@ async fn open_fresh(ancestors: &[camino::Utf8PathBuf], prompt: &str) -> Result<S
     })
 }
 
+#[derive(Debug)]
 enum RunError {
     /// The session to resume no longer exists; nothing was run.
     SessionGone,
@@ -331,11 +336,16 @@ fn arguments(config: &Run<'_>, resume: Resume<'_>) -> Vec<String> {
         }
         Resume::Continue(session) => args.extend(["--resume", session].map(str::to_string)),
     }
-    let config = config
-        .mcp
-        .claude_config(config.root, config.privileged_socket);
+    let mcp = if config.compact {
+        args.extend(["--tools", ""].map(str::to_string));
+        r#"{"mcpServers":{}}"#.to_string()
+    } else {
+        config
+            .mcp
+            .claude_config(config.root, config.privileged_socket)
+    };
     args.push("--mcp-config".to_string());
-    args.push(config);
+    args.push(mcp);
     // Only the servers of this repository, never those of the user's own setup.
     args.push("--strict-mcp-config".to_string());
     args
@@ -381,14 +391,15 @@ fn input_frame(content: &str) -> String {
     format!("{frame}\n")
 }
 
-/// Runs the CLI once and feeds its output to `recorder`. The session id is recorded as
-/// soon as it is known, so it survives a failure or a cancellation.
+/// Runs the CLI once into `recorder`, which keeps the session id; a cancel stops its group.
 async fn run(
     config: &Run<'_>,
     prompt: &str,
     resume: Resume<'_>,
     recorder: &mut crate::agent::turn::live::Recorder,
+    cancel: &mut tokio::sync::watch::Receiver<bool>,
 ) -> Result<(), RunError> {
+    use crate::agent::driver::ChildGuard;
     use crate::agent::turn::live::Injector;
     use tokio::io::AsyncBufReadExt;
     use tokio::io::AsyncReadExt;
@@ -404,7 +415,7 @@ async fn run(
             command
         }
     };
-    let mut child = command
+    let child = command
         .args(arguments(config, resume))
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
@@ -412,15 +423,13 @@ async fn run(
         .process_group(0)
         .spawn()
         .map_err(|e| RunError::Failed(spawn_error(e)))?;
-    // SIGTERM rather than SIGKILL: it lets Claude Code stop the commands it started.
-    let mut terminator = child
-        .id()
-        .map(|pid| crate::util::process::GroupGuard::new(pid, libc::SIGTERM));
+    // SIGTERM first, so Claude Code stops the commands it started; then a kill.
+    let mut guard = ChildGuard::new(child).map_err(RunError::Failed)?;
 
     // stdin stays open for steering; the run ends once `Settling` lets stdin close.
     let first = input_frame(prompt);
     let settled = Arc::new(AtomicBool::new(false));
-    let steering = child.stdin.take().map(|mut stdin| {
+    let steering = guard.child_mut().stdin.take().map(|mut stdin| {
         let injector = injector.clone();
         let settled = Arc::clone(&settled);
         tokio::spawn(async move {
@@ -454,7 +463,7 @@ async fn run(
             }
         })
     });
-    let stderr = child.stderr.take().map(|mut stderr| {
+    let stderr = guard.child_mut().stderr.take().map(|mut stderr| {
         tokio::spawn(async move {
             let mut text = String::new();
             let _ = stderr.read_to_string(&mut text).await;
@@ -464,9 +473,21 @@ async fn run(
 
     let mut outcome = None;
     let mut settling = Settling::default();
-    if let Some(stdout) = child.stdout.take() {
+    let mut cancelled = false;
+    if let Some(stdout) = guard.child_mut().stdout.take() {
         let mut lines = tokio::io::BufReader::new(stdout).lines();
-        while let Ok(Some(line)) = lines.next_line().await {
+        loop {
+            let next = tokio::select! {
+                biased;
+                _ = cancel.wait_for(|cancelled| *cancelled) => {
+                    cancelled = true;
+                    break;
+                }
+                next = lines.next_line() => next,
+            };
+            let Ok(Some(line)) = next else {
+                break;
+            };
             for event in parse_line(&line) {
                 if let Some(now) = settling.after(&event) {
                     settled.store(now, Ordering::SeqCst);
@@ -494,14 +515,20 @@ async fn run(
         // Output ended without a settled result: the steering task would poll forever.
         steering.abort();
     }
-    let status = child.wait().await;
-    if let Some(terminator) = terminator.as_mut() {
-        terminator.disarm();
-    }
+    // Stopped before the turn releases the copy of the repository it works in.
+    let status = if cancelled {
+        guard.stop().await
+    } else {
+        guard.finish().await
+    };
     let stderr = match stderr {
         Some(reader) => reader.await.unwrap_or_default(),
         None => String::new(),
     };
+    // The turn reads the cancel as its outcome, so a stopped run is not a failure.
+    if cancelled {
+        return Ok(());
+    }
 
     let resumed = !matches!(resume, Resume::Fresh);
     match outcome {
@@ -695,6 +722,7 @@ mod tests {
             mcp: &mcp,
             privileged_socket: None,
             sandbox: None,
+            compact: false,
         };
         let joined = |config: &Run<'_>, resume| arguments(config, resume).join(" ");
 
@@ -730,6 +758,15 @@ mod tests {
         // server of its own: a claude-code turn reads the conversation tree through them.
         assert!(fresh.contains("--mcp-config"));
         assert!(fresh.contains("explorer"));
+
+        // A compact turn has no tools and no servers, not even Explorer's own.
+        let compact = Run {
+            compact: true,
+            ..config
+        };
+        let compact = joined(&compact, Resume::Fresh);
+        assert!(compact.contains(r#"--tools  --mcp-config {"mcpServers":{}} --strict-mcp-config"#));
+        assert!(!compact.contains("explorer"));
     }
 
     #[test]
@@ -809,5 +846,125 @@ mod tests {
             "{\"message\":{\"content\":\"also handle the parser\",\"role\":\"user\"},\
              \"type\":\"user\"}\n"
         );
+    }
+
+    /// A stand-in `claude` on `PATH`: a writing child, both pids recorded, then it waits.
+    fn fake_claude(dir: &camino::Utf8Path) -> std::ffi::OsString {
+        use std::os::unix::fs::PermissionsExt;
+        let bin = dir.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let script = format!(
+            "#!/bin/sh\n\
+             echo $$ > {dir}/claude.pid\n\
+             ( while :; do echo x > {dir}/written; sleep 0.05; done ) &\n\
+             echo $! > {dir}/writer.pid\n\
+             sleep 300\n"
+        );
+        let path = bin.join("claude");
+        std::fs::write(&path, script).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut dirs = vec![bin.into_std_path_buf()];
+        dirs.extend(std::env::split_paths(
+            &std::env::var_os("PATH").unwrap_or_default(),
+        ));
+        std::env::join_paths(dirs).unwrap()
+    }
+
+    /// Whether a pid still runs.
+    fn runs(pid: i32) -> bool {
+        !matches!(
+            rustix::process::Pid::from_raw(pid).map(rustix::process::test_kill_process),
+            Some(Err(rustix::io::Errno::SRCH))
+        )
+    }
+
+    /// A turn's recorder on a scratch directory.
+    fn recorder(dir: &camino::Utf8Path) -> crate::agent::turn::live::Recorder {
+        use crate::agent::turn::live::{LiveTurn, Recorder};
+        Recorder::new(
+            std::sync::Arc::new(parking_lot::Mutex::new(LiveTurn::new())),
+            dir.to_path_buf(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_cancelled_run_stops_the_cli_and_the_commands_it_started() {
+        // The turn releases its copy only after this: nothing may still write into it.
+        let (tmp, dir) = crate::util::test_support::temp_root();
+        let path = fake_claude(&dir);
+        // The binary shares one environment: the stand-in goes first on PATH, restored by a guard.
+        struct Restore {
+            previous: Option<std::ffi::OsString>,
+        }
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                // SAFETY: puts back the PATH found above; the stand-in only went in front of it.
+                unsafe {
+                    match self.previous.take() {
+                        Some(path) => std::env::set_var("PATH", path),
+                        None => std::env::remove_var("PATH"),
+                    }
+                }
+            }
+        }
+        let _restore = Restore {
+            previous: std::env::var_os("PATH"),
+        };
+        // SAFETY: the stand-in only goes in front of the value found above.
+        unsafe {
+            std::env::set_var("PATH", &path);
+        }
+        let mut recorder = recorder(&dir);
+        let (cancel_tx, mut cancel) = tokio::sync::watch::channel(false);
+        use crate::model_spec::Effort;
+        let target = ClaudeTarget {
+            model: "haiku".to_string(),
+            effort: Effort::Default,
+        };
+        use crate::agent::mcp::McpTools;
+        let mcp = McpTools::default();
+        let config = Run {
+            target: &target,
+            root: &dir,
+            system: "system",
+            mcp: &mcp,
+            privileged_socket: None,
+            sandbox: None,
+            compact: false,
+        };
+        let run = run(&config, "do it", Resume::Fresh, &mut recorder, &mut cancel);
+        let pid_of = |file: &str| {
+            std::fs::read_to_string(dir.join(file))
+                .ok()
+                .and_then(|text| text.trim().parse::<i32>().ok())
+        };
+        let stopped = async {
+            // Both pids before the cancel lands, so the run cannot finish before it starts.
+            for _ in 0..500 {
+                if pid_of("claude.pid").is_some() && pid_of("writer.pid").is_some() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            cancel_tx.send(true).unwrap();
+        };
+        let (result, ()) = tokio::join!(run, stopped);
+        // A cancelled run is no failure: the turn reads the cancel as its outcome.
+        assert!(matches!(result, Ok(())), "{:?}", result.err());
+
+        for file in ["claude.pid", "writer.pid"] {
+            let pid = pid_of(file)
+                .unwrap_or_else(|| panic!("{file} was never written: the stand-in did not run"));
+            let mut gone = false;
+            for _ in 0..200 {
+                if !runs(pid) {
+                    gone = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            assert!(gone, "{file} ({pid}) outlived the cancelled run");
+        }
+        drop(tmp);
     }
 }

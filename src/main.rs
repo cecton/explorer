@@ -168,9 +168,12 @@ async fn run() {
         }
     };
 
-    // What a crashed or quit Explorer left under target/explorer, deleted off the startup path.
+    // The sandbox check, then the sweep of what a dead Explorer left, off the startup path.
     let swept = root.clone();
-    std::thread::spawn(move || agent::workspace::sweep(&swept));
+    std::thread::spawn(move || {
+        agent::workspace::warm(&swept);
+        agent::workspace::sweep(&swept);
+    });
 
     let theme_name = args.theme.clone().or(config.theme).unwrap_or_else(|| {
         tui::theme::HelixTheme::theme_names()

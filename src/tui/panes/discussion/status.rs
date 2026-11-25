@@ -65,9 +65,6 @@ pub(crate) fn status_text(meta: &crate::conversation::metadata::Metadata) -> (St
     if let Some(secs) = meta.secs {
         push(&fmt_elapsed(secs));
     }
-    if let Some(reason) = &meta.in_place {
-        push(&format!("in place: {reason}"));
-    }
     (text, failed)
 }
 
@@ -181,9 +178,6 @@ fn progress_text(
     }
     if let Some(cached) = live.cached_in {
         text.push_str(&format!(" · {} cached", fmt_tokens(cached)));
-    }
-    if let Some(reason) = &live.in_place {
-        text.push_str(&format!(" · in place: {reason}"));
     }
     text
 }

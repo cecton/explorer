@@ -125,9 +125,13 @@ commits each node produced, so any line of code can be traced, through `git blam
 to the sentence that asked for it. The commits themselves stay clean: no trailer, no
 link, no mention of a tool. Since everything the agent does either ends up in git or is
 thrown away, it works without permission prompts. The price is two rules: a prompt needs
-a clean working tree, and one turn runs at a time. A message sent to the window of the
-turn that is running joins that turn, at its next round, so it can steer the agent while
-it works; a prompt for another window is queued.
+a clean working tree, and a turn that works in the repository itself runs alone. A
+feedback turn works in a reflink copy of the repository when `target/` already holds a
+build, and up to `parallel-copies` of those (four by default, in the `agent` block of
+`config.kdl`) run side by side; a commit turn waits for them, and they wait for it. A
+message sent to the window of the turn that is running joins that turn, at its next
+round, so it can steer the agent while it works; a prompt that has to wait is queued, in
+order.
 
 **Run something when the agents are done.** `<leader>:` opens a command line over the
 status bar. `!<command>` runs a command in a new terminal, and
@@ -286,8 +290,10 @@ it is an ordinary feedback turn: the agent may try things, and they are discarde
 Explorer is used every day by its owner and by nobody else. Know this before trying it:
 
 - The agent runs every tool call without asking, the shell included. What protects you
-  is git. A feedback turn in a repository that has a build works in a copy of it: a guard
-  against accidents, not a sandbox.
+  is git. A feedback turn in a repository that has a build works in a reflink copy of it,
+  mounted at the repository's own path: the agent's writes land in the copy, which is
+  deleted when the turn ends. That is a guard against accidents, not a sandbox: the agent
+  still reaches the rest of the host.
 - Code intelligence is Rust only.
 - There is no file tree: files are opened by name.
 - Not built yet: git status and blame panes, an export of the tree into the repository,

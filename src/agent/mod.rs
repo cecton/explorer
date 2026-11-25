@@ -53,6 +53,9 @@ impl Backend {
 /// Review rounds of a commit when the `agent` block sets none.
 pub const DEFAULT_REVIEW_ROUNDS: u32 = 3;
 
+/// Feedback turns that may work in copies of the repository at once, by default.
+pub const DEFAULT_PARALLEL_COPIES: u32 = 4;
+
 /// Times a tool call may return the same result before the run is stuck, by default.
 pub const DEFAULT_REPEAT_LIMIT: u32 = 5;
 
@@ -74,6 +77,8 @@ pub struct AgentConfig {
     pub review_rounds: u32,
     /// Times one tool call may return the same result before a nudge; 0 is off.
     pub repeat_limit: u32,
+    /// Most feedback turns working in copies of the repository at once; at least 1.
+    pub parallel_copies: u32,
 }
 
 impl Default for AgentConfig {
@@ -86,6 +91,7 @@ impl Default for AgentConfig {
             roles: Vec::new(),
             review_rounds: DEFAULT_REVIEW_ROUNDS,
             repeat_limit: DEFAULT_REPEAT_LIMIT,
+            parallel_copies: DEFAULT_PARALLEL_COPIES,
         }
     }
 }
@@ -142,6 +148,7 @@ impl AgentConfig {
             roles,
             review_rounds: settings.review_rounds.unwrap_or(DEFAULT_REVIEW_ROUNDS),
             repeat_limit: settings.repeat_limit.unwrap_or(DEFAULT_REPEAT_LIMIT),
+            parallel_copies: settings.parallel_copies.unwrap_or(DEFAULT_PARALLEL_COPIES),
         }
     }
 }
@@ -361,6 +368,15 @@ mod tests {
     }
 
     #[test]
+    fn parallel_copies_default_to_four_and_must_be_at_least_one() {
+        assert_eq!(resolve("theme \"night_owl\"").parallel_copies, 4);
+        assert_eq!(resolve("agent {\n parallel-copies 2\n}").parallel_copies, 2);
+        assert!(crate::config::parse("agent {\n parallel-copies 0\n}").is_err());
+        assert!(crate::config::parse("agent {\n parallel-copies -1\n}").is_err());
+        assert!(crate::config::parse("agent {\n parallel-copies \"4\"\n}").is_err());
+    }
+
+    #[test]
     fn endpoint_without_a_token_is_skipped() {
         use crate::config::AgentSettings;
         use crate::endpoint::EndpointKind;
@@ -380,6 +396,7 @@ mod tests {
             subagent_model: None,
             review_rounds: None,
             repeat_limit: None,
+            parallel_copies: None,
         };
         let tokens =
             crate::config::parse_auth("router \"sk-or\"\nunused \"x\"").expect("valid auth");

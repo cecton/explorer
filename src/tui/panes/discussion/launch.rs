@@ -64,8 +64,8 @@ impl Launch {
 /// Why a turn did not start.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) enum Refusal {
-    /// A turn is running: the prompt can start once it has ended.
-    Busy(&'static str),
+    /// Running turns keep the prompt waiting: it can start once they have ended.
+    Busy(String),
     /// The working tree has uncommitted changes.
     DirtyTree,
     /// The repository is not trusted yet: no agent runs in it before the user says so.
@@ -76,7 +76,7 @@ pub(crate) enum Refusal {
 impl Refusal {
     pub(crate) fn into_reason(self) -> String {
         match self {
-            Self::Busy(reason) => reason.to_string(),
+            Self::Busy(reason) => reason,
             Self::DirtyTree => {
                 "the working tree has uncommitted changes; commit or stash them first".to_string()
             }
@@ -306,14 +306,14 @@ pub(crate) fn compose_launch(
     }))
 }
 
-/// Checks the guards, creates the node on disk and starts its turn. On refusal nothing
-/// is created and the reason is returned.
+/// Checks the guards, creates the node and starts its turn; a refusal creates nothing.
 pub(crate) fn start_turn(
     state: &mut crate::tui::state::AppState,
     main_tx: crate::signal::MainTx,
     launch: Launch,
 ) -> Result<crate::conversation::NodeId, Refusal> {
     use crate::agent::Mode;
+    use crate::agent::turn::Claim;
     use crate::agent::turn::TurnRequest;
     use crate::conversation::NodeStatus;
     use crate::conversation::NodeType;
@@ -366,7 +366,7 @@ pub(crate) fn start_turn(
         )
     };
     if parent_status == Some(NodeStatus::Running) {
-        return Err(Refusal::Busy("this node is still running"));
+        return Err(Refusal::Busy("this node is still running".to_string()));
     }
     // A continue turn replays the interrupted node's transcript: it is the one prompt
     // that may build on an incomplete node. A cancelled node cut short with something to
@@ -386,12 +386,16 @@ pub(crate) fn start_turn(
             "this node is not complete; continue from its parent".to_string()
         }));
     }
-    // One turn at a time: a feedback turn experiments in the tree, a commit turn needs it alone.
-    if !state.running_turns.is_empty() {
-        return Err(Refusal::Busy(
-            "another turn is running; wait for it to finish",
-        ));
-    }
+    // A feedback turn with tools plans a copy; a compact turn touches nothing.
+    let workspace = (mode == Mode::Feedback && compact.is_none())
+        .then(|| crate::agent::workspace::plan(&state.root));
+    let claim = Claim::of(workspace.as_ref(), compact.is_some());
+    crate::agent::turn::admit(
+        state.running_turns.values().map(|handle| handle.claim),
+        claim,
+        state.agent.parallel_copies,
+    )
+    .map_err(Refusal::Busy)?;
     if crate::git::status_short(&state.root).is_ok_and(|status| !status.trim().is_empty()) {
         return Err(Refusal::DirtyTree);
     }
@@ -432,6 +436,10 @@ pub(crate) fn start_turn(
         .summary_model
         .as_ref()
         .and_then(|summary| state.agent.backend(summary));
+    // Spends the failure this plan was made around; the copy runs in the spawned turn.
+    if let Some(plan) = &workspace {
+        crate::agent::workspace::started(plan);
+    }
     let request = TurnRequest {
         spec,
         agent: Arc::clone(&state.agent),
@@ -443,6 +451,7 @@ pub(crate) fn start_turn(
         parent_head: context.parent_head,
         head,
         root: state.root.clone(),
+        workspace,
         repo: state.repo.clone(),
         prompt: prompt.clone(),
         date: crate::util::time::utc_date(now),

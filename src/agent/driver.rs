@@ -62,6 +62,11 @@ impl ChildGuard {
         })
     }
 
+    /// The handle itself, for the pipes of a run that reads it while it works.
+    pub(crate) fn child_mut(&mut self) -> &mut tokio::process::Child {
+        &mut self.child
+    }
+
     /// Waits until the process has exited, without reaping it; whether it did in time.
     async fn wait_exit(&self, grace: Duration) -> bool {
         let deadline = tokio::time::Instant::now() + grace;
@@ -89,7 +94,7 @@ impl ChildGuard {
     }
 
     /// Like `stop`, for a process that was told to finish: it has `STOP_GRACE` to exit alone.
-    async fn finish(&mut self) -> std::io::Result<std::process::ExitStatus> {
+    pub(crate) async fn finish(&mut self) -> std::io::Result<std::process::ExitStatus> {
         self.wait_exit(STOP_GRACE).await;
         self.stop().await
     }

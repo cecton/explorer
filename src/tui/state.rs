@@ -447,6 +447,8 @@ pub struct AppState {
     pub spinner_tick: u8,
     /// Prompts waiting for their turn, next to start first. Never saved with the session.
     pub queued_turns: Vec<PendingTurn>,
+    /// The head of the queue left it without a turn finishing: the next tick starts what follows.
+    pub release_pending: bool,
     /// The `after-agents` command, in memory only; replacing or clearing it kills a running one.
     pub after_agents: Option<crate::tui::after_agents::AfterAgents>,
     pub after_agents_grace: Duration,

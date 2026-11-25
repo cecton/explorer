@@ -20,7 +20,7 @@ mod tests {
 
     /// A turn on a fake server, with the node it runs on.
     struct Setup {
-        _tmp: tempfile::TempDir,
+        _tmp: Option<tempfile::TempDir>,
         _store: tempfile::TempDir,
         root: camino::Utf8PathBuf,
         node_dir: camino::Utf8PathBuf,
@@ -38,19 +38,45 @@ mod tests {
         script: Vec<Reply>,
         (tmp, root): (tempfile::TempDir, camino::Utf8PathBuf),
     ) -> Setup {
+        let head = commit(&root, "hello.txt", "hello world\n", "init");
+        build(Some(tmp), root, head, mode, script, 1).await
+    }
+
+    /// A second turn on the repository of `first`, with a server and a conversation of its own.
+    async fn another(first: &Setup, script: Vec<Reply>) -> Setup {
+        let head = first.request.head.clone().unwrap();
+        build(
+            None,
+            first.root.clone(),
+            head,
+            first.request.mode,
+            script,
+            2,
+        )
+        .await
+    }
+
+    async fn build(
+        tmp: Option<tempfile::TempDir>,
+        root: camino::Utf8PathBuf,
+        head: String,
+        mode: Mode,
+        script: Vec<Reply>,
+        // The node's id is its creation time, so two conversations need two of them.
+        created: i64,
+    ) -> Setup {
         use crate::agent::AgentConfig;
         use crate::agent::mcp::McpHost;
         use crate::conversation::ConversationTree;
         use crate::conversation::metadata::Metadata;
         use crate::endpoint::{Endpoint, EndpointKind, Provider};
         use crate::model_spec::ModelSpec;
-        let head = commit(&root, "hello.txt", "hello world\n", "init");
         let server = FakeLlm::start(script).await;
         // Outside the repository, so the tree never shows up as uncommitted work.
         let (store_tmp, store) = temp_root();
         let mut tree = ConversationTree::load(&store);
         let node = tree
-            .create_node(None, 1, Metadata::default(), "do the thing", None)
+            .create_node(None, created, Metadata::default(), "do the thing", None)
             .unwrap();
         let node_dir = tree.node_dir(&node).unwrap();
         let endpoint = Endpoint {
@@ -76,6 +102,8 @@ mod tests {
             parent_head: None,
             head: Some(head),
             root: root.clone(),
+            workspace: (mode == Mode::Feedback)
+                .then(|| crate::agent::workspace::plan_with(&root, &Default::default())),
             repo: Some(gix::open(root.as_std_path()).unwrap().into_sync()),
             prompt: "do the thing".to_string(),
             date: "2026-11-22".to_string(),
@@ -608,7 +636,7 @@ mod tests {
             Reply::new().text("All done."),
         ];
         let setup = setup_in(Mode::Feedback, script, repo_with_a_build()).await;
-        let (handle, outcome, _) = run_turn(&setup, async |_| {}).await;
+        let (_, outcome, _) = run_turn(&setup, async |_| {}).await;
         if let Some(reason) = &outcome.in_place {
             // Without namespaces or reflinks the turn runs in place, as the next test covers.
             assert!(
@@ -620,7 +648,6 @@ mod tests {
             return;
         }
         assert_eq!(outcome.status, NodeStatus::Done);
-        assert_eq!(handle.live.lock().in_place, None);
 
         let seen = tool_result(&setup, 1, "c1");
         assert!(seen.starts_with(setup.root.as_str()), "{seen}");
@@ -657,18 +684,117 @@ mod tests {
             Reply::new().text("Done."),
         ];
         let setup = setup(Mode::Feedback, script).await;
-        let (handle, outcome, _) = run_turn(&setup, async |_| {}).await;
+        let (_, outcome, _) = run_turn(&setup, async |_| {}).await;
         assert_eq!(outcome.status, NodeStatus::Done);
         let reason = outcome.in_place.as_deref().unwrap();
         assert!(
             reason.contains("no target/") || reason.contains("cargo target directory"),
             "{reason}"
         );
-        assert_eq!(handle.live.lock().in_place.as_deref(), Some(reason));
         assert!(outcome.reset);
         assert!(!setup.root.join("scratch.txt").exists());
         assert!(last_user_text(&setup, 0).contains(FEEDBACK_NOTE));
         assert!(!last_user_text(&setup, 0).contains(SANDBOX_NOTE));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn two_feedback_turns_work_in_copies_at_the_same_time() {
+        let (tmp, root) = repo_with_a_build();
+        let (_flags_tmp, flags) = temp_root();
+        let meet = |mine: &str, theirs: &str| {
+            format!(
+                "touch {flags}/{mine}; for i in $(seq 400); do [ -f {flags}/{theirs} ] && break; sleep 0.05; done; \
+                 [ -f {flags}/{theirs} ] && echo peer-seen; echo {mine} > {mine}.txt"
+            )
+        };
+        let script = |mine: &str, theirs: &str| {
+            vec![
+                Reply::new().call("c1", "shell", json!({"command": meet(mine, theirs)})),
+                Reply::new().text("Done."),
+            ]
+        };
+        let first = setup_in(Mode::Feedback, script("a", "b"), (tmp, root)).await;
+        let second = another(&first, script("b", "a")).await;
+        let (main_tx, mut main_rx) = tokio::sync::mpsc::channel(64);
+        let _first = crate::agent::turn::spawn(first.request.clone(), main_tx.clone());
+        let _second = crate::agent::turn::spawn(second.request.clone(), main_tx);
+        let mut outcomes = Vec::new();
+        tokio::time::timeout(Duration::from_secs(60), async {
+            while outcomes.len() < 2 {
+                let Some(r3bl_tui::TerminalWindowMainThreadSignal::ApplyAppSignal(
+                    AppSignal::TurnFinished { outcome, .. },
+                )) = main_rx.recv().await
+                else {
+                    continue;
+                };
+                outcomes.push(outcome);
+            }
+        })
+        .await
+        .expect("the turns did not finish in time");
+        if outcomes.iter().any(|outcome| outcome.in_place.is_some()) {
+            // Without namespaces or reflinks neither turn is planned to copy, as the tests above cover.
+            return;
+        }
+        let errors: Vec<_> = outcomes.iter().map(|outcome| &outcome.error).collect();
+        assert!(
+            outcomes
+                .iter()
+                .all(|outcome| outcome.status == NodeStatus::Done),
+            "{errors:?}"
+        );
+        assert!(tool_result(&first, 1, "c1").contains("peer-seen"));
+        assert!(tool_result(&second, 1, "c1").contains("peer-seen"));
+        assert!(!first.root.join("a.txt").exists());
+        assert!(!first.root.join("b.txt").exists());
+        assert_eq!(git(&first.root, &["status", "--short"]), "");
+    }
+
+    #[tokio::test]
+    async fn a_copy_that_cannot_be_made_fails_the_turn_and_leaves_the_repository_alone() {
+        use crate::agent::workspace::Plan;
+        // The failure marker is process-wide: cleared on drop, so a panic clears it too.
+        struct ClearOnDrop;
+        impl Drop for ClearOnDrop {
+            fn drop(&mut self) {
+                crate::agent::workspace::clear_failed();
+            }
+        }
+        let _clear = ClearOnDrop;
+        let script = vec![Reply::new().text("never asked")];
+        let mut setup = setup(Mode::Feedback, script).await;
+        // A nested git file that names a directory outside the copy cannot be copied.
+        std::fs::create_dir_all(setup.root.join("sub")).unwrap();
+        std::fs::write(setup.root.join("sub/.git"), "gitdir: /elsewhere\n").unwrap();
+        setup.request.workspace = Some(Plan::Copy);
+        let (_, outcome, _) = run_turn(&setup, async |_| {}).await;
+        assert_eq!(outcome.status, NodeStatus::Failed);
+        let error = outcome.error.as_deref().unwrap();
+        assert!(error.contains("cannot copy the repository"), "{error}");
+        assert!(!outcome.reset);
+        // The turn never touched the tree, so nothing of it was discarded.
+        assert!(setup.root.join("sub/.git").exists());
+        assert!(setup.server.requests().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_compact_turn_asks_for_a_summary_without_a_feedback_note() {
+        use crate::agent::context::{FEEDBACK_NOTE, SANDBOX_NOTE};
+        let script = vec![Reply::new().text("A summary.")];
+        let mut setup = setup(Mode::Feedback, script).await;
+        // As `start_turn` builds it: a compact turn plans no copy, since it has no tools.
+        setup.request.compact = Some("keep the decisions".to_string());
+        setup.request.workspace = None;
+        let (_, outcome, _) = run_turn(&setup, async |_| {}).await;
+        assert_eq!(outcome.status, NodeStatus::Done);
+        // Nothing of it is reset, and nothing of it was copied either.
+        assert!(!outcome.reset);
+        assert!(setup.server.requests().len() == 1);
+        let sent = last_user_text(&setup, 0);
+        assert!(sent.contains("keep the decisions"), "{sent}");
+        // The note would promise a reset that a turn with no tools never needs.
+        assert!(!sent.contains(FEEDBACK_NOTE), "{sent}");
+        assert!(!sent.contains(SANDBOX_NOTE), "{sent}");
     }
 
     #[tokio::test]
@@ -676,9 +802,8 @@ mod tests {
         // In a repository a feedback turn would copy, so the mode alone decides.
         let script = vec![Reply::new().text("Nothing to do.")];
         let setup = setup_in(Mode::Commit, script, repo_with_a_build()).await;
-        let (handle, outcome, _) = run_turn(&setup, async |_| {}).await;
+        let (_, outcome, _) = run_turn(&setup, async |_| {}).await;
         assert_eq!(outcome.in_place, None);
-        assert_eq!(handle.live.lock().in_place, None);
         assert!(!setup.root.join("target/explorer").exists());
     }
 

@@ -134,6 +134,12 @@ impl DiscussionComponent {
         node: &crate::conversation::NodeId,
         spec: crate::model_spec::ModelSpec,
     ) {
+        // Prompts queued ahead of this one start first, so it cannot overtake them.
+        Self::release_queue(state, main_tx.clone());
+        if !state.queued_turns.is_empty() {
+            state.tree_view.notice = Some("prompts are queued ahead of this one".to_string());
+            return;
+        }
         let launch = {
             let tree = state.conversations.read();
             let dir = tree.node_dir(node);
@@ -297,7 +303,14 @@ impl DiscussionComponent {
             model_picker::open(state, main_tx, ModelPickerPurpose::Window(id));
             return;
         }
-        match crate::tui::panes::discussion::launch::launch_window(state, main_tx, id) {
+        let launched = if state.queued_turns.is_empty() {
+            crate::tui::panes::discussion::launch::launch_window(state, main_tx, id)
+        } else {
+            Some(Err(Refusal::Busy(
+                "prompts are queued ahead of this one".to_string(),
+            )))
+        };
+        match launched {
             None | Some(Ok(())) => {}
             Some(Err(Refusal::Busy(_))) => {
                 let Some(discussion) = state.discussions.get_mut(&id) else {
@@ -488,9 +501,7 @@ impl Component<crate::tui::state::AppState, crate::signal::AppSignal> for Discus
             InputEvent::Keyboard(KeyPress::Plain {
                 key: Key::SpecialKey(SpecialKey::Esc),
             }) if queued => {
-                if let Some(node) = discussion.node.clone() {
-                    crate::tui::panes::discussion::queue::take_back(state, main_tx, &node);
-                }
+                crate::tui::panes::discussion::queue::take_back_window(state, main_tx, id);
                 return Ok(EventPropagation::ConsumedRender);
             }
             InputEvent::Keyboard(KeyPress::Plain {
@@ -2092,6 +2103,167 @@ mod tests {
         take_back(&mut state, main_tx, &NodeId::new("a1"));
         assert!(state.queued_turns.is_empty());
         assert_eq!(state.discussions[&1].draft.text(), "queued text");
+    }
+
+    #[tokio::test]
+    async fn a_commit_waits_behind_running_copies_and_holds_the_queue_in_order() {
+        use crate::agent::Mode;
+        use crate::agent::turn::{Claim, TurnHandle};
+        use crate::conversation::NodeId;
+        use crate::tui::state::PendingTurn;
+        let (_tmp, mut state) = state_with_failed_child();
+        state.agent = agent_with_endpoint();
+        state.trusted = true;
+        let (main_tx, _rx) = tokio::sync::mpsc::channel(8);
+        for node in ["c1", "c2"] {
+            let mut handle = TurnHandle::for_test(Mode::Feedback, "");
+            handle.claim = Claim::Copy;
+            state.running_turns.insert(NodeId::new(node), handle);
+        }
+
+        let commit = Launch {
+            kind: TurnKind::Prompt(Mode::Commit),
+            ..feedback_launch()
+        };
+        let Err(Refusal::Busy(reason)) = start_turn(&mut state, main_tx.clone(), commit) else {
+            panic!("a commit started beside running copies");
+        };
+        assert!(reason.contains("2 other turns are running"), "{reason}");
+
+        // The commit is first in the queue: a feedback prompt behind it does not jump ahead.
+        for (window, text) in [(0, "/commit"), (1, "look at x")] {
+            state
+                .discussions
+                .get_mut(&window)
+                .unwrap()
+                .draft
+                .set_text(text);
+        }
+        let parent = state.discussions[&0].node.clone();
+        state.queued_turns = vec![
+            PendingTurn { window: 0, parent },
+            PendingTurn {
+                window: 1,
+                parent: Some(NodeId::new("a2")),
+            },
+        ];
+        DiscussionComponent::release_queue(&mut state, main_tx);
+        assert_eq!(queued_windows(&state), [0, 1]);
+        assert_eq!(state.running_turns.len(), 2);
+        let notice = state.discussions[&0].notice.as_deref().unwrap();
+        assert!(
+            notice.starts_with("queue held: 2 other turns are running"),
+            "{notice}"
+        );
+        assert_eq!(state.discussions[&1].notice, None);
+    }
+
+    #[test]
+    fn dropping_the_head_of_the_queue_asks_for_a_release() {
+        use crate::tui::state::PendingTurn;
+        let (_tmp, mut state) = state_with_failed_child();
+        state.queued_turns = vec![
+            PendingTurn {
+                window: 0,
+                parent: None,
+            },
+            PendingTurn {
+                window: 1,
+                parent: None,
+            },
+        ];
+        crate::tui::panes::discussion::queue::drop_queue_entry(&mut state, 1);
+        assert!(!state.release_pending);
+        crate::tui::panes::discussion::queue::drop_queue_entry(&mut state, 0);
+        assert!(state.release_pending);
+    }
+
+    #[test]
+    fn taking_back_a_queued_prompt_clears_the_held_notice() {
+        use crate::tui::state::PendingTurn;
+        let (_tmp, mut state) = state_with_failed_child();
+        state.queued_turns = vec![PendingTurn {
+            window: 1,
+            parent: None,
+        }];
+        state.discussions.get_mut(&1).unwrap().notice =
+            Some("queue held: a turn is running · Enter:Retry".to_string());
+        crate::tui::panes::discussion::queue::drop_queue_entry(&mut state, 1);
+        assert_eq!(state.discussions[&1].notice, None);
+    }
+
+    #[tokio::test]
+    async fn a_prompt_sent_behind_a_held_commit_queues_behind_it() {
+        use crate::agent::Mode;
+        use crate::agent::turn::{Claim, TurnHandle};
+        use crate::conversation::NodeId;
+        use crate::tui::state::PendingTurn;
+        let (_tmp, mut state) = state_with_failed_child();
+        state.agent = agent_with_endpoint();
+        state.trusted = true;
+        let (main_tx, _rx) = tokio::sync::mpsc::channel(8);
+        let mut handle = TurnHandle::for_test(Mode::Feedback, "");
+        handle.claim = Claim::Copy;
+        state.running_turns.insert(NodeId::new("c1"), handle);
+        state
+            .discussions
+            .get_mut(&0)
+            .unwrap()
+            .draft
+            .set_text("/commit");
+        state
+            .discussions
+            .get_mut(&1)
+            .unwrap()
+            .draft
+            .set_text("/compact");
+        let parent = state.discussions[&0].node.clone();
+        state.queued_turns = vec![PendingTurn { window: 0, parent }];
+
+        // A compact turn would be admitted beside the copy, but the commit ahead of it waits.
+        DiscussionComponent::send(&mut state, main_tx, 1);
+        assert_eq!(queued_windows(&state), [0, 1]);
+        assert_eq!(state.running_turns.len(), 1);
+    }
+
+    #[test]
+    fn esc_takes_back_the_prompt_of_its_own_window_only() {
+        use crate::agent::Mode;
+        use crate::agent::turn::{Claim, TurnHandle};
+        use crate::conversation::NodeId;
+        use crate::tui::state::PendingTurn;
+        let (_tmp, mut state) = state_with_failed_child();
+        state.agent = agent_with_endpoint();
+        state.trusted = true;
+        // A running repository turn holds the queue, so both prompts stay queued.
+        let mut busy = TurnHandle::for_test(Mode::Feedback, "");
+        busy.claim = Claim::Exclusive;
+        state.running_turns.insert(NodeId::new("c1"), busy);
+        // Two windows on new conversations: neither has a node to take a prompt back by.
+        for (window, text) in [(0, "first"), (1, "second")] {
+            let discussion = state.discussions.get_mut(&window).unwrap();
+            discussion.draft.set_text(text);
+            discussion.node = None;
+        }
+        state.queued_turns = vec![
+            PendingTurn {
+                window: 0,
+                parent: None,
+            },
+            PendingTurn {
+                window: 1,
+                parent: None,
+            },
+        ];
+        let mut global_data = crate::tui::test_support::global_data(state);
+        let mut component = DiscussionComponent::new(crate::tui::pane_component::pane_id(0));
+        let esc = InputEvent::Keyboard(KeyPress::Plain {
+            key: Key::SpecialKey(SpecialKey::Esc),
+        });
+        type_into(&mut component, &mut global_data, 1, &[esc]);
+
+        assert_eq!(queued_windows(&global_data.state), [0]);
+        assert_eq!(global_data.state.discussions[&1].draft.text(), "second");
     }
 
     #[test]

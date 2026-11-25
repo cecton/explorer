@@ -194,8 +194,14 @@ pub(super) fn handle(
             AppSignal::AfterAgentsExited { run } => crate::tui::after_agents::exited(state, *run),
             AppSignal::Redraw | AppSignal::TerminalOutput => {}
             AppSignal::Tick => {
-                // A countdown shows its seconds, and a firing or reverting one
-                // changes the status text: all repaint.
+                let released = std::mem::take(&mut state.release_pending);
+                if released {
+                    DiscussionComponent::release_queue(
+                        state,
+                        global_data.main_thread_channel_sender.clone(),
+                    );
+                }
+                // Countdown seconds, a firing or reverting one, and a released queue repaint.
                 let countdown = matches!(state.after_agents, Some(AfterAgents::Countdown { .. }));
                 crate::tui::after_agents::tick(
                     state,
@@ -210,7 +216,7 @@ pub(super) fn handle(
                     let pending = pane.lock().flush_pending.swap(false, Ordering::Relaxed);
                     any | pending
                 });
-                if !(countdown || minute_changed || flushed) {
+                if !(countdown || minute_changed || flushed || released) {
                     propagation = EventPropagation::Consumed;
                 }
             }

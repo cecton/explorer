@@ -2,15 +2,14 @@
 //! loses what it left uncommitted, a feedback turn loses both. A feedback turn that worked
 //! in a copy of the repository leaves the repository as it was: the copy is what goes.
 
-/// Whatever a turn left uncommitted is discarded, and a commit turn's commits are
-/// collected; the tree was clean when the turn started.
+/// Discards what a turn left uncommitted in the repository; keeps a commit turn's commits.
 pub(super) async fn close(
     request: &crate::agent::turn::TurnRequest,
     head_after: Option<String>,
     workspace: Option<&crate::agent::workspace::Workspace>,
 ) -> (Vec<String>, bool) {
     use crate::agent::Mode;
-    use crate::agent::workspace::Workspace;
+    use crate::agent::workspace::{Plan, Workspace};
     match request.mode {
         Mode::Feedback if let Some(Workspace::Cloned(path)) = workspace => {
             let path = path.clone();
@@ -18,6 +17,10 @@ pub(super) async fn close(
                 .await
                 .unwrap_or(true);
             (Vec::new(), left_work)
+        }
+        // A turn in a copy that could not be made, and a compact turn, never touched the tree.
+        Mode::Feedback if request.compact.is_some() || request.workspace == Some(Plan::Copy) => {
+            (Vec::new(), false)
         }
         Mode::Feedback => {
             let root = request.root.clone();
