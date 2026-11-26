@@ -3,6 +3,7 @@ use std::time::Duration;
 const FEEDBACK_PROMPT: &str = include_str!("../../prompts/feedback.md");
 const COMMIT_PROMPT: &str = include_str!("../../prompts/commit.md");
 const CONVERSATION_TOOL_PROMPT: &str = include_str!("../../prompts/conversation_tool.md");
+const KNOWLEDGE_TOOL_PROMPT: &str = include_str!("../../prompts/knowledge_tool.md");
 pub const TITLE_SUMMARY_PROMPT: &str = include_str!("../../prompts/title_summary.md");
 const COMPACT_PROMPT: &str = include_str!("../../prompts/compact.md");
 /// System prompt of a sub-agent called without a role.
@@ -43,6 +44,8 @@ fn with_project(lead: Option<&str>, root: &camino::Utf8Path) -> String {
         out.push_str("\n\n");
     }
     out.push_str(CONVERSATION_TOOL_PROMPT.trim_end());
+    out.push_str("\n\n");
+    out.push_str(KNOWLEDGE_TOOL_PROMPT.trim_end());
     if let Ok(agents) = std::fs::read_to_string(root.join("AGENTS.md")) {
         out.push_str("\n\n## Project instructions (AGENTS.md)\n\n");
         out.push_str(agents.trim());
@@ -50,11 +53,15 @@ fn with_project(lead: Option<&str>, root: &camino::Utf8Path) -> String {
     out
 }
 
-/// What is appended to Claude Code's own system prompt: it loads the project's
-/// instructions itself, so only the mode instructions are added.
+/// What is appended to Claude Code's own system prompt, which reads the project's
+/// instructions itself.
 pub fn claude_system_prompt(mode: Option<crate::agent::Mode>, review_rounds: u32) -> String {
-    mode.map(|mode| mode_prompt(mode, review_rounds))
-        .unwrap_or_default()
+    let mode = mode
+        .map(|mode| mode_prompt(mode, review_rounds))
+        .unwrap_or_default();
+    format!("{mode}\n\n{}", KNOWLEDGE_TOOL_PROMPT.trim_end())
+        .trim()
+        .to_string()
 }
 
 fn mode_prompt(mode: crate::agent::Mode, review_rounds: u32) -> String {
@@ -644,7 +651,27 @@ mod tests {
         assert!(!prompt.contains("You are the coding agent inside Explorer"));
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
 
-        assert_eq!(claude_system_prompt(None, 3), "");
+        // Claude reads AGENTS.md itself, so it gets the knowledge prompt alone.
+        assert_eq!(
+            claude_system_prompt(None, 3),
+            KNOWLEDGE_TOOL_PROMPT.trim_end()
+        );
+    }
+
+    #[test]
+    fn both_system_prompts_describe_the_knowledge_base() {
+        use crate::agent::Mode;
+        let (_tmp, root) = temp_root();
+        let own = system_prompt(Some(Mode::Commit), 3, &root);
+        assert!(own.contains("## The knowledge base"));
+        assert!(
+            own.find("## The conversation tree").unwrap()
+                < own.find("## The knowledge base").unwrap()
+        );
+        let claude = claude_system_prompt(Some(Mode::Commit), 3);
+        assert!(claude.contains("## The knowledge base"));
+        assert!(claude.contains("**commit mode**"), "{claude}");
+        assert!(!claude.contains("## The conversation tree"));
     }
 
     #[test]

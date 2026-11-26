@@ -1,11 +1,12 @@
 //! Explorer's own agent tools, offered to other MCP clients over standard input and
-//! output: the `conversation` and `format_markdown` tools, plus the MCP servers the
-//! repository's session lists.
+//! output: the `conversation`, `format_markdown` and `knowledge` tools, plus the MCP
+//! servers the repository's session lists.
 //!
-//! The two tools here are the ones a client has no way to do itself: the conversation
-//! tree is Explorer's own data, and markdown goes through Explorer's formatter. Reading,
-//! globbing, grepping, editing and running a shell are the client's own business, and
-//! serving them would put a shell behind anything able to start this process.
+//! The tools here are the ones a client has no way to do itself: the conversation tree is
+//! Explorer's own data, markdown goes through Explorer's formatter, and the knowledge base
+//! is a store only Explorer lays out. Reading, globbing, grepping, editing and running a
+//! shell are the client's own business, and serving them would put a shell behind anything
+//! able to start this process.
 
 /// The protocol every request and reply here speaks; the same version Explorer's own
 /// MCP client asks for.
@@ -23,7 +24,7 @@ pub const OWN_TOOLS_ONLY: &str = "--own-tools-only";
 const EXTERNAL_NODE: &str = "external";
 
 /// The tools this server advertises, by the names the agent tools use.
-const SERVED: [&str; 2] = ["conversation", "format_markdown"];
+const SERVED: [&str; 3] = ["conversation", "format_markdown", "knowledge"];
 
 /// What one client's requests act on.
 struct Server {
@@ -289,7 +290,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn only_the_two_tools_and_the_repositorys_own_are_advertised() {
+    async fn only_explorers_own_tools_and_the_repositorys_are_advertised() {
         let (_tmp, _root, server) = server();
         let reply = ask(&server, "tools/list", serde_json::json!({})).await;
         let names: Vec<&str> = reply["result"]["tools"]
@@ -298,7 +299,7 @@ mod tests {
             .iter()
             .map(|tool| tool["name"].as_str().unwrap())
             .collect();
-        assert_eq!(names, ["conversation", "format_markdown"]);
+        assert_eq!(names, ["conversation", "knowledge", "format_markdown"]);
         for absent in ["read", "glob", "grep", "shell", "write", "edit"] {
             assert!(!names.contains(&absent), "{absent} must not be served");
         }
@@ -424,7 +425,12 @@ done
             .collect();
         assert_eq!(
             names,
-            ["conversation", "format_markdown", "mcp__fake__echo"]
+            [
+                "conversation",
+                "knowledge",
+                "format_markdown",
+                "mcp__fake__echo"
+            ]
         );
     }
 

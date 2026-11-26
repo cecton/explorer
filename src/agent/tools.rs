@@ -82,6 +82,26 @@ fn base_specs() -> Vec<crate::agent::llm::ToolSpec> {
             }),
         },
         ToolSpec {
+            name: "knowledge".into(),
+            description: "Consult the knowledge base of this repository: short entries, \
+                          under docs/knowledge/, about how its code works. `toc` lists \
+                          entries, or with `id` one entry and its children; `read` \
+                          returns the given entries; `search` finds entries by title, \
+                          summary and body."
+                .into(),
+            schema: serde_json::json!({
+                "type": "object",
+                "properties": {
+                    "action": {"type": "string", "enum": ["toc", "read", "search"]},
+                    "id": {"type": "string", "description": "Knowledge id, for `toc`"},
+                    "page": {"type": "integer", "description": "Page of the list, for `toc`"},
+                    "ids": {"type": "array", "items": {"type": "string"}, "description": "Knowledge ids, for `read`"},
+                    "query": {"type": "string", "description": "Words to look for, for `search`"}
+                },
+                "required": ["action"]
+            }),
+        },
+        ToolSpec {
             name: "read".into(),
             description: "Read a text file of the repository. Lines are returned prefixed \
                           with their number. A file too long to fit is cut at a line \
@@ -268,6 +288,10 @@ pub async fn try_run(
         "format_markdown" => {
             let root = root.to_owned();
             blocking(move || format_markdown(&root, &args)).await
+        }
+        "knowledge" => {
+            let root = root.to_owned();
+            blocking(move || crate::knowledge::run(&root, &args)).await
         }
         "glob" => {
             let root = root.to_owned();
@@ -982,6 +1006,7 @@ mod tests {
             names,
             [
                 "conversation",
+                "knowledge",
                 "read",
                 "format_markdown",
                 "glob",
@@ -1120,5 +1145,45 @@ mod tests {
         )
         .await;
         assert_eq!(unknown, "error: no node recorded commit 1234567");
+    }
+
+    #[tokio::test]
+    async fn the_knowledge_tool_reads_the_store_of_its_own_root() {
+        let (_tmp, root) = repo();
+        let store = root.join(crate::knowledge::DIR);
+        std::fs::create_dir_all(store.join("turn")).unwrap();
+        std::fs::write(
+            store.join("turn/closing.md"),
+            "---\ntitle: Closing a turn\nsummary: What a turn does when it ends.\n---\n",
+        )
+        .unwrap();
+        let context = context(&root);
+        let page = run(
+            &context,
+            &test_call("knowledge", serde_json::json!({"action": "toc"})),
+        )
+        .await;
+        assert!(
+            page.contains("- turn: (malformed: it has no entry file) (1 child)"),
+            "{page}"
+        );
+        let read = run(
+            &context,
+            &test_call(
+                "knowledge",
+                serde_json::json!({"action": "read", "ids": ["turn/closing"]}),
+            ),
+        )
+        .await;
+        assert!(
+            read.starts_with("# turn/closing: Closing a turn\n"),
+            "{read}"
+        );
+        let unknown = run(
+            &context,
+            &test_call("knowledge", serde_json::json!({"action": "nope"})),
+        )
+        .await;
+        assert_eq!(unknown, "error: unknown action: nope");
     }
 }

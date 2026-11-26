@@ -162,7 +162,7 @@ impl Sandbox {
 }
 
 /// The directory of knowledge entries, which the agent of a commit turn cannot write.
-const KNOWLEDGE: &str = "docs/knowledge";
+const KNOWLEDGE: &str = crate::knowledge::DIR;
 
 /// Whether `path` is on the filesystem of `root`, and so remounted read-only by a bind of it.
 fn same_device(root: &camino::Utf8Path, path: &camino::Utf8Path) -> bool {

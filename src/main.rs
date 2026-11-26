@@ -10,6 +10,7 @@ mod conversation;
 mod endpoint;
 mod git;
 mod highlight;
+mod knowledge;
 mod loader;
 mod lsp;
 mod markdown_format;

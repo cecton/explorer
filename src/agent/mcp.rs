@@ -246,9 +246,7 @@ impl McpTools {
         self.host.call(server, tool, arguments).await
     }
 
-    /// The `--mcp-config` of a Claude Code run, which starts the servers itself: the
-    /// repository's own, and Explorer's, which serves the `conversation` and
-    /// `format_markdown` tools a client has no other way to reach.
+    /// The `--mcp-config` of a Claude Code run: the repository's servers and Explorer's own tools.
     pub fn claude_config(
         &self,
         root: &camino::Utf8Path,
