@@ -284,8 +284,8 @@ pub async fn try_run(
             blocking(move || conversation(&tree, &node, &args)).await
         }
         "read" => read(root, &args),
-        "write" => write(root, &args),
-        "edit" => edit(root, &args),
+        "write" => write(root, &args, context.knowledge),
+        "edit" => edit(root, &args, context.knowledge),
         "format_markdown" => {
             let root = root.to_owned();
             blocking(move || format_markdown(&root, &args)).await
@@ -440,8 +440,37 @@ fn conversation(
     }
 }
 
-fn write(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
+/// Refuses a path the knowledge tool is the only writer of: an edit here would be left out
+/// of the changes it stages, and a feedback turn reads it from a copy that is thrown away.
+fn refuse_knowledge(
+    root: &camino::Utf8Path,
+    path: &camino::Utf8Path,
+    access: crate::knowledge::Access,
+) -> Result<(), String> {
+    use crate::knowledge::Access;
+    if !path.starts_with(root.join(crate::knowledge::DIR)) {
+        return Ok(());
+    }
+    Err(match access {
+        Access::Write => {
+            "docs/knowledge/ is changed only through the knowledge tool: use \
+                          its write, delete, move and rename actions"
+        }
+        Access::Read => {
+            "docs/knowledge/ is read-only in a feedback turn: put what is \
+                         worth recording in your closing answer"
+        }
+    }
+    .to_string())
+}
+
+fn write(
+    root: &camino::Utf8Path,
+    args: &serde_json::Value,
+    access: crate::knowledge::Access,
+) -> Result<String, String> {
     let path = crate::util::fs::resolve_in(root, str_arg(args, "path")?)?;
+    refuse_knowledge(root, &path, access)?;
     let content = str_arg(args, "content")?;
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("{parent}: {e}"))?;
@@ -450,8 +479,13 @@ fn write(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, St
     Ok(format!("wrote {} bytes\n", content.len()))
 }
 
-fn edit(root: &camino::Utf8Path, args: &serde_json::Value) -> Result<String, String> {
+fn edit(
+    root: &camino::Utf8Path,
+    args: &serde_json::Value,
+    access: crate::knowledge::Access,
+) -> Result<String, String> {
     let path = crate::util::fs::resolve_in(root, str_arg(args, "path")?)?;
+    refuse_knowledge(root, &path, access)?;
     let old = str_arg(args, "old_string")?;
     let new = str_arg(args, "new_string")?;
     if old.is_empty() {
@@ -1082,6 +1116,73 @@ mod tests {
             std::fs::read_to_string(root.join("a.txt")).unwrap(),
             "alpha gamma alpha\n"
         );
+    }
+
+    #[tokio::test]
+    async fn write_and_edit_refuse_the_knowledge_base() {
+        use crate::knowledge::Access;
+        let (_tmp, root) = repo();
+        std::fs::create_dir_all(root.join(crate::knowledge::DIR).join("a")).unwrap();
+        std::fs::write(
+            root.join(crate::knowledge::DIR).join("a/entry.md"),
+            "original\n",
+        )
+        .unwrap();
+        let writing = |path: &str| {
+            test_call(
+                "write",
+                serde_json::json!({"path": path, "content": "one\n"}),
+            )
+        };
+        let editing = |path: &str| {
+            test_call(
+                "edit",
+                serde_json::json!({"path": path, "old_string": "original", "new_string": "x"}),
+            )
+        };
+
+        // Every way of naming a file of the store is refused, whatever the turn may do.
+        for knowledge in [Access::Write, Access::Read] {
+            let mut context = context(&root);
+            context.knowledge = knowledge;
+            let wrote = run(&context, &writing("docs/knowledge/new.md")).await;
+            assert!(
+                wrote.starts_with("error: docs/knowledge/ is "),
+                "{knowledge:?}: {wrote}"
+            );
+            let wrote = run(&context, &writing("docs/knowledge/a/b.md")).await;
+            assert!(wrote.starts_with("error: docs/knowledge/"), "{wrote}");
+            let absolute = root.join("docs/knowledge/new.md");
+            let wrote = run(&context, &writing(absolute.as_str())).await;
+            assert!(wrote.starts_with("error: docs/knowledge/"), "{wrote}");
+            let wrote = run(&context, &writing("src/../docs/knowledge/new.md")).await;
+            assert!(wrote.starts_with("error: docs/knowledge/"), "{wrote}");
+            let edited = run(&context, &editing("docs/knowledge/a/entry.md")).await;
+            assert!(
+                edited.starts_with("error: docs/knowledge/ is "),
+                "{knowledge:?}: {edited}"
+            );
+        }
+        let refused = run(&context(&root), &writing("docs/knowledge/new.md")).await;
+        assert!(refused.contains("knowledge tool"), "{refused}");
+        let mut read_only = context(&root);
+        read_only.knowledge = Access::Read;
+        let refused = run(&read_only, &writing("docs/knowledge/new.md")).await;
+        assert!(refused.contains("feedback turn"), "{refused}");
+
+        // Nothing was created, and the entry is as it was.
+        assert!(!root.join("docs/knowledge/new.md").exists());
+        assert!(!root.join("docs/knowledge/a/b.md").exists());
+        assert_eq!(
+            std::fs::read_to_string(root.join("docs/knowledge/a/entry.md")).unwrap(),
+            "original\n"
+        );
+
+        // A path that only shares the prefix, and the rest of the repository, are written.
+        let names = run(&context(&root), &writing("docs/knowledge-notes.md")).await;
+        assert_eq!(names, "wrote 4 bytes\n");
+        let other = run(&context(&root), &writing("docs/other.md")).await;
+        assert_eq!(other, "wrote 4 bytes\n");
     }
 
     #[tokio::test]

@@ -6,6 +6,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 /// code a repository supplies and which Claude Code runs before the model is called.
 const SETTINGS: &str = r#"{"attribution":{"commit":"","pr":""},"disableAllHooks":true}"#;
 
+/// The knowledge base is changed through its tool, whose changes are staged; an edit here
+/// would be left out of that. `Edit(path)` covers every tool that writes a file.
+const DENIED_EDITS: &str = "Edit(docs/knowledge/**)";
+
 /// How often the steering task looks for a message the user sent while the CLI works.
 const STEERING_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
@@ -342,6 +346,8 @@ fn arguments(config: &Run<'_>, resume: Resume<'_>) -> Vec<String> {
         args.extend(["--tools", ""].map(str::to_string));
         r#"{"mcpServers":{}}"#.to_string()
     } else {
+        // The flag takes every argument after it for another rule, so another flag follows.
+        args.extend(["--disallowedTools", DENIED_EDITS].map(str::to_string));
         config
             .mcp
             .claude_config(config.root, config.privileged_socket, config.knowledge)
@@ -732,8 +738,14 @@ mod tests {
 
         let forked = joined(&config, Resume::Fork("abc"));
         assert!(forked.contains("--model opus --effort high"));
-        assert!(!forked.contains("--disallowedTools"));
-        assert!(forked.contains("--resume abc --fork-session --mcp-config"));
+        // The knowledge base is changed only through its tool, which stages every change.
+        let rights = arguments(&config, Resume::Fork("abc"));
+        let denied = rights.iter().position(|arg| arg == "--disallowedTools");
+        let denied = denied.expect("every run denies edits of the knowledge base");
+        assert_eq!(rights[denied + 1], "Edit(docs/knowledge/**)");
+        // The flag takes every argument after it for another rule, so a flag follows.
+        assert!(rights[denied + 2].starts_with("--"), "{:?}", rights);
+        assert!(forked.contains("--resume abc --fork-session --disallowedTools"));
         assert!(forked.ends_with("--strict-mcp-config"));
         assert!(forked.contains("--append-system-prompt SYSTEM"));
         assert!(forked.contains("--system-prompt-snapshot off"));
@@ -743,7 +755,7 @@ mod tests {
         assert!(forked.contains(r#"{"attribution":{"commit":"","pr":""},"disableAllHooks":true}"#));
 
         let continued = joined(&config, Resume::Continue("abc"));
-        assert!(continued.contains("--resume abc --mcp-config"));
+        assert!(continued.contains("--resume abc --disallowedTools"));
 
         let default_effort = ClaudeTarget {
             model: "haiku".to_string(),
@@ -771,6 +783,8 @@ mod tests {
         let compact = joined(&compact, Resume::Fresh);
         assert!(compact.contains(r#"--tools  --mcp-config {"mcpServers":{}} --strict-mcp-config"#));
         assert!(!compact.contains("explorer"));
+        // A compact turn has no tools, so nothing to deny.
+        assert!(!compact.contains("--disallowedTools"));
     }
 
     #[test]

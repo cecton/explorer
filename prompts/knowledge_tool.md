@@ -19,4 +19,6 @@ concluding that something is undocumented. The `refs` of an entry name the code 
 describes; when an entry and the code disagree, the code is right.
 
 Which actions you have depends on the turn: a commit turn records, changes and removes
-entries, while a feedback turn only reads them.
+entries, while a feedback turn only reads them. Entries are changed only through this
+tool, never with `write`, `edit` or the shell: each change it makes is staged, and one
+made by hand would be left out of the commit that carries the code it describes.
