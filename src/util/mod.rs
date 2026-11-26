@@ -1,4 +1,5 @@
 pub(crate) mod fs;
+pub(crate) mod fuzzy;
 pub(crate) mod http;
 pub(crate) mod process;
 #[cfg(test)]

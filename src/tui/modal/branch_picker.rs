@@ -118,13 +118,13 @@ fn show(
 
 /// The rows whose name holds the query, best first; an empty query lists all, HEAD first.
 pub fn run_ref_match(text: &str, refs: &[crate::git::GitRef]) -> Vec<BranchRow> {
-    use crate::tui::widgets::fuzzy::Kind;
+    use crate::util::fuzzy::Kind;
     let named = std::iter::once((BranchRow::Head, "HEAD")).chain(
         refs.iter()
             .enumerate()
             .map(|(index, git_ref)| (BranchRow::Ref(index), git_ref.name.as_str())),
     );
-    crate::tui::widgets::fuzzy::ranked(Kind::Plain, text, named).unwrap_or_else(|| {
+    crate::util::fuzzy::ranked(Kind::Plain, text, named).unwrap_or_else(|| {
         std::iter::once(BranchRow::Head)
             .chain((0..refs.len()).map(BranchRow::Ref))
             .collect()

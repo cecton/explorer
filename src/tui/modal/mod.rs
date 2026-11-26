@@ -255,8 +255,8 @@ pub fn render(
     painters: &mut crate::tui::modal::list::ModalPainters,
     surface: VPSize,
 ) -> Option<RenderOpIRVec> {
-    use crate::tui::widgets::fuzzy::Kind;
     use crate::tui::widgets::title_row::BarColors;
+    use crate::util::fuzzy::Kind;
     let modal = state.modal.clone()?;
     let results = match modal {
         Modal::WindowPicker => state.window_picker.results.len(),
@@ -496,7 +496,7 @@ mod tests {
         let modal = ModalBox::for_modal(size(20, 12), 3);
         let list = modal.list_box();
         let rows = vec![PickerRow::plain("a/very/long/path/that/does/not/fit.rs")];
-        use crate::tui::widgets::fuzzy::Kind;
+        use crate::util::fuzzy::Kind;
         let mut painter = crate::tui::widgets::fuzzy_picker::FuzzyPicker::new(Kind::Plain);
         let ops = painter.render_results(
             PickerColors::in_overlay(&crate::tui::theme::HelixTheme::bundled_default()),

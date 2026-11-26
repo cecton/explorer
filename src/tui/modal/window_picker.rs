@@ -219,7 +219,7 @@ fn run_file_name_match(
 ) -> Vec<crate::tui::pane_manager::Window> {
     use crate::loader::FileKey;
     use crate::tui::pane_manager::Window;
-    use crate::tui::widgets::fuzzy::Kind;
+    use crate::util::fuzzy::Kind;
     let items = files
         .iter()
         .enumerate()
@@ -228,7 +228,7 @@ fn run_file_name_match(
             let rel = file.path.strip_prefix(root).unwrap_or(&file.path);
             (Window::FilePreview(FileKey(index)), rel.as_str())
         });
-    crate::tui::widgets::fuzzy::ranked(Kind::Paths, text, items)
+    crate::util::fuzzy::ranked(Kind::Paths, text, items)
         .unwrap_or_else(|| open_windows_results(files, window_stack))
 }
 

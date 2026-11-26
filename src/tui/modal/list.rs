@@ -10,8 +10,8 @@ pub struct ModalPainters {
 
 impl ModalPainters {
     pub fn new() -> Self {
-        use crate::tui::widgets::fuzzy::Kind;
         use crate::tui::widgets::fuzzy_picker::FuzzyPicker;
+        use crate::util::fuzzy::Kind;
         Self {
             paths: FuzzyPicker::new(Kind::Paths),
             plain: FuzzyPicker::new(Kind::Plain),
@@ -21,9 +21,9 @@ impl ModalPainters {
     /// The painter that reads candidates the way `kind` says.
     pub fn of(
         &mut self,
-        kind: crate::tui::widgets::fuzzy::Kind,
+        kind: crate::util::fuzzy::Kind,
     ) -> &mut crate::tui::widgets::fuzzy_picker::FuzzyPicker {
-        use crate::tui::widgets::fuzzy::Kind;
+        use crate::util::fuzzy::Kind;
         match kind {
             Kind::Paths => &mut self.paths,
             Kind::Plain | Kind::Substring => &mut self.plain,

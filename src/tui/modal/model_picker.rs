@@ -133,9 +133,9 @@ pub fn fetch_models(endpoint: &crate::endpoint::Endpoint, main_tx: crate::signal
 
 /// The specs matching `text`, best match first; an empty query lists them all.
 pub fn run_model_match(text: &str, state: &crate::tui::state::AppState) -> Vec<usize> {
-    use crate::tui::widgets::fuzzy::Kind;
+    use crate::util::fuzzy::Kind;
     let specs = &state.models.specs;
-    crate::tui::widgets::fuzzy::ranked(
+    crate::util::fuzzy::ranked(
         Kind::Plain,
         text,
         specs

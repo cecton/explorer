@@ -129,13 +129,13 @@ impl PickerColors {
 pub struct FuzzyPicker {
     /// The query the painted rows are highlighted with, kept across frames so its pattern
     /// is parsed only when the draft moves.
-    query: crate::tui::widgets::fuzzy::Query,
+    query: crate::util::fuzzy::Query,
 }
 
 impl FuzzyPicker {
-    pub fn new(kind: crate::tui::widgets::fuzzy::Kind) -> Self {
+    pub fn new(kind: crate::util::fuzzy::Kind) -> Self {
         Self {
-            query: crate::tui::widgets::fuzzy::Query::new(kind),
+            query: crate::util::fuzzy::Query::new(kind),
         }
     }
 

@@ -7,17 +7,17 @@ pub struct GitLogPaneComponent {
     content_origin_row: usize,
     content_row_count: usize,
     /// The `/` filter's query, kept so a frame reuses its matcher instead of making one.
-    log_query: crate::tui::widgets::fuzzy::Query,
+    log_query: crate::util::fuzzy::Query,
 }
 
 impl GitLogPaneComponent {
     pub fn new(id: FlexBoxId) -> Self {
-        use crate::tui::widgets::fuzzy::Kind;
+        use crate::util::fuzzy::Kind;
         Self {
             id,
             content_origin_row: 0,
             content_row_count: 0,
-            log_query: crate::tui::widgets::fuzzy::Query::new(Kind::Plain),
+            log_query: crate::util::fuzzy::Query::new(Kind::Plain),
         }
     }
 
@@ -683,8 +683,8 @@ fn paint_log_rows(
 /// The entries of `entries` whose summary holds the query, best match first. Only the
 /// indices: the chars a painted row highlights are matched again, for that row alone.
 pub(crate) fn run_log_match(text: &str, entries: &[crate::git::LogEntry]) -> Vec<usize> {
-    use crate::tui::widgets::fuzzy::Kind;
-    crate::tui::widgets::fuzzy::ranked(
+    use crate::util::fuzzy::Kind;
+    crate::util::fuzzy::ranked(
         Kind::Plain,
         text,
         entries
@@ -720,7 +720,7 @@ pub(crate) fn painted_entries(
 /// ranked the whole log, only the rows on screen are matched again, and the cost follows the
 /// pane's height instead of the log's length.
 pub(crate) fn visible_matches(
-    query: &mut crate::tui::widgets::fuzzy::Query,
+    query: &mut crate::util::fuzzy::Query,
     win: &crate::tui::state::GitLogWindowState,
     visible: &[usize],
 ) -> Vec<Vec<u32>> {
@@ -1135,7 +1135,7 @@ mod tests {
         win.query.set_text("readme");
         apply_filter(&mut win);
         let painted_rows = painted_entries(&win, 0, 1);
-        use crate::tui::widgets::fuzzy::{Kind, Query};
+        use crate::util::fuzzy::{Kind, Query};
         let mut query = Query::new(Kind::Plain);
         let matched = visible_matches(&mut query, &win, &painted_rows);
         let highlighted: String = matched[0]

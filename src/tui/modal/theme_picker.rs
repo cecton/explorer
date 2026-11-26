@@ -68,8 +68,8 @@ fn preview_selected_theme(state: &mut crate::tui::state::AppState) {
 /// The theme names the query keeps, best match first; an empty query lists them all.
 pub fn run_theme_name_match(text: &str) -> Vec<String> {
     use crate::tui::theme::HelixTheme;
-    use crate::tui::widgets::fuzzy::Kind;
-    crate::tui::widgets::fuzzy::ranked(
+    use crate::util::fuzzy::Kind;
+    crate::util::fuzzy::ranked(
         Kind::Plain,
         text,
         HelixTheme::theme_names().map(|name| (name.to_string(), name)),

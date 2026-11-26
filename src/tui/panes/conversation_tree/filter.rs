@@ -15,7 +15,7 @@ pub(crate) fn filter_nodes(
     tree: &crate::conversation::ConversationTree,
     text: &str,
 ) -> Vec<FilterMatch> {
-    use crate::tui::widgets::fuzzy::{Kind, Query};
+    use crate::util::fuzzy::{Kind, Query};
     let mut query = Query::new(Kind::Substring);
     query.set(text);
     let mut indices = Vec::new();
