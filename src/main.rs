@@ -141,7 +141,13 @@ async fn run() {
             false => tui::session::session_mcp_servers(&root),
         };
         std::process::exit(
-            agent::serve::serve(root, servers, serve.privileged_socket.clone()).await,
+            agent::serve::serve(
+                root,
+                servers,
+                serve.privileged_socket.clone(),
+                serve.knowledge,
+            )
+            .await,
         );
     }
 

@@ -27,6 +27,8 @@ pub struct ToolContext {
     pub mcp: crate::agent::mcp::McpTools,
     /// The turn's socket: privileged tools are asked of the turn that owns it, not run here.
     pub privileged: Option<camino::Utf8PathBuf>,
+    /// What this turn may do with the knowledge base.
+    pub knowledge: crate::knowledge::Access,
 }
 
 /// The process groups of an agent run's background commands, killed when the run ends.
@@ -52,15 +54,15 @@ pub fn specs(
     context: &ToolContext,
     agent: Option<crate::agent::llm::ToolSpec>,
 ) -> Vec<crate::agent::llm::ToolSpec> {
-    let mut specs = base_specs();
+    let mut specs = base_specs(context);
     specs.extend(agent);
     specs.extend(context.mcp.specs());
     specs
 }
 
-fn base_specs() -> Vec<crate::agent::llm::ToolSpec> {
+fn base_specs(context: &ToolContext) -> Vec<crate::agent::llm::ToolSpec> {
     use crate::agent::llm::ToolSpec;
-    vec![
+    let mut specs = vec![
         ToolSpec {
             name: "conversation".into(),
             description: "Consult the conversation tree of this repository: every \
@@ -81,26 +83,25 @@ fn base_specs() -> Vec<crate::agent::llm::ToolSpec> {
                 "required": ["action"]
             }),
         },
-        ToolSpec {
-            name: "knowledge".into(),
-            description: "Consult the knowledge base of this repository: short entries, \
-                          under docs/knowledge/, about how its code works. `toc` lists \
-                          entries, or with `id` one entry and its children; `read` \
-                          returns the given entries; `search` finds entries by title, \
-                          summary and body."
-                .into(),
-            schema: serde_json::json!({
-                "type": "object",
-                "properties": {
-                    "action": {"type": "string", "enum": ["toc", "read", "search"]},
-                    "id": {"type": "string", "description": "Knowledge id, for `toc`"},
-                    "page": {"type": "integer", "description": "Page of the list, for `toc`"},
-                    "ids": {"type": "array", "items": {"type": "string"}, "description": "Knowledge ids, for `read`"},
-                    "query": {"type": "string", "description": "Words to look for, for `search`"}
-                },
-                "required": ["action"]
-            }),
-        },
+        knowledge_spec(context.knowledge),
+    ];
+    specs.extend(rest_specs());
+    specs
+}
+
+fn knowledge_spec(access: crate::knowledge::Access) -> crate::agent::llm::ToolSpec {
+    use crate::agent::llm::ToolSpec;
+    let spec = crate::knowledge::spec(access);
+    ToolSpec {
+        name: "knowledge".into(),
+        description: spec.description,
+        schema: spec.schema,
+    }
+}
+
+fn rest_specs() -> Vec<crate::agent::llm::ToolSpec> {
+    use crate::agent::llm::ToolSpec;
+    vec![
         ToolSpec {
             name: "read".into(),
             description: "Read a text file of the repository. Lines are returned prefixed \
@@ -272,7 +273,7 @@ pub async fn try_run(
     let args = call.arguments.clone();
     let root = context.root.as_path();
     if let Some(socket) = &context.privileged
-        && crate::agent::privileged::PRIVILEGED.contains(&call.name.as_str())
+        && crate::agent::privileged::serves(&call.name, &args)
     {
         return crate::agent::privileged::call(socket, &call.name, args).await;
     }
@@ -291,7 +292,8 @@ pub async fn try_run(
         }
         "knowledge" => {
             let root = root.to_owned();
-            blocking(move || crate::knowledge::run(&root, &args)).await
+            let access = context.knowledge;
+            blocking(move || crate::knowledge::run(&root, &args, access)).await
         }
         "glob" => {
             let root = root.to_owned();
@@ -689,6 +691,7 @@ mod tests {
     fn context(root: &camino::Utf8Path) -> ToolContext {
         use crate::agent::mcp::McpTools;
         use crate::conversation::NodeId;
+        use crate::knowledge::Access;
         ToolContext {
             root: root.to_owned(),
             tree: Arc::default(),
@@ -697,6 +700,7 @@ mod tests {
             background: Arc::default(),
             mcp: McpTools::default(),
             privileged: None,
+            knowledge: Access::Write,
         }
     }
 
@@ -900,6 +904,7 @@ mod tests {
         use crate::agent::mcp::McpTools;
         use crate::conversation::ConversationTree;
         use crate::conversation::NodeId;
+        use crate::knowledge::Access;
         let (_tmp, root) = repo();
         let store = root.join("store");
         std::fs::create_dir_all(store.join("n1")).unwrap();
@@ -911,6 +916,7 @@ mod tests {
             background: Arc::default(),
             mcp: McpTools::default(),
             privileged: None,
+            knowledge: Access::Write,
         };
         let start = std::time::Instant::now();
         let started = run(
@@ -1083,6 +1089,7 @@ mod tests {
         use crate::agent::mcp::McpTools;
         use crate::conversation::ConversationTree;
         use crate::conversation::NodeId;
+        use crate::knowledge::Access;
         let (_tmp, root) = repo();
         let store = root.join("store");
         let node_dir = store.join("n1");
@@ -1103,6 +1110,7 @@ mod tests {
             background: Arc::default(),
             mcp: McpTools::default(),
             privileged: None,
+            knowledge: Access::Write,
         };
         let ask = |arguments| test_call("conversation", arguments);
 
@@ -1145,6 +1153,33 @@ mod tests {
         )
         .await;
         assert_eq!(unknown, "error: no node recorded commit 1234567");
+    }
+
+    #[tokio::test]
+    async fn a_read_only_turn_is_offered_no_knowledge_change() {
+        use crate::knowledge::Access;
+        let (_tmp, root) = repo();
+        let mut context = context(&root);
+        context.knowledge = Access::Read;
+        let schema = specs(&context, None)
+            .into_iter()
+            .find(|spec| spec.name == "knowledge")
+            .unwrap()
+            .schema;
+        assert_eq!(
+            schema["properties"]["action"]["enum"],
+            serde_json::json!(["toc", "read", "search"])
+        );
+        // A change is refused even when the model asks for it anyway.
+        let refused = run(
+            &context,
+            &test_call(
+                "knowledge",
+                serde_json::json!({"action": "write", "name": "a", "title": "A", "summary": "s"}),
+            ),
+        )
+        .await;
+        assert!(refused.contains("feedback turn"), "{refused}");
     }
 
     #[tokio::test]

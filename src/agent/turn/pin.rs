@@ -808,6 +808,71 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_commit_turn_records_a_knowledge_entry_where_it_cannot_write() {
+        let script = vec![
+            Reply::new().call(
+                "c1",
+                "knowledge",
+                json!({
+                    "action": "write",
+                    "name": "a-commit-turn",
+                    "title": "A commit turn",
+                    "summary": "What a commit turn does.",
+                    "body": "It writes the repository and commits."
+                }),
+            ),
+            // The same file by hand, which the sandbox refuses.
+            Reply::new().call(
+                "c2",
+                "shell",
+                json!({"command": "{ echo x > docs/knowledge/by-hand.md; } 2>&1; echo \"write=$?\""}),
+            ),
+            // The commit the tool staged the entry for, which takes it along.
+            Reply::new().call(
+                "c3",
+                "shell",
+                json!({"command": "git add -A && git commit -q -m 'docs(knowledge): add an entry'"}),
+            ),
+            Reply::new().text("Recorded."),
+        ];
+        let setup = setup(Mode::Commit, script).await;
+        if crate::agent::workspace::Sandbox::commit(&setup.root).is_none() {
+            // Without namespaces the turn runs unprotected: there is no read-only view to check.
+            return;
+        }
+        let (_, outcome, _) = run_turn(&setup, async |_| {}).await;
+        assert_eq!(outcome.status, NodeStatus::Done, "{:?}", outcome.error);
+
+        let recorded = tool_result(&setup, 1, "c1");
+        assert!(
+            recorded.starts_with("Recorded a-commit-turn."),
+            "{recorded}"
+        );
+        // The tool wrote the real store, which the agent's own view cannot write.
+        let path = setup.root.join("docs/knowledge/a-commit-turn.md");
+        assert!(path.is_file(), "the entry is not where the store keeps it");
+        assert!(
+            std::fs::read_to_string(&path)
+                .unwrap()
+                .contains("summary: What a commit turn does.")
+        );
+        let written = tool_result(&setup, 2, "c2");
+        assert!(written.contains("Read-only file system"), "{written}");
+        assert!(!setup.root.join("docs/knowledge/by-hand.md").exists());
+        // Staged by the tool, so the turn's own commit took it with the rest.
+        assert_eq!(outcome.commits.len(), 1);
+        let committed = git(
+            &setup.root,
+            &["show", "--name-only", "--format=", &outcome.commits[0]],
+        );
+        assert!(
+            committed.contains("docs/knowledge/a-commit-turn.md"),
+            "{committed}"
+        );
+        assert_eq!(git(&setup.root, &["status", "--short"]), "");
+    }
+
+    #[tokio::test]
     async fn a_commit_turn_cannot_write_the_knowledge_directory_but_commits_elsewhere() {
         let script = vec![
             Reply::new().call(

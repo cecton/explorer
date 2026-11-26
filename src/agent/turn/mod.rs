@@ -159,6 +159,16 @@ pub struct TurnRequest {
     pub mcp: Arc<crate::agent::mcp::McpHost>,
 }
 
+/// What a turn of `mode` may do with the knowledge base: a feedback turn only reads it.
+fn knowledge_of(mode: crate::agent::Mode) -> crate::knowledge::Access {
+    use crate::agent::Mode;
+    use crate::knowledge::Access;
+    match mode {
+        Mode::Feedback => Access::Read,
+        Mode::Commit => Access::Write,
+    }
+}
+
 /// The text to send for `request`: what the turn asks, preceded by the notes Explorer
 /// adds. Reads files and runs git.
 fn message_to_send(request: &TurnRequest, sandboxed: bool) -> String {
@@ -513,6 +523,7 @@ async fn run_claude_code(
         background: Arc::default(),
         mcp: McpTools::default(),
         privileged: None,
+        knowledge: knowledge_of(request.mode),
     })?;
     let socket_path = socket.path();
     let sandboxed = sandbox.is_some();
@@ -534,6 +545,7 @@ async fn run_claude_code(
         system: &system,
         mcp,
         privileged_socket: Some(&socket_path),
+        knowledge: knowledge_of(request.mode),
         sandbox,
         compact: request.compact.is_some(),
     };
@@ -625,6 +637,7 @@ async fn run_own_loop(
             background: Arc::default(),
             mcp: mcp.clone(),
             privileged: None,
+            knowledge: knowledge_of(request.mode),
         })?)
     };
     let start = Start {
@@ -648,6 +661,7 @@ async fn run_own_loop(
         }),
         repeat_limit: request.agent.repeat_limit,
         compact,
+        knowledge: knowledge_of(request.mode),
     };
     // A commit turn is asked to commit while its tree is dirty; the nudge is never shown.
     let closing = Closing {

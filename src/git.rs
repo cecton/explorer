@@ -255,7 +255,7 @@ pub fn log_oneline(root: &camino::Utf8Path, from: &str, to: &str, cap: usize) ->
     .unwrap_or_default()
 }
 
-fn git_output(root: &camino::Utf8Path, args: &[&str]) -> Result<String, String> {
+pub(crate) fn git_output(root: &camino::Utf8Path, args: &[&str]) -> Result<String, String> {
     let output = std::process::Command::new("git")
         .current_dir(root)
         .args(args)

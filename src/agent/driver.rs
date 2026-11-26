@@ -463,6 +463,7 @@ mod tests {
     fn start(system: &str) -> crate::agent::wire::Start {
         use crate::agent::llm::LlmTarget;
         use crate::agent::wire::Start;
+        use crate::knowledge::Access;
         use crate::model_spec::Effort;
         Start {
             target: LlmTarget {
@@ -482,6 +483,7 @@ mod tests {
             agents: None,
             repeat_limit: 0,
             compact: false,
+            knowledge: Access::Write,
         }
     }
 

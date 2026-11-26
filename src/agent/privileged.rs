@@ -1,6 +1,8 @@
 //! The socket of one turn, through which a process that runs the turn's tools reaches the
-//! tools only Explorer can serve: those that read its own state (the `conversation` tool
-//! needs the tree held in memory, current down to nodes not yet flushed).
+//! tools only Explorer can serve: those that read or write its own state (the `conversation`
+//! tool needs the tree held in memory, current down to nodes not yet flushed) or a store the
+//! agent's own view of the repository does not hold (a knowledge change writes the real
+//! store, which a feedback turn's copy stands for but is not).
 //!
 //! A turn opens one socket, whose answers are no more than the turn's own tool list offers.
 //! It lives in a private directory removed with the guard. The wire is one JSON line per
@@ -8,8 +10,10 @@
 
 use std::sync::Arc;
 
-/// The tools served through the socket instead of where the agent runs.
-pub const PRIVILEGED: [&str; 1] = ["conversation"];
+/// Whether a call goes through the socket; a knowledge read stays in the process's own view.
+pub fn serves(name: &str, arguments: &serde_json::Value) -> bool {
+    name == "conversation" || (name == "knowledge" && crate::knowledge::is_mutation(arguments))
+}
 
 /// The longest path a unix socket address takes, less the terminating NUL.
 const SOCKET_PATH_MAX: usize = 107;
@@ -97,15 +101,17 @@ async fn answer(stream: tokio::net::UnixStream, context: Arc<crate::agent::tools
     let mut lines = tokio::io::BufReader::new(reader).split(b'\n');
     while let Ok(Some(line)) = lines.next_segment().await {
         let reply = match serde_json::from_slice::<Request>(&line) {
-            Ok(request) if PRIVILEGED.contains(&request.name.as_str()) => {
+            Ok(request) => {
                 let call = ToolCall {
                     id: String::new(),
                     name: request.name,
                     arguments: request.arguments,
                 };
-                crate::agent::tools::try_run(&context, &call).await
+                match serves(&call.name, &call.arguments) {
+                    true => crate::agent::tools::try_run(&context, &call).await,
+                    false => Err(format!("unknown tool: {}", call.name)),
+                }
             }
-            Ok(request) => Err(format!("unknown tool: {}", request.name)),
             Err(error) => Err(format!("bad request: {error}")),
         };
         let mut written = match reply {
@@ -161,6 +167,7 @@ pub async fn call(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::knowledge::Access;
 
     fn context() -> crate::agent::tools::ToolContext {
         use crate::agent::mcp::McpTools;
@@ -174,6 +181,7 @@ mod tests {
             background: Arc::default(),
             mcp: McpTools::default(),
             privileged: None,
+            knowledge: Access::Write,
         }
     }
 
@@ -200,6 +208,119 @@ mod tests {
         for name in ["shell", "write", "format_markdown", "agent"] {
             let refused = call(&path, name, serde_json::json!({"command": "true"})).await;
             assert_eq!(refused, Err(format!("unknown tool: {name}")));
+        }
+    }
+
+    fn store(root: &camino::Utf8Path) {
+        crate::util::test_support::init_repo(root);
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        crate::util::test_support::commit(root, "src/main.rs", "fn main() {}\n", "init");
+    }
+
+    /// A socket for a turn working in `root`, with `access` to the knowledge base.
+    fn socket_of(root: &camino::Utf8Path, access: Access) -> PrivilegedSocket {
+        use crate::agent::mcp::McpTools;
+        use crate::agent::tools::ToolContext;
+        use crate::conversation::NodeId;
+        PrivilegedSocket::start(ToolContext {
+            root: root.to_owned(),
+            tree: Arc::default(),
+            node: NodeId::new("n1"),
+            node_dir: None,
+            background: Arc::default(),
+            mcp: McpTools::default(),
+            privileged: None,
+            knowledge: access,
+        })
+        .unwrap()
+    }
+
+    fn record(id: &str, name: &str) -> serde_json::Value {
+        match id.is_empty() {
+            true => serde_json::json!({
+                "action": "write", "name": name, "title": "A title", "summary": "A summary."
+            }),
+            false => serde_json::json!({
+                "action": "write", "id": id, "title": "A title", "summary": "A summary."
+            }),
+        }
+    }
+
+    #[tokio::test]
+    async fn a_commit_turns_socket_records_a_knowledge_entry() {
+        let (tmp, root) = crate::util::test_support::temp_root();
+        store(&root);
+        let socket = socket_of(&root, Access::Write);
+        let path = socket.path();
+        let started = call(&path, "knowledge", record("", "a-turn"))
+            .await
+            .unwrap();
+        assert!(started.starts_with("Recorded a-turn."), "{started}");
+        // Written and staged where the agent's own view may be a copy of the repository.
+        assert!(root.join(crate::knowledge::DIR).join("a-turn.md").is_file());
+        assert!(
+            crate::util::test_support::git(&root, &["status", "--short"]).contains("a-turn.md"),
+            "the entry is staged"
+        );
+        drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn a_feedback_turns_socket_refuses_every_knowledge_change() {
+        let (tmp, root) = crate::util::test_support::temp_root();
+        store(&root);
+        let dir = root.join(crate::knowledge::DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("a.md"), "---\ntitle: A\nsummary: An entry.\n---\n").unwrap();
+        crate::util::test_support::git(&root, &["add", "-A"]);
+        crate::util::test_support::git(&root, &["commit", "-q", "-m", "entry"]);
+
+        let socket = socket_of(&root, Access::Read);
+        let path = socket.path();
+        for arguments in [
+            record("", "b"),
+            record("a", ""),
+            serde_json::json!({"action": "delete", "id": "a"}),
+            serde_json::json!({"action": "move", "id": "a"}),
+            serde_json::json!({"action": "rename", "id": "a", "name": "b"}),
+        ] {
+            let refused = call(&path, "knowledge", arguments.clone())
+                .await
+                .unwrap_err();
+            assert!(refused.contains("feedback turn"), "{arguments}: {refused}");
+        }
+        assert!(!dir.join("b.md").exists());
+        assert!(dir.join("a.md").is_file());
+        assert_eq!(
+            crate::util::test_support::git(&root, &["status", "--short"]),
+            ""
+        );
+        drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn the_socket_refuses_a_knowledge_read_which_the_process_answers_itself() {
+        let (_socket, path) = socket();
+        let refused = call(&path, "knowledge", serde_json::json!({"action": "toc"})).await;
+        assert_eq!(refused, Err("unknown tool: knowledge".to_string()));
+    }
+
+    #[test]
+    fn only_the_tools_of_the_turns_state_are_served() {
+        for (name, action, served) in [
+            ("conversation", "toc", true),
+            ("knowledge", "toc", false),
+            ("knowledge", "read", false),
+            ("knowledge", "search", false),
+            ("knowledge", "write", true),
+            ("knowledge", "delete", true),
+            ("knowledge", "move", true),
+            ("knowledge", "rename", true),
+            ("shell", "toc", false),
+            ("write", "write", false),
+        ] {
+            let arguments = serde_json::json!({"action": action});
+            assert_eq!(serves(name, &arguments), served, "{name} {action}");
         }
     }
 

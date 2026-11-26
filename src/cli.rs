@@ -6,8 +6,7 @@ pub struct Args {
     pub scan: bool,
     /// `fmt-md [paths]`: formats the markdown and exits; `Some(empty)` means the working tree.
     pub fmt_md: Option<Vec<camino::Utf8PathBuf>>,
-    /// `mcp-serve [root] [--own-tools-only] [--privileged-socket <path>]`: serves Explorer's
-    /// own agent tools over stdio as an MCP server.
+    /// `mcp-serve [root] [options]`: Explorer's own agent tools over stdio, as an MCP server.
     pub mcp_serve: Option<McpServe>,
     /// `agent`: runs the own agent loop of the turn that started it (`src/agent/child.rs`).
     pub agent: bool,
@@ -22,6 +21,8 @@ pub struct McpServe {
     pub own_tools_only: bool,
     /// The turn's socket: `conversation` is asked of that turn, not read from disk.
     pub privileged_socket: Option<camino::Utf8PathBuf>,
+    /// What the client's turn may do with the knowledge base; a server outside a turn may record.
+    pub knowledge: crate::knowledge::Access,
 }
 
 pub fn parse_args() -> Args {
@@ -63,6 +64,13 @@ pub fn parse_args() -> Args {
     // Both subcommands take their own options after their name, so they are read from
     // what is left once the global ones are gone. Only `mcp-serve` knows this one.
     let own_tools_only = serving && args.contains("--own-tools-only");
+    let knowledge = {
+        use crate::knowledge::Access;
+        match serving && args.contains("--knowledge-read-only") {
+            true => Access::Read,
+            false => Access::Write,
+        }
+    };
     let privileged_socket: Option<camino::Utf8PathBuf> = match serving {
         true => args
             .opt_value_from_str("--privileged-socket")
@@ -97,6 +105,7 @@ pub fn parse_args() -> Args {
             .map(utf8),
         own_tools_only,
         privileged_socket,
+        knowledge,
     });
     Args {
         log_file,

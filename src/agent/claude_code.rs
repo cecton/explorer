@@ -36,6 +36,8 @@ pub struct Run<'a> {
     pub mcp: &'a crate::agent::mcp::McpTools,
     /// The turn's tool socket, which Explorer's tool server asks for what only the turn knows.
     pub privileged_socket: Option<&'a camino::Utf8Path>,
+    /// What the turn may do with the knowledge base.
+    pub knowledge: crate::knowledge::Access,
     pub sandbox: Option<&'a crate::agent::workspace::Sandbox>,
     /// A compact turn answers without tools, as the own loop does.
     pub compact: bool,
@@ -342,7 +344,7 @@ fn arguments(config: &Run<'_>, resume: Resume<'_>) -> Vec<String> {
     } else {
         config
             .mcp
-            .claude_config(config.root, config.privileged_socket)
+            .claude_config(config.root, config.privileged_socket, config.knowledge)
     };
     args.push("--mcp-config".to_string());
     args.push(mcp);
@@ -709,6 +711,7 @@ mod tests {
     #[test]
     fn arguments_follow_effort_and_session() {
         use crate::agent::mcp::McpTools;
+        use crate::knowledge::Access;
         use crate::model_spec::Effort;
         let target = ClaudeTarget {
             model: "opus".to_string(),
@@ -721,6 +724,7 @@ mod tests {
             system: "SYSTEM",
             mcp: &mcp,
             privileged_socket: None,
+            knowledge: Access::Write,
             sandbox: None,
             compact: false,
         };
@@ -889,6 +893,7 @@ mod tests {
 
     #[tokio::test]
     async fn a_cancelled_run_stops_the_cli_and_the_commands_it_started() {
+        use crate::knowledge::Access;
         // The turn releases its copy only after this: nothing may still write into it.
         let (tmp, dir) = crate::util::test_support::temp_root();
         let path = fake_claude(&dir);
@@ -929,6 +934,7 @@ mod tests {
             system: "system",
             mcp: &mcp,
             privileged_socket: None,
+            knowledge: Access::Write,
             sandbox: None,
             compact: false,
         };

@@ -19,6 +19,9 @@ const SERVER_NAME: &str = "explorer";
 /// under `mcp__explorer__` names would only duplicate them.
 pub const OWN_TOOLS_ONLY: &str = "--own-tools-only";
 
+/// The argument of a server serving a feedback turn: its knowledge base is read-only.
+pub const KNOWLEDGE_READ_ONLY: &str = "--knowledge-read-only";
+
 /// A client outside Explorer has no node of its own, so the pages it reads mark nothing
 /// as "this turn" or "your branch".
 const EXTERNAL_NODE: &str = "external";
@@ -38,6 +41,8 @@ struct Server {
     mcp: std::sync::Arc<crate::agent::mcp::McpHost>,
     /// The turn's socket, which answers the privileged tools; without one they read the disk.
     privileged_socket: Option<camino::Utf8PathBuf>,
+    /// What the client's turn may do with the knowledge base.
+    knowledge: crate::knowledge::Access,
 }
 
 impl Server {
@@ -48,6 +53,7 @@ impl Server {
         root: camino::Utf8PathBuf,
         servers: Vec<crate::agent::mcp::McpServerDecl>,
         privileged_socket: Option<camino::Utf8PathBuf>,
+        knowledge: crate::knowledge::Access,
     ) -> Self {
         let mcp = std::sync::Arc::new(crate::agent::mcp::McpHost::new(root.clone()));
         let notify: crate::agent::mcp::Notify = std::sync::Arc::new(|_| {});
@@ -59,6 +65,7 @@ impl Server {
             tree: std::sync::Arc::default(),
             mcp,
             privileged_socket,
+            knowledge,
         }
     }
 
@@ -71,6 +78,7 @@ impl Server {
             background: std::sync::Arc::default(),
             mcp,
             privileged: None,
+            knowledge: self.knowledge,
         }
     }
 
@@ -92,7 +100,7 @@ impl Server {
             return Err(format!("unknown tool: {name}"));
         }
         if let Some(socket) = &self.privileged_socket
-            && crate::agent::privileged::PRIVILEGED.contains(&name)
+            && crate::agent::privileged::serves(name, &arguments)
         {
             return crate::agent::privileged::call(socket, name, arguments).await;
         }
@@ -185,8 +193,9 @@ pub async fn serve(
     root: camino::Utf8PathBuf,
     servers: Vec<crate::agent::mcp::McpServerDecl>,
     privileged_socket: Option<camino::Utf8PathBuf>,
+    knowledge: crate::knowledge::Access,
 ) -> i32 {
-    let server = std::sync::Arc::new(Server::start(root, servers, privileged_socket));
+    let server = std::sync::Arc::new(Server::start(root, servers, privileged_socket, knowledge));
     converse(
         server,
         tokio::io::BufReader::new(tokio::io::stdin()),
@@ -231,7 +240,9 @@ pub fn claude_server(
     root: &camino::Utf8Path,
     own_tools_only: bool,
     privileged_socket: Option<&camino::Utf8Path>,
+    knowledge: crate::knowledge::Access,
 ) -> (String, serde_json::Value) {
+    use crate::knowledge::Access;
     let program = std::env::current_exe()
         .ok()
         .and_then(|path| camino::Utf8PathBuf::from_path_buf(path).ok())
@@ -243,6 +254,9 @@ pub fn claude_server(
     if let Some(socket) = privileged_socket {
         args.extend(["--privileged-socket".to_string(), socket.to_string()]);
     }
+    if knowledge == Access::Read {
+        args.push(KNOWLEDGE_READ_ONLY.to_string());
+    }
     (
         SERVER_NAME.to_string(),
         serde_json::json!({"command": program, "args": args}),
@@ -252,6 +266,7 @@ pub fn claude_server(
 #[cfg(test)]
 mod tests {
     use super::{PROTOCOL_VERSION, SERVER_NAME, Server, claude_server, converse};
+    use crate::knowledge::Access;
 
     fn server() -> (
         tempfile::TempDir,
@@ -260,7 +275,8 @@ mod tests {
     ) {
         let tmp = tempfile::tempdir().unwrap();
         let root = camino::Utf8PathBuf::from_path_buf(tmp.path().canonicalize().unwrap()).unwrap();
-        let server = std::sync::Arc::new(Server::start(root.clone(), Vec::new(), None));
+        let server =
+            std::sync::Arc::new(Server::start(root.clone(), Vec::new(), None, Access::Write));
         (tmp, root, server)
     }
 
@@ -415,7 +431,7 @@ done
             name: "fake".to_string(),
             program: script.to_str().unwrap().to_string(),
         };
-        let server = std::sync::Arc::new(Server::start(root, vec![decl], None));
+        let server = std::sync::Arc::new(Server::start(root, vec![decl], None, Access::Write));
         let reply = ask(&server, "tools/list", serde_json::json!({})).await;
         let names: Vec<&str> = reply["result"]["tools"]
             .as_array()
@@ -451,9 +467,10 @@ done
             background: std::sync::Arc::default(),
             mcp: McpTools::default(),
             privileged: None,
+            knowledge: Access::Write,
         })
         .unwrap();
-        let server = Server::start(root, Vec::new(), Some(socket.path()));
+        let server = Server::start(root, Vec::new(), Some(socket.path()), Access::Write);
         let reply = ask(
             &server,
             "tools/call",
@@ -480,7 +497,7 @@ done
     fn a_claude_entry_carries_the_turns_socket() {
         let root = camino::Utf8Path::new("/repo");
         let socket = camino::Utf8Path::new("/run/turn/tools.sock");
-        let (_, config) = claude_server(root, true, Some(socket));
+        let (_, config) = claude_server(root, true, Some(socket), Access::Write);
         assert_eq!(
             config["args"],
             serde_json::json!([
@@ -494,15 +511,110 @@ done
     }
 
     #[test]
+    fn a_feedback_turns_server_is_told_the_knowledge_base_is_read_only() {
+        let root = camino::Utf8Path::new("/repo");
+        let socket = camino::Utf8Path::new("/run/turn/tools.sock");
+        let (_, read_only) = claude_server(root, true, Some(socket), Access::Read);
+        assert_eq!(
+            read_only["args"],
+            serde_json::json!([
+                "mcp-serve",
+                "/repo",
+                crate::agent::serve::OWN_TOOLS_ONLY,
+                "--privileged-socket",
+                "/run/turn/tools.sock",
+                crate::agent::serve::KNOWLEDGE_READ_ONLY
+            ])
+        );
+        let (_, writing) = claude_server(root, true, Some(socket), Access::Write);
+        assert!(
+            !writing["args"]
+                .as_array()
+                .unwrap()
+                .contains(&serde_json::json!(crate::agent::serve::KNOWLEDGE_READ_ONLY))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_read_only_server_serves_no_knowledge_change_and_refuses_one_it_is_asked_for() {
+        let (tmp, root) = crate::util::test_support::temp_repo();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        crate::util::test_support::commit(&root, "src/main.rs", "fn main() {}\n", "init");
+        let server =
+            std::sync::Arc::new(Server::start(root.clone(), Vec::new(), None, Access::Read));
+        let reply = ask(&server, "tools/list", serde_json::json!({})).await;
+        let knowledge = reply["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|tool| tool["name"] == "knowledge")
+            .unwrap();
+        assert_eq!(
+            knowledge["inputSchema"]["properties"]["action"]["enum"],
+            serde_json::json!(["toc", "read", "search"])
+        );
+
+        let reply = ask(
+            &server,
+            "tools/call",
+            serde_json::json!({"name": "knowledge", "arguments": {
+                "action": "write", "name": "a", "title": "A", "summary": "s"
+            }}),
+        )
+        .await;
+        assert_eq!(reply["result"]["isError"], true);
+        let text = reply["result"]["content"][0]["text"].as_str().unwrap();
+        assert!(text.contains("feedback turn"), "{text}");
+        assert!(!root.join("docs/knowledge/a.md").exists());
+        drop(tmp);
+    }
+
+    #[tokio::test]
+    async fn a_knowledge_change_goes_to_the_turns_socket_when_there_is_one() {
+        use crate::agent::mcp::McpTools;
+        use crate::agent::privileged::PrivilegedSocket;
+        use crate::agent::tools::ToolContext;
+        use crate::conversation::NodeId;
+        let (tmp, root) = crate::util::test_support::temp_repo();
+        std::fs::create_dir_all(root.join("src")).unwrap();
+        crate::util::test_support::commit(&root, "src/main.rs", "fn main() {}\n", "init");
+        let socket = PrivilegedSocket::start(ToolContext {
+            root: root.clone(),
+            tree: std::sync::Arc::default(),
+            node: NodeId::new("n1"),
+            node_dir: None,
+            background: std::sync::Arc::default(),
+            mcp: McpTools::default(),
+            privileged: None,
+            knowledge: Access::Write,
+        })
+        .unwrap();
+        let server = Server::start(root.clone(), Vec::new(), Some(socket.path()), Access::Write);
+        let reply = ask(
+            &server,
+            "tools/call",
+            serde_json::json!({"name": "knowledge", "arguments": {
+                "action": "write", "name": "through-the-socket", "title": "A", "summary": "s"
+            }}),
+        )
+        .await;
+        assert!(reply["result"]["isError"].is_null(), "{reply}");
+        // The socket's store is the turn's root, which here is the only one there is.
+        assert!(root.join("docs/knowledge/through-the-socket.md").is_file());
+        drop(socket);
+        drop(tmp);
+    }
+
+    #[test]
     fn a_claude_entry_always_names_explorer_and_its_own_tools_only_flag() {
         let root = camino::Utf8Path::new("/repo");
-        let (plain, plain_config) = claude_server(root, false, None);
+        let (plain, plain_config) = claude_server(root, false, None, Access::Write);
         assert_eq!(plain, SERVER_NAME);
         assert_eq!(
             plain_config["args"],
             serde_json::json!(["mcp-serve", "/repo"])
         );
-        let (_, own_config) = claude_server(root, true, None);
+        let (_, own_config) = claude_server(root, true, None, Access::Write);
         assert_eq!(
             own_config["args"],
             serde_json::json!(["mcp-serve", "/repo", super::OWN_TOOLS_ONLY])

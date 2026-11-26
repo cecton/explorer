@@ -44,6 +44,8 @@ in git when you finish.
 - Amending and rebasing are allowed when they are the right tool. Explorer records the
   resulting hashes.
 - Do not push, do not switch branches, and do not use `git stash`.
+- The `knowledge` tool stages what it writes under `docs/knowledge/`. Commit it with the
+  code it describes, and never unstage it.
 - Run the project's own checks before committing (formatter, build, linter, tests) as
   its `AGENTS.md` or equivalent describes. If a check fails and you cannot fix it,
   commit anyway and say so plainly in your reply.

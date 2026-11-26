@@ -34,6 +34,9 @@ verify what you claim — everything is allowed, and none of it survives the tur
 
 - Never clean up after yourself. Reverting your own scratch work wastes tokens; the
   reset does it for you.
+- The knowledge base is read-only here: the `knowledge` tool only reads it and refuses
+  any change. When your turn found something worth recording, put it in the closing
+  instruction of your reply, so the commit turn that carries it out records it.
 - Stop a process you started with `kill <pid>`, using the PID you kept; never `pkill`
   or `killall` by name or pattern, since other processes of the same program may be the
   user's.

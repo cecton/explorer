@@ -158,6 +158,7 @@ async fn run(start: crate::agent::wire::Start, sink: &mut WireSink) -> Result<()
         agents,
         repeat_limit,
         compact,
+        knowledge,
     } = start;
     // A test child that writes a JSON line which is no event, then waits for its parent.
     #[cfg(test)]
@@ -215,6 +216,7 @@ async fn run(start: crate::agent::wire::Start, sink: &mut WireSink) -> Result<()
         background: Arc::default(),
         mcp,
         privileged: socket,
+        knowledge,
     });
     let agent_tool = agents.as_ref().map(|agents| agents.tool.clone());
     sink.agents = agents.map(|agents| {

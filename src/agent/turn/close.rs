@@ -34,6 +34,7 @@ pub(super) async fn close(
             let node = request.node.clone();
             let before = request.head.clone();
             let (commits, reset) = tokio::task::spawn_blocking(move || {
+                crate::knowledge::settle();
                 close_commit_turn(
                     &root,
                     node.as_str(),

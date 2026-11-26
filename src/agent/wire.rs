@@ -25,6 +25,8 @@ pub struct Start {
     pub repeat_limit: u32,
     /// A single answer without tools, asking for a summary.
     pub compact: bool,
+    /// What the turn may do with the knowledge base.
+    pub knowledge: crate::knowledge::Access,
 }
 
 /// What the child reports, in the order the run produces it.
