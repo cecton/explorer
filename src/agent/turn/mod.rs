@@ -226,6 +226,7 @@ pub fn report_usage(
 pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle {
     use crate::agent::Mode;
     use crate::agent::turn::live::LiveTurn;
+    use crate::agent::workspace::Sandbox;
     use crate::conversation::NodeStatus;
     use crate::signal::AppSignal;
     let live = Arc::new(parking_lot::Mutex::new(LiveTurn::new()));
@@ -257,9 +258,18 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
             Ok(workspace) => (workspace, Ok(())),
             Err(reason) => (None, Err(reason)),
         };
-        let sandbox = workspace
-            .as_ref()
-            .and_then(|workspace| workspace.sandbox(&request.root));
+        let sandbox = match &workspace {
+            Some(workspace) => workspace.sandbox(&request.root),
+            // A commit turn works in the repository itself, with the knowledge directory read-only.
+            None if request.mode == Mode::Commit && request.compact.is_none() => {
+                let root = request.root.clone();
+                tokio::task::spawn_blocking(move || Sandbox::commit(&root))
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            None => None,
+        };
         let in_place = workspace
             .as_ref()
             .and_then(|workspace| workspace.in_place_reason())

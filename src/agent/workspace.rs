@@ -98,22 +98,78 @@ pub(crate) fn clear_failed() {
 #[derive(Clone, Debug)]
 pub struct Sandbox {
     pub root: camino::Utf8PathBuf,
-    pub workspace: camino::Utf8PathBuf,
+    /// A copy shown at `root`; `None` for a turn that works in the repository itself.
+    pub workspace: Option<camino::Utf8PathBuf>,
+    /// Directories the agent cannot write.
+    pub read_only: Vec<camino::Utf8PathBuf>,
 }
 
 impl Sandbox {
     /// Starts in `/`: an inherited cwd would name the real repository.
     pub fn command(&self, program: impl AsRef<std::ffi::OsStr>) -> tokio::process::Command {
         let mut command = tokio::process::Command::new(explorer());
+        command.args(["sandbox-exec", "--root"]).arg(&self.root);
+        if let Some(workspace) = &self.workspace {
+            command.arg("--workspace").arg(workspace);
+        }
+        for path in &self.read_only {
+            command.arg("--ro").arg(path);
+        }
+        command.arg("--").arg(program).current_dir("/");
         command
-            .args(["sandbox-exec", "--root"])
-            .arg(&self.root)
-            .arg("--workspace")
-            .arg(&self.workspace)
-            .arg("--")
-            .arg(program)
-            .current_dir("/");
-        command
+    }
+
+    /// The sandbox of a commit turn, which works in the repository itself and cannot write
+    /// the knowledge directory; `None` where the host has no namespaces, or where
+    /// `docs/knowledge` is not a directory it can protect: the turn then runs unprotected.
+    /// Blocking: the first call runs the namespace check.
+    pub fn commit(root: &camino::Utf8Path) -> Option<Self> {
+        if let Err(reason) = sandbox_works(root) {
+            tracing::warn!(
+                "a commit turn runs unprotected, the sandbox does not work here: {reason}"
+            );
+            return None;
+        }
+        // A linked parent would have the directory made, and protected, outside the repository.
+        let docs = root.join("docs");
+        if std::fs::symlink_metadata(&docs).is_ok_and(|meta| !meta.is_dir()) {
+            tracing::warn!("a commit turn runs unprotected, {KNOWLEDGE} is not under a real docs/");
+            return None;
+        }
+        let knowledge = root.join(KNOWLEDGE);
+        let usable = match std::fs::symlink_metadata(&knowledge) {
+            Ok(meta) => meta.is_dir(),
+            Err(_) => std::fs::create_dir_all(&knowledge).is_ok(),
+        };
+        if !usable {
+            tracing::warn!("a commit turn runs unprotected, {KNOWLEDGE} is not a directory");
+            return None;
+        }
+        // The check remounts the repository, which says nothing about a mount below it.
+        if !same_device(root, &knowledge) {
+            tracing::warn!(
+                "a commit turn runs unprotected, {KNOWLEDGE} is on another filesystem than the \
+                 repository"
+            );
+            return None;
+        }
+        Some(Self {
+            root: root.to_path_buf(),
+            workspace: None,
+            read_only: vec![knowledge],
+        })
+    }
+}
+
+/// The directory of knowledge entries, which the agent of a commit turn cannot write.
+const KNOWLEDGE: &str = "docs/knowledge";
+
+/// Whether `path` is on the filesystem of `root`, and so remounted read-only by a bind of it.
+fn same_device(root: &camino::Utf8Path, path: &camino::Utf8Path) -> bool {
+    use std::os::unix::fs::MetadataExt;
+    match (std::fs::metadata(root), std::fs::metadata(path)) {
+        (Ok(root), Ok(path)) => root.dev() == path.dev(),
+        _ => false,
     }
 }
 
@@ -177,10 +233,13 @@ fn cargo_config_target_dir_set(root: &camino::Utf8Path) -> bool {
     })
 }
 
-/// Runs the sandbox check now; while `target/` is missing nothing is cached.
+/// Runs the sandbox check now, so the first turn does not wait for it.
 pub fn warm(root: &camino::Utf8Path) {
-    if root.join("target").is_dir() {
-        let _ = sandbox_works(root);
+    if let Err(reason) = sandbox_works(root) {
+        tracing::warn!(
+            "the sandbox does not work here ({reason}): feedback turns run one at a time in the \
+             repository, and a commit turn does not protect {KNOWLEDGE}"
+        );
     }
 }
 
@@ -195,7 +254,8 @@ impl Workspace {
         match self {
             Self::Cloned(workspace) => Some(Sandbox {
                 root: root.to_path_buf(),
-                workspace: workspace.clone(),
+                workspace: Some(workspace.clone()),
+                read_only: Vec::new(),
             }),
             Self::InPlace { .. } => None,
         }
@@ -270,12 +330,13 @@ fn sandbox_works(root: &camino::Utf8Path) -> Result<(), String> {
 }
 
 fn sandbox_check(root: &camino::Utf8Path) -> Result<(), String> {
-    // Only namespaces are checked here, so any existing directory inside the root will do.
+    // The root as the read-only path exercises the namespaces, the id maps and the remount
+    // on the filesystem that holds the repository, whatever the repository holds.
     let output = std::process::Command::new(explorer())
         .args(["sandbox-exec", "--root"])
         .arg(root)
-        .arg("--workspace")
-        .arg(root.join("target"))
+        .arg("--ro")
+        .arg(root)
         .arg("--check")
         .current_dir("/")
         .stdin(std::process::Stdio::null())
@@ -1134,7 +1195,8 @@ mod tests {
     fn the_sandbox_command_shows_the_copy_at_the_root_and_starts_in_slash() {
         let sandbox = Sandbox {
             root: camino::Utf8PathBuf::from("/repo"),
-            workspace: camino::Utf8PathBuf::from("/repo/target/explorer/1-n"),
+            workspace: Some(camino::Utf8PathBuf::from("/repo/target/explorer/1-n")),
+            read_only: Vec::new(),
         };
         let command = sandbox.command("claude");
         let std = command.as_std();
@@ -1155,6 +1217,65 @@ mod tests {
             ]
         );
         assert_eq!(std.get_current_dir(), Some(std::path::Path::new("/")));
+    }
+
+    #[test]
+    fn a_commit_turns_sandbox_has_no_copy_and_a_read_only_knowledge_directory() {
+        let sandbox = Sandbox {
+            root: camino::Utf8PathBuf::from("/repo"),
+            workspace: None,
+            read_only: vec![camino::Utf8PathBuf::from("/repo/docs/knowledge")],
+        };
+        let command = sandbox.command("claude");
+        let args: Vec<_> = command
+            .as_std()
+            .get_args()
+            .map(|a| a.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(
+            args,
+            [
+                "sandbox-exec",
+                "--root",
+                "/repo",
+                "--ro",
+                "/repo/docs/knowledge",
+                "--",
+                "claude"
+            ]
+        );
+    }
+
+    #[test]
+    fn the_commit_sandbox_creates_the_knowledge_directory_and_a_copy_less_plan_gets_none() {
+        let (_tmp, root) = temp_root();
+        if let Some(sandbox) = Sandbox::commit(&root) {
+            assert_eq!(sandbox.workspace, None);
+            assert_eq!(sandbox.read_only, [root.join(KNOWLEDGE)]);
+            assert!(root.join(KNOWLEDGE).is_dir());
+        }
+        let in_place = Workspace::InPlace {
+            reason: "no build".to_string(),
+        };
+        assert!(in_place.sandbox(&root).is_none());
+    }
+
+    #[test]
+    fn the_commit_sandbox_is_refused_where_knowledge_is_not_a_directory() {
+        let (_tmp, root) = temp_root();
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(root.join(KNOWLEDGE), "a file").unwrap();
+        assert!(Sandbox::commit(&root).is_none());
+    }
+
+    #[test]
+    fn the_commit_sandbox_is_refused_behind_a_linked_docs_directory() {
+        let (_tmp, root) = temp_root();
+        let (_other, outside) = temp_root();
+        std::os::unix::fs::symlink(&outside, root.join("docs")).unwrap();
+        assert!(Sandbox::commit(&root).is_none());
+        // Nothing was made where the link pointed.
+        assert!(!outside.join("knowledge").exists());
     }
 
     #[test]

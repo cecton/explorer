@@ -808,6 +808,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn a_commit_turn_cannot_write_the_knowledge_directory_but_commits_elsewhere() {
+        let script = vec![
+            Reply::new().call(
+                "c1",
+                "shell",
+                json!({"command": "{ echo x > docs/knowledge/a.md; } 2>&1; echo ok > other.txt && git add other.txt && git commit -q -m 'feat: other'"}),
+            ),
+            Reply::new().text("Committed."),
+        ];
+        let setup = setup(Mode::Commit, script).await;
+        if crate::agent::workspace::Sandbox::commit(&setup.root).is_none() {
+            // Without namespaces the turn runs unprotected, and there is nothing to check here.
+            return;
+        }
+        let (_, outcome, _) = run_turn(&setup, async |_| {}).await;
+        assert_eq!(outcome.status, NodeStatus::Done);
+        assert!(
+            tool_result(&setup, 1, "c1").contains("Read-only file system"),
+            "{}",
+            tool_result(&setup, 1, "c1")
+        );
+        assert!(!setup.root.join("docs/knowledge/a.md").exists());
+        assert_eq!(outcome.commits.len(), 1);
+        assert_eq!(git(&setup.root, &["status", "--short"]), "");
+    }
+
+    #[tokio::test]
     async fn a_commit_turn_is_nudged_until_the_tree_is_clean() {
         let script = vec![
             Reply::new().call("c1", "shell", json!({"command": "echo x > new.txt"})),

@@ -1,12 +1,14 @@
-//! `explorer sandbox-exec --root <repo> --workspace <dir> -- <cmd> [args]`: runs a
-//! command in a user and mount namespace where the repository path is replaced by a
-//! workspace of it. It guards against accidents: an agent that writes to the repository
-//! path writes the workspace, and its edits are thrown away with it. It does not confine
-//! the agent, which can still reach everything else on the host.
+//! `explorer sandbox-exec --root <repo> [--workspace <dir>] [--ro <path>]... -- <cmd> [args]`:
+//! runs a command in a user and mount namespace where, given a workspace, the repository
+//! path is replaced by it, and where the `--ro` paths cannot be written. It guards against
+//! accidents: an agent that writes to the repository path writes the workspace, and its
+//! edits are thrown away with it; one that writes a read-only path gets `EROFS`. It does
+//! not confine the agent, which can still reach everything else on the host.
 //!
 //! `unshare` into a user namespace must happen in a single-threaded process, so
 //! `sandbox-exec` re-execs itself as `sandbox-child` and that child enters the
-//! namespaces, binds the workspace over the root and `exec`s the command. The command
+//! namespaces, binds the workspace over the root if there is one, remounts the `--ro` paths
+//! and `exec`s the command. The command
 //! then runs with the child process's pid, process group and standard streams, so the
 //! caller's signal and group handling works as without a sandbox.
 
@@ -57,7 +59,7 @@ fn enter_namespaces() {
     }
 }
 
-fn shadow(root: &camino::Utf8Path, workspace: &camino::Utf8Path) {
+fn make_private() {
     use rustix::mount::MountPropagationFlags;
     if let Err(error) = rustix::mount::mount_change(
         "/",
@@ -65,8 +67,48 @@ fn shadow(root: &camino::Utf8Path, workspace: &camino::Utf8Path) {
     ) {
         fail(&format!("could not make the mounts private: {error}"));
     }
+}
+
+fn shadow(root: &camino::Utf8Path, workspace: &camino::Utf8Path) {
     if let Err(error) = rustix::mount::mount_bind(workspace.as_std_path(), root.as_std_path()) {
         fail(&format!("could not bind {workspace} over {root}: {error}"));
+    }
+}
+
+/// Makes `path` read-only for this namespace: bound onto itself, then remounted with the
+/// flags its mount already has, since an unprivileged remount cannot drop a locked one.
+fn read_only(path: &camino::Utf8Path) {
+    use rustix::fs::StatVfsMountFlags;
+    use rustix::mount::MountFlags;
+    match std::fs::metadata(path) {
+        Ok(meta) if meta.is_dir() => {}
+        Ok(_) => fail(&format!("{path} is not a directory")),
+        Err(error) => fail(&format!("cannot read {path}: {error}")),
+    }
+    if let Err(error) = rustix::mount::mount_bind(path.as_std_path(), path.as_std_path()) {
+        fail(&format!("could not bind {path} onto itself: {error}"));
+    }
+    let have = match rustix::fs::statvfs(path.as_std_path()) {
+        Ok(stat) => stat.f_flag,
+        Err(error) => fail(&format!(
+            "could not read the mount flags of {path}: {error}"
+        )),
+    };
+    let mut flags = MountFlags::BIND | MountFlags::RDONLY;
+    for (from, to) in [
+        (StatVfsMountFlags::NOSUID, MountFlags::NOSUID),
+        (StatVfsMountFlags::NODEV, MountFlags::NODEV),
+        (StatVfsMountFlags::NOEXEC, MountFlags::NOEXEC),
+        (StatVfsMountFlags::NOATIME, MountFlags::NOATIME),
+        (StatVfsMountFlags::NODIRATIME, MountFlags::NODIRATIME),
+        (StatVfsMountFlags::RELATIME, MountFlags::RELATIME),
+    ] {
+        if have.contains(from) {
+            flags |= to;
+        }
+    }
+    if let Err(error) = rustix::mount::mount_remount(path.as_std_path(), flags, "") {
+        fail(&format!("could not make {path} read-only: {error}"));
     }
 }
 
@@ -101,25 +143,49 @@ pub(crate) fn child(arguments: &[std::ffi::OsString]) -> ! {
     let workspace = args
         .opt_value_from_os_str("--workspace", path)
         .unwrap_or_else(|error| fail(&error.to_string()));
+    let mut read_only_paths = Vec::new();
+    while let Some(ro) = args
+        .opt_value_from_os_str("--ro", path)
+        .unwrap_or_else(|error| fail(&error.to_string()))
+    {
+        read_only_paths.push(ro);
+    }
     let check = args.contains("--check");
     if let Some(other) = args.finish().first() {
         fail(&format!("unknown option {}", other.to_string_lossy()));
     }
-    let (Some(root), Some(workspace)) = (root, workspace) else {
-        fail("usage: sandbox-exec --root <repo> --workspace <dir> [--check] -- <cmd> [args]");
+    let Some(root) = root else {
+        fail(
+            "usage: sandbox-exec --root <repo> [--workspace <dir>] [--ro <path>]... [--check] \
+             -- <cmd> [args]",
+        );
     };
-    if !root.is_absolute() || !workspace.is_absolute() {
-        fail("the root and the workspace must be absolute paths");
+    if !root.is_absolute()
+        || !workspace
+            .iter()
+            .chain(&read_only_paths)
+            .all(|p| p.is_absolute())
+    {
+        fail("the root, the workspace and the read-only paths must be absolute paths");
     }
     // A workspace inside the root is bound over it; the other way round would shadow the root.
-    if root.starts_with(&workspace) {
+    if workspace
+        .as_ref()
+        .is_some_and(|workspace| root.starts_with(workspace))
+    {
         fail("the root must not be inside the workspace");
     }
     if !check && command.is_empty() {
         fail("no command after --");
     }
     enter_namespaces();
-    shadow(&root, &workspace);
+    make_private();
+    if let Some(workspace) = &workspace {
+        shadow(&root, workspace);
+    }
+    for path in &read_only_paths {
+        read_only(path);
+    }
     if check {
         std::process::exit(0);
     }
@@ -344,6 +410,94 @@ mod tests {
         assert_eq!(output.status.code(), Some(NOT_FOUND));
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.contains("could not exec"), "{stderr}");
+    }
+
+    fn exec_read_only(
+        root: &camino::Utf8Path,
+        read_only: &[&camino::Utf8Path],
+        command: &[&str],
+    ) -> std::process::Command {
+        use std::process::Command;
+        let mut cmd = Command::new(built_explorer());
+        cmd.arg("sandbox-exec").arg("--root").arg(root);
+        for path in read_only {
+            cmd.arg("--ro").arg(path);
+        }
+        cmd.arg("--").args(command);
+        cmd
+    }
+
+    #[test]
+    fn a_read_only_path_refuses_writes_while_the_rest_of_the_root_takes_them() {
+        if !usable() {
+            return;
+        }
+        let (_dirs, root, _workspace) = dirs();
+        let knowledge = root.join("docs").join("knowledge");
+        std::fs::create_dir_all(&knowledge).unwrap();
+        let script = format!(
+            "{{ echo x > {knowledge}/entry.md; }} 2>&1; echo \"write=$?\"; \
+             echo x > {root}/free && echo \"other=$?\""
+        );
+        let output = exec_read_only(&root, &[&knowledge], &["sh", "-c", &script])
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(stdout.contains("Read-only file system"), "{stdout}");
+        assert!(stdout.contains("write=1"), "{stdout}");
+        assert!(stdout.contains("other=0"), "{stdout}");
+        assert!(!knowledge.join("entry.md").exists());
+        assert!(root.join("free").exists());
+    }
+
+    #[test]
+    fn a_read_only_path_is_read_only_beside_a_workspace_too() {
+        if !usable() {
+            return;
+        }
+        let (_dirs, root, workspace) = dirs();
+        std::fs::create_dir_all(workspace.join("docs")).unwrap();
+        let mut cmd = std::process::Command::new(built_explorer());
+        cmd.arg("sandbox-exec")
+            .arg("--root")
+            .arg(&root)
+            .arg("--workspace")
+            .arg(&workspace)
+            .arg("--ro")
+            .arg(root.join("docs"))
+            .args(["--", "sh", "-c", "{ echo x > docs/f; } 2>&1; echo $?"]);
+        let stdout = String::from_utf8_lossy(&cmd.output().unwrap().stdout).into_owned();
+        assert!(stdout.contains("Read-only file system"), "{stdout}");
+        assert!(!workspace.join("docs").join("f").exists());
+    }
+
+    #[test]
+    fn a_missing_read_only_path_is_a_setup_failure() {
+        if !usable() {
+            return;
+        }
+        let (_dirs, root, _workspace) = dirs();
+        let missing = root.join("nothing");
+        let output = exec_read_only(&root, &[&missing], &["true"])
+            .output()
+            .unwrap();
+        assert_eq!(output.status.code(), Some(SETUP_FAILED));
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.contains("cannot read"), "{stderr}");
+    }
+
+    #[test]
+    fn check_works_without_a_workspace() {
+        let (_dirs, root, _workspace) = dirs();
+        let status = std::process::Command::new(built_explorer())
+            .args(["sandbox-exec", "--root"])
+            .arg(&root)
+            .arg("--ro")
+            .arg(&root)
+            .arg("--check")
+            .status()
+            .unwrap();
+        assert!(status.success(), "{status}");
     }
 
     #[test]
