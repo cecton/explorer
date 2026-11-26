@@ -551,7 +551,7 @@ done
             .unwrap();
         assert_eq!(
             knowledge["inputSchema"]["properties"]["action"]["enum"],
-            serde_json::json!(["toc", "read", "search"])
+            serde_json::json!(["toc", "read", "search", "check"])
         );
 
         let reply = ask(

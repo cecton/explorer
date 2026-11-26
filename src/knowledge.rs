@@ -8,8 +8,8 @@
 //! than read, so the layout and the formatter stay one fixed point.
 //!
 //! What a turn may do here follows its mode: a commit turn records, changes and removes
-//! entries, and each change is staged so it is committed with the code it describes, while
-//! a feedback turn only reads, since its work is discarded when it ends.
+//! entries, and each change is staged so that the turn's own commit carries it, while a
+//! feedback turn only reads, since its work is discarded when it ends.
 
 use std::collections::BTreeMap;
 
@@ -27,6 +27,8 @@ const SUMMARY_MAX: usize = 200;
 const BODY_MAX: usize = 2000;
 /// Characters one segment of an id holds.
 const NAME_MAX: usize = 32;
+/// Faults `check` lists at once.
+const CHECK_MAX_PROBLEMS: usize = 40;
 /// Times staging waits for another git process to release the index.
 const INDEX_LOCK_TRIES: u32 = 20;
 const INDEX_LOCK_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
@@ -365,6 +367,143 @@ impl Store {
         }
         Ok(out)
     }
+
+    /// What is wrong with the store, one page of the problems at a time.
+    fn check(&self, page: usize) -> Result<String, String> {
+        let mut problems: Vec<String> = Vec::new();
+        let mut symbols: Vec<(String, String)> = Vec::new();
+        for (id, node) in &self.nodes {
+            if let Err(error) = self.entry(id) {
+                let children = self.children(Some(id)).len();
+                let more = match (matches!(node, Node::Bare), children) {
+                    (true, 1) => " (1 child)".to_string(),
+                    (true, count) if count > 1 => format!(" ({count} children)"),
+                    _ => String::new(),
+                };
+                problems.push(format!("- {id}: (malformed: {error}){more}"));
+            }
+        }
+        for (id, entry) in self.entries() {
+            if entry.refs.is_empty() {
+                problems.push(format!(
+                    "- {id}: no refs, so nothing names the code it describes"
+                ));
+                continue;
+            }
+            for reference in &entry.refs {
+                match is_path(reference) {
+                    true if !self.root.join(reference).exists() => {
+                        problems.push(format!("- {id}: refs {reference}, which does not exist"))
+                    }
+                    true => {}
+                    false => symbols.push((id.to_string(), reference.clone())),
+                }
+            }
+        }
+        for (id, missing) in self.missing_symbols(&symbols)? {
+            for name in missing {
+                problems.push(format!("- {id}: refs {name}, which no tracked file holds"));
+            }
+        }
+        if self.nodes.is_empty() {
+            return Ok("No knowledge recorded yet.\n".to_string());
+        }
+        if problems.is_empty() {
+            let noun = if self.nodes.len() == 1 {
+                "entry"
+            } else {
+                "entries"
+            };
+            return Ok(format!(
+                "The knowledge base checks out: {} {noun}, none with a problem.\n",
+                self.nodes.len()
+            ));
+        }
+        let pages = problems.len().div_ceil(CHECK_MAX_PROBLEMS).max(1);
+        let page = page.clamp(1, pages);
+        let mut out = format!(
+            "Knowledge check: {} problem{} (page {page} of {pages}).\n\n",
+            problems.len(),
+            if problems.len() == 1 { "" } else { "s" }
+        );
+        for problem in problems
+            .iter()
+            .skip((page - 1) * CHECK_MAX_PROBLEMS)
+            .take(CHECK_MAX_PROBLEMS)
+        {
+            out.push_str(problem);
+            out.push('\n');
+        }
+        if page < pages {
+            out.push_str(&format!("\nMore problems: check page={}\n", page + 1));
+        }
+        Ok(out)
+    }
+
+    /// The symbol refs of `symbols` that no tracked file holds, grouped by id, in one `git grep`.
+    fn missing_symbols(
+        &self,
+        symbols: &[(String, String)],
+    ) -> Result<Vec<(String, Vec<String>)>, String> {
+        if symbols.is_empty() {
+            return Ok(Vec::new());
+        }
+        let mut names: Vec<&str> = symbols
+            .iter()
+            .map(|(_, reference)| symbol_name(reference))
+            .collect();
+        names.sort();
+        names.dedup();
+        let held = grep_symbols(&self.root, &names)?;
+        let mut missing: Vec<(String, Vec<String>)> = Vec::new();
+        for (id, reference) in symbols {
+            if held.iter().any(|name| name == symbol_name(reference)) {
+                continue;
+            }
+            match missing.iter_mut().find(|(group, _)| group == id) {
+                Some((_, group)) => group.push(reference.clone()),
+                None => missing.push((id.clone(), vec![reference.clone()])),
+            }
+        }
+        Ok(missing)
+    }
+}
+
+/// Whether a reference names a file rather than a symbol: it holds a separator or an extension.
+fn is_path(reference: &str) -> bool {
+    reference.contains('/') || reference.contains('.')
+}
+
+/// The name a reference is searched for: its last `::` segment, since a method is rarely a literal.
+fn symbol_name(reference: &str) -> &str {
+    reference.rsplit("::").next().unwrap_or(reference)
+}
+
+/// The symbols of `names` that a tracked file of `root` outside the store holds.
+fn grep_symbols(root: &camino::Utf8Path, names: &[&str]) -> Result<Vec<String>, String> {
+    use std::io::Write;
+    let mut patterns = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
+    for name in names {
+        writeln!(patterns, "{name}").map_err(|e| e.to_string())?;
+    }
+    let output = std::process::Command::new("git")
+        .current_dir(root)
+        .args(["grep", "-F", "-w", "-o", "-h", "-f"])
+        .arg(patterns.path())
+        // The store's own refs name every symbol it lists, so it is not searched.
+        .args(["--", "."])
+        .arg(format!(":(exclude){DIR}"))
+        .output()
+        .map_err(|e| format!("git grep: {e}"))?;
+    // Exit status 1 is no match: no tracked file holds any of them, which is no failure.
+    if !matches!(output.status.code(), Some(0 | 1)) {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("git grep: {}", stderr.trim()));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .map(|line| line.trim().to_string())
+        .collect())
 }
 
 /// Whether `name` is one segment of a knowledge id.
@@ -409,12 +548,15 @@ pub(crate) struct Spec {
 }
 
 pub(crate) fn spec(access: Access) -> Spec {
-    let mut actions = vec!["toc", "read", "search"];
+    let mut actions = vec!["toc", "read", "search", "check"];
     let mut description = "Consult the knowledge base of this repository: short entries, \
                            under docs/knowledge/, about how its code works. `toc` lists \
                            entries, or with `id` one entry and its children; `read` \
                            returns the given entries; `search` finds entries by title, \
-                           summary and body."
+                           summary and body; `check` lists what is wrong with the base: \
+                           entries that cannot be read, entries without `refs` or whose \
+                           `refs` name no code, and directories that hold children but no \
+                           entry of their own."
         .to_string();
     if access == Access::Write {
         actions.extend(["write", "delete", "move", "rename"]);
@@ -422,7 +564,7 @@ pub(crate) fn spec(access: Access) -> Spec {
             " `write` records an entry (without an `id`) or changes the fields it is given \
              (with one); `delete` removes an entry and everything under it; `move` puts an \
              entry under another one; `rename` gives it another name. Each change is staged, \
-             so it is committed with the code it describes.",
+             so the turn's commit takes it.",
         );
     }
     let id_for = match access {
@@ -432,7 +574,7 @@ pub(crate) fn spec(access: Access) -> Spec {
     let mut properties = serde_json::json!({
         "action": {"type": "string", "enum": actions},
         "id": {"type": "string", "description": format!("Knowledge id: the entry, for {id_for}")},
-        "page": {"type": "integer", "description": "Page of the list, for `toc`"},
+        "page": {"type": "integer", "description": "Page of the list, for `toc` and `check`"},
         "ids": {"type": "array", "items": {"type": "string"}, "description": "Knowledge ids, for `read`"},
         "query": {"type": "string", "description": "Words to look for, for `search`"}
     });
@@ -497,7 +639,7 @@ pub(crate) fn spec(access: Access) -> Spec {
 fn staged(paths: &[String]) -> String {
     format!(
         "Staged {}. Knowledge changes are staged by the knowledge tool so they can be \
-         committed with the code they describe. Leave them staged.\n",
+         committed by the turn's commit. Do not unstage them.\n",
         paths.join(", ")
     )
 }
@@ -1031,6 +1173,7 @@ pub(crate) fn run(
         ),
         "read" => store.read(&ids_arg(args)?),
         "search" => store.search(str_arg(args, "query")?),
+        "check" => store.check(usize_arg(args, "page").unwrap_or(1)),
         "write" if has(args, "id") => update(&store, root, args),
         "write" => create(&store, root, args),
         "delete" => delete(&store, root, args),
@@ -1592,8 +1735,8 @@ mod tests {
         assert_eq!(
             written,
             "Recorded closing-a-turn.\nStaged docs/knowledge/closing-a-turn.md. Knowledge \
-             changes are staged by the knowledge tool so they can be committed with the code \
-             they describe. Leave them staged.\n"
+             changes are staged by the knowledge tool so they can be committed by the turn's \
+             commit. Do not unstage them.\n"
         );
         assert_eq!(
             std::fs::read_to_string(root.join(DIR).join("closing-a-turn.md")).unwrap(),
@@ -2026,10 +2169,12 @@ mod tests {
                 .map(|action| action.as_str().unwrap().to_string())
                 .collect::<Vec<String>>()
         };
-        assert_eq!(actions(Access::Read), ["toc", "read", "search"]);
+        assert_eq!(actions(Access::Read), ["toc", "read", "search", "check"]);
         assert_eq!(
             actions(Access::Write),
-            ["toc", "read", "search", "write", "delete", "move", "rename"]
+            [
+                "toc", "read", "search", "check", "write", "delete", "move", "rename"
+            ]
         );
         assert!(
             spec(Access::Read).schema["properties"]
@@ -2053,7 +2198,7 @@ mod tests {
                 "{action}"
             );
         }
-        for action in ["toc", "read", "search"] {
+        for action in ["toc", "read", "search", "check"] {
             assert!(
                 !is_mutation(&serde_json::json!({"action": action})),
                 "{action}"
@@ -2103,5 +2248,125 @@ mod tests {
             "{error}"
         );
         assert!(root.join(DIR).join("a.md").is_file());
+    }
+
+    /// A store whose entries name `src/main.rs` and a symbol the code holds.
+    fn checked_repo() -> (tempfile::TempDir, camino::Utf8PathBuf) {
+        let mut good = entry("A good entry", "It names code that exists.");
+        good.refs = vec!["src/main.rs".to_string(), "main".to_string()];
+        let (tmp, root) = staged_repo(&rendered(&[("good", good)]));
+        (tmp, root)
+    }
+
+    /// What `check` reports about `root`.
+    fn check(root: &camino::Utf8Path) -> String {
+        run(root, &serde_json::json!({"action": "check"})).unwrap()
+    }
+
+    #[test]
+    fn check_passes_a_base_whose_refs_name_the_code() {
+        let (_tmp, root) = checked_repo();
+        assert_eq!(
+            check(&root),
+            "The knowledge base checks out: 1 entry, none with a problem.\n"
+        );
+        let (empty_tmp, empty) = temp_root();
+        assert_eq!(check(&empty), "No knowledge recorded yet.\n");
+        drop(empty_tmp);
+    }
+
+    #[test]
+    fn check_reports_every_kind_of_problem() {
+        let (_tmp, root) = checked_repo();
+        let dir = root.join(DIR);
+        // An entry whose path is gone and whose symbol nothing holds.
+        let mut stale = entry("Stale", "It names code that is gone.");
+        stale.refs = vec!["src/gone.rs".to_string(), "NoSuchSymbol".to_string()];
+        // An entry that names nothing.
+        let bare = entry("Unreferenced", "It names no code.");
+        // One that cannot be read, and a directory that holds children but no entry.
+        for (id, text) in [
+            ("stale", stale.render().unwrap()),
+            ("unreferenced", bare.render().unwrap()),
+            ("malformed", "No metadata block.\n".to_string()),
+            (
+                "bare/child",
+                entry("A child", "Under a directory without an entry.")
+                    .render()
+                    .unwrap(),
+            ),
+        ] {
+            let path = dir.join(format!("{id}.md"));
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, text).unwrap();
+        }
+        crate::util::test_support::git(&root, &["add", "-A"]);
+        let reported = check(&root);
+        for expected in [
+            "- bare: (malformed: it has no entry file) (1 child)",
+            "- malformed: (malformed: it has no metadata block)",
+            "- stale: refs src/gone.rs, which does not exist",
+            "- stale: refs NoSuchSymbol, which no tracked file holds",
+            "- unreferenced: no refs, so nothing names the code it describes",
+            "- bare/child: no refs, so nothing names the code it describes",
+        ] {
+            assert!(reported.contains(expected), "{expected}\n{reported}");
+        }
+        // The entry that names code that exists is not reported.
+        assert!(!reported.contains("- good:"), "{reported}");
+        assert!(
+            reported.starts_with("Knowledge check: 6 problems"),
+            "{reported}"
+        );
+    }
+
+    #[test]
+    fn check_pages_a_long_list_of_problems() {
+        let files: Vec<(String, String)> = (0..CHECK_MAX_PROBLEMS + 5)
+            .map(|i| {
+                (
+                    format!("e{i:02}"),
+                    entry("No refs", "It names no code.").render().unwrap(),
+                )
+            })
+            .collect();
+        let files: Vec<(&str, String)> = files
+            .iter()
+            .map(|(id, text)| (id.as_str(), text.clone()))
+            .collect();
+        let (_tmp, root) = store_of(&files);
+        let first = check(&root);
+        assert!(
+            first.starts_with(&format!(
+                "Knowledge check: {} problems (page 1 of 2).",
+                CHECK_MAX_PROBLEMS + 5
+            )),
+            "{first}"
+        );
+        assert!(first.ends_with("\nMore problems: check page=2\n"));
+        let second = run(&root, &serde_json::json!({"action": "check", "page": 2})).unwrap();
+        assert_eq!(second.matches("no refs").count(), 5, "{second}");
+    }
+
+    #[test]
+    fn a_symbol_ref_is_looked_up_by_its_last_segment() {
+        assert_eq!(symbol_name("Store::entry"), "entry");
+        assert_eq!(symbol_name("RefKind::Branch"), "Branch");
+        assert_eq!(symbol_name("grep"), "grep");
+        assert!(is_path("src/agent/tools.rs"));
+        assert!(is_path("Cargo.toml"));
+        assert!(!is_path("ToolContext"));
+        assert!(!is_path("Store::entry"));
+    }
+
+    #[test]
+    fn check_is_offered_to_a_feedback_turn() {
+        let actions = spec(Access::Read).schema["properties"]["action"]["enum"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|action| action.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        assert!(actions.contains(&"check".to_string()));
     }
 }

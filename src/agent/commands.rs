@@ -55,6 +55,8 @@ pub enum Expansion<'a> {
     Commit { instructions: String },
     /// The built-in `/continue`, with the instructions typed after it.
     Continue { instructions: String },
+    /// The built-in `/update`, with the instructions typed after it.
+    Update { instructions: String },
 }
 
 impl<'a> Expansion<'a> {
@@ -64,6 +66,7 @@ impl<'a> Expansion<'a> {
             Expansion::Compact { .. } => name == COMPACT,
             Expansion::Commit { .. } => name == COMMIT,
             Expansion::Continue { .. } => name == CONTINUE,
+            Expansion::Update { .. } => name == UPDATE,
             Expansion::Prompt { .. } => false,
         }
     }
@@ -73,9 +76,10 @@ impl<'a> Expansion<'a> {
 pub const COMPACT: &str = "compact";
 pub const COMMIT: &str = "commit";
 pub const CONTINUE: &str = "continue";
+pub const UPDATE: &str = "update";
 
 /// Each built-in command with what it expects after its name and what it does.
-const BUILT_INS: [(&str, &str, Option<&str>); 3] = [
+const BUILT_INS: [(&str, &str, Option<&str>); 4] = [
     (COMMIT, "[additional instructions]", None),
     (
         COMPACT,
@@ -86,6 +90,11 @@ const BUILT_INS: [(&str, &str, Option<&str>); 3] = [
         CONTINUE,
         "[instructions]",
         Some("Resume the node shown, keeping everything its turn did"),
+    ),
+    (
+        UPDATE,
+        "[instructions]",
+        Some("Verify the knowledge base against the code and commit what changed"),
     ),
 ];
 
@@ -149,6 +158,11 @@ pub fn commit_prompt(instructions: &str) -> String {
     }
 }
 
+/// The prompt an `/update` sends, with the instructions typed after it.
+pub fn update_prompt(instructions: &str) -> String {
+    crate::agent::context::update_request(instructions)
+}
+
 /// Splits `/name rest` when the prompt starts with a command name: lowercase letters,
 /// digits and dashes, followed by whitespace or the end of the text.
 fn split_command(typed: &str) -> Option<(&str, &str)> {
@@ -181,6 +195,11 @@ pub fn expand<'a>(typed: &str, commands: &'a [Command]) -> Expansion<'a> {
     }
     if name == CONTINUE {
         return Expansion::Continue {
+            instructions: rest.to_string(),
+        };
+    }
+    if name == UPDATE {
+        return Expansion::Update {
             instructions: rest.to_string(),
         };
     }
@@ -476,6 +495,39 @@ mod tests {
             placeholder("/continue", &[])
                 .unwrap()
                 .starts_with(" [instructions]\n")
+        );
+    }
+
+    #[test]
+    fn update_is_built_in_and_sends_its_task_with_the_instructions() {
+        assert_eq!(
+            expand("/update", &commands()),
+            Expansion::Update {
+                instructions: String::new()
+            }
+        );
+        assert_eq!(
+            expand("/update docs/ only", &commands()),
+            Expansion::Update {
+                instructions: "docs/ only".to_string()
+            }
+        );
+        assert_eq!(expand("/updates", &commands()), prompt("/updates", None));
+        assert!(
+            placeholder("/update", &[])
+                .unwrap()
+                .starts_with(" [instructions]\n")
+        );
+        // The prompt is the update task, with what the user typed after the command.
+        let base = update_prompt("");
+        assert!(base.starts_with("You are bringing the knowledge base"));
+        assert!(base.contains("`check`"));
+        assert!(!base.contains("Additional instructions"));
+        let with_extra = update_prompt("docs/ only");
+        assert!(with_extra.starts_with(&base), "{with_extra}");
+        assert!(
+            with_extra.ends_with("Additional instructions from the user: docs/ only"),
+            "{with_extra}"
         );
     }
 }

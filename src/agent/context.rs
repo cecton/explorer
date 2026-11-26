@@ -6,6 +6,7 @@ const CONVERSATION_TOOL_PROMPT: &str = include_str!("../../prompts/conversation_
 const KNOWLEDGE_TOOL_PROMPT: &str = include_str!("../../prompts/knowledge_tool.md");
 pub const TITLE_SUMMARY_PROMPT: &str = include_str!("../../prompts/title_summary.md");
 const COMPACT_PROMPT: &str = include_str!("../../prompts/compact.md");
+const UPDATE_PROMPT: &str = include_str!("../../prompts/update.md");
 /// System prompt of a sub-agent called without a role.
 pub const SUBAGENT_PROMPT: &str = include_str!("../../prompts/subagent.md");
 
@@ -354,6 +355,15 @@ pub fn with_notes(notes: &[Option<String>], prompt: &str) -> String {
     parts.join("\n\n")
 }
 
+/// What an `/update` turn asks the model, with the instructions the user typed.
+pub fn update_request(instructions: &str) -> String {
+    let base = UPDATE_PROMPT.trim_end();
+    match instructions.trim() {
+        "" => base.to_string(),
+        extra => format!("{base}\n\nAdditional instructions from the user: {extra}"),
+    }
+}
+
 /// The notes that open a message rather than its system prompt, because HEAD moves on
 /// every commit and anything that changes ahead of the replayed ancestors throws the
 /// endpoint's prefix cache away. Only the fields a caller has apply. Reads files and runs
@@ -430,7 +440,7 @@ pub fn commit_nudge(status: &str) -> crate::agent::Message {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::util::test_support::temp_root;
+    use crate::util::test_support::{commit, git, temp_repo, temp_root};
 
     #[test]
     fn ancestor_with_transcript_is_replayed_exactly() {
@@ -791,6 +801,23 @@ mod tests {
         };
         assert!(injected);
         assert!(content.contains(" M a.txt\n?? b.txt\n\nCommit them now."));
+    }
+
+    #[tokio::test]
+    async fn a_knowledge_entry_left_staged_is_asked_for_in_a_nudge() {
+        let (_tmp, root) = temp_repo();
+        commit(&root, "a.txt", "1", "init");
+        let dir = root.join(crate::knowledge::DIR);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("entry.md"), "An entry.\n").unwrap();
+        git(&root, &["add", "-A"]);
+        // A plain commit turn is asked to commit what it left staged, knowledge included.
+        use crate::agent::Message;
+        let nudge = next_commit_nudge(&root, 0).await.unwrap().unwrap();
+        let Message::User { content, .. } = nudge else {
+            panic!("a nudge is a user message");
+        };
+        assert!(content.contains("docs/knowledge/entry.md"), "{content}");
     }
 
     #[test]

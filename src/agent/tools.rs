@@ -1269,7 +1269,7 @@ mod tests {
             .schema;
         assert_eq!(
             schema["properties"]["action"]["enum"],
-            serde_json::json!(["toc", "read", "search"])
+            serde_json::json!(["toc", "read", "search", "check"])
         );
         // A change is refused even when the model asks for it anyway.
         let refused = run(

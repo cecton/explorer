@@ -1810,6 +1810,18 @@ mod tests {
             .unwrap();
         let launch = compose_launch(&state, 1).unwrap().unwrap();
         assert!(matches!(launch.kind, TurnKind::Continue(Mode::Commit)));
+        assert!(launch.command.is_none());
+        // Resuming an interrupted update keeps it an update, so it is never nudged to commit.
+        state
+            .conversations
+            .write()
+            .update_meta(&NodeId::new("a2"), |meta| {
+                meta.command = Some("update".to_string());
+            })
+            .unwrap();
+        let launch = compose_launch(&state, 1).unwrap().unwrap();
+        assert!(matches!(launch.kind, TurnKind::Continue(Mode::Commit)));
+        assert_eq!(launch.command.as_deref(), Some("update"));
         // The note carries the recorded error and the prompt as typed.
         assert!(launch.prompt.contains("was interrupted"));
         assert!(launch.prompt.contains("[Note from Explorer:"));
@@ -1974,6 +1986,57 @@ mod tests {
         let launch = compose_launch(&state, 0).unwrap().unwrap();
         assert_eq!(launch.parent, Some(NodeId::new("a1")));
         assert!(matches!(launch.kind, TurnKind::Prompt(Mode::Feedback)));
+    }
+
+    #[test]
+    fn update_command_composes_its_task_as_a_commit_turn() {
+        use crate::conversation::NodeId;
+        let (_tmp, mut state) = state_with_failed_child();
+        for (typed, expected) in [
+            ("/update", crate::agent::commands::update_prompt("")),
+            (
+                "/update docs/ only",
+                crate::agent::commands::update_prompt("docs/ only"),
+            ),
+        ] {
+            state.discussions.get_mut(&0).unwrap().draft.set_text(typed);
+            let launch = compose_launch(&state, 0).unwrap().unwrap();
+            assert_eq!(launch.parent, Some(NodeId::new("a1")));
+            assert_eq!(launch.prompt, expected);
+            assert_eq!(launch.input.as_deref(), Some(typed));
+            assert_eq!(launch.command.as_deref(), Some("update"));
+            assert!(matches!(launch.kind, TurnKind::Update));
+        }
+
+        // Unlike `/commit`, an update needs no node to go with: it runs in a new conversation too.
+        let root = state.discussions.get_mut(&0).unwrap();
+        root.node = None;
+        root.draft.set_text("/update ");
+        assert!(matches!(
+            compose_launch(&state, 0),
+            Some(Ok(Launch { parent: None, .. }))
+        ));
+    }
+
+    #[test]
+    fn an_update_node_replays_as_an_update_turn() {
+        use crate::conversation::ConversationTree;
+        use crate::conversation::NodeId;
+        use crate::model_spec::ModelSpec;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = Utf8PathBuf::from_path_buf(tmp.path().to_path_buf()).unwrap();
+        let update = root.join("a1");
+        std::fs::create_dir_all(&update).unwrap();
+        std::fs::write(
+            update.join(crate::conversation::files::METADATA),
+            "type: commit\ncommand: update\nsystem-prompt: off\n",
+        )
+        .unwrap();
+        let tree = ConversationTree::load(&root);
+        let spec = ModelSpec::parse("mock/m/low").unwrap();
+        let launch = Launch::replay(&tree, &NodeId::new("a1"), "go".to_string(), spec).unwrap();
+        assert!(matches!(launch.kind, TurnKind::Update));
+        assert_eq!(launch.command.as_deref(), Some("update"));
     }
 
     #[test]

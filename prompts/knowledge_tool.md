@@ -13,6 +13,9 @@ The base is served in bounded pages, like the conversation tree.
 - `read` with up to ten ids: the entries themselves.
 - `search` with a query: the entries whose id, title or summary match, then those whose body
   holds every word of it.
+- `check`: what is wrong with the base: entries that cannot be read, directories with children
+  but no entry, entries without `refs`, and `refs` naming a path that is gone or a symbol no
+  tracked file holds.
 
 Navigate by summaries, and read in full only the entries that look relevant. Search before
 concluding that something is undocumented. The `refs` of an entry name the code it
@@ -21,4 +24,4 @@ describes; when an entry and the code disagree, the code is right.
 Which actions you have depends on the turn: a commit turn records, changes and removes
 entries, while a feedback turn only reads them. Entries are changed only through this
 tool, never with `write`, `edit` or the shell: each change it makes is staged, and one
-made by hand would be left out of the commit that carries the code it describes.
+made by hand would be left out of the turn's commit.

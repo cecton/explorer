@@ -150,6 +150,8 @@ pub struct TurnRequest {
     /// Instructions of a `/compact` turn; such a turn asks for a summary instead of
     /// sending `prompt`.
     pub compact: Option<String>,
+    /// A `/update` turn, never nudged to commit: the close step commits what it staged.
+    pub update: bool,
     /// Directory of the parent when it is a compact node: its reply opens the context.
     pub compacted_parent: Option<camino::Utf8PathBuf>,
     /// The conversation tree, for the `conversation` tool.
@@ -296,6 +298,23 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
             Err(error) => (NodeStatus::Failed, Some(with_compact_hint(error))),
         };
         recorder.flush_reply();
+        // Committed before HEAD is read, so the update's entries count as the turn's own.
+        if request.update {
+            let root = request.root.clone();
+            let committed =
+                tokio::task::spawn_blocking(move || close::commit_staged_knowledge(&root))
+                    .await
+                    .unwrap_or_else(|e| Err(e.to_string()));
+            match committed {
+                // A run that failed on its own keeps the reason it failed for.
+                Err(failure) if status == NodeStatus::Done => {
+                    status = NodeStatus::Failed;
+                    error = Some(failure);
+                }
+                Err(failure) => tracing::warn!("{}: {failure}", request.node.as_str()),
+                Ok(()) => {}
+            }
+        }
         let mut head_after = request.repo.as_ref().and_then(crate::git::head_id);
         // The markdown a commit turn committed is formatted into its newest commit.
         if request.mode == Mode::Commit {
@@ -564,12 +583,11 @@ async fn run_claude_code(
     if request.mode == Mode::Feedback {
         return Ok(());
     }
-    // A commit turn is not over while the working tree is dirty: stay in the loop and
-    // ask for the commit. The nudge joins the turn's own CLI session, which is the only
-    // place this backend keeps it, so a session that is gone fails the turn rather than
-    // opening one that has never read what the nudge refers to.
+    // Nudges join the turn's own CLI session: a gone session fails the turn, never opens a new one.
     let mut sent = 0;
-    while let Some(nudge) = crate::agent::context::next_commit_nudge(&request.root, sent).await? {
+    while !request.update
+        && let Some(nudge) = crate::agent::context::next_commit_nudge(&request.root, sent).await?
+    {
         sent += 1;
         let Some(session) = recorder.live.lock().session_id.clone() else {
             break;
@@ -663,10 +681,11 @@ async fn run_own_loop(
         compact,
         knowledge: knowledge_of(request.mode),
     };
-    // A commit turn is asked to commit while its tree is dirty; the nudge is never shown.
+    // A commit turn is nudged while its tree is dirty, but an update turn's close step commits.
     let closing = Closing {
         sandbox,
-        commit_root: (request.mode == Mode::Commit && !compact).then_some(request.root.as_path()),
+        commit_root: (request.mode == Mode::Commit && !compact && !request.update)
+            .then_some(request.root.as_path()),
         cancel,
     };
     crate::agent::driver::run(&start, closing, recorder).await
@@ -861,6 +880,7 @@ mod tests {
                 continue_session: continue_session.map(str::to_string),
                 compact: None,
                 compacted_parent: None,
+                update: false,
                 tree: std::sync::Arc::new(parking_lot::RwLock::new(
                     crate::conversation::ConversationTree::default(),
                 )),

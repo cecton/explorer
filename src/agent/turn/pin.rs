@@ -117,6 +117,7 @@ mod tests {
             continue_session: None,
             compact: None,
             compacted_parent: None,
+            update: false,
             tree: Arc::new(parking_lot::RwLock::new(tree)),
             mcp: Arc::new(McpHost::default()),
         };
@@ -897,6 +898,102 @@ mod tests {
         assert!(!setup.root.join("docs/knowledge/a.md").exists());
         assert_eq!(outcome.commits.len(), 1);
         assert_eq!(git(&setup.root, &["status", "--short"]), "");
+    }
+
+    #[tokio::test]
+    async fn a_commit_turn_leaves_its_staged_knowledge_to_the_agents_commit() {
+        let script = vec![
+            Reply::new().call(
+                "c1",
+                "knowledge",
+                json!({
+                    "action": "write",
+                    "name": "a-forgotten-entry",
+                    "title": "A forgotten entry",
+                    "summary": "What the agent stages and never commits."
+                }),
+            ),
+            Reply::new().text("Recorded."),
+            // The staged entry is uncommitted work like any other, so it is asked for.
+            Reply::new().text("Nothing to commit."),
+            Reply::new().text("Still nothing."),
+        ];
+        let setup = setup(Mode::Commit, script).await;
+        let (_, outcome, _) = run_turn(&setup, async |_| {}).await;
+
+        assert_eq!(outcome.status, NodeStatus::Done, "{:?}", outcome.error);
+        // The entry counts as uncommitted work: the turn is nudged, and says it will not commit.
+        assert_eq!(setup.server.requests().len(), 4);
+        let nudged = last_user_text(&setup, 2);
+        assert!(
+            nudged.contains("docs/knowledge/a-forgotten-entry.md"),
+            "{nudged}"
+        );
+        // Nothing was committed, so the entry is discarded with the leftover work.
+        assert!(outcome.commits.is_empty(), "{outcome:?}");
+        assert!(outcome.reset);
+        assert_eq!(git(&setup.root, &["status", "--short"]), "");
+        assert_eq!(
+            git(&setup.root, &["log", "-1", "--format=%s"]),
+            "init",
+            "a knowledge commit of its own was made"
+        );
+    }
+
+    #[tokio::test]
+    async fn an_update_turn_stages_knowledge_and_closes_with_a_commit_of_it() {
+        let script = vec![
+            Reply::new().call(
+                "c1",
+                "knowledge",
+                json!({
+                    "action": "write",
+                    "name": "an-updated-entry",
+                    "title": "An updated entry",
+                    "summary": "What an update turn records."
+                }),
+            ),
+            Reply::new().text("Recorded."),
+        ];
+        // An update turn is never nudged: the close step commits the knowledge it staged.
+        let mut setup = setup(Mode::Commit, script).await;
+        setup.request.update = true;
+        setup.request.prompt = crate::agent::commands::update_prompt("");
+        let (_, outcome, _) = run_turn(&setup, async |_| {}).await;
+
+        assert_eq!(outcome.status, NodeStatus::Done, "{:?}", outcome.error);
+        if crate::agent::workspace::Sandbox::commit(&setup.root).is_some() {
+            // The tool wrote the real store through the turn's socket, not the agent's view.
+            assert!(
+                setup
+                    .root
+                    .join("docs/knowledge/an-updated-entry.md")
+                    .is_file()
+            );
+        }
+        // The turn's close step committed the entry, and HEAD records it.
+        assert_eq!(outcome.commits.len(), 1, "{outcome:?}");
+        assert_eq!(
+            git(
+                &setup.root,
+                &["log", "-1", "--format=%s", &outcome.commits[0].clone()]
+            ),
+            "docs(knowledge): update"
+        );
+        assert_eq!(git(&setup.root, &["status", "--short"]), "");
+        // The agent is never nudged: a nudge would have it run git, which its prompt forbids.
+        assert!(
+            !setup
+                .server
+                .requests()
+                .iter()
+                .any(|request| request["messages"]
+                    .as_array()
+                    .is_some_and(|messages| messages.iter().any(|message| message["content"]
+                        .as_str()
+                        .is_some_and(|text| text.starts_with("The working tree still has"))))),
+            "the update turn was nudged"
+        );
     }
 
     #[tokio::test]

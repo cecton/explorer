@@ -11,6 +11,8 @@ pub(crate) enum TurnKind {
     /// The built-in `/continue`: resume the turn of an interrupted node in the mode it
     /// ran, replaying its transcript and adding a note of how it ended.
     Continue(crate::agent::Mode),
+    /// The built-in `/update`: a commit turn that verifies the knowledge base, never nudged.
+    Update,
 }
 
 /// A turn to start: a new node under `parent`, or a new root.
@@ -21,7 +23,7 @@ pub(crate) struct Launch {
     /// The prompt as typed, when a slash command expanded it into `prompt`.
     pub input: Option<String>,
     pub kind: TurnKind,
-    /// Custom slash command the prompt was expanded from.
+    /// Slash command the prompt was expanded from: a custom one, or `/update`.
     pub command: Option<String>,
     pub spec: crate::model_spec::ModelSpec,
 }
@@ -43,10 +45,17 @@ impl Launch {
                 Expansion::Compact { instructions } => TurnKind::Compact { instructions },
                 Expansion::Prompt { .. }
                 | Expansion::Commit { .. }
-                | Expansion::Continue { .. } => TurnKind::Compact {
+                | Expansion::Continue { .. }
+                | Expansion::Update { .. } => TurnKind::Compact {
                     instructions: String::new(),
                 },
             },
+            // The update command leaves no trace but its name, which says what the turn was.
+            Some(NodeType::Commit)
+                if source.meta.command.as_deref() == Some(crate::agent::commands::UPDATE) =>
+            {
+                TurnKind::Update
+            }
             _ if source.meta.no_system_prompt => TurnKind::NoSystemPrompt,
             _ => TurnKind::Prompt(node_mode(source)),
         };
@@ -244,7 +253,7 @@ pub(crate) fn compose_launch(
                     "/continue has nothing to resume in a new conversation".to_string(),
                 )));
             };
-            let (interrupted, mode, discarded) = {
+            let (interrupted, mode, discarded, resumed_command) = {
                 let tree = state.conversations.read();
                 let Some(resumed) = tree.node(node) else {
                     return Some(Err(Refusal::Rejected(
@@ -260,8 +269,11 @@ pub(crate) fn compose_launch(
                     interrupted_of(resumed),
                     node_mode(resumed),
                     resumed.meta.scratch_reset,
+                    resumed.meta.command.clone(),
                 )
             };
+            // Resuming an update keeps it an update: it is never nudged to commit.
+            let command = resumed_command.filter(|name| name == crate::agent::commands::UPDATE);
             (
                 crate::agent::context::continue_request(
                     interrupted.as_deref(),
@@ -270,7 +282,7 @@ pub(crate) fn compose_launch(
                 ),
                 Some(typed),
                 TurnKind::Continue(mode),
-                None,
+                command,
             )
         }
         Expansion::Commit { instructions } if instructions.is_empty() && parent.is_none() => {
@@ -283,6 +295,12 @@ pub(crate) fn compose_launch(
             Some(typed),
             TurnKind::Prompt(Mode::Commit),
             None,
+        ),
+        Expansion::Update { instructions } => (
+            crate::agent::commands::update_prompt(&instructions),
+            Some(typed),
+            TurnKind::Update,
+            Some(crate::agent::commands::UPDATE.to_string()),
         ),
         Expansion::Prompt { text, command } => {
             let kind = match command {
@@ -327,13 +345,13 @@ pub(crate) fn start_turn(
         command,
         spec,
     } = launch;
-    // A resumed commit turn is closed as a commit but gets no mode prompt, like a custom
-    // command with `system-prompt: off`; a resumed feedback turn keeps its prompt.
+    // A resumed commit turn gets no mode prompt, like `system-prompt: off`; an update too.
     let no_system_prompt = matches!(
         kind,
-        TurnKind::NoSystemPrompt | TurnKind::Continue(Mode::Commit)
+        TurnKind::NoSystemPrompt | TurnKind::Update | TurnKind::Continue(Mode::Commit)
     );
     let continuing = matches!(kind, TurnKind::Continue(_));
+    let update = command.as_deref() == Some(crate::agent::commands::UPDATE);
     // Nothing an agent says or does runs in a repository the user has not allowed it in,
     // and the scan is how they come to know whether they should.
     if !state.trusted {
@@ -345,6 +363,7 @@ pub(crate) fn start_turn(
             (Mode::Feedback, NodeType::Feedback, None)
         }
         TurnKind::Prompt(Mode::Commit)
+        | TurnKind::Update
         | TurnKind::NoSystemPrompt
         | TurnKind::Continue(Mode::Commit) => (Mode::Commit, NodeType::Commit, None),
         TurnKind::Compact { instructions } => {
@@ -465,6 +484,7 @@ pub(crate) fn start_turn(
         continue_session: continuing.then_some(context.parent_session).flatten(),
         compact,
         compacted_parent: context.compacted_parent,
+        update,
         tree: Arc::clone(&state.conversations),
         mcp: Arc::clone(&state.mcp),
     };

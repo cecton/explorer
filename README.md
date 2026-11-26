@@ -133,6 +133,14 @@ message sent to the window of the turn that is running joins that turn, at its n
 round, so it can steer the agent while it works; a prompt that has to wait is queued, in
 order.
 
+**A knowledge base, written by the agents.** Short entries under `docs/knowledge/`, one
+file each, say what the code does and which files it lives in, so a turn reads a few
+entries instead of the code. Only the `knowledge` tool writes them: a commit turn records,
+changes and removes entries, and each change is staged so the commit that carries the code
+it describes takes it along, while a feedback turn reads them. `/update` runs the whole
+pass: the agent checks every entry against the code, fixes what went stale, and adds what
+is missing, and its entries are committed as `docs(knowledge): update` when the turn ends.
+
 **Run something when the agents are done.** `<leader>:` opens a command line over the
 status bar. `!<command>` runs a command in a new terminal, and
 `after-agents <command>` keeps one for later: once a turn has run and the whole queue
@@ -159,7 +167,8 @@ on the way. The status bar shows how much of the subscription behind the focused
 conversation is used, or what an OpenRouter key has spent.
 
 Also there: custom slash commands (one Markdown file each), `/compact` to summarize a
-long branch and continue from the summary, a work log of the tools the agent called, and
+long branch and continue from the summary, `/update` to check the knowledge base of the
+repository against its code, a work log of the tools the agent called, and
 highlights in prompts and replies that persist like the ones in files.
 
 ## Getting started
