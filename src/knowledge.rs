@@ -393,7 +393,7 @@ impl Store {
             for reference in &entry.refs {
                 match is_path(reference) {
                     true if !self.root.join(reference).exists() => {
-                        problems.push(format!("- {id}: refs {reference}, which does not exist"))
+                        problems.push(missing_path(id, reference))
                     }
                     true => {}
                     false => symbols.push((id.to_string(), reference.clone())),
@@ -402,7 +402,7 @@ impl Store {
         }
         for (id, missing) in self.missing_symbols(&symbols)? {
             for name in missing {
-                problems.push(format!("- {id}: refs {name}, which no tracked file holds"));
+                problems.push(format!("- {id}: refs {name}, which no file holds"));
             }
         }
         if self.nodes.is_empty() {
@@ -440,7 +440,7 @@ impl Store {
         Ok(out)
     }
 
-    /// The symbol refs of `symbols` that no tracked file holds, grouped by id, in one `git grep`.
+    /// The symbol refs of `symbols` that no file of the tree holds, grouped by id, in one `git grep`.
     fn missing_symbols(
         &self,
         symbols: &[(String, String)],
@@ -474,12 +474,23 @@ fn is_path(reference: &str) -> bool {
     reference.contains('/') || reference.contains('.')
 }
 
+/// The problem a path ref that names no file is: one that also holds `::` joins a path and
+/// a symbol, which the agent may mean as one ref where the store wants two.
+fn missing_path(id: &str, reference: &str) -> String {
+    match reference.contains("::") {
+        true => format!(
+            "- {id}: refs {reference}, which is a path and a symbol joined; write them as two refs"
+        ),
+        false => format!("- {id}: refs {reference}, which does not exist"),
+    }
+}
+
 /// The name a reference is searched for: its last `::` segment, since a method is rarely a literal.
 fn symbol_name(reference: &str) -> &str {
     reference.rsplit("::").next().unwrap_or(reference)
 }
 
-/// The symbols of `names` that a tracked file of `root` outside the store holds.
+/// The symbols of `names` that a file of `root` outside the store holds.
 fn grep_symbols(root: &camino::Utf8Path, names: &[&str]) -> Result<Vec<String>, String> {
     use std::io::Write;
     let mut patterns = tempfile::NamedTempFile::new().map_err(|e| e.to_string())?;
@@ -488,14 +499,16 @@ fn grep_symbols(root: &camino::Utf8Path, names: &[&str]) -> Result<Vec<String>, 
     }
     let output = std::process::Command::new("git")
         .current_dir(root)
-        .args(["grep", "-F", "-w", "-o", "-h", "-f"])
+        // `--untracked`: a turn that writes code and its entry in one commit would otherwise
+        // find its own new symbols missing.
+        .args(["grep", "--untracked", "-F", "-w", "-o", "-h", "-f"])
         .arg(patterns.path())
         // The store's own refs name every symbol it lists, so it is not searched.
         .args(["--", "."])
         .arg(format!(":(exclude){DIR}"))
         .output()
         .map_err(|e| format!("git grep: {e}"))?;
-    // Exit status 1 is no match: no tracked file holds any of them, which is no failure.
+    // Exit status 1 is no match: no file holds any of them, which is no failure.
     if !matches!(output.status.code(), Some(0 | 1)) {
         let stderr = String::from_utf8_lossy(&output.stderr);
         return Err(format!("git grep: {}", stderr.trim()));
@@ -611,7 +624,7 @@ pub(crate) fn spec(access: Access) -> Spec {
                 serde_json::json!({
                     "type": "array",
                     "items": {"type": "string"},
-                    "description": "The code the entry describes: paths and symbol names, one per item, with no comma or line break"
+                    "description": "The code the entry describes: a path from the repository root or a bare symbol name, one per item, with no comma or line break"
                 }),
             ),
             (
@@ -2306,7 +2319,7 @@ mod tests {
             "- bare: (malformed: it has no entry file) (1 child)",
             "- malformed: (malformed: it has no metadata block)",
             "- stale: refs src/gone.rs, which does not exist",
-            "- stale: refs NoSuchSymbol, which no tracked file holds",
+            "- stale: refs NoSuchSymbol, which no file holds",
             "- unreferenced: no refs, so nothing names the code it describes",
             "- bare/child: no refs, so nothing names the code it describes",
         ] {
@@ -2317,6 +2330,35 @@ mod tests {
         assert!(
             reported.starts_with("Knowledge check: 6 problems"),
             "{reported}"
+        );
+    }
+
+    #[test]
+    fn check_explains_a_path_and_a_symbol_joined_into_one_ref() {
+        let (_tmp, root) = checked_repo();
+        let mut joined = entry("Joined", "It joins a path and a symbol.");
+        joined.refs = vec!["src/main.rs::ToolContext".to_string()];
+        std::fs::write(root.join(DIR).join("joined.md"), joined.render().unwrap()).unwrap();
+        crate::util::test_support::git(&root, &["add", "-A"]);
+        let reported = check(&root);
+        assert!(
+            reported.contains(
+                "- joined: refs src/main.rs::ToolContext, which is a path and a symbol joined; \
+                 write them as two refs"
+            ),
+            "{reported}"
+        );
+    }
+
+    #[test]
+    fn check_finds_a_symbol_in_a_file_the_turn_has_not_committed_yet() {
+        let mut good = entry("A good entry", "It names code written in the same turn.");
+        good.refs = vec!["src/fresh.rs".to_string(), "FreshSymbol".to_string()];
+        let (_tmp, root) = staged_repo(&rendered(&[("good", good)]));
+        std::fs::write(root.join("src/fresh.rs"), "fn FreshSymbol() {}\n").unwrap();
+        assert_eq!(
+            check(&root),
+            "The knowledge base checks out: 1 entry, none with a problem.\n"
         );
     }
 

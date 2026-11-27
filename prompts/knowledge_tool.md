@@ -15,11 +15,14 @@ The base is served in bounded pages, like the conversation tree.
   holds every word of it.
 - `check`: what is wrong with the base: entries that cannot be read, directories with children
   but no entry, entries without `refs`, and `refs` naming a path that is gone or a symbol no
-  tracked file holds.
+  file holds.
 
 Navigate by summaries, and read in full only the entries that look relevant. Search before
 concluding that something is undocumented. The `refs` of an entry name the code it
 describes; when an entry and the code disagree, the code is right.
+
+A ref is either a path from the repository root (`src/agent/tools.rs`) or a bare symbol
+name (`ToolContext`), never the two joined: the file and the symbol are two refs.
 
 Which actions you have depends on the turn: a commit turn records, changes and removes
 entries, while a feedback turn only reads them. Entries are changed only through this

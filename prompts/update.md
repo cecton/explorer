@@ -17,7 +17,9 @@ entry that covers a subsystem belongs at a level that lists its parts.
    path that is gone or a symbol nothing holds, the directories that hold children but no
    entry of their own, and the entries with no `refs`. None of it is proof on its own: a
    symbol can be built by a macro, and a path can have moved. Look at the code before
-   deciding anything.
+   deciding anything. A ref is a path (`src/agent/tools.rs`) or a bare symbol name
+   (`ToolContext`), never the two joined: write `src/agent/tools.rs::ToolContext` as the two
+   refs `src/agent/tools.rs` and `ToolContext`.
 2. Walk the base with `toc`, section by section, and `read` the entries of each section.
    Verify each one against the code: a stale entry is worse than no entry, because it is
    believed. Fix what is out of date, delete what is no longer true, improve a summary that
