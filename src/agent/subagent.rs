@@ -84,7 +84,7 @@ pub fn load_roles() -> Vec<Role> {
 /// The roles of the `.md` files in `dir`, by name. A file that cannot make a role is
 /// logged and skipped; a missing directory yields none.
 fn read_roles(dir: &std::path::Path) -> Vec<Role> {
-    crate::agent::commands::read_markdown(dir, "a role", Role::parse, |role| &role.name)
+    crate::util::fs::read_markdown(dir, "a role", Role::parse, |role| &role.name)
 }
 
 /// The `agent` tool as advertised to the model, with the roles it offers.
@@ -145,6 +145,8 @@ pub struct Agents {
     pub date: String,
     /// A feedback turn's sub-agents get its feedback note: they must not commit either.
     pub feedback: Option<crate::agent::context::Feedback>,
+    /// The turn's user instructions, which a sub-agent gets too but cannot read itself.
+    pub user_instructions: Option<String>,
 }
 
 /// How one kind of sub-agent runs, resolved by the turn so the process needs no config.
@@ -174,6 +176,7 @@ pub fn agents(
     caller_target: &crate::agent::llm::LlmTarget,
     date: &str,
     feedback: Option<crate::agent::context::Feedback>,
+    user_instructions: Option<String>,
 ) -> Agents {
     use crate::agent::Backend;
     use crate::agent::llm::LlmTarget;
@@ -235,6 +238,7 @@ pub fn agents(
         general,
         date: date.to_string(),
         feedback,
+        user_instructions,
     }
 }
 
@@ -443,8 +447,9 @@ impl Subagents {
         };
         let system = {
             let root = self.context.root.clone();
+            let extra = self.agents.user_instructions.clone();
             tokio::task::spawn_blocking(move || {
-                crate::agent::context::subagent_system_prompt(&system, &root)
+                crate::agent::context::subagent_system_prompt(&system, &root, extra.as_deref())
             })
             .await
             .map_err(|e| e.to_string())?
@@ -614,6 +619,7 @@ mod tests {
             &target,
             "2026-11-23",
             Some(Feedback::Sandboxed),
+            None,
         );
         let names: Vec<&str> = agents.roles.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["fast"]);
@@ -650,7 +656,7 @@ mod tests {
             model: "m".to_string(),
             effort: Effort::Low,
         };
-        let agents = agents(&config, &caller, &target, "2026-11-23", None);
+        let agents = agents(&config, &caller, &target, "2026-11-23", None, None);
         let names: Vec<&str> = agents.roles.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names, ["plain"]);
         let plain = &agents.roles[0].1;

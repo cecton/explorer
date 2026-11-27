@@ -19,26 +19,28 @@ pub const NOTE_MAX_COMMITS: usize = 20;
 /// Times a commit turn is asked to commit what it left behind before Explorer discards it.
 const MAX_COMMIT_NUDGES: usize = 2;
 
-/// The system prompt of a turn: mode instructions and the project's own instructions.
-/// Without a `mode`, the mode instructions are left out. `review_rounds` is the most
-/// review rounds of each commit, from the configuration. It holds nothing that changes
-/// between turns: see [`environment_note`].
-pub fn system_prompt(
+/// The system prompt of a turn: mode instructions, the project's own instructions, and
+/// the user's (`extra`), which comes last so it wins on a conflict. Without a `mode`, the
+/// mode instructions are left out. It holds nothing that changes between turns: see
+/// [`environment_note`].
+pub fn system_prompt_with(
     mode: Option<crate::agent::Mode>,
     review_rounds: u32,
     root: &camino::Utf8Path,
+    extra: Option<&str>,
 ) -> String {
     let lead = mode.map(|mode| mode_prompt(mode, review_rounds));
-    with_project(lead.as_deref(), root)
+    with_project(lead.as_deref(), root, extra)
 }
 
 /// The system prompt of a sub-agent: its role's prompt instead of a mode's, and the
-/// project's own instructions.
-pub fn subagent_system_prompt(role: &str, root: &camino::Utf8Path) -> String {
-    with_project(Some(role.trim_end()), root)
+/// project's own instructions. `extra` is the turn's user instructions, which sub-agents
+/// get too but cannot read from the config directory they never open.
+pub fn subagent_system_prompt(role: &str, root: &camino::Utf8Path, extra: Option<&str>) -> String {
+    with_project(Some(role.trim_end()), root, extra)
 }
 
-fn with_project(lead: Option<&str>, root: &camino::Utf8Path) -> String {
+fn with_project(lead: Option<&str>, root: &camino::Utf8Path, extra: Option<&str>) -> String {
     let mut out = String::new();
     if let Some(lead) = lead {
         out.push_str(lead);
@@ -51,18 +53,35 @@ fn with_project(lead: Option<&str>, root: &camino::Utf8Path) -> String {
         out.push_str("\n\n## Project instructions (AGENTS.md)\n\n");
         out.push_str(agents.trim());
     }
+    // Last, so a personal rule wins over the project's on a conflict.
+    if let Some(extra) = extra {
+        out.push_str("\n\n");
+        out.push_str(extra.trim());
+    }
     out
 }
 
 /// What is appended to Claude Code's own system prompt, which reads the project's
 /// instructions itself.
-pub fn claude_system_prompt(mode: Option<crate::agent::Mode>, review_rounds: u32) -> String {
-    let mode = mode
-        .map(|mode| mode_prompt(mode, review_rounds))
-        .unwrap_or_default();
-    format!("{mode}\n\n{}", KNOWLEDGE_TOOL_PROMPT.trim_end())
-        .trim()
-        .to_string()
+pub fn claude_system_prompt(
+    mode: Option<crate::agent::Mode>,
+    review_rounds: u32,
+    extra: Option<&str>,
+) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    if let Some(mode) = mode {
+        parts.push(mode_prompt(mode, review_rounds));
+    }
+    if let Some(extra) = extra {
+        parts.push(extra.to_string());
+    }
+    parts.push(KNOWLEDGE_TOOL_PROMPT.trim_end().to_string());
+    parts
+        .iter()
+        .map(|part| part.trim())
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join("\n\n")
 }
 
 fn mode_prompt(mode: crate::agent::Mode, review_rounds: u32) -> String {
@@ -609,11 +628,11 @@ mod tests {
         use crate::agent::Mode;
         let (_tmp, root) = temp_root();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = system_prompt(Some(Mode::Feedback), 3, &root);
+        let prompt = system_prompt_with(Some(Mode::Feedback), 3, &root, None);
         assert!(prompt.starts_with("You are the coding agent inside Explorer"));
         assert!(prompt.contains("**feedback mode**"));
         assert!(prompt.contains("## The conversation tree"));
-        let commit = system_prompt(Some(Mode::Commit), 3, &root);
+        let commit = system_prompt_with(Some(Mode::Commit), 3, &root, None);
         assert!(commit.contains("**commit mode**"));
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
         for part in ["HEAD", "Repository root", "Date", "Environment"] {
@@ -623,8 +642,8 @@ mod tests {
             );
         }
         assert!(
-            commit.ends_with("Use tabs."),
-            "the system prompt ends with the project instructions: {commit}"
+            prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."),
+            "the system prompt carries the project instructions: {prompt}"
         );
     }
 
@@ -632,10 +651,10 @@ mod tests {
     fn commit_prompt_states_the_configured_review_rounds() {
         use crate::agent::Mode;
         let (_tmp, root) = temp_root();
-        let commit = system_prompt(Some(Mode::Commit), 7, &root);
+        let commit = system_prompt_with(Some(Mode::Commit), 7, &root, None);
         assert!(commit.contains("At most 7 review rounds"));
         assert!(!commit.contains(REVIEW_ROUNDS_PLACEHOLDER));
-        let claude = claude_system_prompt(Some(Mode::Commit), 2);
+        let claude = claude_system_prompt(Some(Mode::Commit), 2, None);
         assert!(claude.contains("At most 2 review rounds"));
         assert!(!claude.contains(REVIEW_ROUNDS_PLACEHOLDER));
     }
@@ -656,29 +675,62 @@ mod tests {
     fn system_prompt_without_a_mode_keeps_everything_but_the_mode_prompt() {
         let (_tmp, root) = temp_root();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = system_prompt(None, 3, &root);
+        let prompt = system_prompt_with(None, 3, &root, None);
         assert!(prompt.starts_with("## The conversation tree"));
         assert!(!prompt.contains("You are the coding agent inside Explorer"));
         assert!(prompt.contains("## Project instructions (AGENTS.md)\n\nUse tabs."));
 
         // Claude reads AGENTS.md itself, so it gets the knowledge prompt alone.
         assert_eq!(
-            claude_system_prompt(None, 3),
+            claude_system_prompt(None, 3, None),
             KNOWLEDGE_TOOL_PROMPT.trim_end()
         );
+    }
+
+    #[test]
+    fn the_user_s_instructions_come_last_and_win_on_a_conflict() {
+        use crate::agent::Mode;
+        let (_tmp, root) = temp_root();
+        std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
+        let extra = "## User instructions\n\nBe brief.";
+        let commit = system_prompt_with(Some(Mode::Commit), 3, &root, Some(extra));
+        assert!(commit.ends_with("Be brief."), "{commit}");
+        assert!(commit.contains("Use tabs."));
+        // A turn without a mode reads none, whatever the caller would pass.
+        let none = system_prompt_with(None, 3, &root, None);
+        assert!(!none.contains("User instructions") || !none.contains("Be brief."));
+    }
+
+    #[test]
+    fn a_sub_agent_gets_the_instructions_the_turn_carries() {
+        let (_tmp, root) = temp_root();
+        std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
+        let prompt = subagent_system_prompt(
+            "You review.",
+            &root,
+            Some("## User instructions\n\nBe brief."),
+        );
+        assert!(prompt.starts_with("You review."));
+        assert!(
+            prompt.ends_with("Be brief."),
+            "the user's rule comes last: {prompt}"
+        );
+        // The child never reads the config directory: without instructions it gets none.
+        let bare = subagent_system_prompt("You review.", &root, None);
+        assert!(!bare.contains("User instructions"));
     }
 
     #[test]
     fn both_system_prompts_describe_the_knowledge_base() {
         use crate::agent::Mode;
         let (_tmp, root) = temp_root();
-        let own = system_prompt(Some(Mode::Commit), 3, &root);
+        let own = system_prompt_with(Some(Mode::Commit), 3, &root, None);
         assert!(own.contains("## The knowledge base"));
         assert!(
             own.find("## The conversation tree").unwrap()
                 < own.find("## The knowledge base").unwrap()
         );
-        let claude = claude_system_prompt(Some(Mode::Commit), 3);
+        let claude = claude_system_prompt(Some(Mode::Commit), 3, None);
         assert!(claude.contains("## The knowledge base"));
         assert!(claude.contains("**commit mode**"), "{claude}");
         assert!(!claude.contains("## The conversation tree"));
@@ -825,7 +877,7 @@ mod tests {
         use crate::agent::Mode;
         let (_tmp, root) = temp_root();
         std::fs::write(root.join("AGENTS.md"), "Use tabs.\n").unwrap();
-        let prompt = claude_system_prompt(Some(Mode::Commit), 3);
+        let prompt = claude_system_prompt(Some(Mode::Commit), 3, None);
         assert!(prompt.contains("**commit mode**"));
         assert!(!prompt.contains("Use tabs."));
         assert!(!prompt.contains("## The conversation tree"));

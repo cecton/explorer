@@ -98,15 +98,6 @@ const BUILT_INS: [(&str, &str, Option<&str>); 4] = [
     ),
 ];
 
-/// Whether `name` can follow the slash of a command: lowercase letters, digits and
-/// dashes.
-fn is_command_name(name: &str) -> bool {
-    !name.is_empty()
-        && name
-            .chars()
-            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-')
-}
-
 fn is_built_in(name: &str) -> bool {
     BUILT_INS.iter().any(|(built_in, ..)| *built_in == name)
 }
@@ -169,7 +160,7 @@ fn split_command(typed: &str) -> Option<(&str, &str)> {
     let body = typed.strip_prefix('/')?;
     let end = body.find(char::is_whitespace).unwrap_or(body.len());
     let (name, rest) = body.split_at(end);
-    is_command_name(name).then_some((name, rest.trim()))
+    crate::util::fs::is_markdown_name(name).then_some((name, rest.trim()))
 }
 
 /// Resolves a leading slash command. A custom command becomes its base prompt, two
@@ -227,7 +218,7 @@ pub fn load() -> Vec<Command> {
 /// The commands of the `.md` files in `dir`, by name. A file that cannot make a
 /// command is logged and skipped; a missing directory yields none.
 fn read(dir: &std::path::Path) -> Vec<Command> {
-    read_markdown(
+    crate::util::fs::read_markdown(
         dir,
         "a command",
         |name, text| {
@@ -238,42 +229,6 @@ fn read(dir: &std::path::Path) -> Vec<Command> {
         },
         |command| &command.name,
     )
-}
-
-/// The items `parse` makes from the `.md` files in `dir`, sorted by `name_of`.
-pub(super) fn read_markdown<T>(
-    dir: &std::path::Path,
-    kind: &str,
-    parse: impl Fn(&str, &str) -> Result<T, String>,
-    name_of: impl Fn(&T) -> &str,
-) -> Vec<T> {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return Vec::new();
-    };
-    let mut found: Vec<T> = entries
-        .filter_map(|entry| {
-            let path = entry.ok()?.path();
-            if path.extension()? != "md" {
-                return None;
-            }
-            let name = path.file_stem()?.to_str()?;
-            if !is_command_name(name) {
-                tracing::warn!(
-                    "ignoring {}: {kind} name is made of lowercase letters, digits and dashes",
-                    path.display()
-                );
-                return None;
-            }
-            let text = std::fs::read_to_string(&path)
-                .map_err(|e| tracing::warn!("cannot read {}: {e}", path.display()))
-                .ok()?;
-            parse(name, &text)
-                .map_err(|reason| tracing::warn!("ignoring {}: {reason}", path.display()))
-                .ok()
-        })
-        .collect();
-    found.sort_by(|a, b| name_of(a).cmp(name_of(b)));
-    found
 }
 
 #[cfg(test)]

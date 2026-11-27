@@ -546,12 +546,17 @@ async fn run_claude_code(
     })?;
     let socket_path = socket.path();
     let sandboxed = sandbox.is_some();
+    let extra = request
+        .system_prompt
+        .then(|| crate::agent::fragments::block(request.mode))
+        .flatten();
     let (system, message) = {
         let request = request.clone();
         tokio::task::spawn_blocking(move || {
             let system = crate::agent::context::claude_system_prompt(
                 request.system_prompt.then_some(request.mode),
                 request.agent.review_rounds,
+                extra.as_deref(),
             );
             (system, message_to_send(&request, sandboxed))
         })
@@ -621,13 +626,21 @@ async fn run_own_loop(
     use crate::agent::tools::ToolContext;
     use crate::agent::wire::Start;
     let sandboxed = sandbox.is_some();
+    // Read once: the system prompt and the sub-agents' prompts share it, and a config
+    // edited between two reads would give the parent and its sub-agents different rules.
+    let extra = request
+        .system_prompt
+        .then(|| crate::agent::fragments::block(request.mode))
+        .flatten();
     let (system, messages) = {
         let request = request.clone();
+        let extra = extra.clone();
         tokio::task::spawn_blocking(move || {
-            let system = crate::agent::context::system_prompt(
+            let system = crate::agent::context::system_prompt_with(
                 request.system_prompt.then_some(request.mode),
                 request.agent.review_rounds,
                 &request.root,
+                extra.as_deref(),
             );
             let mut messages = crate::agent::context::replay(&request.ancestor_dirs, request.mode);
             messages.push(Message::User {
@@ -675,6 +688,7 @@ async fn run_own_loop(
                 target,
                 &request.date,
                 Feedback::of(request.mode, sandboxed),
+                extra.clone(),
             )
         }),
         repeat_limit: request.agent.repeat_limit,

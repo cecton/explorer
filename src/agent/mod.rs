@@ -6,6 +6,7 @@ pub mod context;
 pub mod driver;
 #[cfg(test)]
 mod fake_llm;
+pub mod fragments;
 pub mod llm;
 pub mod mcp;
 pub mod models;
