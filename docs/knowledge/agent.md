@@ -1,0 +1,9 @@
+---
+title: The agent subsystem
+summary: The agent subsystem: its parts one by one, and the two invariants (the transcript records everything, the parent is the only writer of the tree) that the rest exists to keep.
+refs: src/agent/mod.rs, src/agent/turn/mod.rs, src/agent/agent_loop.rs, src/agent/tools.rs, src/agent/context.rs, src/agent/llm.rs, src/agent/claude_code.rs, src/agent/workspace.rs, src/agent/child.rs, src/agent/wire.rs, src/agent/driver.rs, src/agent/sink.rs, src/agent/privileged.rs, src/agent/mcp.rs, src/agent/serve.rs, src/agent/commands.rs, src/agent/subagent.rs, src/agent/fragments.rs, src/agent/models.rs, src/agent/turn/pin.rs, src/agent/turn/title.rs
+---
+
+`src/agent/` is the coding agent: the turns it runs, the loop it runs them in, the tools it can call, and the two ways it can reach a model. `turn/` is the life of one turn off the UI thread (with `pin.rs` and `title.rs` for pinning HEAD and titling), `agent_loop.rs` the loop itself, `tools.rs` the built-in tools, `context.rs` the prompts, `llm.rs` and `claude_code.rs` the two backends, `models.rs` the model listing, `workspace.rs` the copy a feedback turn works in and the in-place fallback, `child.rs`/`wire.rs`/`driver.rs`/`sink.rs` the process the own loop runs in, `mcp.rs` and `privileged.rs` the tools it reaches from outside, `serve.rs` the `mcp-serve` server, `commands.rs` the slash commands, `subagent.rs` the `agent` tool, `fragments.rs` the user's own prompt additions.
+
+Two facts shape the whole module: everything sent to a model is recorded in the node's transcript, and the parent process stays the only writer of the conversation tree. Everything else — the child process, the socket, the copies — exists to keep those two true while the agent can still be confined.
