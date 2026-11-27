@@ -410,7 +410,7 @@ pub(crate) fn start_turn(
         .then(|| crate::agent::workspace::plan(&state.root));
     let claim = Claim::of(workspace.as_ref(), compact.is_some());
     crate::agent::turn::admit(
-        state.running_turns.values().map(|handle| handle.claim),
+        state.running_turns.values().map(|handle| handle.claim()),
         claim,
         state.agent.parallel_copies,
     )

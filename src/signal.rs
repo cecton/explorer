@@ -125,6 +125,9 @@ pub enum AppSignal {
         node: crate::conversation::NodeId,
         outcome: crate::conversation::metadata::TurnOutcome,
     },
+    /// The copy of a feedback turn is made: a turn working in the repository itself may
+    /// start now, without waiting for the turn that works in it.
+    TurnCopyMade,
     /// `title.md` of `node` was written.
     NodeTitleReady {
         node: crate::conversation::NodeId,

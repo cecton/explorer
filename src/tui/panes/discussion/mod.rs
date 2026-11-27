@@ -2169,29 +2169,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_commit_waits_behind_running_copies_and_holds_the_queue_in_order() {
+    async fn a_copy_still_being_made_holds_the_repository_and_the_queue_in_order() {
         use crate::agent::Mode;
-        use crate::agent::turn::{Claim, TurnHandle};
+        use crate::agent::turn::TurnHandle;
         use crate::conversation::NodeId;
         use crate::tui::state::PendingTurn;
         let (_tmp, mut state) = state_with_failed_child();
         state.agent = agent_with_endpoint();
         state.trusted = true;
         let (main_tx, _rx) = tokio::sync::mpsc::channel(8);
-        for node in ["c1", "c2"] {
-            let mut handle = TurnHandle::for_test(Mode::Feedback, "");
-            handle.claim = Claim::Copy;
-            state.running_turns.insert(NodeId::new(node), handle);
-        }
+        state
+            .running_turns
+            .insert(NodeId::new("c1"), TurnHandle::for_test_copy(false));
 
+        // A copy still being walked reads the tree: the commit waits for the walk to end.
         let commit = Launch {
             kind: TurnKind::Prompt(Mode::Commit),
             ..feedback_launch()
         };
         let Err(Refusal::Busy(reason)) = start_turn(&mut state, main_tx.clone(), commit) else {
-            panic!("a commit started beside running copies");
+            panic!("a commit started while a copy was being made");
         };
-        assert!(reason.contains("2 other turns are running"), "{reason}");
+        assert!(
+            reason.contains("1 feedback turn is still copying"),
+            "{reason}"
+        );
 
         // The commit is first in the queue: a feedback prompt behind it does not jump ahead.
         for (window, text) in [(0, "/commit"), (1, "look at x")] {
@@ -2210,15 +2212,75 @@ mod tests {
                 parent: Some(NodeId::new("a2")),
             },
         ];
-        DiscussionComponent::release_queue(&mut state, main_tx);
+        DiscussionComponent::release_queue(&mut state, main_tx.clone());
         assert_eq!(queued_windows(&state), [0, 1]);
-        assert_eq!(state.running_turns.len(), 2);
+        assert_eq!(state.running_turns.len(), 1);
         let notice = state.discussions[&0].notice.as_deref().unwrap();
         assert!(
-            notice.starts_with("queue held: 2 other turns are running"),
+            notice.starts_with("queue held: 1 feedback turn is still copying"),
             "{notice}"
         );
         assert_eq!(state.discussions[&1].notice, None);
+
+        // The copy is made: the commit starts without waiting for the turn made in it.
+        state
+            .running_turns
+            .insert(NodeId::new("c1"), TurnHandle::for_test_copy(true));
+        DiscussionComponent::release_queue(&mut state, main_tx);
+        assert_eq!(state.running_turns.len(), 2);
+        assert!(!queued_windows(&state).contains(&0));
+    }
+
+    #[tokio::test]
+    async fn a_feedback_turn_in_place_starts_beside_copies() {
+        use crate::agent::turn::TurnHandle;
+        use crate::conversation::NodeId;
+        let (_tmp, mut state) = state_with_failed_child();
+        state.agent = agent_with_endpoint();
+        state.trusted = true;
+        let (main_tx, _rx) = tokio::sync::mpsc::channel(8);
+        state
+            .running_turns
+            .insert(NodeId::new("c1"), TurnHandle::for_test_copy(true));
+
+        // The repository of the test has no build, so the turn is planned in place.
+        let started = start_turn(&mut state, main_tx, feedback_launch());
+        assert!(started.is_ok(), "{started:?}");
+        assert_eq!(state.running_turns.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn two_turns_of_the_repository_still_exclude_each_other() {
+        use crate::agent::Mode;
+        use crate::agent::turn::TurnHandle;
+        use crate::conversation::NodeId;
+        let (_tmp, mut state) = state_with_failed_child();
+        state.agent = agent_with_endpoint();
+        state.trusted = true;
+        let (main_tx, _rx) = tokio::sync::mpsc::channel(8);
+        state
+            .running_turns
+            .insert(NodeId::new("c1"), TurnHandle::for_test_copy(true));
+        let commit = Launch {
+            kind: TurnKind::Prompt(Mode::Commit),
+            ..feedback_launch()
+        };
+        assert!(start_turn(&mut state, main_tx.clone(), commit).is_ok());
+
+        // The commit now works the repository itself: nothing else may join it.
+        let other = Launch {
+            kind: TurnKind::Prompt(Mode::Commit),
+            ..feedback_launch()
+        };
+        let Err(Refusal::Busy(reason)) = start_turn(&mut state, main_tx.clone(), other) else {
+            panic!("a second repository turn started");
+        };
+        assert!(reason.contains("repository itself"), "{reason}");
+        let Err(Refusal::Busy(reason)) = start_turn(&mut state, main_tx.clone(), feedback_launch())
+        else {
+            panic!("a feedback turn started beside a commit");
+        };
+        assert!(reason.contains("repository itself"), "{reason}");
     }
 
     #[test]
@@ -2257,17 +2319,16 @@ mod tests {
 
     #[tokio::test]
     async fn a_prompt_sent_behind_a_held_commit_queues_behind_it() {
-        use crate::agent::Mode;
-        use crate::agent::turn::{Claim, TurnHandle};
+        use crate::agent::turn::TurnHandle;
         use crate::conversation::NodeId;
         use crate::tui::state::PendingTurn;
         let (_tmp, mut state) = state_with_failed_child();
         state.agent = agent_with_endpoint();
         state.trusted = true;
         let (main_tx, _rx) = tokio::sync::mpsc::channel(8);
-        let mut handle = TurnHandle::for_test(Mode::Feedback, "");
-        handle.claim = Claim::Copy;
-        state.running_turns.insert(NodeId::new("c1"), handle);
+        state
+            .running_turns
+            .insert(NodeId::new("c1"), TurnHandle::for_test_copy(false));
         state
             .discussions
             .get_mut(&0)
@@ -2292,16 +2353,16 @@ mod tests {
     #[test]
     fn esc_takes_back_the_prompt_of_its_own_window_only() {
         use crate::agent::Mode;
-        use crate::agent::turn::{Claim, TurnHandle};
+        use crate::agent::turn::TurnHandle;
         use crate::conversation::NodeId;
         use crate::tui::state::PendingTurn;
         let (_tmp, mut state) = state_with_failed_child();
         state.agent = agent_with_endpoint();
         state.trusted = true;
         // A running repository turn holds the queue, so both prompts stay queued.
-        let mut busy = TurnHandle::for_test(Mode::Feedback, "");
-        busy.claim = Claim::Exclusive;
-        state.running_turns.insert(NodeId::new("c1"), busy);
+        state
+            .running_turns
+            .insert(NodeId::new("c1"), TurnHandle::for_test(Mode::Commit, ""));
         // Two windows on new conversations: neither has a node to take a prompt back by.
         for (window, text) in [(0, "first"), (1, "second")] {
             let discussion = state.discussions.get_mut(&window).unwrap();

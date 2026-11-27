@@ -170,6 +170,12 @@ pub(super) fn handle(
                     outcome,
                 );
             }
+            AppSignal::TurnCopyMade => {
+                DiscussionComponent::release_queue(
+                    state,
+                    global_data.main_thread_channel_sender.clone(),
+                );
+            }
             AppSignal::NodeTitleReady { node, title } => {
                 state.conversations.write().set_title(node, title.clone());
             }

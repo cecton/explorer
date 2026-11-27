@@ -751,6 +751,34 @@ mod tests {
         assert_eq!(git(&first.root, &["status", "--short"]), "");
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn a_feedback_turn_in_a_copy_records_the_head_it_started_from() {
+        // A commit turn may land beside the copy; its commit is not the copy's to record.
+        let (open, opened) = tokio::sync::oneshot::channel();
+        let script = vec![Reply::new().after(opened).text("Done.")];
+        let setup = setup_in(Mode::Feedback, script, repo_with_a_build()).await;
+        let before = setup.request.head.clone().unwrap();
+        let (_, outcome, _) = run_turn(&setup, async |_| {
+            for _ in 0..2000 {
+                if setup.server.requests().len() == 1 {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+            commit(&setup.root, "other.txt", "x", "feat: other");
+            let _ = open.send(());
+        })
+        .await;
+        if outcome.in_place.is_some() {
+            // Without namespaces or reflinks the turn runs in place, and does move HEAD.
+            return;
+        }
+        assert_eq!(outcome.status, NodeStatus::Done, "{:?}", outcome.error);
+        let landed = git(&setup.root, &["rev-parse", "HEAD"]);
+        assert_ne!(landed, before);
+        assert_eq!(outcome.head_after.as_deref(), Some(before.as_str()));
+    }
+
     #[tokio::test]
     async fn a_copy_that_cannot_be_made_fails_the_turn_and_leaves_the_repository_alone() {
         use crate::agent::workspace::Plan;

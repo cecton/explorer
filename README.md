@@ -125,13 +125,14 @@ commits each node produced, so any line of code can be traced, through `git blam
 to the sentence that asked for it. The commits themselves stay clean: no trailer, no
 link, no mention of a tool. Since everything the agent does either ends up in git or is
 thrown away, it works without permission prompts. The price is two rules: a prompt needs
-a clean working tree, and a turn that works in the repository itself runs alone. A
-feedback turn works in a reflink copy of the repository when `target/` already holds a
-build, and up to `parallel-copies` of those (four by default, in the `agent` block of
-`config.kdl`) run side by side; a commit turn waits for them, and they wait for it. A
-message sent to the window of the turn that is running joins that turn, at its next
-round, so it can steer the agent while it works; a prompt that has to wait is queued, in
-order.
+a clean working tree, and two turns that work in the repository itself never run side by
+side. A feedback turn works in a reflink copy of the repository when `target/` already
+holds a build, and up to `parallel-copies` of those (four by default, in the `agent` block
+of `config.kdl`) run side by side; a commit turn, or a feedback turn planned in place,
+starts beside them, and waits only while a copy is still being made, since making one
+walks the tree it would write. The copies wait for it. A message sent to the window of
+the turn that is running joins that turn, at its next round, so it can steer the agent
+while it works; a prompt that has to wait is queued, in order.
 
 **A knowledge base, written by the agents.** Short entries under `docs/knowledge/`, one
 file each, say what the code does and which files it lives in, so a turn reads a few

@@ -29,6 +29,9 @@ pub enum Claim {
     Compact,
     /// A feedback turn working in a copy; the number of these is capped.
     Copy,
+    /// A `Copy` whose copy is still being made: the walk over the repository reads the tree
+    /// as it is, so nothing may write it until the walk ends.
+    Copying,
 }
 
 impl Claim {
@@ -48,20 +51,23 @@ pub fn admit(
     claim: Claim,
     parallel_copies: u32,
 ) -> Result<(), String> {
-    let (mut turns, mut copies) = (0_usize, 0_u32);
+    use crate::agent::turn::Claim;
+    let (mut copies, mut copying) = (0_u32, 0_usize);
     for running in running {
         if running == Claim::Exclusive {
             return Err("a turn is working in the repository itself; wait for it to finish".into());
         }
-        turns += 1;
-        copies += u32::from(running == Claim::Copy);
+        copies += u32::from(matches!(running, Claim::Copy | Claim::Copying));
+        copying += usize::from(running == Claim::Copying);
     }
     match claim {
-        Claim::Exclusive if turns > 0 => Err(format!(
-            "{turns} other turn{} running; this one needs the repository alone",
-            if turns == 1 { " is" } else { "s are" }
+        // A copy is made by walking the repository, so nothing may write it meanwhile.
+        Claim::Exclusive if copying > 0 => Err(format!(
+            "{copying} feedback turn{} still copying the repository; wait for the copy to be made",
+            if copying == 1 { " is" } else { "s are" }
         )),
-        Claim::Copy if copies >= parallel_copies => Err(format!(
+        Claim::Exclusive => Ok(()),
+        Claim::Copy | Claim::Copying if copies >= parallel_copies => Err(format!(
             "{copies} feedback turn{} already work{} in copies of the repository (parallel-copies)",
             if copies == 1 { "" } else { "s" },
             if copies == 1 { "s" } else { "" },
@@ -76,7 +82,11 @@ pub struct TurnHandle {
     pub live: Arc<parking_lot::Mutex<live::LiveTurn>>,
     pub started: Instant,
     pub mode: crate::agent::Mode,
-    pub claim: Claim,
+    /// The claim the turn was admitted with.
+    claim: Claim,
+    /// Set once the turn's copy is made, or can no longer be: until then the walk over the
+    /// repository it is doing reads the tree as it is.
+    copied: Arc<AtomicBool>,
     /// HEAD when the prompt was sent: what a commit turn's commits are counted from.
     pub head_before: Option<String>,
     cancel: Arc<tokio::sync::watch::Sender<bool>>,
@@ -85,6 +95,14 @@ pub struct TurnHandle {
 impl TurnHandle {
     pub fn cancel(&self) {
         let _ = self.cancel.send(true);
+    }
+
+    /// What the turn holds of the repository now.
+    pub fn claim(&self) -> Claim {
+        match self.claim {
+            Claim::Copy if !self.copied.load(Ordering::SeqCst) => Claim::Copying,
+            claim => claim,
+        }
     }
 
     /// A handle on a turn that never ran, for a test that only needs one parked in
@@ -102,9 +120,21 @@ impl TurnHandle {
             started: Instant::now(),
             mode,
             claim: Claim::Exclusive,
+            copied: Arc::new(AtomicBool::new(true)),
             head_before: None,
             cancel: Arc::new(cancel),
         }
+    }
+
+    /// A handle on a feedback turn in a copy, for a test that only needs one parked in
+    /// `AppState::running_turns`: `made` false while its copy is still being walked.
+    #[cfg(test)]
+    pub(crate) fn for_test_copy(made: bool) -> Self {
+        use crate::agent::Mode;
+        let mut handle = Self::for_test(Mode::Feedback, "");
+        handle.claim = Claim::Copy;
+        handle.copied = Arc::new(AtomicBool::new(made));
+        handle
     }
 }
 
@@ -243,11 +273,14 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
     use crate::signal::AppSignal;
     let live = Arc::new(parking_lot::Mutex::new(LiveTurn::new()));
     let (cancel_tx, cancel_rx) = tokio::sync::watch::channel(false);
+    let claim = Claim::of(request.workspace.as_ref(), request.compact.is_some());
+    let copied = Arc::new(AtomicBool::new(claim != Claim::Copy));
     let handle = TurnHandle {
         live: Arc::clone(&live),
         started: Instant::now(),
         mode: request.mode,
-        claim: Claim::of(request.workspace.as_ref(), request.compact.is_some()),
+        claim,
+        copied: Arc::clone(&copied),
         head_before: request.head.clone(),
         cancel: Arc::new(cancel_tx),
     };
@@ -266,10 +299,17 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
     let body_sent = Arc::clone(&outcome_sent);
     let body = tokio::spawn(async move {
         let mut recorder = live::Recorder::new(Arc::clone(&live), request.node_dir.clone());
+        // Dropped however the preparation ends, a panic inside it included: the claim the
+        // turn was admitted with must not hold the repository once nothing walks it.
+        let preparing = CopyMade {
+            copied: (claim == Claim::Copy).then(|| Arc::clone(&copied)),
+            main_tx: main_tx.clone(),
+        };
         let (workspace, prepared) = match prepare_workspace(&request, &mut recorder).await {
             Ok(workspace) => (workspace, Ok(())),
             Err(reason) => (None, Err(reason)),
         };
+        drop(preparing);
         let sandbox = match &workspace {
             Some(workspace) => workspace.sandbox(&request.root),
             // A commit turn works in the repository itself, with the knowledge directory read-only.
@@ -315,7 +355,12 @@ pub fn spawn(request: TurnRequest, main_tx: crate::signal::MainTx) -> TurnHandle
                 Ok(()) => {}
             }
         }
-        let mut head_after = request.repo.as_ref().and_then(crate::git::head_id);
+        // Only a commit turn moves HEAD, and only one runs at a time: a feedback turn records
+        // the HEAD it read, so a commit landing beside it is not mistaken for its own.
+        let mut head_after = match request.mode {
+            Mode::Commit => request.repo.as_ref().and_then(crate::git::head_id),
+            Mode::Feedback => request.head.clone(),
+        };
         // The markdown a commit turn committed is formatted into its newest commit.
         if request.mode == Mode::Commit {
             let root = request.root.clone();
@@ -430,6 +475,25 @@ async fn report_panic(
         in_place: None,
     };
     crate::signal::send(&main_tx, AppSignal::TurnFinished { node, outcome });
+}
+
+/// Marks the copy of a copy turn done however the preparation ends, a panic included, and
+/// wakes the queue: the claim it was admitted with must not hold the repository once
+/// nothing walks it.
+struct CopyMade {
+    copied: Option<Arc<AtomicBool>>,
+    main_tx: crate::signal::MainTx,
+}
+
+impl Drop for CopyMade {
+    fn drop(&mut self) {
+        use crate::signal::AppSignal;
+        let Some(copied) = &self.copied else {
+            return;
+        };
+        copied.store(true, Ordering::SeqCst);
+        crate::signal::send(&self.main_tx, AppSignal::TurnCopyMade);
+    }
 }
 
 /// A failed copy fails the turn: admitted beside others, it cannot run in the repository.
@@ -782,10 +846,15 @@ mod tests {
     }
 
     #[test]
-    fn admission_lets_copies_and_compacts_overlap_and_everything_else_run_alone() {
+    fn admission_lets_copies_overlap_and_a_repository_turn_wait_only_for_a_copy_still_made() {
         use crate::agent::turn::Claim;
         let admitted = |running: &[Claim], claim| admit(running.iter().copied(), claim, 2).is_ok();
-        for claim in [Claim::Exclusive, Claim::Compact, Claim::Copy] {
+        for claim in [
+            Claim::Exclusive,
+            Claim::Compact,
+            Claim::Copy,
+            Claim::Copying,
+        ] {
             assert!(admitted(&[], claim), "{claim:?} alone");
             assert!(
                 !admitted(&[Claim::Exclusive], claim),
@@ -795,9 +864,21 @@ mod tests {
         assert!(admitted(&[Claim::Copy], Claim::Copy));
         assert!(admitted(&[Claim::Copy, Claim::Compact], Claim::Compact));
         assert!(admitted(&[Claim::Compact], Claim::Copy));
-        assert!(!admitted(&[Claim::Copy], Claim::Exclusive));
-        assert!(!admitted(&[Claim::Compact], Claim::Exclusive));
-        assert!(!admitted(&[Claim::Copy, Claim::Copy], Claim::Exclusive));
+        // A turn in the repository runs beside copies; those beside it still wait for it.
+        assert!(admitted(&[Claim::Copy], Claim::Exclusive));
+        assert!(admitted(
+            &[Claim::Copy, Claim::Copy, Claim::Compact],
+            Claim::Exclusive
+        ));
+        assert!(!admitted(&[Claim::Exclusive], Claim::Exclusive));
+        assert!(!admitted(
+            &[Claim::Exclusive, Claim::Copy],
+            Claim::Exclusive
+        ));
+        assert!(!admitted(&[Claim::Exclusive], Claim::Copy));
+        // A copy still being made reads the tree: nothing may write it until the walk ends.
+        assert!(!admitted(&[Claim::Copying], Claim::Exclusive));
+        assert!(!admitted(&[Claim::Copy, Claim::Copying], Claim::Exclusive));
     }
 
     #[test]
@@ -816,6 +897,12 @@ mod tests {
         );
         let one = admit([Claim::Copy].into_iter(), Claim::Copy, 1).unwrap_err();
         assert!(one.contains("1 feedback turn already works"), "{one}");
+        // A copy still being made holds a slot of its own cap.
+        let building = admit([Claim::Copying].into_iter(), Claim::Copy, 1).unwrap_err();
+        assert!(
+            building.contains("1 feedback turn already works"),
+            "{building}"
+        );
         assert!(
             admit(
                 [Claim::Compact, Claim::Compact, Claim::Compact].into_iter(),
@@ -824,10 +911,16 @@ mod tests {
             )
             .is_ok()
         );
-        let alone = admit([Claim::Copy, Claim::Copy].into_iter(), Claim::Exclusive, 4).unwrap_err();
-        assert!(alone.contains("2 other turns are running"), "{alone}");
-        let alone = admit([Claim::Copy].into_iter(), Claim::Exclusive, 4).unwrap_err();
-        assert!(alone.contains("1 other turn is running"), "{alone}");
+        let building = admit(
+            [Claim::Copy, Claim::Copying].into_iter(),
+            Claim::Exclusive,
+            4,
+        )
+        .unwrap_err();
+        assert!(
+            building.contains("1 feedback turn is still copying"),
+            "{building}"
+        );
         let held = admit([Claim::Exclusive].into_iter(), Claim::Copy, 4).unwrap_err();
         assert!(held.contains("repository itself"), "{held}");
     }

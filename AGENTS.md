@@ -72,6 +72,11 @@ Layers, each importing only from itself or below:
   `util`, never app state or panes.
 - Modals (`src/tui/modal/`) are not windows: no `Window` variant, no session entry.
 - UI state lives in `AppState` (`src/tui/state.rs`), never in a component.
+- A turn's `Claim` (`src/agent/turn/mod.rs`) is what it needs of the repository, and
+  `admit` decides what may start beside it: a turn working in the repository (`Exclusive`:
+  a commit, or a feedback turn planned in place) runs beside copies, but only once each of
+  them has finished copying, since the walk reads the tree it would write. Two `Exclusive`
+  turns never overlap, and a copy never starts beside one.
 
 ## Import rules (unusual, mostly enforced by `check-imports`)
 
