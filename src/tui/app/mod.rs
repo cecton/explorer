@@ -163,6 +163,83 @@ impl App for AppMain {
     }
 }
 
+#[cfg(test)]
+mod scroll_tests {
+    use crate::tui::keymap::Action;
+    use crate::tui::pane_manager::PaneSize;
+    use crate::tui::pane_manager::Window;
+    use crate::tui::state::AppState;
+    use r3bl_tui::*;
+
+    /// The path a Tab takes in the running app: the event handler lays the panes out, then
+    /// the keymap turns the key into the action that moves focus. Every window is reachable,
+    /// and the one focus lands on is drawn.
+    #[test]
+    fn tab_walks_the_whole_stack_and_scrolls_the_view() {
+        use crate::tui::test_support::key;
+        let mut state = AppState::blank_for_test();
+        for id in 0..6 {
+            state.pane_manager.push_window(Window::Terminal(id));
+            state
+                .pane_manager
+                .window_states
+                .get_mut(&Window::Terminal(id))
+                .unwrap()
+                .pane_size = PaneSize::Full;
+        }
+        state.pane_manager.focused_window = Some(Window::Terminal(5));
+        let surface = vp_width(200) + vp_height(24);
+        let tab = key(Key::SpecialKey(SpecialKey::Tab));
+        let back_tab = key(Key::SpecialKey(SpecialKey::BackTab));
+
+        let mut seen = Vec::new();
+        for _ in 0..6 {
+            state.pane_manager.relayout(surface);
+            let action = state.keymap.global_action(&match &tab {
+                InputEvent::Keyboard(kp) => *kp,
+                _ => unreachable!(),
+            });
+            assert_eq!(action, Some(Action::FocusNext));
+            state.pane_manager.cycle_focus(1);
+            let focused = state.pane_manager.focused_window;
+            state.pane_manager.relayout(surface);
+            seen.push(focused);
+            assert!(
+                state
+                    .pane_manager
+                    .visible()
+                    .iter()
+                    .any(|slot| Some(slot.window) == focused),
+                "the window focus landed on is drawn: {focused:?}"
+            );
+        }
+        assert_eq!(
+            seen.last().copied().flatten(),
+            Some(Window::Terminal(5)),
+            "six Tabs on six windows came back to the first one"
+        );
+        let mut unique = seen.iter().flatten().copied().collect::<Vec<_>>();
+        unique.sort_by_key(|w| match w {
+            Window::Terminal(id) => *id,
+            _ => 0,
+        });
+        unique.dedup();
+        assert_eq!(unique.len(), 6, "every window was visited: {seen:?}");
+
+        let back = state.keymap.global_action(&match &back_tab {
+            InputEvent::Keyboard(kp) => *kp,
+            _ => unreachable!(),
+        });
+        assert_eq!(back, Some(Action::FocusPrev));
+        state.pane_manager.cycle_focus(-1);
+        assert_eq!(
+            state.pane_manager.focused_window,
+            Some(Window::Terminal(0)),
+            "Shift+Tab wraps to the end of the stack"
+        );
+    }
+}
+
 /// Points the focus at the pane slot of the focused window.
 fn sync_has_focus(state: &crate::tui::state::AppState, has_focus: &mut HasFocus) {
     let slot = state.pane_manager.focused_slot().unwrap_or(0);

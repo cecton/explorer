@@ -44,11 +44,20 @@ manager, tmux, a file manager, `tig` and an agent CLI held together by habit:
 ### The workspace
 
 Everything is a window: a file, a terminal, a git log, a commit diff, a conversation.
-Windows live in one stack, most recent first, and Explorer tiles the top of that stack
-by itself: as many columns as fit at 100 cells minimum each, each window a full, a half,
-a third or a quarter of a column. There are no splits to manage. You resize a window,
-move it in the stack or send it to the back, and the layout follows. Windows that do not
-fit stay open behind the others.
+Windows live in one stack, and Explorer tiles them by itself: as many columns as fit at
+100 cells minimum each, each window a full, a half, a third or a quarter of a column.
+There are no splits to manage. You resize a window, move it in the stack or send it to
+the back, and the layout follows.
+
+A stack usually holds more windows than a screen shows, so the view scrolls over it.
+`Tab` and `Shift+Tab` reach every window, on screen or not: steering onto one the view
+hides slides the columns along, one at a time, the way a scrolling window manager does,
+until the window is in the leftmost or the rightmost column. The two ends wrap.
+
+Picking a window brings it to the front of the view rather than the front of the stack,
+so the screen holds still while you look around. Whatever is open stays open: windows
+the view does not show keep their place, and `Tab` reaches them. The session remembers
+where the view was, so the next start puts it back there.
 
 The window picker (`<leader>Space`) lists the open windows and, once you type, every
 file of the repository by fuzzy name. It is the way to open a file and the way to get

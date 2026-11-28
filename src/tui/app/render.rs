@@ -37,24 +37,9 @@ pub(super) fn render(
         let window_size = global_data.window_size;
         let surface_size = crate::tui::app::surface_size(window_size);
         // One layout for the frame: every pane below reads its window and its box from it.
+        // It also scrolls a focused window that fell off the view back onto it, which is why
+        // nothing here moves focus: a window the view hides is one Tab can reach.
         global_data.state.pane_manager.relayout(surface_size);
-        let visible = global_data.state.pane_manager.visible();
-
-        // Sync focused window with actual visible windows: if the currently focused
-        // window is not visible, focus the frontmost visible one.
-        let focused = global_data.state.pane_manager.focused_window;
-        let focused_is_visible = focused
-            .as_ref()
-            .map(|f| visible.iter().any(|s| &s.window == f))
-            .unwrap_or(false);
-        if !global_data.state.mouse_drag_active
-            && !focused_is_visible
-            && let Some(first) = visible.first()
-        {
-            let old = global_data.state.pane_manager.focused_window;
-            global_data.state.pane_manager.focused_window = Some(first.window);
-            crate::tui::focus::refocus(&mut global_data.state, old);
-        }
         crate::tui::app::sync_has_focus(&global_data.state, has_focus);
 
         render_panes(global_data, component_registry_map, has_focus, surface_size)?;

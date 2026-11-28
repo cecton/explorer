@@ -34,6 +34,11 @@ pub struct Session {
     /// The user allowed agent turns in this repository. No turn runs without it.
     #[serde(default)]
     pub trusted: bool,
+    /// The window the view started at (the top of its leftmost column) when the session was
+    /// saved. Its kind and payload, not its index: a window that failed to restore would move
+    /// every index, and the columns a surface packs change with its size.
+    #[serde(default)]
+    pub view_start: Option<PaneEntry>,
 }
 
 /// Persisted symbol-highlight identity. Byte-offset locations are never saved —
@@ -50,7 +55,8 @@ pub struct SessionSymbolGroup {
     pub color: [u8; 3],
 }
 
-/// One window of the saved stack: its size, and what it shows.
+/// One window of the saved stack: its size, and what it shows. Records are saved in stack
+/// order, so a restored stack keeps the shape of the saved one.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct PaneRecord {
     pub pane_size: crate::tui::pane_manager::PaneSize,
@@ -58,7 +64,7 @@ pub struct PaneRecord {
     pub entry: PaneEntry,
 }
 
-#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[derive(Clone, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(tag = "kind")]
 pub enum PaneEntry {
     #[serde(rename = "file_preview")]
@@ -154,6 +160,12 @@ impl Session {
             .map(|(node, highlights)| (node.as_str().to_string(), highlights.clone()))
             .collect();
 
+        let view_start = state
+            .pane_manager
+            .window_stack
+            .get(state.pane_manager.view_start())
+            .and_then(|window| pane_entry_from_window(window, &snapshot, state));
+
         Self {
             panes,
             highlight_ranges,
@@ -166,6 +178,7 @@ impl Session {
             mcp_servers: state.mcp_servers.clone(),
             aliases: state.project_aliases.clone(),
             trusted: state.trusted,
+            view_start,
         }
     }
 
@@ -212,12 +225,17 @@ impl Session {
         let snapshot_after = state.files.load();
         let mut new_stack = Vec::new();
         let mut new_states = HashMap::new();
+        // The entry each restored window came from, so the saved view can name its window
+        // again: a window that failed to restore is not there to be started at.
+        let mut saved_entries: HashMap<crate::tui::pane_manager::Window, PaneEntry> =
+            HashMap::new();
 
         for PaneRecord { pane_size, entry } in self.panes {
             let mut window_state = WindowState {
                 pane_size,
                 ..Default::default()
             };
+            let saved = entry.clone();
             let window = match entry {
                 PaneEntry::FilePreview { path, scroll } => {
                     let abs = state.root.join(&path);
@@ -295,6 +313,7 @@ impl Session {
             };
             new_stack.push(window);
             new_states.insert(window, window_state);
+            saved_entries.insert(window, saved);
         }
 
         state.tree_view.expanded = self
@@ -312,10 +331,24 @@ impl Session {
         state.project_aliases = self.aliases;
         state.trusted = self.trusted;
 
+        let view_start = self.view_start.as_ref().and_then(|saved| {
+            new_stack
+                .iter()
+                .position(|window| saved_entries.get(window) == Some(saved))
+        });
         if !new_stack.is_empty() {
             state.pane_manager.window_stack = new_stack;
             state.pane_manager.window_states = new_states;
-            state.pane_manager.focused_window = state.pane_manager.window_stack.first().copied();
+            // The first layout reveals the focused window, so focus must start at the window
+            // the restored view starts at: the front of the stack would scroll it away again.
+            state.pane_manager.focused_window = state
+                .pane_manager
+                .window_stack
+                .get(view_start.unwrap_or(0))
+                .copied();
+        }
+        if let Some(start) = view_start {
+            state.pane_manager.restore_view_start(start);
         }
 
         let snapshot = state.files.load();
@@ -360,6 +393,24 @@ fn pane_record_from_window(
     files: &[Arc<crate::loader::LoadedFile>],
     state: &crate::tui::state::AppState,
 ) -> Option<PaneRecord> {
+    let window_state = state
+        .pane_manager
+        .window_states
+        .get(window)
+        .cloned()
+        .unwrap_or_default();
+    Some(PaneRecord {
+        pane_size: window_state.pane_size,
+        entry: pane_entry_from_window(window, files, state)?,
+    })
+}
+
+/// What `window` shows, as the session saves it: `None` for a window it never saves.
+fn pane_entry_from_window(
+    window: &crate::tui::pane_manager::Window,
+    files: &[Arc<crate::loader::LoadedFile>],
+    state: &crate::tui::state::AppState,
+) -> Option<PaneEntry> {
     use crate::tui::pane_manager::Window;
     let root = &state.root;
     let window_state = state
@@ -368,7 +419,7 @@ fn pane_record_from_window(
         .get(window)
         .cloned()
         .unwrap_or_default();
-    let entry = match window {
+    Some(match window {
         Window::FilePreview(key) => {
             let path = crate::loader::path_for_file_key(files, *key)?;
             let rel = path.strip_prefix(root).ok()?;
@@ -424,10 +475,6 @@ fn pane_record_from_window(
                 is_command_pane: pane.is_command_pane,
             }
         }
-    };
-    Some(PaneRecord {
-        pane_size: window_state.pane_size,
-        entry,
     })
 }
 
@@ -567,6 +614,7 @@ mod tests {
             mcp_servers: Vec::new(),
             aliases: Vec::new(),
             trusted: false,
+            view_start: None,
         };
 
         let value = serde_json::to_value(&session).unwrap();
@@ -671,6 +719,152 @@ mod tests {
                 ..
             }
         ));
+    }
+
+    /// The view comes back where it was, named by the window it started at rather than by an
+    /// index: the surface may pack five windows into other columns than when it was saved.
+    #[test]
+    fn the_view_returns_to_the_window_it_started_at() {
+        use crate::tui::state::AppState;
+        let (_dir, root) = temp_root();
+        let mut state = AppState::for_test(root);
+        let session = Session {
+            panes: ["a.rs", "b.rs", "c.rs"]
+                .iter()
+                .map(|path| PaneRecord {
+                    pane_size: PaneSize::Full,
+                    entry: PaneEntry::FilePreview {
+                        path: (*path).to_string(),
+                        scroll: 0,
+                    },
+                })
+                .collect(),
+            view_start: Some(PaneEntry::FilePreview {
+                path: "b.rs".to_string(),
+                scroll: 0,
+            }),
+            ..Default::default()
+        };
+
+        session.apply(&mut state);
+
+        assert_eq!(state.pane_manager.window_stack.len(), 3);
+        assert_eq!(
+            state.pane_manager.window_stack[state.pane_manager.view_start()],
+            state.pane_manager.window_stack[1],
+            "the view starts at the second window, where it was saved"
+        );
+    }
+
+    /// The first layout after a restore reveals the focused window: focused at the front of
+    /// the stack, it would scroll a restored view back onto the front, and the saved view
+    /// would never survive the first frame. Focus lands on the window the view starts at.
+    #[test]
+    fn the_restored_view_survives_the_first_layout() {
+        use crate::tui::state::AppState;
+        let (_dir, root) = temp_root();
+        let mut state = AppState::for_test(root);
+        let session = Session {
+            panes: ["a.rs", "b.rs", "c.rs"]
+                .iter()
+                .map(|path| PaneRecord {
+                    pane_size: PaneSize::Full,
+                    entry: PaneEntry::FilePreview {
+                        path: (*path).to_string(),
+                        scroll: 0,
+                    },
+                })
+                .collect(),
+            view_start: Some(PaneEntry::FilePreview {
+                path: "b.rs".to_string(),
+                scroll: 0,
+            }),
+            ..Default::default()
+        };
+
+        session.apply(&mut state);
+        state
+            .pane_manager
+            .relayout(r3bl_tui::vp_width(200) + r3bl_tui::vp_height(24));
+
+        assert_eq!(
+            state.pane_manager.view_start(),
+            1,
+            "the layout did not scroll the restored view back to the front"
+        );
+    }
+
+    #[test]
+    fn a_saved_view_start_round_trips_through_the_session() {
+        use crate::loader::LoadedFile;
+        use crate::tui::state::AppState;
+        let (_dir, root) = temp_root();
+        let mut files = Vec::new();
+        for name in ["a.rs", "b.rs", "c.rs"] {
+            let path = root.join(name);
+            std::fs::write(&path, "x\n").unwrap();
+            files.push(LoadedFile::load(path.into()).unwrap());
+        }
+        let mut state = AppState::for_test_with_files(files, root);
+        for key in 0..3 {
+            state
+                .pane_manager
+                .push_window(Window::FilePreview(FileKey(key)));
+        }
+        state.pane_manager.restore_view_start(2);
+
+        let session = Session::from_state(&state);
+
+        assert_eq!(
+            session.view_start,
+            Some(PaneEntry::FilePreview {
+                path: "a.rs".to_string(),
+                scroll: 0,
+            }),
+            "the third push is the front of the view"
+        );
+    }
+
+    /// A window that could not be restored is not in the stack to start the view at: the
+    /// window that followed it does, instead of the view landing past the end.
+    #[test]
+    fn the_view_falls_back_when_its_saved_window_did_not_restore() {
+        use crate::tui::state::AppState;
+        let (_dir, root) = temp_root();
+        let mut state = AppState::for_test(root.join("nowhere"));
+        let session = Session {
+            panes: vec![
+                PaneRecord {
+                    pane_size: PaneSize::Full,
+                    entry: PaneEntry::ConversationTree,
+                },
+                PaneRecord {
+                    pane_size: PaneSize::Full,
+                    entry: PaneEntry::FilePreview {
+                        path: "gone.rs".to_string(),
+                        scroll: 0,
+                    },
+                },
+                PaneRecord {
+                    pane_size: PaneSize::Full,
+                    entry: PaneEntry::CommitDiff {
+                        hash: hex::encode([7u8; 20]),
+                    },
+                },
+            ],
+            view_start: Some(PaneEntry::FilePreview {
+                path: "gone.rs".to_string(),
+                scroll: 0,
+            }),
+            ..Default::default()
+        };
+
+        session.apply(&mut state);
+
+        assert!(
+            state.pane_manager.view_start() < state.pane_manager.window_stack.len(),
+            "the view starts inside the restored stack"
+        );
     }
 
     #[test]
