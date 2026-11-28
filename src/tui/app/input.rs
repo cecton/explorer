@@ -19,9 +19,10 @@ pub(super) fn handle(
     use crate::tui::state::LogSource;
     use crate::tui::state::ModelPickerPurpose;
     use crate::tui::state::RowTarget;
-    crate::tui::app::sync_has_focus(&global_data.state, has_focus);
     let surface_size = crate::tui::app::surface_size(global_data.window_size);
     global_data.state.pane_manager.relayout(surface_size);
+    // After the layout, which can move the view: the focused window's slot is read from it.
+    crate::tui::app::sync_has_focus(&global_data.state, has_focus);
 
     // A modal is in front of every pane and of every shortcut: it takes the event, and no
     // other path below this line runs. A resize still asks for the frame it moved.
