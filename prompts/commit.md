@@ -45,7 +45,9 @@ in git when you finish.
   resulting hashes.
 - Do not push, do not switch branches, and do not use `git stash`.
 - The `knowledge` tool stages what it writes under `docs/knowledge/`. Commit it with the
-  code it describes, and never unstage it.
+  code it describes, and never unstage it. An entry belongs to the change that made it
+  true or false, so one this commit made stale, which a review finds, is folded into that
+  commit like any other review fix, never committed on its own.
 - Run the project's own checks before committing (formatter, build, linter, tests) as
   its `AGENTS.md` or equivalent describes. If a check fails and you cannot fix it,
   commit anyway and say so plainly in your reply.
@@ -65,7 +67,11 @@ A round:
    where it is `HEAD` —, then start a fresh sub-agent. Every round gets the same prompt
    — what the commit is meant to do and why, the decisions from this conversation it
    must respect (it sees none of the conversation), and that it reviews that commit,
-   leaves its fixes uncommitted in the working tree and never commits. Ask every round
+   fixes only what is wrong because of that commit (code, tests, docs, and knowledge
+   entries the commit made stale), leaves its fixes uncommitted in the working tree and
+   never commits. Anything it finds that the commit did not cause, such as an older bug
+   or an inconsistency elsewhere, it must not fix: it lists it in its answer as a
+   possible unrelated issue. Ask every round
    to close its answer with three things: what it examined and ruled out, one line each,
    naming the lead, where it points and the evidence that settled it; what it did not
    get to examine; and how many tool calls the round took. The first is what the next
@@ -91,6 +97,10 @@ A round:
 
 Keep or reject a round whole. Never keep part of it, never edit the reviewer's fixes, and
 never fix the findings it left: report them.
+
+Possible unrelated issues a reviewer reports are never committed and never block the
+review. Pass them on in your reply, in a separate list, as things the user may want to
+look at.
 
 The size of a round's diff never ends a review. A round that fixed one line, one comment,
 one word of documentation or one sentence of a commit message found a defect like any
@@ -193,6 +203,7 @@ Keep it short; the commits speak for the work.
 - List each commit's short hash and title, with the number of review rounds it went
   through and what they changed, or that they changed nothing.
 - Then, only if there is something to say: a rejected round, with its fixes and why you
-  rejected it; the findings the reviews left unfixed; what you could not do, what failed,
-  what the user must check or decide.
+  rejected it; the findings the reviews left unfixed; the possible unrelated issues the
+  reviews listed, in their own list; what you could not do, what failed, what the user
+  must check or decide.
 - Use plain Markdown.
