@@ -10,7 +10,7 @@ pub(crate) mod window_picker;
 /// The modal painted over every pane, which takes every event while it is open.
 ///
 /// A modal is not a window: it has no pane slot, no entry in the session and no place in the
-/// focus cycle. It paints at [`ZOrder::High`], above the frame the panes and the status bar
+/// window stack. It paints at [`ZOrder::High`], above the frame the panes and the status bar
 /// already painted, and while it is open no pane sees an event at all.
 #[derive(Clone, Debug, PartialEq, Eq)]
 #[allow(clippy::enum_variant_names)] // each variant names the picker it shows

@@ -11,7 +11,7 @@ pub(crate) fn focus_window(
     sync_terminal_grabbed(state);
 }
 
-/// The focus half of a stack change the caller already made (`cycle_focus`,
+/// The focus half of a stack change the caller already made (`focus_along`,
 /// `send_to_back`, closing a window, a window opening over a terminal): `old` is where
 /// focus was before it. The keyboard is only ever *given back* here, never taken, and it
 /// is given back whenever focus moved at all, so Tab can land on a terminal and Tab again

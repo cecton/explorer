@@ -4,7 +4,7 @@ summary: The four pickers, why a modal is not a window, and the rules their code
 refs: src/tui/modal/mod.rs, src/tui/modal/list.rs, src/tui/modal/window_picker.rs, src/tui/modal/theme_picker.rs, src/tui/modal/model_picker.rs, src/tui/modal/branch_picker.rs, Modal
 ---
 
-`src/tui/modal/` holds the four pickers and the frame they share. A modal is not a window — no `Window` variant, no session entry, no place in the focus cycle: it paints above every pane and takes every event while it is open, so the panes see none.
+`src/tui/modal/` holds the four pickers and the frame they share. A modal is not a window — no `Window` variant, no session entry, no place in the window stack: it paints above every pane and takes every event while it is open, so the panes see none.
 
 `Modal::open` records the window that had the keyboard only when no modal was already open, and drops the terminal grab, any drag and the leader state. It reverts an unconfirmed theme preview only when another modal replaces the open theme picker; `close` reverts an unconfirmed theme preview and gives the keyboard back, ungrabbed.
 

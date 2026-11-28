@@ -52,7 +52,8 @@ the back, and the layout follows.
 A stack usually holds more windows than a screen shows, so the view scrolls over it.
 `Tab` and `Shift+Tab` reach every window, on screen or not: steering onto one the view
 hides slides the columns along, one at a time, the way a scrolling window manager does,
-until the window is in the leftmost or the rightmost column. The two ends wrap.
+until the window is in the leftmost or the rightmost column. The stack does not wrap: at
+either end, the key does nothing.
 
 Picking a window brings it to the front of the view rather than the front of the stack,
 so the screen holds still while you look around. Whatever is open stays open: windows

@@ -173,7 +173,7 @@ mod scroll_tests {
 
     /// The path a Tab takes in the running app: the event handler lays the panes out, then
     /// the keymap turns the key into the action that moves focus. Every window is reachable,
-    /// and the one focus lands on is drawn.
+    /// the one focus lands on is drawn, and the ends of the stack stop it.
     #[test]
     fn tab_walks_the_whole_stack_and_scrolls_the_view() {
         use crate::tui::test_support::key;
@@ -187,20 +187,20 @@ mod scroll_tests {
                 .unwrap()
                 .pane_size = PaneSize::Full;
         }
-        state.pane_manager.focused_window = Some(Window::Terminal(5));
         let surface = vp_width(200) + vp_height(24);
         let tab = key(Key::SpecialKey(SpecialKey::Tab));
         let back_tab = key(Key::SpecialKey(SpecialKey::BackTab));
+        state.pane_manager.focused_window = state.pane_manager.window_stack.first().copied();
+        state.pane_manager.relayout(surface);
 
-        let mut seen = Vec::new();
-        for _ in 0..6 {
-            state.pane_manager.relayout(surface);
+        let mut seen = vec![state.pane_manager.focused_window];
+        for _ in 0..5 {
             let action = state.keymap.global_action(&match &tab {
                 InputEvent::Keyboard(kp) => *kp,
                 _ => unreachable!(),
             });
             assert_eq!(action, Some(Action::FocusNext));
-            state.pane_manager.cycle_focus(1);
+            state.pane_manager.focus_along(1);
             let focused = state.pane_manager.focused_window;
             state.pane_manager.relayout(surface);
             seen.push(focused);
@@ -215,8 +215,8 @@ mod scroll_tests {
         }
         assert_eq!(
             seen.last().copied().flatten(),
-            Some(Window::Terminal(5)),
-            "six Tabs on six windows came back to the first one"
+            state.pane_manager.window_stack.last().copied(),
+            "five Tabs on six windows reached the last one"
         );
         let mut unique = seen.iter().flatten().copied().collect::<Vec<_>>();
         unique.sort_by_key(|w| match w {
@@ -224,18 +224,29 @@ mod scroll_tests {
             _ => 0,
         });
         unique.dedup();
-        assert_eq!(unique.len(), 6, "every window was visited: {seen:?}");
+        assert_eq!(
+            unique.len(),
+            6,
+            "the windows Tab landed on plus the one it started from: {seen:?}"
+        );
+
+        state.pane_manager.focus_along(1);
+        assert_eq!(
+            state.pane_manager.focused_window,
+            state.pane_manager.window_stack.last().copied(),
+            "a sixth Tab at the end of the stack does nothing"
+        );
 
         let back = state.keymap.global_action(&match &back_tab {
             InputEvent::Keyboard(kp) => *kp,
             _ => unreachable!(),
         });
         assert_eq!(back, Some(Action::FocusPrev));
-        state.pane_manager.cycle_focus(-1);
-        assert_eq!(
+        state.pane_manager.focus_along(-1);
+        assert_ne!(
             state.pane_manager.focused_window,
-            Some(Window::Terminal(0)),
-            "Shift+Tab wraps to the end of the stack"
+            state.pane_manager.window_stack.last().copied(),
+            "Shift+Tab steps back from the last window"
         );
     }
 }

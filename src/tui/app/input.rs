@@ -174,9 +174,9 @@ pub(super) fn handle(
         }
     }
 
-    // Global shortcuts: Tab/BackTab cycles focus; Ctrl+Up/Down resize; Ctrl+Left/Right reorder.
+    // Global shortcuts: Tab/BackTab moves focus; Ctrl+Up/Down resize; Ctrl+Left/Right reorder.
     // Skipped for Terminal panes so Tab reaches the PTY (e.g. shell completion).
-    // When a terminal is ungrabbed Tab cycles focus.
+    // When a terminal is ungrabbed Tab moves focus.
     let shortcuts_reach_here = (!matches!(
         global_data.state.pane_manager.focused_window,
         Some(Window::Terminal(_))
@@ -242,7 +242,7 @@ fn apply_action(
         Action::FocusNext | Action::FocusPrev => {
             let old = state.pane_manager.focused_window;
             let direction = if action == Action::FocusNext { 1 } else { -1 };
-            state.pane_manager.cycle_focus(direction);
+            state.pane_manager.focus_along(direction);
             crate::tui::focus::refocus(state, old);
         }
         Action::ResizeGrow | Action::ResizeShrink => {

@@ -355,8 +355,9 @@ impl PaneManager {
     }
 
     /// Moves focus one window along the whole stack, on screen or not, and scrolls the view
-    /// by as many whole columns as it takes to show where focus landed. Both ends wrap.
-    pub fn cycle_focus(&mut self, direction: i32) {
+    /// by as many whole columns as it takes to show where focus landed. A move past either end
+    /// of the stack does nothing.
+    pub fn focus_along(&mut self, direction: i32) {
         let len = self.window_stack.len();
         if len == 0 {
             return;
@@ -365,7 +366,10 @@ impl PaneManager {
             .focused_window
             .and_then(|f| self.window_stack.iter().position(|w| *w == f))
             .unwrap_or(self.view_start);
-        let next = ((current as i32 + direction).rem_euclid(len as i32)) as usize;
+        let next = match current.checked_add_signed(direction as isize) {
+            Some(next) if next < len => next,
+            _ => return,
+        };
         self.focused_window = Some(self.window_stack[next]);
         self.reveal(next);
     }
@@ -390,7 +394,7 @@ impl PaneManager {
     ///
     /// A window past the right edge brings its column to the right edge and a window past the
     /// left one puts its column at the left edge: the view slides by whole columns rather
-    /// than jumping. A wrap to the far end of the stack lands the same way.
+    /// than jumping.
     fn reveal(&mut self, pos: usize) {
         let columns = self.columns();
         let Some(view) = columns
@@ -1197,55 +1201,55 @@ mod tests {
         }
     }
 
+    /// Tab stops at the end of the stack instead of wrapping: a move past either end does
+    /// nothing, so the user can feel where the stack ends.
     #[test]
-    fn cycle_focus_forward_wraps() {
+    fn focus_along_stops_at_the_end_of_the_stack() {
         let mut manager = make_manager(&[
             Window::ConversationTree,
             Window::GitLog(1),
             Window::Terminal(0),
         ]);
         set_all_pane_sizes(&mut manager, PaneSize::Quarter);
+        manager.relayout(size(80, 24));
+
         manager.focused_window = Some(Window::Terminal(0));
-        manager.relayout(size(80, 24));
-        manager.cycle_focus(1);
-        assert_eq!(manager.focused_window, Some(Window::ConversationTree));
-    }
+        manager.focus_along(1);
+        assert_eq!(
+            manager.focused_window,
+            Some(Window::Terminal(0)),
+            "the last window has nowhere to go forward"
+        );
 
-    #[test]
-    fn cycle_focus_backward_wraps() {
-        let mut manager = make_manager(&[
-            Window::ConversationTree,
-            Window::GitLog(1),
-            Window::Terminal(0),
-        ]);
-        set_all_pane_sizes(&mut manager, PaneSize::Quarter);
         manager.focused_window = Some(Window::ConversationTree);
-        manager.relayout(size(80, 24));
-        manager.cycle_focus(-1);
-        assert_eq!(manager.focused_window, Some(Window::Terminal(0)));
+        manager.focus_along(-1);
+        assert_eq!(
+            manager.focused_window,
+            Some(Window::ConversationTree),
+            "the first window has nowhere to go back"
+        );
+        assert_eq!(manager.view_start(), 0, "and the view did not move");
     }
 
     #[test]
-    fn cycle_focus_on_an_empty_stack_is_a_noop() {
+    fn focus_along_on_an_empty_stack_is_a_noop() {
         let mut manager = PaneManager::new();
-        manager.cycle_focus(1);
+        manager.focus_along(1);
         assert!(manager.focused_window.is_none());
     }
 
     #[test]
-    fn cycle_focus_starts_from_the_view_when_nothing_is_focused() {
+    fn focus_along_starts_from_the_view_when_nothing_is_focused() {
         let mut manager = make_manager(&[
             Window::ConversationTree,
             Window::GitLog(1),
             Window::Terminal(0),
         ]);
         manager.focused_window = None;
-        manager.cycle_focus(1);
+        manager.focus_along(1);
         assert_eq!(manager.focused_window, Some(Window::GitLog(1)));
     }
 
-    /// Four quarter panes on a 250-column surface: two columns of one window each, so every
-    /// window is a column of its own and Tab walks column by column.
     /// Four full-height windows on a 200-column surface: two columns in view, one window each,
     /// so Tab walks column by column.
     fn four_columns() -> PaneManager {
@@ -1271,7 +1275,7 @@ mod tests {
 
     /// One Tab, then the layout the app runs for the event: what the next frame shows.
     fn tab(manager: &mut PaneManager, direction: i32) {
-        manager.cycle_focus(direction);
+        manager.focus_along(direction);
         manager.relayout(size(200, 24));
     }
 
@@ -1333,33 +1337,37 @@ mod tests {
     }
 
     #[test]
-    fn tab_wraps_to_the_front_and_scrolls_back_to_it() {
+    fn tab_at_the_last_window_does_nothing() {
         let mut manager = four_columns();
         manager.focused_window = Some(Window::Terminal(3));
         manager.set_view_start(2);
         manager.relayout(size(200, 24));
 
         tab(&mut manager, 1);
-        assert_eq!(
-            focused_and_visible(&manager),
-            (
-                Some(Window::Terminal(0)),
-                vec![Window::Terminal(0), Window::Terminal(1)]
-            )
-        );
-    }
 
-    #[test]
-    fn shift_tab_wraps_to_the_last_window_and_shows_it() {
-        let mut manager = four_columns();
-        tab(&mut manager, -1);
         assert_eq!(
             focused_and_visible(&manager),
             (
                 Some(Window::Terminal(3)),
                 vec![Window::Terminal(2), Window::Terminal(3)]
             ),
-            "the last window's column is the rightmost the view shows"
+            "the focus and the view stay where they were"
+        );
+    }
+
+    #[test]
+    fn shift_tab_at_the_first_window_does_nothing() {
+        let mut manager = four_columns();
+
+        tab(&mut manager, -1);
+
+        assert_eq!(
+            focused_and_visible(&manager),
+            (
+                Some(Window::Terminal(0)),
+                vec![Window::Terminal(0), Window::Terminal(1)]
+            ),
+            "the focus and the view stay where they were"
         );
     }
 
@@ -1385,7 +1393,7 @@ mod tests {
         );
 
         for (step, expected, view) in [(1, 1, 0), (2, 2, 0), (3, 3, 0), (4, 4, 2)] {
-            manager.cycle_focus(1);
+            manager.focus_along(1);
             assert_eq!(
                 manager.focused_window,
                 Some(Window::Terminal(expected)),
@@ -1410,7 +1418,7 @@ mod tests {
         manager.focused_window = Some(Window::Terminal(0));
         manager.relayout(size(200, 24));
         for _ in 0..5 {
-            manager.cycle_focus(1);
+            manager.focus_along(1);
             manager.relayout(size(200, 24));
         }
         assert_eq!(
@@ -1423,7 +1431,8 @@ mod tests {
         assert_eq!(manager.view_start(), 4);
     }
 
-    /// Tab reaches every window of the stack, and the one it lands on is always on screen.
+    /// Tab reaches every window of the stack from the first to the last, the one it lands on
+    /// is always on screen, and the last Tab has nowhere left to go.
     #[test]
     fn tab_reaches_every_window_of_the_stack() {
         let mut manager = PaneManager::new();
@@ -1439,12 +1448,12 @@ mod tests {
                 _ => PaneSize::Third,
             };
         }
-        manager.focused_window = Some(Window::Terminal(0));
         let surface = size(200, 24);
+        manager.focused_window = manager.window_stack.first().copied();
         manager.relayout(surface);
-        let mut seen = vec![Window::Terminal(0)];
-        for _ in 0..14 {
-            manager.cycle_focus(1);
+        let mut seen = vec![manager.focused_window.unwrap()];
+        for _ in 0..13 {
+            manager.focus_along(1);
             manager.relayout(surface);
             seen.push(manager.focused_window.unwrap());
             assert!(
@@ -1456,18 +1465,26 @@ mod tests {
                 manager.focused_window
             );
         }
+
         assert_eq!(
-            seen.last(),
-            Some(&Window::Terminal(0)),
-            "fourteen Tabs came back to the first window"
+            seen.last().copied(),
+            manager.window_stack.last().copied(),
+            "thirteen Tabs reached the last window"
         );
-        let mut unique = seen[..14].to_vec();
+        let mut unique = seen.clone();
         unique.sort_by_key(|w| match w {
             Window::Terminal(id) => *id,
             _ => 0,
         });
         unique.dedup();
         assert_eq!(unique.len(), 14, "Tab visited every window");
+
+        manager.focus_along(1);
+        assert_eq!(
+            manager.focused_window,
+            manager.window_stack.last().copied(),
+            "and the last Tab does nothing"
+        );
     }
 
     #[test]
